@@ -1,0 +1,11 @@
+<view class="page">
+  <view class="card" wx:for="{{templates}}" wx:key="id" bindtap="createFromTemplate">
+    <view class="row-between"><text class="name">{{item.name}}</text><text class="muted">{{item.nodeCount}} 个节点</text></view>
+    <text class="muted block">{{item.builtIn ? '内置示例模板' : '自定义模板'}}</text>
+  </view>
+  <view class="card hint">
+    <text class="section-title">下一迭代</text>
+    <text class="muted block">支持把现有业务线保存为模板、编辑模板节点、从模板快速创建业务线。</text>
+  </view>
+</view>
+

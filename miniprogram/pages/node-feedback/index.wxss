@@ -1,0 +1,9 @@
+.node-title { margin-top: 12rpx; }
+.choose { color: #0f766e; }
+.file { padding: 18rpx 0; border-bottom: 1rpx solid #e5e7eb; }
+.file-name { display: block; max-width: 510rpx; word-break: break-all; }
+.file-size { display: block; margin-top: 6rpx; font-size: 22rpx; }
+.remove { color: #be123c; }
+.history-status { color: #0f766e; font-weight: 650; }
+.history-comment { display: block; margin-top: 16rpx; line-height: 1.6; }
+.evidence { gap: 20rpx; }

@@ -1,0 +1,25 @@
+<view class="page" wx:if="{{line}}">
+  <view class="card">
+    <view class="row-between"><view class="title detail-title">{{line.name}}</view><status-pill status="{{line.status}}" /></view>
+    <text class="muted block">编号：{{line.code}}</text>
+    <text class="muted block">{{line.description || '暂无说明'}}</text>
+    <view class="progress"><view class="progress-value" style="width: {{line.progress || 0}}%"></view></view>
+    <text class="muted">总体进度 {{line.progress || 0}}%</text>
+  </view>
+
+  <view class="section-title">节点进度</view>
+  <view class="timeline">
+    <view class="node card" wx:for="{{nodes}}" wx:key="_id" data-index="{{index}}" bindtap="openFeedback">
+      <view class="node-index">{{index + 1}}</view>
+      <view class="node-body">
+        <view class="row-between"><text class="node-name">{{item.name}}</text><status-pill status="{{item.status}}" /></view>
+        <text class="muted block">负责人：{{item.assigneeNamesText || '待分配'}}</text>
+        <text class="muted block" wx:if="{{item.requiresEvidence}}">需上传凭证</text>
+        <text class="action-tip">{{item.canFeedback ? '反馈进度并查看凭证' : '查看节点记录与凭证'}} →</text>
+      </view>
+    </view>
+  </view>
+
+  <button wx:if="{{canManage}}" class="danger-button" bindtap="deleteLine">删除业务线</button>
+</view>
+<view class="empty" wx:else>{{loading ? '加载中…' : '业务线不存在或无权查看'}}</view>

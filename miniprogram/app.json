@@ -1,0 +1,20 @@
+{
+  "pages": [
+    "pages/dashboard/index",
+    "pages/business-list/index",
+    "pages/business-detail/index",
+    "pages/business-edit/index",
+    "pages/node-feedback/index",
+    "pages/template-list/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "业务进度",
+    "navigationBarBackgroundColor": "#0f766e",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f4f7f7",
+    "backgroundTextStyle": "light"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json",
+  "lazyCodeLoading": "requiredComponents"
+}

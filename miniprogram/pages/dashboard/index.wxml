@@ -1,0 +1,35 @@
+<view class="page">
+  <view class="hero card">
+    <text class="muted">你好{{profile && profile.displayName ? '，' + profile.displayName : ''}}</text>
+    <view class="title">让每条业务都有清晰的下一步</view>
+    <view class="hero-actions">
+      <button class="primary-button action" bindtap="createBusiness">新建业务线</button>
+      <button class="secondary-button action" bindtap="openList">查看全部</button>
+    </view>
+  </view>
+
+  <view class="stats">
+    <view class="stat card"><text class="stat-value">{{stats.active}}</text><text class="muted">进行中</text></view>
+    <view class="stat card"><text class="stat-value">{{stats.pendingMine}}</text><text class="muted">待我处理</text></view>
+    <view class="stat card"><text class="stat-value">{{stats.completed}}</text><text class="muted">已完成</text></view>
+  </view>
+
+  <view class="row-between section-head">
+    <view class="section-title">最近业务</view>
+    <text class="link" bindtap="openTemplates">模板管理</text>
+  </view>
+
+  <view wx:if="{{recent.length}}">
+    <view class="card line-card" wx:for="{{recent}}" wx:key="_id" data-id="{{item._id}}" bindtap="openDetail">
+      <view class="row-between">
+        <text class="line-name">{{item.name}}</text>
+        <status-pill status="{{item.status}}" />
+      </view>
+      <text class="muted">编号：{{item.code}}</text>
+      <view class="progress"><view class="progress-value" style="width: {{item.progress || 0}}%"></view></view>
+      <text class="muted">当前节点：{{item.currentNodeName || '待配置'}}</text>
+    </view>
+  </view>
+  <view class="empty" wx:else>{{loading ? '加载中…' : '暂无业务线，先创建一条吧'}}</view>
+</view>
+

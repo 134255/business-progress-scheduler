@@ -1,0 +1,10 @@
+.detail-title { max-width: 500rpx; }
+.block { display: block; margin-top: 14rpx; }
+.progress { height: 14rpx; margin: 28rpx 0 10rpx; background: #e5e7eb; border-radius: 999rpx; overflow: hidden; }
+.progress-value { height: 100%; background: #14b8a6; }
+.node { display: flex; gap: 20rpx; }
+.node-index { width: 52rpx; height: 52rpx; line-height: 52rpx; border-radius: 50%; text-align: center; background: #ccfbf1; color: #0f766e; font-weight: 700; flex: none; }
+.node-body { flex: 1; }
+.node-name { font-weight: 650; }
+.action-tip { display: block; margin-top: 18rpx; color: #0f766e; }
+

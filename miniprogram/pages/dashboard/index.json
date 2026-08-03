@@ -1,0 +1,7 @@
+{
+  "navigationBarTitleText": "业务概览",
+  "usingComponents": {
+    "status-pill": "/components/status-pill/index"
+  }
+}
+

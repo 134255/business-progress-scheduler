@@ -1,0 +1,4 @@
+.name { font-size: 31rpx; font-weight: 650; }
+.block { display: block; margin-top: 12rpx; }
+.hint { border-style: dashed; }
+

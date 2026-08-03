@@ -1,0 +1,21 @@
+<view class="page">
+  <view class="card">
+    <view class="field"><text class="field-label">业务线名称 *</text><input class="input" data-field="name" value="{{form.name}}" bindinput="updateField" placeholder="例如：客户A开户流程" /></view>
+    <view class="field"><text class="field-label">业务线编号 *</text><input class="input" data-field="code" value="{{form.code}}" bindinput="updateField" placeholder="例如：BL-2026-001" /></view>
+    <view class="field"><text class="field-label">说明</text><textarea class="textarea" data-field="description" value="{{form.description}}" bindinput="updateField" placeholder="补充业务背景、目标或特别要求" /></view>
+    <view class="date-grid">
+      <picker mode="date" data-field="plannedStartDate" bindchange="updateDate"><view class="date-box">{{form.plannedStartDate || '计划开始日期'}}</view></picker>
+      <picker mode="date" data-field="plannedEndDate" bindchange="updateDate"><view class="date-box">{{form.plannedEndDate || '计划完成日期'}}</view></picker>
+    </view>
+  </view>
+
+  <view class="section-title">业务节点</view>
+  <view class="card node" wx:for="{{form.nodes}}" wx:key="index">
+    <view class="row-between"><text>节点 {{index + 1}}</text><text class="remove" data-index="{{index}}" bindtap="removeNode">删除</text></view>
+    <input class="input node-input" data-index="{{index}}" value="{{item.name}}" bindinput="updateNodeName" placeholder="节点名称" />
+    <label class="row switch-row"><switch color="#0f766e" checked="{{item.requiresEvidence}}" data-index="{{index}}" bindchange="toggleEvidence" /><text>完成时必须上传凭证</text></label>
+  </view>
+  <button class="secondary-button" bindtap="addNode">+ 添加节点</button>
+  <button class="primary-button save" bindtap="save" loading="{{saving}}" disabled="{{saving}}">创建业务线</button>
+</view>
+

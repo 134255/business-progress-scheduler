@@ -1,0 +1,15 @@
+.hero { padding-top: 36rpx; }
+.hero .title { margin: 12rpx 0 28rpx; }
+.hero-actions { display: flex; gap: 18rpx; }
+.action { flex: 1; margin: 0; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16rpx; }
+.stat { margin-bottom: 8rpx; padding: 22rpx 12rpx; text-align: center; }
+.stat-value { display: block; color: #0f766e; font-size: 44rpx; font-weight: 700; }
+.section-head { margin: 24rpx 4rpx 12rpx; }
+.section-title { margin: 0; }
+.link { color: #0f766e; }
+.line-name { max-width: 470rpx; font-size: 31rpx; font-weight: 650; }
+.line-card .muted { display: block; margin-top: 12rpx; }
+.progress { height: 12rpx; margin: 22rpx 0 10rpx; border-radius: 999rpx; background: #e5e7eb; overflow: hidden; }
+.progress-value { height: 100%; background: #14b8a6; border-radius: 999rpx; }
+

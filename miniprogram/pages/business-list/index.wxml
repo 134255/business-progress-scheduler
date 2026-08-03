@@ -1,0 +1,24 @@
+<view class="page">
+  <view class="card">
+    <view class="field">
+      <text class="field-label">名称或编号</text>
+      <input class="input" value="{{keyword}}" placeholder="输入业务线名称或编号" bindinput="onKeyword" confirm-type="search" bindconfirm="search" />
+    </view>
+    <view class="date-row">
+      <picker mode="date" value="{{startDate}}" bindchange="onStartDate"><view class="date-box">{{startDate || '开始日期'}}</view></picker>
+      <text class="muted">至</text>
+      <picker mode="date" value="{{endDate}}" bindchange="onEndDate"><view class="date-box">{{endDate || '结束日期'}}</view></picker>
+    </view>
+    <button class="primary-button" bindtap="search" loading="{{loading}}">检索</button>
+  </view>
+
+  <button class="secondary-button create" bindtap="createBusiness">+ 新建业务线</button>
+
+  <view class="card" wx:for="{{items}}" wx:key="_id" data-id="{{item._id}}" bindtap="openDetail">
+    <view class="row-between"><text class="name">{{item.name}}</text><status-pill status="{{item.status}}" /></view>
+    <text class="muted block">{{item.code}} · {{item.plannedStartDate || '未设开始日期'}}</text>
+    <text class="muted block">当前节点：{{item.currentNodeName || '待配置'}}</text>
+  </view>
+  <view class="empty" wx:if="{{!loading && !items.length}}">没有匹配的业务线</view>
+</view>
+
