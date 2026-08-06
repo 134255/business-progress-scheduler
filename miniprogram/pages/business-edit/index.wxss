@@ -4,4 +4,4 @@
 .remove { color: #be123c; }
 .switch-row { gap: 16rpx; color: #4b5563; }
 .save { margin-top: 30rpx; }
-
+.lock-note { margin: 0 0 20rpx; padding: 20rpx; border-radius: 12rpx; color: #92400e; background: #fef3c7; line-height: 1.5; }

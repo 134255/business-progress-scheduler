@@ -4,4 +4,4 @@
 .create { margin-bottom: 24rpx; }
 .name { font-size: 31rpx; font-weight: 650; }
 .block { display: block; margin-top: 12rpx; }
-
+.load-more { padding: 20rpx 0 40rpx; text-align: center; color: #9ca3af; }

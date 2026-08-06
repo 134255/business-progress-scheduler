@@ -5,6 +5,7 @@
     <text class="muted block">{{line.description || '暂无说明'}}</text>
     <view class="progress"><view class="progress-value" style="width: {{line.progress || 0}}%"></view></view>
     <text class="muted">总体进度 {{line.progress || 0}}%</text>
+    <button wx:if="{{canManage}}" class="secondary-button edit-button" bindtap="editLine">编辑业务线</button>
   </view>
 
   <view class="section-title">节点进度</view>

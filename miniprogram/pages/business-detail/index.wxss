@@ -7,4 +7,4 @@
 .node-body { flex: 1; }
 .node-name { font-weight: 650; }
 .action-tip { display: block; margin-top: 18rpx; color: #0f766e; }
-
+.edit-button { margin-top: 24rpx; }

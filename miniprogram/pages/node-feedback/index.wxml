@@ -1,29 +1,31 @@
 <view class="page">
-  <view class="card" wx:if="{{canFeedback}}">
-    <text class="muted">当前节点</text>
-    <view class="title node-title">{{nodeName}}</view>
-  </view>
+  <block wx:if="{{canFeedback}}">
+    <view class="card">
+      <text class="muted">当前节点</text>
+      <view class="title node-title">{{nodeName}}</view>
+    </view>
 
-  <view class="card">
-    <view class="field">
-      <text class="field-label">节点状态</text>
-      <picker mode="selector" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatus">
-        <view class="input">{{statusOptions[statusIndex].label}}</view>
-      </picker>
-    </view>
-    <view class="field">
-      <text class="field-label">进度说明</text>
-      <textarea class="textarea" value="{{comment}}" bindinput="onComment" placeholder="说明已完成事项、存在问题或下一步安排" />
-    </view>
-    <view class="field">
-      <view class="row-between"><text class="field-label">凭证（PDF/图片）</text><text class="choose" bindtap="chooseEvidence">选择文件</text></view>
-      <view class="file row-between" wx:for="{{files}}" wx:key="path">
-        <view><text class="file-name">{{item.name}}</text><text class="muted file-size">{{item.size}} bytes</text></view>
-        <text class="remove" data-index="{{index}}" bindtap="removeFile">移除</text>
+    <view class="card">
+      <view class="field">
+        <text class="field-label">节点状态</text>
+        <picker mode="selector" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatus">
+          <view class="input">{{statusOptions[statusIndex].label}}</view>
+        </picker>
       </view>
+      <view class="field">
+        <text class="field-label">进度说明</text>
+        <textarea class="textarea" value="{{comment}}" bindinput="onComment" placeholder="说明已完成事项、存在问题或下一步安排" />
+      </view>
+      <view class="field">
+        <view class="row-between"><text class="field-label">凭证（PDF/图片）</text><text class="choose" bindtap="chooseEvidence">选择文件</text></view>
+        <view class="file row-between" wx:for="{{files}}" wx:key="path">
+          <view><text class="file-name">{{item.name}}</text><text class="muted file-size">{{item.size}} bytes</text></view>
+          <text class="remove" data-index="{{index}}" bindtap="removeFile">移除</text>
+        </view>
+      </view>
+      <button class="primary-button" bindtap="submit" loading="{{submitting}}" disabled="{{submitting}}">提交反馈</button>
     </view>
-    <button class="primary-button" bindtap="submit" loading="{{submitting}}" disabled="{{submitting}}">提交反馈</button>
-  </view>
+  </block>
 
   <view class="card" wx:else>
     <text class="muted">你可以查看节点记录与凭证，但当前账号不是该节点负责人。</text>

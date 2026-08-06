@@ -4,6 +4,16 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV })
 
 const db = cloud.database()
 const _ = db.command
+const {
+  unique,
+  isManager,
+  isMember,
+  canFeedback,
+  canTransitionNode,
+  calculateProgress,
+  normalizeLineInput
+} = require('./lib/domain')
+const { bootstrapUser } = require('./lib/bootstrap-user')
 
 const COLLECTIONS = {
   users: 'users',
@@ -31,20 +41,8 @@ function assert(condition, message, code) {
   }
 }
 
-function unique(values) {
-  return Array.from(new Set((values || []).filter(Boolean)))
-}
-
 function now() {
   return db.serverDate()
-}
-
-function isManager(line, openid) {
-  return Array.isArray(line.managerIds) && line.managerIds.includes(openid)
-}
-
-function isMember(line, openid) {
-  return isManager(line, openid) || (Array.isArray(line.memberIds) && line.memberIds.includes(openid))
 }
 
 async function getLine(id) {
@@ -61,20 +59,25 @@ async function writeAudit(openid, action, targetType, targetId, snapshot) {
 }
 
 async function bootstrap(openid) {
+  return bootstrapUser({
+    users: db.collection(COLLECTIONS.users),
+    openid,
+    now
+  })
+}
+
+async function updateUserProfile(openid, payload) {
+  const displayName = String(payload.displayName || '').trim()
+  const avatarUrl = String(payload.avatarUrl || '').trim()
+  assert(displayName.length >= 1 && displayName.length <= 30, '昵称长度需为 1-30 个字符')
+  assert(!avatarUrl || avatarUrl.startsWith('cloud://') || avatarUrl.startsWith('https://'), '头像地址不合法')
+
   const users = db.collection(COLLECTIONS.users)
   const existing = await users.where({ openid }).limit(1).get()
-  if (existing.data.length) return existing.data[0]
-
-  const user = {
-    openid,
-    displayName: '微信用户',
-    avatarUrl: '',
-    status: 'active',
-    createdAt: now(),
-    updatedAt: now()
-  }
-  const created = await users.add({ data: user })
-  return Object.assign({ _id: created._id }, user)
+  assert(existing.data.length, '用户档案不存在', 'NOT_FOUND')
+  await users.doc(existing.data[0]._id).update({ data: { displayName, avatarUrl, updatedAt: now() } })
+  await writeAudit(openid, 'update_profile', 'user', existing.data[0]._id, { displayName })
+  return Object.assign({}, existing.data[0], { displayName, avatarUrl })
 }
 
 async function dashboard(openid) {
@@ -101,6 +104,8 @@ async function dashboard(openid) {
 
 async function listBusinessLines(openid, payload) {
   const query = payload || {}
+  const page = Math.max(1, Number(query.page || 1))
+  const pageSize = Math.min(50, Math.max(5, Number(query.pageSize || 20)))
   const result = await db.collection(COLLECTIONS.lines)
     .where({ memberIds: openid, status: _.neq('deleted') })
     .orderBy('updatedAt', 'desc')
@@ -118,7 +123,14 @@ async function listBusinessLines(openid, payload) {
     return keywordMatch && dateMatch
   })
 
-  return { items }
+  const offset = (page - 1) * pageSize
+  return {
+    items: items.slice(offset, offset + pageSize),
+    page,
+    pageSize,
+    total: items.length,
+    hasMore: offset + pageSize < items.length
+  }
 }
 
 async function getBusinessLine(openid, payload) {
@@ -131,11 +143,13 @@ async function getBusinessLine(openid, payload) {
     .get()
 
   const nodes = nodesResult.data.map(node => Object.assign({}, node, {
-    canFeedback: isManager(line, openid) || (node.assigneeIds || []).includes(openid),
+    canFeedback: canFeedback(line, node, openid),
     assigneeNamesText: (node.assigneeNames || []).join('、')
   }))
 
-  return { line, nodes, canManage: isManager(line, openid) }
+  const canManage = isManager(line, openid)
+  const canEditNodes = canManage && Number(line.progress || 0) === 0 && nodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
+  return { line, nodes, canManage, canEditNodes }
 }
 
 function dateText(value) {
@@ -159,15 +173,15 @@ async function getNodeHistory(openid, payload) {
   ])
   const labels = { in_progress: '处理中', blocked: '受阻', completed: '已完成' }
   return {
-    canFeedback: isManager(line, openid) || (node.assigneeIds || []).includes(openid),
+    canFeedback: canFeedback(line, node, openid),
     history: feedbackResult.data.map(item => Object.assign({}, item, { statusLabel: labels[item.status] || item.status, createdAtText: dateText(item.createdAt) })),
     evidences: evidenceResult.data.map(item => Object.assign({}, item, { createdAtText: dateText(item.createdAt) }))
   }
 }
 
 async function createBusinessLine(openid, payload) {
-  const name = String(payload.name || '').trim()
-  const code = String(payload.code || '').trim()
+  const normalized = normalizeLineInput(payload)
+  const { name, code, description, plannedStartDate, plannedEndDate } = normalized
   const nodes = Array.isArray(payload.nodes) ? payload.nodes : []
   assert(name, '业务线名称不能为空')
   assert(code, '业务线编号不能为空')
@@ -181,7 +195,7 @@ async function createBusinessLine(openid, payload) {
   const lineData = {
     name,
     code,
-    description: String(payload.description || '').trim(),
+    description,
     status: 'active',
     managerIds: [openid],
     memberIds: [openid],
@@ -189,8 +203,8 @@ async function createBusinessLine(openid, payload) {
     currentNodeName: String(nodes[0].name).trim(),
     nodeCount: nodes.length,
     progress: 0,
-    plannedStartDate: payload.plannedStartDate || '',
-    plannedEndDate: payload.plannedEndDate || '',
+    plannedStartDate,
+    plannedEndDate,
     templateId: payload.templateId || '',
     createdBy: openid,
     version: 1,
@@ -223,6 +237,63 @@ async function createBusinessLine(openid, payload) {
   return { id: lineResult._id }
 }
 
+async function updateBusinessLine(openid, payload) {
+  const line = await getLine(payload.id)
+  assert(isManager(line, openid), '只有业务线管理员可以编辑', 'FORBIDDEN')
+  assert(Number(payload.version) === Number(line.version), '业务线已被其他人更新，请刷新后重试', 'VERSION_CONFLICT')
+
+  const normalized = normalizeLineInput(payload)
+  assert(normalized.name, '业务线名称不能为空')
+  assert(normalized.code, '业务线编号不能为空')
+  const duplicate = await db.collection(COLLECTIONS.lines).where({ code: normalized.code, status: _.neq('deleted') }).limit(5).get()
+  assert(!duplicate.data.some(item => item._id !== line._id), '业务线编号已存在', 'DUPLICATE_CODE')
+
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : []
+  const replaceNodes = Boolean(payload.replaceNodes)
+  if (replaceNodes) {
+    assert(Number(line.progress || 0) === 0, '业务已开始流转，不能再修改节点结构', 'NODE_STRUCTURE_LOCKED')
+    assert(nodes.length > 0 && nodes.every(node => String(node.name || '').trim()), '至少需要一个有效业务节点')
+    const existingNodes = await db.collection(COLLECTIONS.nodes).where({ businessLineId: line._id }).get()
+    assert(existingNodes.data.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment), '节点已有反馈，不能修改节点结构', 'NODE_STRUCTURE_LOCKED')
+  }
+
+  const nextVersion = Number(line.version || 1) + 1
+  const lineChanges = Object.assign({}, normalized, { version: nextVersion, updatedAt: now() })
+  if (replaceNodes) {
+    lineChanges.nodeCount = nodes.length
+    lineChanges.currentNodeIndex = 0
+    lineChanges.currentNodeName = String(nodes[0].name).trim()
+  }
+  const updated = await db.collection(COLLECTIONS.lines).where({ _id: line._id, version: line.version }).update({ data: lineChanges })
+  assert(updated.stats && updated.stats.updated === 1, '业务线已被其他人更新，请刷新后重试', 'VERSION_CONFLICT')
+
+  if (replaceNodes) {
+    await db.collection(COLLECTIONS.nodes).where({ businessLineId: line._id }).remove()
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index]
+      await db.collection(COLLECTIONS.nodes).add({
+        data: {
+          businessLineId: line._id,
+          sequence: index,
+          name: String(node.name).trim(),
+          status: index === 0 ? 'ready' : 'pending',
+          assigneeIds: unique(node.assigneeIds),
+          assigneeNames: unique(node.assigneeNames),
+          watcherIds: unique(node.watcherIds),
+          requiresEvidence: Boolean(node.requiresEvidence),
+          evidenceTypes: node.evidenceTypes || ['pdf', 'png', 'jpg', 'jpeg'],
+          dueDate: node.dueDate || '',
+          createdAt: now(),
+          updatedAt: now()
+        }
+      })
+    }
+  }
+
+  await writeAudit(openid, 'update', 'business_line', line._id, { beforeVersion: line.version, afterVersion: nextVersion, replaceNodes })
+  return { id: line._id, version: nextVersion }
+}
+
 async function deleteBusinessLine(openid, payload) {
   const line = await getLine(payload.id)
   assert(isManager(line, openid), '只有业务线管理员可以删除', 'FORBIDDEN')
@@ -242,7 +313,8 @@ async function submitNodeFeedback(openid, payload) {
   const nodeResult = await db.collection(COLLECTIONS.nodes).doc(payload.nodeId).get()
   const node = nodeResult.data
   assert(node && node.businessLineId === line._id, '节点不存在', 'NOT_FOUND')
-  assert(isManager(line, openid) || (node.assigneeIds || []).includes(openid), '只有节点负责人或业务线管理员可以反馈', 'FORBIDDEN')
+  assert(canFeedback(line, node, openid), '只有节点负责人或业务线管理员可以反馈', 'FORBIDDEN')
+  assert(canTransitionNode(node.status, payload.status), '当前节点状态不允许执行该操作', 'INVALID_TRANSITION')
 
   const evidences = Array.isArray(payload.evidences) ? payload.evidences : []
   if (payload.status === 'completed' && node.requiresEvidence) {
@@ -298,7 +370,7 @@ async function submitNodeFeedback(openid, payload) {
 
     if (next) {
       await db.collection(COLLECTIONS.nodes).doc(next._id).update({ data: { status: 'ready', activatedAt: now(), updatedAt: now() } })
-      const progress = Math.round(((node.sequence + 1) / Math.max(line.nodeCount || node.sequence + 2, 1)) * 100)
+      const progress = calculateProgress(node.sequence + 1, line.nodeCount || node.sequence + 2)
       await db.collection(COLLECTIONS.lines).doc(line._id).update({
         data: { currentNodeIndex: next.sequence, currentNodeName: next.name, progress, updatedAt: now() }
       })
@@ -339,11 +411,13 @@ exports.main = async event => {
     assert(openid, '无法识别当前微信用户', 'UNAUTHORIZED')
     const routes = {
       bootstrap: () => bootstrap(openid),
+      updateUserProfile: () => updateUserProfile(openid, payload),
       dashboard: () => dashboard(openid),
       listBusinessLines: () => listBusinessLines(openid, payload),
       getBusinessLine: () => getBusinessLine(openid, payload),
       getNodeHistory: () => getNodeHistory(openid, payload),
       createBusinessLine: () => createBusinessLine(openid, payload),
+      updateBusinessLine: () => updateBusinessLine(openid, payload),
       deleteBusinessLine: () => deleteBusinessLine(openid, payload),
       submitNodeFeedback: () => submitNodeFeedback(openid, payload)
     }

@@ -4,6 +4,10 @@ function bootstrap() {
   return callBusinessApi('bootstrap')
 }
 
+function updateUserProfile(input) {
+  return callBusinessApi('updateUserProfile', input)
+}
+
 function dashboard() {
   return callBusinessApi('dashboard')
 }
@@ -20,6 +24,10 @@ function createBusinessLine(input) {
   return callBusinessApi('createBusinessLine', input)
 }
 
+function updateBusinessLine(input) {
+  return callBusinessApi('updateBusinessLine', input)
+}
+
 function deleteBusinessLine(id) {
   return callBusinessApi('deleteBusinessLine', { id })
 }
@@ -34,10 +42,12 @@ function getNodeHistory(businessLineId, nodeId) {
 
 module.exports = {
   bootstrap,
+  updateUserProfile,
   dashboard,
   listBusinessLines,
   getBusinessLine,
   createBusinessLine,
+  updateBusinessLine,
   deleteBusinessLine,
   submitNodeFeedback,
   getNodeHistory

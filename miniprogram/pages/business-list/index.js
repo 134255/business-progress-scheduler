@@ -6,11 +6,19 @@ Page({
     startDate: '',
     endDate: '',
     items: [],
-    loading: false
+    loading: false,
+    page: 1,
+    pageSize: 20,
+    total: 0,
+    hasMore: false
   },
 
   onLoad() {
     this.search()
+  },
+
+  onReachBottom() {
+    if (this.data.hasMore && !this.data.loading) this.loadPage(false)
   },
 
   onKeyword(event) {
@@ -26,14 +34,26 @@ Page({
   },
 
   async search() {
+    return this.loadPage(true)
+  },
+
+  async loadPage(reset) {
     this.setData({ loading: true })
     try {
+      const page = reset ? 1 : this.data.page + 1
       const data = await businessService.listBusinessLines({
         keyword: this.data.keyword.trim(),
         startDate: this.data.startDate,
-        endDate: this.data.endDate
+        endDate: this.data.endDate,
+        page,
+        pageSize: this.data.pageSize
       })
-      this.setData({ items: data.items || [] })
+      this.setData({
+        items: reset ? (data.items || []) : this.data.items.concat(data.items || []),
+        page: data.page,
+        total: data.total,
+        hasMore: data.hasMore
+      })
     } finally {
       this.setData({ loading: false })
     }
@@ -47,4 +67,3 @@ Page({
     wx.navigateTo({ url: `/pages/business-detail/index?id=${event.currentTarget.dataset.id}` })
   }
 })
-

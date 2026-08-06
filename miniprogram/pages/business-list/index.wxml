@@ -20,5 +20,5 @@
     <text class="muted block">当前节点：{{item.currentNodeName || '待配置'}}</text>
   </view>
   <view class="empty" wx:if="{{!loading && !items.length}}">没有匹配的业务线</view>
+  <view class="load-more" wx:if="{{items.length}}">{{loading ? '加载中…' : (hasMore ? '上拉加载更多' : '已加载全部 ' + total + ' 条')}}</view>
 </view>
-

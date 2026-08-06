@@ -1,0 +1,5 @@
+.profile-card { padding-top: 42rpx; }
+.avatar-button { display: flex; flex-direction: column; align-items: center; gap: 14rpx; margin-bottom: 36rpx; background: transparent; }
+.avatar-button::after { border: 0; }
+.avatar { width: 144rpx; height: 144rpx; border-radius: 50%; background: #e5e7eb; }
+.avatar-placeholder { display: flex; align-items: center; justify-content: center; color: #6b7280; }

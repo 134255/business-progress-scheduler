@@ -10,12 +10,12 @@
   </view>
 
   <view class="section-title">业务节点</view>
+  <view class="lock-note" wx:if="{{editMode && !canEditNodes}}">业务已产生反馈，节点结构已锁定；仍可修改名称、编号、说明和计划日期。</view>
   <view class="card node" wx:for="{{form.nodes}}" wx:key="index">
-    <view class="row-between"><text>节点 {{index + 1}}</text><text class="remove" data-index="{{index}}" bindtap="removeNode">删除</text></view>
-    <input class="input node-input" data-index="{{index}}" value="{{item.name}}" bindinput="updateNodeName" placeholder="节点名称" />
-    <label class="row switch-row"><switch color="#0f766e" checked="{{item.requiresEvidence}}" data-index="{{index}}" bindchange="toggleEvidence" /><text>完成时必须上传凭证</text></label>
+    <view class="row-between"><text>节点 {{index + 1}}</text><text wx:if="{{canEditNodes}}" class="remove" data-index="{{index}}" bindtap="removeNode">删除</text></view>
+    <input class="input node-input" disabled="{{!canEditNodes}}" data-index="{{index}}" value="{{item.name}}" bindinput="updateNodeName" placeholder="节点名称" />
+    <label class="row switch-row"><switch disabled="{{!canEditNodes}}" color="#0f766e" checked="{{item.requiresEvidence}}" data-index="{{index}}" bindchange="toggleEvidence" /><text>完成时必须上传凭证</text></label>
   </view>
-  <button class="secondary-button" bindtap="addNode">+ 添加节点</button>
-  <button class="primary-button save" bindtap="save" loading="{{saving}}" disabled="{{saving}}">创建业务线</button>
+  <button wx:if="{{canEditNodes}}" class="secondary-button" bindtap="addNode">+ 添加节点</button>
+  <button class="primary-button save" bindtap="save" loading="{{saving}}" disabled="{{saving || loading}}">{{editMode ? '保存修改' : '创建业务线'}}</button>
 </view>
-

@@ -38,8 +38,11 @@ Page({
     wx.navigateTo({ url: '/pages/template-list/index' })
   },
 
+  openProfile() {
+    wx.navigateTo({ url: '/pages/profile/index' })
+  },
+
   openDetail(event) {
     wx.navigateTo({ url: `/pages/business-detail/index?id=${event.currentTarget.dataset.id}` })
   }
 })
-

@@ -14,8 +14,10 @@ App({
       return
     }
 
-    wx.cloud.init({ traceUser: true })
+    wx.cloud.init({
+      env: 'cloud1-d5gxt99rh492670d9',
+      traceUser: true
+    })
     this.globalData.cloudReady = true
   }
 })
-

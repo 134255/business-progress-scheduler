@@ -32,6 +32,10 @@ Page({
     wx.navigateTo({ url: `/pages/node-feedback/index?lineId=${this.data.id}&nodeId=${node._id}&nodeName=${encodeURIComponent(node.name)}&canFeedback=${node.canFeedback ? '1' : '0'}` })
   },
 
+  editLine() {
+    wx.navigateTo({ url: `/pages/business-edit/index?id=${this.data.id}` })
+  },
+
   async deleteLine() {
     const confirm = await new Promise(resolve => {
       wx.showModal({

@@ -5,7 +5,8 @@
     "pages/business-detail/index",
     "pages/business-edit/index",
     "pages/node-feedback/index",
-    "pages/template-list/index"
+    "pages/template-list/index",
+    "pages/profile/index"
   ],
   "window": {
     "navigationBarTitleText": "业务进度",
