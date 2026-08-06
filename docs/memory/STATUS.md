@@ -73,6 +73,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 ## Blockers
 
 - `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
+- The accepted design in `docs/superpowers/specs/2026-08-06-super-admin-initialization-page-design.md` replaces the obsolete developer-tool cloud-test initialization step with a guarded Mini Program initialization page. Implementation and simulator acceptance are unverified.
 - Cloud deployment, creation/backfill of `wechat_bindings`, removal of the legacy `users.openid` unique index, real transaction-conflict behavior, and simulator acceptance are unverified.
 - Task 5 simulator acceptance in WeChat DevTools is unverified.
 - Task 6 WeChat DevTools compilation, navigation, rendering, and ordinary-user manual-route smoke acceptance are unverified.
@@ -80,7 +81,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Follow `docs/deployment/account-admin-setup.md` in a maintenance window to execute Task 8 migration, index, recovery configuration, deployment, and redacted consistency checks for exact commit `7feac41` or its memory-only successor.
-2. Run the Task 8 WeChat DevTools simulator and account-lifecycle acceptance, recording only redacted outcomes; never place operator credentials, identity values, recovery material, or hashes in Git.
+1. Implement the accepted guarded Mini Program initialization page using TDD and update `docs/deployment/account-admin-setup.md` to remove the obsolete cloud-test-panel dependency.
+2. Deploy the updated Mini Program and run the Task 8 initialization, forced-password-change, and account-lifecycle acceptance, recording only redacted outcomes; never place operator credentials, identity values, recovery material, or hashes in Git.
 3. After Task 8 passes, run the final whole-branch review and choose the branch integration method.
 4. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
