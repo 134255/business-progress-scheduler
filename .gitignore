@@ -5,5 +5,5 @@ cloudfunctions/**/node_modules/
 .DS_Store
 Thumbs.db
 qa/
+.worktrees/
 *.log
-
