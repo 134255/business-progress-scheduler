@@ -14,6 +14,12 @@ function normalizeUsername(value) {
   return String(value || '').trim().toLowerCase()
 }
 
+function assertTrustedOpenid(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw createError('INVALID_WECHAT_IDENTITY')
+  }
+}
+
 function publicUser(user, credential) {
   return {
     _id: user._id,
@@ -75,6 +81,7 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
   }
 
   async function getSession({ openid }) {
+    assertTrustedOpenid(openid)
     const user = await repository.findUserByOpenid(openid)
     const requiresInitialization = (await repository.countActiveSuperAdmins()) === 0
     if (!user) return { authenticated: false, requiresInitialization }
@@ -93,6 +100,7 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
   }
 
   async function login({ openid, username, password }) {
+    assertTrustedOpenid(openid)
     const normalized = normalizeUsername(username)
     const { user, credential } = await accountRecords(normalized)
     if (!user || !credential) return rejectLogin(normalized, 'INVALID_CREDENTIALS')
@@ -135,6 +143,7 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
   }
 
   async function completeFirstLogin({ openid, challengeToken, newPassword }) {
+    assertTrustedOpenid(openid)
     assertPasswordPolicy(newPassword)
     const passwordRecord = hashPassword(newPassword)
     const result = await repository.consumeChallenge({
@@ -191,6 +200,7 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
   }
 
   async function initializeSuperAdmin({ openid, username, displayName, temporaryPassword, recoveryCode }) {
+    assertTrustedOpenid(openid)
     const normalized = normalizeUsername(username)
     assertPasswordPolicy(temporaryPassword)
     await verifyRecoveryCode(recoveryCode)
@@ -256,6 +266,7 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
         await transactionRepository.invalidateChallenges(user._id, clock())
         await audit(transactionRepository.writeAudit, {
           action: 'RECOVER_SUPER_ADMIN',
+          priority: 'high',
           username: user.username,
           roleBefore,
           roleAfter: 'super_admin',

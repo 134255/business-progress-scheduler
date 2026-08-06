@@ -3,12 +3,47 @@ const assert = require('node:assert/strict')
 const { createAuthHarness } = require('./helpers/auth-harness')
 
 const RECOVERY_CODE = 'RECOVERY9-TEST-ONLY'
+const INVALID_OPENIDS = [undefined, '', '   ', 42]
+
+function auditKeys(value, keys = []) {
+  if (!value || typeof value !== 'object') return keys
+  if (Array.isArray(value)) {
+    for (const item of value) auditKeys(item, keys)
+    return keys
+  }
+  for (const [key, item] of Object.entries(value)) {
+    keys.push(key)
+    auditKeys(item, keys)
+  }
+  return keys
+}
+
+function assertAuditPrivacy(audit, forbiddenValues) {
+  const forbiddenKey = /password|credential|salt|hash|digest|challenge|token|recoverycode/i
+  for (const key of auditKeys(audit)) {
+    assert.doesNotMatch(key.replace(/[^a-z0-9]/gi, ''), forbiddenKey)
+  }
+  const serialized = JSON.stringify(audit)
+  for (const forbiddenValue of forbiddenValues) {
+    assert.equal(serialized.includes(forbiddenValue), false)
+  }
+}
 
 test('unknown OpenID is unauthenticated and is not auto-created', async () => {
   const harness = createAuthHarness()
   const result = await harness.service.getSession({ openid: 'wx-new' })
   assert.deepEqual(result, { authenticated: false, requiresInitialization: true })
   assert.equal(harness.state.users.length, 0)
+})
+
+test('getSession rejects missing, blank, and non-string trusted OpenID without authenticating or mutating state', async () => {
+  for (const openid of INVALID_OPENIDS) {
+    const harness = createAuthHarness()
+    harness.seedAccount({ username: 'user01', password: 'TempPass8', openid: '' })
+    const before = structuredClone(harness.state)
+    await assert.rejects(harness.service.getSession({ openid }), error => error.code === 'INVALID_WECHAT_IDENTITY')
+    assert.deepEqual(harness.state, before)
+  }
 })
 
 test('a bound user without a credential fails closed instead of receiving a session', async () => {
@@ -32,6 +67,19 @@ test('temporary-password login returns a ten-minute challenge and does not bind 
   assert.equal(harness.state.challenges[0].expiresAt - harness.state.challenges[0].createdAt, 10 * 60 * 1000)
 })
 
+test('login rejects missing, blank, and non-string trusted OpenID without challenge, binding, or audit mutation', async () => {
+  for (const openid of INVALID_OPENIDS) {
+    const harness = createAuthHarness()
+    harness.seedAccount({ username: 'user01', password: 'TempPass8', mustChangePassword: true })
+    const before = structuredClone(harness.state)
+    await assert.rejects(
+      harness.service.login({ openid, username: 'user01', password: 'TempPass8' }),
+      error => error.code === 'INVALID_WECHAT_IDENTITY'
+    )
+    assert.deepEqual(harness.state, before)
+  }
+})
+
 test('completing first login changes password, consumes challenge, and binds OpenID', async () => {
   const harness = createAuthHarness()
   harness.seedAccount({ username: 'user01', password: 'TempPass8', mustChangePassword: true })
@@ -45,6 +93,20 @@ test('completing first login changes password, consumes challenge, and binds Ope
   )
   const relogin = await harness.service.login({ openid: 'wx-1', username: 'user01', password: 'NewPass99' })
   assert.equal(relogin.authenticated, true)
+})
+
+test('completeFirstLogin rejects missing, blank, and non-string trusted OpenID before consuming a challenge', async () => {
+  for (const openid of INVALID_OPENIDS) {
+    const harness = createAuthHarness()
+    harness.seedAccount({ username: 'user01', password: 'TempPass8', mustChangePassword: true })
+    const login = await harness.service.login({ openid: 'wx-1', username: 'user01', password: 'TempPass8' })
+    const before = structuredClone(harness.state)
+    await assert.rejects(
+      harness.service.completeFirstLogin({ openid, challengeToken: login.challengeToken, newPassword: 'NewPass99' }),
+      error => error.code === 'INVALID_WECHAT_IDENTITY'
+    )
+    assert.deepEqual(harness.state, before)
+  }
 })
 
 test('five bad passwords lock the account for thirty minutes', async () => {
@@ -265,6 +327,24 @@ test('the first super administrator can be initialized exactly once', async () =
   )
 })
 
+test('initialization rejects missing, blank, and non-string trusted OpenID before consuming recovery state', async () => {
+  for (const openid of INVALID_OPENIDS) {
+    const harness = createAuthHarness()
+    const before = structuredClone(harness.state)
+    await assert.rejects(
+      harness.service.initializeSuperAdmin({
+        openid,
+        username: 'rootadmin',
+        displayName: 'Test Administrator',
+        temporaryPassword: 'AdminTemp9',
+        recoveryCode: RECOVERY_CODE
+      }),
+      error => error.code === 'INVALID_WECHAT_IDENTITY'
+    )
+    assert.deepEqual(harness.state, before)
+  }
+})
+
 test('failed initialization rolls back recovery-code consumption', async () => {
   const harness = createAuthHarness()
   harness.seedAccount({ username: 'rootadmin', password: 'Existing9' })
@@ -328,7 +408,7 @@ test('concurrent initialization consumes the recovery code only once', async () 
   assert.equal(harness.state.recoveryStates[0].consumedAt !== null, true)
 })
 
-test('emergency recovery promotes and activates the account while clearing its old OpenID', async () => {
+test('emergency recovery requires no OpenID, promotes and activates the account, and writes a high-priority audit', async () => {
   const harness = createAuthHarness()
   harness.seedAccount({
     username: 'admin01',
@@ -351,6 +431,13 @@ test('emergency recovery promotes and activates the account while clearing its o
   assert.equal(result.user.mustChangePassword, true)
   assert.equal(harness.state.credentials[0].failedAttempts, 0)
   assert.equal(harness.state.credentials[0].lockedUntil, null)
+  const recoveryAudit = harness.state.audit.find(entry => entry.action === 'RECOVER_SUPER_ADMIN')
+  assert.equal(recoveryAudit.priority, 'high')
+  assert.equal(recoveryAudit.roleBefore, 'user')
+  assert.equal(recoveryAudit.roleAfter, 'super_admin')
+  assert.equal(recoveryAudit.statusBefore, 'disabled')
+  assert.equal(recoveryAudit.statusAfter, 'active')
+  assert.equal(recoveryAudit.resultCode, 'SUPER_ADMIN_RECOVERED')
 })
 
 test('bound temporary-password accounts get only a password-change-required session', async () => {
@@ -362,13 +449,79 @@ test('bound temporary-password accounts get only a password-change-required sess
   assert.equal(result.user.mustChangePassword, true)
 })
 
-test('audit snapshots include transitions and result codes but exclude authentication secrets', async () => {
-  const harness = createAuthHarness()
-  const actor = harness.seedAccount({ username: 'user01', password: 'OldPass88', openid: 'wx-1', role: 'user' })
-  await harness.service.changePassword({ actor, currentPassword: 'OldPass88', newPassword: 'NewPass99' })
-  const serialized = JSON.stringify(harness.state.audit)
-  assert.match(serialized, /user01/)
-  assert.match(serialized, /PASSWORD_CHANGED/)
-  assert.doesNotMatch(serialized, /OldPass88|NewPass99|RECOVERY9-TEST-ONLY|challenge-token/)
-  assert.doesNotMatch(serialized, /\"(?:password|credential|salt|hash|challengeToken|recoveryCode)\"/i)
+test('all sensitive authentication paths write required audit evidence without secret-derived fields', async () => {
+  const firstLoginHarness = createAuthHarness()
+  firstLoginHarness.seedAccount({ username: 'firstuser', password: 'FirstTemp8', mustChangePassword: true })
+  const login = await firstLoginHarness.service.login({ openid: 'wx-first', username: 'firstuser', password: 'FirstTemp8' })
+  await firstLoginHarness.service.completeFirstLogin({
+    openid: 'wx-first',
+    challengeToken: login.challengeToken,
+    newPassword: 'FirstNew9'
+  })
+
+  const initializationHarness = createAuthHarness()
+  await initializationHarness.service.initializeSuperAdmin({
+    openid: 'wx-admin',
+    username: 'rootadmin',
+    displayName: 'Test Administrator',
+    temporaryPassword: 'AdminTemp9',
+    recoveryCode: RECOVERY_CODE
+  })
+
+  const recoveryHarness = createAuthHarness()
+  recoveryHarness.seedAccount({
+    username: 'recoveradmin',
+    password: 'BeforeRecover8',
+    openid: 'wx-previous',
+    role: 'user',
+    status: 'disabled'
+  })
+  await recoveryHarness.service.recoverSuperAdmin({
+    username: 'recoveradmin',
+    temporaryPassword: 'AfterRecover9',
+    recoveryCode: RECOVERY_CODE
+  })
+
+  const passwordHarness = createAuthHarness()
+  const actor = passwordHarness.seedAccount({ username: 'changeuser', password: 'BeforeChange8', openid: 'wx-change' })
+  await passwordHarness.service.changePassword({ actor, currentPassword: 'BeforeChange8', newPassword: 'AfterChange9' })
+
+  const audit = [
+    ...firstLoginHarness.state.audit,
+    ...initializationHarness.state.audit,
+    ...recoveryHarness.state.audit,
+    ...passwordHarness.state.audit
+  ]
+  const firstLoginAudit = audit.find(entry => entry.action === 'COMPLETE_FIRST_LOGIN')
+  assert.equal(firstLoginAudit.username, 'firstuser')
+  assert.equal(firstLoginAudit.resultCode, 'PASSWORD_CHANGED_AND_BOUND')
+  const initializationAudit = audit.find(entry => entry.action === 'INITIALIZE_SUPER_ADMIN')
+  assert.equal(initializationAudit.username, 'rootadmin')
+  assert.equal(initializationAudit.roleBefore, null)
+  assert.equal(initializationAudit.roleAfter, 'super_admin')
+  assert.equal(initializationAudit.statusBefore, null)
+  assert.equal(initializationAudit.statusAfter, 'active')
+  assert.equal(initializationAudit.resultCode, 'SUPER_ADMIN_INITIALIZED')
+  const recoveryAudit = audit.find(entry => entry.action === 'RECOVER_SUPER_ADMIN')
+  assert.equal(recoveryAudit.username, 'recoveradmin')
+  assert.equal(recoveryAudit.priority, 'high')
+  assert.equal(recoveryAudit.roleBefore, 'user')
+  assert.equal(recoveryAudit.roleAfter, 'super_admin')
+  assert.equal(recoveryAudit.statusBefore, 'disabled')
+  assert.equal(recoveryAudit.statusAfter, 'active')
+  assert.equal(recoveryAudit.resultCode, 'SUPER_ADMIN_RECOVERED')
+  const passwordAudit = audit.find(entry => entry.action === 'CHANGE_PASSWORD')
+  assert.equal(passwordAudit.username, 'changeuser')
+  assert.equal(passwordAudit.resultCode, 'PASSWORD_CHANGED')
+  assertAuditPrivacy(audit, [
+    'FirstTemp8',
+    'FirstNew9',
+    login.challengeToken,
+    'AdminTemp9',
+    RECOVERY_CODE,
+    'BeforeRecover8',
+    'AfterRecover9',
+    'BeforeChange8',
+    'AfterChange9'
+  ])
 })
