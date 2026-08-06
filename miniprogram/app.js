@@ -1,7 +1,13 @@
 App({
   globalData: {
     currentUser: null,
+    loginChallenge: null,
     cloudReady: false
+  },
+
+  resetAuthState() {
+    this.globalData.currentUser = null
+    this.globalData.loginChallenge = null
   },
 
   onLaunch() {

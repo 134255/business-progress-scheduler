@@ -9,18 +9,20 @@ Page({
   },
 
   onShow() {
-    this.loadDashboard()
+    const currentUser = getApp().globalData.currentUser
+    if (!currentUser) {
+      wx.reLaunch({ url: '/pages/login/index' })
+      return
+    }
+    this.setData({ profile: currentUser })
+    return this.loadDashboard()
   },
 
   async loadDashboard() {
     this.setData({ loading: true })
     try {
-      const [profile, data] = await Promise.all([
-        businessService.bootstrap(),
-        businessService.dashboard()
-      ])
-      getApp().globalData.currentUser = profile
-      this.setData({ profile, stats: data.stats, recent: data.recent || [] })
+      const data = await businessService.dashboard()
+      this.setData({ stats: data.stats, recent: data.recent || [] })
     } finally {
       this.setData({ loading: false })
     }

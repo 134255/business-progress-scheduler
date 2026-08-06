@@ -1,0 +1,24 @@
+<view class="page login-page">
+  <view class="card login-card">
+    <view class="title">登录业务进度</view>
+    <text class="muted intro">使用管理员分配的账号登录</text>
+
+    <view class="checking" wx:if="{{checking}}">正在检查登录状态…</view>
+
+    <block wx:else>
+      <view class="error" wx:if="{{errorMessage}}">{{errorMessage}}</view>
+
+      <block wx:if="{{!requiresInitialization}}">
+        <view class="field">
+          <label class="field-label" for="username">用户名</label>
+          <input id="username" class="input" value="{{username}}" placeholder="请输入用户名" bindinput="onUsernameInput" />
+        </view>
+        <view class="field">
+          <label class="field-label" for="password">密码</label>
+          <input id="password" class="input" value="{{password}}" password="true" placeholder="请输入密码" bindinput="onPasswordInput" confirm-type="done" bindconfirm="submit" />
+        </view>
+        <button class="primary-button submit" loading="{{submitting}}" disabled="{{submitting}}" bindtap="submit">登录</button>
+      </block>
+    </block>
+  </view>
+</view>

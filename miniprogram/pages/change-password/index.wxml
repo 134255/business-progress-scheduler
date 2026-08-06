@@ -1,0 +1,22 @@
+<view class="page password-page">
+  <view class="card password-card">
+    <view class="title">{{firstLogin ? '设置新密码' : '修改密码'}}</view>
+    <text class="muted intro">{{firstLogin ? '首次登录必须修改密码，完成后才能进入系统' : '请验证当前密码并设置新密码'}}</text>
+
+    <view class="error" wx:if="{{errorMessage}}">{{errorMessage}}</view>
+
+    <view class="field" wx:if="{{!firstLogin}}">
+      <label class="field-label" for="current-password">当前密码</label>
+      <input id="current-password" class="input" value="{{currentPassword}}" password="true" placeholder="请输入当前密码" bindinput="onCurrentPasswordInput" />
+    </view>
+    <view class="field">
+      <label class="field-label" for="new-password">新密码</label>
+      <input id="new-password" class="input" value="{{newPassword}}" password="true" placeholder="请输入新密码" bindinput="onNewPasswordInput" />
+    </view>
+    <view class="field">
+      <label class="field-label" for="confirm-password">确认新密码</label>
+      <input id="confirm-password" class="input" value="{{confirmPassword}}" password="true" placeholder="请再次输入新密码" bindinput="onConfirmPasswordInput" confirm-type="done" bindconfirm="submit" />
+    </view>
+    <button class="primary-button submit" loading="{{submitting}}" disabled="{{submitting}}" bindtap="submit">确认修改</button>
+  </view>
+</view>

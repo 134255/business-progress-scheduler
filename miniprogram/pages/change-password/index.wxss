@@ -1,0 +1,32 @@
+.password-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.password-card {
+  width: 100%;
+  max-width: 680rpx;
+  margin: 0;
+  padding: 48rpx 36rpx;
+}
+
+.intro {
+  display: block;
+  margin: 16rpx 0 40rpx;
+  line-height: 1.6;
+}
+
+.error {
+  margin-bottom: 28rpx;
+  padding: 20rpx;
+  border: 1rpx solid #fecaca;
+  border-radius: 12rpx;
+  background: #fef2f2;
+  color: #b91c1c;
+  line-height: 1.5;
+}
+
+.submit {
+  margin-top: 36rpx;
+}
