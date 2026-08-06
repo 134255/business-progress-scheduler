@@ -19,7 +19,10 @@
 
   <view class="row-between section-head">
     <view class="section-title">最近业务</view>
-    <text class="link" bindtap="openTemplates">模板管理</text>
+    <view class="admin-links">
+      <text wx:if="{{profile && profile.role === 'super_admin'}}" class="link" bindtap="openAdminUsers">用户管理</text>
+      <text class="link" bindtap="openTemplates">模板管理</text>
+    </view>
   </view>
 
   <view wx:if="{{recent.length}}">

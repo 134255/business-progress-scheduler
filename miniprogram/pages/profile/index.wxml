@@ -5,10 +5,16 @@
       <view wx:else class="avatar avatar-placeholder">头像</view>
       <text class="muted">点击更换头像</text>
     </button>
+    <view class="account-meta">
+      <view class="row-between"><text class="muted">用户名</text><text>{{username}}</text></view>
+      <view class="row-between"><text class="muted">角色</text><text>{{roleLabel}}</text></view>
+    </view>
     <view class="field">
       <text class="field-label">显示名称</text>
       <input class="input" type="nickname" value="{{displayName}}" bindinput="onName" placeholder="请输入你的称呼" maxlength="30" />
     </view>
     <button class="primary-button" bindtap="save" loading="{{saving}}" disabled="{{saving || loading}}">保存资料</button>
+    <button class="secondary-button profile-action" bindtap="openChangePassword">修改密码</button>
+    <button class="danger-button profile-action" bindtap="logout">退出登录</button>
   </view>
 </view>

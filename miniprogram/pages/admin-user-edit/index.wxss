@@ -1,0 +1,7 @@
+.form-card { padding-top: 36rpx; }
+.error { margin-bottom: 24rpx; padding: 18rpx; color: #be123c; background: #fff1f2; border-radius: 12rpx; }
+.readonly { padding: 20rpx; color: #4b5563; background: #f3f4f6; border-radius: 12rpx; }
+.hint { display: block; margin-top: 10rpx; color: #9ca3af; font-size: 23rpx; line-height: 1.5; }
+.option-group { display: flex; gap: 36rpx; }
+.option-group label { display: flex; align-items: center; }
+.primary-button { margin-top: 40rpx; }

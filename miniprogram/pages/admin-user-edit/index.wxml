@@ -1,0 +1,41 @@
+<view class="page">
+  <view class="card form-card">
+    <view class="error" wx:if="{{errorMessage}}">{{errorMessage}}</view>
+
+    <view class="field">
+      <label class="field-label" for="username">用户名</label>
+      <view wx:if="{{editMode}}" class="readonly">{{username}}</view>
+      <input wx:else id="username" class="input" value="{{username}}" placeholder="请输入唯一用户名" bindinput="onUsernameInput" />
+      <text class="hint">用户名创建后不可修改，比较时忽略大小写和首尾空格</text>
+    </view>
+
+    <view class="field">
+      <label class="field-label" for="display-name">显示名称</label>
+      <input id="display-name" class="input" value="{{displayName}}" placeholder="请输入显示名称" maxlength="30" bindinput="onDisplayNameInput" />
+    </view>
+
+    <view class="field">
+      <text class="field-label">角色</text>
+      <radio-group class="option-group" bindchange="onRoleChange">
+        <label><radio value="user" checked="{{role === 'user'}}" />普通用户</label>
+        <label><radio value="super_admin" checked="{{role === 'super_admin'}}" />超级管理员</label>
+      </radio-group>
+    </view>
+
+    <view wx:if="{{editMode}}" class="field">
+      <text class="field-label">状态</text>
+      <radio-group class="option-group" bindchange="onStatusChange">
+        <label><radio value="active" checked="{{status === 'active'}}" />启用</label>
+        <label><radio value="disabled" checked="{{status === 'disabled'}}" />停用</label>
+      </radio-group>
+    </view>
+
+    <view wx:if="{{!editMode}}" class="field">
+      <label class="field-label" for="temporary-password">临时密码</label>
+      <input id="temporary-password" class="input" value="{{temporaryPassword}}" password="true" placeholder="8-64 位，至少含字母和数字" bindinput="onTemporaryPasswordInput" />
+      <text class="hint">用户首次登录后必须修改此密码</text>
+    </view>
+
+    <button class="primary-button" bindtap="submit" loading="{{submitting}}" disabled="{{submitting}}">{{editMode ? '保存修改' : '创建用户'}}</button>
+  </view>
+</view>

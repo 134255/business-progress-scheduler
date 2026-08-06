@@ -40,6 +40,11 @@ Page({
     wx.navigateTo({ url: '/pages/template-list/index' })
   },
 
+  openAdminUsers() {
+    if (!this.data.profile || this.data.profile.role !== 'super_admin' || this.data.profile.status !== 'active') return
+    wx.navigateTo({ url: '/pages/admin-users/index' })
+  },
+
   openProfile() {
     wx.navigateTo({ url: '/pages/profile/index' })
   },

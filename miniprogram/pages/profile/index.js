@@ -4,23 +4,26 @@ Page({
   data: {
     loading: true,
     saving: false,
+    username: '',
+    roleLabel: '',
     displayName: '',
     avatarUrl: '',
     pendingAvatarPath: ''
   },
 
   onLoad() {
-    this.loadProfile()
-  },
-
-  async loadProfile() {
-    this.setData({ loading: true })
-    try {
-      const profile = await businessService.bootstrap()
-      this.setData({ displayName: profile.displayName || '', avatarUrl: profile.avatarUrl || '' })
-    } finally {
-      this.setData({ loading: false })
+    const profile = getApp().globalData.currentUser
+    if (!profile) {
+      wx.reLaunch({ url: '/pages/login/index' })
+      return
     }
+    this.setData({
+      username: profile.username || '',
+      roleLabel: profile.role === 'super_admin' ? '超级管理员' : '普通用户',
+      displayName: profile.displayName || '',
+      avatarUrl: profile.avatarUrl || '',
+      loading: false
+    })
   },
 
   onName(event) {
@@ -50,11 +53,31 @@ Page({
     try {
       const avatarUrl = await this.uploadAvatarIfNeeded()
       const profile = await businessService.updateUserProfile({ displayName, avatarUrl })
-      getApp().globalData.currentUser = profile
+      getApp().globalData.currentUser = Object.assign({}, getApp().globalData.currentUser, profile)
       this.setData({ avatarUrl, pendingAvatarPath: '' })
       wx.showToast({ title: '保存成功', icon: 'success' })
     } finally {
       this.setData({ saving: false })
     }
+  },
+
+  openChangePassword() {
+    wx.navigateTo({ url: '/pages/change-password/index' })
+  },
+
+  async logout() {
+    const result = await wx.showModal({
+      title: '退出登录',
+      content: '退出后可使用其他账号登录，不会解除当前微信绑定。',
+      confirmText: '退出'
+    })
+    if (!result.confirm) return
+    const app = getApp()
+    if (typeof app.resetAuthState === 'function') app.resetAuthState()
+    else {
+      app.globalData.currentUser = null
+      app.globalData.loginChallenge = null
+    }
+    wx.reLaunch({ url: '/pages/login/index' })
   }
 })

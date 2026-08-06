@@ -3,6 +3,8 @@
     "pages/login/index",
     "pages/change-password/index",
     "pages/dashboard/index",
+    "pages/admin-users/index",
+    "pages/admin-user-edit/index",
     "pages/business-list/index",
     "pages/business-detail/index",
     "pages/business-edit/index",

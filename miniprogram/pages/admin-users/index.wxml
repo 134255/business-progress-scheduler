@@ -1,0 +1,43 @@
+<view class="page">
+  <view class="card toolbar">
+    <view class="search-row">
+      <input class="input search-input" value="{{keyword}}" placeholder="搜索用户名或姓名" bindinput="onKeywordInput" confirm-type="search" bindconfirm="search" />
+      <button class="primary-button search-button" bindtap="search" loading="{{loading}}">搜索</button>
+    </view>
+    <view class="filter-row row-between">
+      <picker range="{{['全部状态', '已启用', '已停用']}}" value="{{status === 'active' ? 1 : status === 'disabled' ? 2 : 0}}" bindchange="onStatusChange">
+        <view class="filter">状态：{{status === 'active' ? '已启用' : status === 'disabled' ? '已停用' : '全部'}}</view>
+      </picker>
+      <button class="secondary-button create-button" bindtap="openCreate">新建用户</button>
+    </view>
+  </view>
+
+  <view wx:if="{{items.length}}">
+    <view class="card user-card" wx:for="{{items}}" wx:key="_id">
+      <view class="row-between">
+        <view>
+          <view class="user-name">{{item.displayName || '未命名用户'}}</view>
+          <text class="muted">@{{item.username}}</text>
+        </view>
+        <text class="status {{item.status}}">{{item.status === 'active' ? '已启用' : '已停用'}}</text>
+      </view>
+      <view class="meta-grid">
+        <text>角色：{{item.role === 'super_admin' ? '超级管理员' : '普通用户'}}</text>
+        <text>微信：{{item.openidBound ? '已绑定' : '未绑定'}}</text>
+        <text>登录：{{item.locked ? '已锁定' : '未锁定'}}</text>
+        <text>密码：{{item.mustChangePassword ? '待修改' : '正常'}}</text>
+      </view>
+      <view class="actions">
+        <button size="mini" data-id="{{item._id}}" bindtap="openEdit">编辑</button>
+        <button size="mini" data-id="{{item._id}}" bindtap="resetPassword">重置密码</button>
+        <button wx:if="{{item.locked}}" size="mini" data-id="{{item._id}}" bindtap="unlock">解锁</button>
+        <button wx:if="{{item.openidBound}}" size="mini" data-id="{{item._id}}" bindtap="unbindWechat">解绑微信</button>
+        <button class="{{item.status === 'active' ? 'danger-button' : 'secondary-button'}}" size="mini" data-id="{{item._id}}" data-status="{{item.status}}" bindtap="toggleStatus">{{item.status === 'active' ? '停用' : '启用'}}</button>
+      </view>
+    </view>
+  </view>
+  <view class="empty" wx:else>{{loading ? '加载中…' : '暂无用户'}}</view>
+
+  <button wx:if="{{hasMore}}" class="secondary-button more" bindtap="loadMore" loading="{{loading}}">加载更多</button>
+  <text class="muted total">共 {{total}} 个用户</text>
+</view>
