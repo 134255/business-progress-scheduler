@@ -51,18 +51,17 @@ Page({
   },
 
   search() {
-    this.setData({ page: 1 })
-    return this.loadUsers(false)
+    return this.loadUsers(false, 1)
   },
 
-  async loadUsers(append) {
+  async loadUsers(append, requestedPage = this.data.page) {
     if (this.data.loading) return
     this.setData({ loading: true })
     try {
       const result = await adminUsers.listUsers({
         keyword: this.data.keyword.trim(),
         status: this.data.status,
-        page: this.data.page,
+        page: requestedPage,
         pageSize: this.data.pageSize
       })
       this.setData({
@@ -83,8 +82,7 @@ Page({
 
   loadMore() {
     if (this.data.loading || !this.data.hasMore) return
-    this.setData({ page: this.data.page + 1 })
-    return this.loadUsers(true)
+    return this.loadUsers(true, this.data.page + 1)
   },
 
   openCreate() {
@@ -96,20 +94,44 @@ Page({
     if (!item) return
     const query = [
       `id=${encodeURIComponent(item._id)}`,
-      `username=${encodeURIComponent(item.username)}`,
-      `displayName=${encodeURIComponent(item.displayName)}`,
-      `role=${encodeURIComponent(item.role)}`,
-      `status=${encodeURIComponent(item.status)}`
+      `username=${encodeURIComponent(item.username)}`
     ].join('&')
     wx.navigateTo({ url: `/pages/admin-user-edit/index?${query}` })
+  },
+
+  resetAuthAndLogin() {
+    const app = getApp()
+    if (typeof app.resetAuthState === 'function') app.resetAuthState()
+    else {
+      app.globalData.currentUser = null
+      app.globalData.loginChallenge = null
+    }
+    wx.reLaunch({ url: '/pages/login/index' })
+  },
+
+  handleCurrentUserMutation(updated) {
+    const app = getApp()
+    const currentUser = app.globalData.currentUser
+    if (!updated || !currentUser || updated._id !== currentUser._id) return false
+    if (updated.status !== 'active' || updated.mustChangePassword || updated.openidBound === false) {
+      this.resetAuthAndLogin()
+      return true
+    }
+    app.globalData.currentUser = Object.assign({}, currentUser, updated)
+    if (updated.role !== 'super_admin') {
+      wx.reLaunch({ url: '/pages/dashboard/index' })
+      return true
+    }
+    return false
   },
 
   async runConfirmed(options, action) {
     const result = await wx.showModal(options)
     if (!result.confirm) return false
     try {
-      await action(result)
+      const updated = await action(result)
       wx.showToast({ title: '操作成功', icon: 'success' })
+      if (this.handleCurrentUserMutation(updated)) return true
       await this.loadUsers(false)
       return true
     } catch (error) {
@@ -144,8 +166,9 @@ Page({
       return
     }
     try {
-      await adminUsers.resetUserPassword(userId, temporaryPassword)
+      const updated = await adminUsers.resetUserPassword(userId, temporaryPassword)
       wx.showToast({ title: '密码已重置', icon: 'success' })
+      if (this.handleCurrentUserMutation(updated)) return
       await this.loadUsers(false)
     } catch (error) {
       wx.showToast({ title: errorMessage(error), icon: 'none' })
