@@ -211,6 +211,7 @@ test('user listing rejects malformed queries with typed errors before repository
     { name: 'boolean page', query: { page: true }, code: 'INVALID_PAGINATION' },
     { name: 'fractional page', query: { page: 1.5 }, code: 'INVALID_PAGINATION' },
     { name: 'unsafe page', query: { page: Number.MAX_SAFE_INTEGER + 1 }, code: 'INVALID_PAGINATION' },
+    { name: 'unsafe pagination offset', query: { page: Number.MAX_SAFE_INTEGER, pageSize: 100 }, code: 'INVALID_PAGINATION' },
     { name: 'zero page', query: { page: 0 }, code: 'INVALID_PAGINATION' },
     { name: 'string page size', query: { pageSize: '20' }, code: 'INVALID_PAGINATION' },
     { name: 'boolean page size', query: { pageSize: false }, code: 'INVALID_PAGINATION' },

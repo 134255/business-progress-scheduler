@@ -50,14 +50,17 @@ function validateListQuery(query) {
       (typeof query.pageSize !== 'number' || !Number.isSafeInteger(query.pageSize) || query.pageSize <= 0 || query.pageSize > 100)) {
     throw createError('INVALID_PAGINATION')
   }
+  const page = hasOwn(query, 'page') ? query.page : 1
+  const pageSize = hasOwn(query, 'pageSize') ? query.pageSize : 20
+  if (!Number.isSafeInteger((page - 1) * pageSize)) throw createError('INVALID_PAGINATION')
   if (hasOwn(query, 'status') &&
       (typeof query.status !== 'string' || (query.status !== 'all' && !ALLOWED_STATUSES.has(query.status)))) {
     throw createError('INVALID_STATUS')
   }
   if (hasOwn(query, 'keyword') && typeof query.keyword !== 'string') throw createError('INVALID_KEYWORD')
   return {
-    page: hasOwn(query, 'page') ? query.page : 1,
-    pageSize: hasOwn(query, 'pageSize') ? query.pageSize : 20,
+    page,
+    pageSize,
     status: query.status && query.status !== 'all' ? query.status : undefined,
     keyword: hasOwn(query, 'keyword') ? query.keyword.trim().toLowerCase() : ''
   }
