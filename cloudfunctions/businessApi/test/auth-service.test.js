@@ -440,6 +440,30 @@ test('emergency recovery requires no OpenID, promotes and activates the account,
   assert.equal(recoveryAudit.resultCode, 'SUPER_ADMIN_RECOVERED')
 })
 
+test('emergency recovery gives the repository the normalized username for transactional document revalidation', async () => {
+  const harness = createAuthHarness()
+  harness.seedAccount({
+    username: 'admin01',
+    password: 'OldPass88',
+    role: 'user',
+    status: 'disabled'
+  })
+  const consumeRecoveryCode = harness.repository.consumeRecoveryCode
+  let requestedUsername
+  harness.repository.consumeRecoveryCode = options => {
+    requestedUsername = options.username
+    return consumeRecoveryCode(options)
+  }
+
+  await harness.service.recoverSuperAdmin({
+    username: '  ADMIN01  ',
+    temporaryPassword: 'ResetPass9',
+    recoveryCode: RECOVERY_CODE
+  })
+
+  assert.equal(requestedUsername, 'admin01')
+})
+
 test('bound temporary-password accounts get only a password-change-required session', async () => {
   const harness = createAuthHarness()
   harness.seedAccount({ username: 'user01', password: 'TempPass8', mustChangePassword: true, openid: 'wx-1' })

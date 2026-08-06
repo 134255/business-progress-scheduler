@@ -245,6 +245,7 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
     const result = await repository.consumeRecoveryCode({
       recoveryCodeHash,
       now: clock(),
+      username: normalized,
       apply: async transactionRepository => {
         const user = await transactionRepository.findUserByUsername(normalized)
         if (!user) throw createError('ACCOUNT_NOT_FOUND')

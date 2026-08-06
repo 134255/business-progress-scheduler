@@ -1,4 +1,5 @@
 const cloud = require('wx-server-sdk')
+const crypto = require('node:crypto')
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV })
 
@@ -13,7 +14,10 @@ const {
   calculateProgress,
   normalizeLineInput
 } = require('./lib/domain')
-const { bootstrapUser } = require('./lib/bootstrap-user')
+const { createAuthService } = require('./lib/auth-service')
+const { createAdminUserService } = require('./lib/admin-user-service')
+const { createCloudAccountRepository } = require('./lib/cloud-account-repository')
+const { hashPassword } = require('./lib/password')
 
 const COLLECTIONS = {
   users: 'users',
@@ -23,6 +27,89 @@ const COLLECTIONS = {
   evidences: 'evidences',
   notifications: 'notifications',
   audit: 'audit_logs'
+}
+
+const PUBLIC_ACTIONS = new Set([
+  'getSession',
+  'bootstrap',
+  'login',
+  'completeFirstLogin',
+  'initializeSuperAdmin',
+  'recoverSuperAdmin'
+])
+
+function isPublicAction(action) {
+  return PUBLIC_ACTIONS.has(action)
+}
+
+function createBusinessApi({
+  repository,
+  authService,
+  adminUserService,
+  legacyRoutes = {},
+  getContext,
+  clock = Date.now,
+  logger = console
+}) {
+  async function resolveActor(openid) {
+    assert(openid, 'Unable to identify the current WeChat user', 'UNAUTHORIZED')
+    const actor = await repository.findUserByOpenid(openid)
+    assert(actor, 'Authentication required', 'UNAUTHORIZED')
+    const credential = await repository.findCredential(actor._id)
+    assert(credential, 'Account state is invalid', 'ACCOUNT_STATE_INVALID')
+    assert(actor.status === 'active', 'Account is disabled', 'ACCOUNT_DISABLED')
+    assert(!(credential.lockedUntil && credential.lockedUntil > clock()), 'Account is locked', 'ACCOUNT_LOCKED')
+    assert(!credential.mustChangePassword, 'Password change required', 'PASSWORD_CHANGE_REQUIRED')
+    return actor
+  }
+
+  function accountRoutes(openid, payload, actor) {
+    return {
+      getSession: () => authService.getSession({ openid }),
+      bootstrap: () => authService.getSession({ openid }),
+      login: () => authService.login({ ...payload, openid }),
+      completeFirstLogin: () => authService.completeFirstLogin({ ...payload, openid }),
+      initializeSuperAdmin: () => authService.initializeSuperAdmin({ ...payload, openid }),
+      recoverSuperAdmin: () => authService.recoverSuperAdmin(payload),
+      changePassword: () => authService.changePassword({ ...payload, actor }),
+      listUsers: () => adminUserService.listUsers({ actor, query: payload }),
+      createUser: () => adminUserService.createUser({ actor, input: payload }),
+      updateUser: () => adminUserService.updateUser({ actor, userId: payload.userId || payload.id, changes: payload.changes }),
+      resetUserPassword: () => adminUserService.resetUserPassword({ actor, userId: payload.userId || payload.id, temporaryPassword: payload.temporaryPassword }),
+      unlockUser: () => adminUserService.unlockUser({ actor, userId: payload.userId || payload.id }),
+      unbindWechat: () => adminUserService.unbindWechat({ actor, userId: payload.userId || payload.id })
+    }
+  }
+
+  async function main(event = {}) {
+    const context = getContext() || {}
+    const openid = context.OPENID
+    const action = event.action
+    const payload = event.payload || {}
+    try {
+      const knownAccountAction = [
+        'getSession', 'bootstrap', 'login', 'completeFirstLogin', 'initializeSuperAdmin', 'recoverSuperAdmin',
+        'changePassword', 'listUsers', 'createUser', 'updateUser', 'resetUserPassword', 'unlockUser', 'unbindWechat'
+      ].includes(action)
+      assert(knownAccountAction || legacyRoutes[action], 'Unsupported action', 'UNKNOWN_ACTION')
+      const actor = isPublicAction(action) ? null : await resolveActor(openid)
+      const route = accountRoutes(openid, payload, actor)[action]
+      const data = route
+        ? await route()
+        : await legacyRoutes[action](actor.openid, payload)
+      return ok(data)
+    } catch (error) {
+      logger.error('[businessApi]', {
+        action,
+        code: error.code || 'INTERNAL_ERROR',
+        requestId: context.REQUESTID || context.requestId || '',
+        targetUserId: payload.userId || payload.id || ''
+      })
+      return fail(error.message || 'Service error', error.code || 'INTERNAL_ERROR')
+    }
+  }
+
+  return { main }
 }
 
 function ok(data) {
@@ -55,14 +142,6 @@ async function getLine(id) {
 async function writeAudit(openid, action, targetType, targetId, snapshot) {
   await db.collection(COLLECTIONS.audit).add({
     data: { openid, action, targetType, targetId, snapshot: snapshot || null, createdAt: now() }
-  })
-}
-
-async function bootstrap(openid) {
-  return bootstrapUser({
-    users: db.collection(COLLECTIONS.users),
-    openid,
-    now
   })
 }
 
@@ -401,30 +480,42 @@ async function submitNodeFeedback(openid, payload) {
   return { id: node._id, status: payload.status }
 }
 
-exports.main = async event => {
-  const context = cloud.getWXContext()
-  const openid = context.OPENID
-  const action = event.action
-  const payload = event.payload || {}
-
-  try {
-    assert(openid, '无法识别当前微信用户', 'UNAUTHORIZED')
-    const routes = {
-      bootstrap: () => bootstrap(openid),
-      updateUserProfile: () => updateUserProfile(openid, payload),
-      dashboard: () => dashboard(openid),
-      listBusinessLines: () => listBusinessLines(openid, payload),
-      getBusinessLine: () => getBusinessLine(openid, payload),
-      getNodeHistory: () => getNodeHistory(openid, payload),
-      createBusinessLine: () => createBusinessLine(openid, payload),
-      updateBusinessLine: () => updateBusinessLine(openid, payload),
-      deleteBusinessLine: () => deleteBusinessLine(openid, payload),
-      submitNodeFeedback: () => submitNodeFeedback(openid, payload)
+function createDefaultBusinessApi() {
+  const repository = createCloudAccountRepository({ db, clock: () => new Date() })
+  const clock = Date.now
+  const authService = createAuthService({
+    repository,
+    clock,
+    randomToken: () => crypto.randomBytes(32).toString('hex'),
+    sha256: value => crypto.createHash('sha256').update(String(value)).digest('hex'),
+    recoveryCodeHash: process.env.ADMIN_RECOVERY_CODE_SHA256 || ''
+  })
+  const adminUserService = createAdminUserService({ repository, hashPassword, clock })
+  return createBusinessApi({
+    repository,
+    authService,
+    adminUserService,
+    getContext: () => cloud.getWXContext(),
+    clock,
+    legacyRoutes: {
+      updateUserProfile,
+      dashboard,
+      listBusinessLines,
+      getBusinessLine,
+      getNodeHistory,
+      createBusinessLine,
+      updateBusinessLine,
+      deleteBusinessLine,
+      submitNodeFeedback
     }
-    assert(routes[action], '不支持的操作', 'UNKNOWN_ACTION')
-    return ok(await routes[action]())
-  } catch (error) {
-    console.error('[businessApi]', action, error)
-    return fail(error.message || '服务异常', error.code || 'INTERNAL_ERROR')
-  }
+  })
 }
+
+let defaultBusinessApi
+exports.main = event => {
+  if (!defaultBusinessApi) defaultBusinessApi = createDefaultBusinessApi()
+  return defaultBusinessApi.main(event)
+}
+
+exports.isPublicAction = isPublicAction
+exports.createBusinessApi = createBusinessApi
