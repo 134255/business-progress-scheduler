@@ -30,6 +30,39 @@ function assertStatus(status) {
   if (!ALLOWED_STATUSES.has(status)) throw createError('INVALID_STATUS')
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function validateListQuery(query) {
+  if (!isPlainObject(query)) throw createError('INVALID_QUERY')
+  if (hasOwn(query, 'page') &&
+      (typeof query.page !== 'number' || !Number.isSafeInteger(query.page) || query.page <= 0)) {
+    throw createError('INVALID_PAGINATION')
+  }
+  if (hasOwn(query, 'pageSize') &&
+      (typeof query.pageSize !== 'number' || !Number.isSafeInteger(query.pageSize) || query.pageSize <= 0 || query.pageSize > 100)) {
+    throw createError('INVALID_PAGINATION')
+  }
+  if (hasOwn(query, 'status') &&
+      (typeof query.status !== 'string' || (query.status !== 'all' && !ALLOWED_STATUSES.has(query.status)))) {
+    throw createError('INVALID_STATUS')
+  }
+  if (hasOwn(query, 'keyword') && typeof query.keyword !== 'string') throw createError('INVALID_KEYWORD')
+  return {
+    page: hasOwn(query, 'page') ? query.page : 1,
+    pageSize: hasOwn(query, 'pageSize') ? query.pageSize : 20,
+    status: query.status && query.status !== 'all' ? query.status : undefined,
+    keyword: hasOwn(query, 'keyword') ? query.keyword.trim().toLowerCase() : ''
+  }
+}
+
 function createAdminUserService({ repository, hashPassword, clock }) {
   function publicUser(user, credential) {
     const result = {
@@ -61,17 +94,9 @@ function createAdminUserService({ repository, hashPassword, clock }) {
     }
   }
 
-  async function listUsers({ actor, query = {} }) {
+  async function listUsers({ actor, query }) {
     requireSuperAdmin(actor)
-    const requestedPage = Number(query.page)
-    const requestedPageSize = Number(query.pageSize)
-    const page = Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1
-    const pageSize = Number.isInteger(requestedPageSize) && requestedPageSize > 0
-      ? Math.min(requestedPageSize, 100)
-      : 20
-    const status = query.status && query.status !== 'all' ? query.status : undefined
-    if (status) assertStatus(status)
-    const keyword = String(query.keyword || '').trim().toLowerCase()
+    const { page, pageSize, status, keyword } = validateListQuery(query)
     const result = await repository.listUsers({ page, pageSize, status, keyword })
     return {
       items: result.items.map(item => item && item.user
@@ -91,7 +116,6 @@ function createAdminUserService({ repository, hashPassword, clock }) {
     if (!usernameNormalized) throw createError('INVALID_USERNAME')
     const role = input.role || 'user'
     assertRole(role)
-    if (await repository.usernameExists(usernameNormalized)) throw createError('USERNAME_TAKEN')
     const createdAt = clock()
     const user = {
       username,
@@ -113,7 +137,7 @@ function createAdminUserService({ repository, hashPassword, clock }) {
       createdAt,
       updatedAt: createdAt
     }
-    const created = await repository.createAccount({
+    const created = await repository.createAccountWithAdminGuard({
       user,
       credential,
       audit: audit(actor, user, 'CREATE_USER', 'USER_CREATED', {
@@ -145,18 +169,21 @@ function createAdminUserService({ repository, hashPassword, clock }) {
   async function updateUser({ actor, userId, changes }) {
     requireSuperAdmin(actor)
     const safeChanges = validatedChanges(changes)
-    return repository.runUserTransaction(async transactionRepository => {
+    return repository.runAdminGuardTransaction(async transactionRepository => {
       const user = await transactionRepository.findUserById(userId)
       if (!user) throw createError('ACCOUNT_NOT_FOUND')
       const roleAfter = safeChanges.role || user.role
       const statusAfter = safeChanges.status || user.status
-      const removesActiveSuperAdmin = user.role === 'super_admin' &&
-        user.status === 'active' &&
-        (roleAfter !== 'super_admin' || statusAfter !== 'active')
-      if (removesActiveSuperAdmin && await transactionRepository.countActiveSuperAdmins() <= 1) {
+      const wasActiveSuperAdmin = user.role === 'super_admin' && user.status === 'active'
+      const isActiveSuperAdmin = roleAfter === 'super_admin' && statusAfter === 'active'
+      const guard = await transactionRepository.getAdminGuard()
+      if (!guard || !Number.isSafeInteger(guard.activeSuperAdminCount) || guard.activeSuperAdminCount < 0) {
+        throw createError('ACCOUNT_STATE_INVALID')
+      }
+      if (wasActiveSuperAdmin && !isActiveSuperAdmin && guard.activeSuperAdminCount <= 1) {
         throw createError('LAST_SUPER_ADMIN')
       }
-      const updated = await transactionRepository.updateUser(userId, { ...safeChanges, updatedAt: clock() })
+      const updated = await transactionRepository.updateUserAndAdminGuard(userId, { ...safeChanges, updatedAt: clock() })
       await transactionRepository.writeAudit(audit(actor, updated, 'UPDATE_USER', 'USER_UPDATED', {
         roleBefore: user.role,
         roleAfter: updated.role,

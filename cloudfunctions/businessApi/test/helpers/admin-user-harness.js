@@ -15,11 +15,17 @@ function createAdminUserHarness() {
   const now = Date.parse('2026-08-06T00:00:00.000Z')
   let sequence = 0
   let operationQueue = Promise.resolve()
+  const calls = []
   const state = {
     users: [],
     credentials: [],
     challenges: [],
-    audit: []
+    audit: [],
+    adminGuard: {
+      _id: 'account-admin-state',
+      activeSuperAdminCount: 0,
+      revision: 0
+    }
   }
 
   async function serialize(work) {
@@ -38,7 +44,12 @@ function createAdminUserHarness() {
 
   function restore(snapshot) {
     for (const key of Object.keys(state)) {
-      state[key].splice(0, state[key].length, ...snapshot[key])
+      if (Array.isArray(state[key])) {
+        state[key].splice(0, state[key].length, ...snapshot[key])
+      } else {
+        for (const field of Object.keys(state[key])) delete state[key][field]
+        Object.assign(state[key], snapshot[key])
+      }
     }
   }
 
@@ -60,8 +71,8 @@ function createAdminUserHarness() {
 
   function transactionRepository() {
     return {
-      countActiveSuperAdmins() {
-        return state.users.filter(user => user.role === 'super_admin' && user.status === 'active').length
+      getAdminGuard() {
+        return clone(state.adminGuard)
       },
       findCredential(userId) {
         return clone(findCredential(userId))
@@ -86,12 +97,23 @@ function createAdminUserHarness() {
         Object.assign(user, clone(changes))
         return clone(user)
       },
+      updateUserAndAdminGuard(userId, changes) {
+        const user = findUserById(userId)
+        if (!user) throw createError('ACCOUNT_NOT_FOUND')
+        const wasActiveSuperAdmin = user.role === 'super_admin' && user.status === 'active'
+        Object.assign(user, clone(changes))
+        const isActiveSuperAdmin = user.role === 'super_admin' && user.status === 'active'
+        state.adminGuard.activeSuperAdminCount += Number(isActiveSuperAdmin) - Number(wasActiveSuperAdmin)
+        state.adminGuard.revision += 1
+        return clone(user)
+      },
       writeAudit
     }
   }
 
   const repository = {
-    async createAccount({ user, credential, audit }) {
+    async createAccountWithAdminGuard({ user, credential, audit }) {
+      calls.push('createAccountWithAdminGuard')
       return serialize(async () => {
         await Promise.resolve()
         const snapshot = clone(state)
@@ -101,6 +123,10 @@ function createAdminUserHarness() {
           const storedUser = { _id: `created-user-${sequence}`, ...clone(user) }
           state.users.push(storedUser)
           state.credentials.push({ userId: storedUser._id, ...clone(credential) })
+          if (storedUser.role === 'super_admin' && storedUser.status === 'active') {
+            state.adminGuard.activeSuperAdminCount += 1
+          }
+          state.adminGuard.revision += 1
           writeAudit({ ...clone(audit), targetUserId: storedUser._id })
           return clone(storedUser)
         } catch (error) {
@@ -110,6 +136,7 @@ function createAdminUserHarness() {
       })
     },
     listUsers({ page, pageSize, status, keyword }) {
+      calls.push('listUsers')
       const normalizedKeyword = String(keyword || '').toLowerCase()
       const filtered = state.users
         .filter(user => !status || user.status === status)
@@ -125,7 +152,8 @@ function createAdminUserHarness() {
         total: filtered.length
       }
     },
-    runUserTransaction(apply) {
+    runAdminGuardTransaction(apply) {
+      calls.push('runAdminGuardTransaction')
       return serialize(async () => {
         await Promise.resolve()
         const snapshot = clone(state)
@@ -137,8 +165,18 @@ function createAdminUserHarness() {
         }
       })
     },
-    usernameExists(usernameNormalized) {
-      return serialize(() => usernameExists(usernameNormalized))
+    runUserTransaction(apply) {
+      calls.push('runUserTransaction')
+      return serialize(async () => {
+        await Promise.resolve()
+        const snapshot = clone(state)
+        try {
+          return await apply(transactionRepository())
+        } catch (error) {
+          restore(snapshot)
+          throw error
+        }
+      })
     }
   }
 
@@ -179,6 +217,9 @@ function createAdminUserHarness() {
       failedAttempts,
       lockedUntil
     })
+    if (user.role === 'super_admin' && user.status === 'active') {
+      state.adminGuard.activeSuperAdminCount += 1
+    }
     return {
       _id: user._id,
       username: user.username,
@@ -200,7 +241,7 @@ function createAdminUserHarness() {
     return seedAccount(id, { ...options, role: 'user' })
   }
 
-  return { repository, service, state, seedAdmin, seedUser }
+  return { repository, service, state, calls, seedAdmin, seedUser }
 }
 
 module.exports = { createAdminUserHarness }

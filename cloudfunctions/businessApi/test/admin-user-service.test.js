@@ -65,7 +65,24 @@ test('administrator creates an active account with normalized unique username an
   assert.equal(storedUser.openid, '')
   assert.equal(credential.mustChangePassword, true)
   assert.equal(verifyPassword('TempPass8', credential), true)
+  assert.deepEqual(harness.state.adminGuard, {
+    _id: 'account-admin-state',
+    activeSuperAdminCount: 1,
+    revision: 1
+  })
   assertPublicUser(created)
+})
+
+test('creating an active super administrator increments the shared admin guard', async () => {
+  const harness = createAdminUserHarness()
+  const admin = harness.seedAdmin('admin-1')
+  await harness.service.createUser({
+    actor: admin,
+    input: { username: 'Admin02', displayName: 'Second Admin', temporaryPassword: 'TempPass8', role: 'super_admin' }
+  })
+  assert.equal(harness.state.adminGuard.activeSuperAdminCount, 2)
+  assert.equal(harness.state.adminGuard.revision, 1)
+  assert.equal(harness.state.audit.length, 1)
 })
 
 test('username uniqueness is enforced after trimming and case normalization', async () => {
@@ -81,6 +98,28 @@ test('username uniqueness is enforced after trimming and case normalization', as
   )
   assert.equal(harness.state.users.length, 2)
   assert.equal(harness.state.audit.length, 0)
+})
+
+test('concurrent creates with the same normalized username commit one account, credential, guard touch, and audit', async () => {
+  const harness = createAdminUserHarness()
+  const admin = harness.seedAdmin('admin-1')
+  const results = await Promise.allSettled([
+    harness.service.createUser({
+      actor: admin,
+      input: { username: ' Staff02 ', displayName: 'First Attempt', temporaryPassword: 'FirstPass8', role: 'user' }
+    }),
+    harness.service.createUser({
+      actor: admin,
+      input: { username: 'staff02', displayName: 'Second Attempt', temporaryPassword: 'SecondPass8', role: 'user' }
+    })
+  ])
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1)
+  assert.equal(results.filter(result => result.status === 'rejected' && result.reason.code === 'USERNAME_TAKEN').length, 1)
+  assert.equal(harness.state.users.filter(user => user.usernameNormalized === 'staff02').length, 1)
+  assert.equal(harness.state.credentials.filter(credential => credential.userId !== 'admin-1').length, 1)
+  assert.equal(harness.state.audit.length, 1)
+  assert.equal(harness.state.adminGuard.activeSuperAdminCount, 1)
+  assert.equal(harness.state.adminGuard.revision, 1)
 })
 
 test('username is immutable and only displayName, role, and status are accepted updates', async () => {
@@ -128,6 +167,8 @@ test('cannot disable or demote the final active super administrator', async () =
     error => error.code === 'LAST_SUPER_ADMIN'
   )
   assert.equal(harness.state.audit.length, 0)
+  assert.equal(harness.state.adminGuard.activeSuperAdminCount, 1)
+  assert.equal(harness.state.adminGuard.revision, 0)
 })
 
 test('promoting another administrator allows the current administrator to be demoted', async () => {
@@ -138,6 +179,8 @@ test('promoting another administrator allows the current administrator to be dem
   const demoted = await harness.service.updateUser({ actor: admin, userId: 'admin-1', changes: { role: 'user' } })
   assert.equal(demoted.role, 'user')
   assert.equal(harness.state.users.filter(user => user.role === 'super_admin' && user.status === 'active').length, 1)
+  assert.equal(harness.state.adminGuard.activeSuperAdminCount, 1)
+  assert.equal(harness.state.adminGuard.revision, 2)
 })
 
 test('concurrent demote and disable operations cannot remove all active super administrators', async () => {
@@ -152,6 +195,44 @@ test('concurrent demote and disable operations cannot remove all active super ad
   assert.equal(results.filter(result => result.status === 'rejected' && result.reason.code === 'LAST_SUPER_ADMIN').length, 1)
   assert.equal(harness.state.users.filter(user => user.role === 'super_admin' && user.status === 'active').length, 1)
   assert.equal(harness.state.audit.length, 1)
+  assert.equal(harness.state.adminGuard.activeSuperAdminCount, 1)
+  assert.equal(harness.state.adminGuard.revision, 1)
+})
+
+test('user listing rejects malformed queries with typed errors before repository access', async t => {
+  const cases = [
+    { name: 'undefined query', query: undefined, code: 'INVALID_QUERY' },
+    { name: 'null query', query: null, code: 'INVALID_QUERY' },
+    { name: 'boolean query', query: true, code: 'INVALID_QUERY' },
+    { name: 'false query', query: false, code: 'INVALID_QUERY' },
+    { name: 'array query', query: [], code: 'INVALID_QUERY' },
+    { name: 'date query', query: new Date(0), code: 'INVALID_QUERY' },
+    { name: 'string page', query: { page: '1' }, code: 'INVALID_PAGINATION' },
+    { name: 'boolean page', query: { page: true }, code: 'INVALID_PAGINATION' },
+    { name: 'fractional page', query: { page: 1.5 }, code: 'INVALID_PAGINATION' },
+    { name: 'unsafe page', query: { page: Number.MAX_SAFE_INTEGER + 1 }, code: 'INVALID_PAGINATION' },
+    { name: 'zero page', query: { page: 0 }, code: 'INVALID_PAGINATION' },
+    { name: 'string page size', query: { pageSize: '20' }, code: 'INVALID_PAGINATION' },
+    { name: 'boolean page size', query: { pageSize: false }, code: 'INVALID_PAGINATION' },
+    { name: 'fractional page size', query: { pageSize: 1.5 }, code: 'INVALID_PAGINATION' },
+    { name: 'zero page size', query: { pageSize: 0 }, code: 'INVALID_PAGINATION' },
+    { name: 'oversized page size', query: { pageSize: 101 }, code: 'INVALID_PAGINATION' },
+    { name: 'non-string status', query: { status: 1 }, code: 'INVALID_STATUS' },
+    { name: 'unknown status', query: { status: 'blocked' }, code: 'INVALID_STATUS' },
+    { name: 'empty status', query: { status: '' }, code: 'INVALID_STATUS' },
+    { name: 'non-string keyword', query: { keyword: 1 }, code: 'INVALID_KEYWORD' }
+  ]
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const harness = createAdminUserHarness()
+      const admin = harness.seedAdmin('admin-1')
+      await assert.rejects(
+        harness.service.listUsers({ actor: admin, query: item.query }),
+        error => error.code === item.code
+      )
+      assert.deepEqual(harness.calls, [])
+    })
+  }
 })
 
 test('user listing supports pagination and returns public projections only', async () => {
