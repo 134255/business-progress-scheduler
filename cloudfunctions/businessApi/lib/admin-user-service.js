@@ -242,8 +242,8 @@ function createAdminUserService({ repository, hashPassword, clock }) {
       const user = await transactionRepository.findUserById(userId)
       if (!user) throw createError('ACCOUNT_NOT_FOUND')
       const updated = await transactionRepository.updateUser(userId, { openid: '', updatedAt: clock() })
+      const credential = await transactionRepository.invalidateChallenges(userId, clock())
       await transactionRepository.writeAudit(audit(actor, updated, 'UNBIND_WECHAT', 'WECHAT_UNBOUND'))
-      const credential = await transactionRepository.findCredential(userId)
       return publicUser(updated, credential)
     })
   }

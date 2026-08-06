@@ -1,7 +1,11 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-const { createCloudAccountRepository, ADMIN_GUARD_ID } = require('../lib/cloud-account-repository')
+const {
+  createCloudAccountRepository,
+  ADMIN_GUARD_ID,
+  bindingIdForOpenid
+} = require('../lib/cloud-account-repository')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 
 function createRepository(seed = {}, ids = []) {
@@ -27,6 +31,15 @@ test('active super-admin count comes from the stable singleton guard document', 
   assert.equal(ADMIN_GUARD_ID, 'account_admin_state')
   assert.equal(await repository.countActiveSuperAdmins(), 2)
   assert.deepEqual(fake.transactionQueries, [])
+})
+
+test('active super-admin count fails closed when the singleton guard is missing or corrupt', async () => {
+  const missing = createRepository()
+  await assert.rejects(missing.repository.countActiveSuperAdmins(), error => error.code === 'ACCOUNT_STATE_INVALID')
+  const corrupt = createRepository({
+    system_settings: [{ _id: ADMIN_GUARD_ID, activeSuperAdminCount: -1, revision: 0 }]
+  })
+  await assert.rejects(corrupt.repository.countActiveSuperAdmins(), error => error.code === 'ACCOUNT_STATE_INVALID')
 })
 
 test('guarded account creation atomically writes user, credential, guard, and patched audit', async () => {
@@ -98,6 +111,22 @@ test('guarded account creation maps duplicate usernames and rolls back the whole
   assert.equal(fake.documents('system_settings')[0].revision, 5)
 })
 
+test('multiple unbound accounts persist without OpenID fields or binding reservations', async () => {
+  const { fake, repository } = createRepository({
+    system_settings: [{ _id: ADMIN_GUARD_ID, activeSuperAdminCount: 1, revision: 0 }]
+  }, ['user-1', 'audit-1', 'user-2', 'audit-2'])
+  for (const username of ['first', 'second']) {
+    await repository.createAccountWithAdminGuard({
+      user: { username, usernameNormalized: username, role: 'user', status: 'active', openid: '' },
+      credential: { hash: `hash-${username}` },
+      audit: { action: 'CREATE_USER' }
+    })
+  }
+  assert.equal(fake.documents('users').length, 2)
+  assert.equal(fake.documents('users').every(user => !Object.hasOwn(user, 'openid')), true)
+  assert.equal(fake.documents('wechat_bindings').length, 0)
+})
+
 test('guarded user transitions update the user and singleton count from the same snapshot', async () => {
   const { fake, repository } = createRepository({
     users: [{
@@ -154,6 +183,7 @@ test('transaction-local updateUser also maintains the shared guard invariant for
 })
 
 test('account lookup and listing use top-level queries and return paired credentials', async () => {
+  const alphaBindingId = bindingIdForOpenid('wx-alpha')
   const { repository } = createRepository({
     users: [
       { _id: 'u-1', username: 'Alpha', usernameNormalized: 'alpha', displayName: 'First', role: 'user', status: 'active', openid: 'wx-alpha' },
@@ -164,7 +194,8 @@ test('account lookup and listing use top-level queries and return paired credent
       { _id: 'u-1', userId: 'u-1', mustChangePassword: false },
       { _id: 'u-2', userId: 'u-2', mustChangePassword: true },
       { _id: 'u-3', userId: 'u-3', mustChangePassword: false }
-    ]
+    ],
+    wechat_bindings: [{ _id: alphaBindingId, userId: 'u-1' }]
   })
 
   assert.equal((await repository.findUserByUsername('alpha'))._id, 'u-1')
@@ -199,6 +230,7 @@ test('credential updates are atomic, date fields are concrete Dates, and audit t
   })
 
   assert.equal(updated.failedAttempts, 5)
+  assert.equal(updated.credentialVersion, 1)
   assert.equal(updated.lockedUntil instanceof Date, true)
   assert.equal(fake.documents('user_credentials')[0].lockedUntil instanceof Date, true)
   assert.equal(fake.transactionRuns.length, 1)
@@ -209,7 +241,7 @@ test('credential updates are atomic, date fields are concrete Dates, and audit t
 test('challenge creation stores concrete dates and concurrent consumption invokes the callback once', async () => {
   const { fake, repository } = createRepository({
     users: [{ _id: 'u-1', username: 'user01', usernameNormalized: 'user01', role: 'user', status: 'active' }],
-    user_credentials: [{ _id: 'u-1', userId: 'u-1', challengeEpoch: 0 }]
+    user_credentials: [{ _id: 'u-1', userId: 'u-1', challengeEpoch: 0, credentialVersion: 0 }]
   }, ['challenge-1'])
   await repository.createChallenge({
     userId: 'u-1',
@@ -218,9 +250,11 @@ test('challenge creation stores concrete dates and concurrent consumption invoke
     tokenHash: 'token-digest',
     createdAt: Date.parse('2026-08-06T00:00:00.000Z'),
     expiresAt: Date.parse('2026-08-06T00:10:00.000Z'),
-    consumedAt: null
+    consumedAt: null,
+    expectedCredentialVersion: 0
   })
   assert.equal(fake.documents('auth_challenges')[0].expiresAt instanceof Date, true)
+  assert.equal(fake.documents('auth_challenges')[0].credentialVersion, 0)
   let callbackCount = 0
   const consume = () => repository.consumeChallenge({
     tokenHash: 'token-digest',
@@ -245,7 +279,7 @@ test('challenge creation stores concrete dates and concurrent consumption invoke
 test('challenge consumption revalidates expiry and identity before invoking the callback', async () => {
   const { repository } = createRepository({
     users: [{ _id: 'u-1', username: 'user01', usernameNormalized: 'user01', role: 'user', status: 'active' }],
-    user_credentials: [{ _id: 'u-1', userId: 'u-1', challengeEpoch: 0 }],
+    user_credentials: [{ _id: 'u-1', userId: 'u-1', challengeEpoch: 0, credentialVersion: 0 }],
     auth_challenges: [{
       _id: 'challenge-1',
       userId: 'u-1',
@@ -253,6 +287,7 @@ test('challenge consumption revalidates expiry and identity before invoking the 
       openid: 'wx-1',
       tokenHash: 'token-digest',
       challengeEpoch: 0,
+      credentialVersion: 0,
       expiresAt: new Date('2026-08-06T00:10:00.000Z'),
       consumedAt: null
     }]
@@ -287,7 +322,7 @@ test('challenge invalidation is an O(1) credential epoch change that rejects eve
   }))
   const { fake, repository } = createRepository({
     users: [{ _id: 'u-1', username: 'user01', usernameNormalized: 'user01', role: 'user', status: 'active' }],
-    user_credentials: [{ _id: 'u-1', userId: 'u-1', challengeEpoch: 0 }],
+    user_credentials: [{ _id: 'u-1', userId: 'u-1', challengeEpoch: 0, credentialVersion: 0 }],
     auth_challenges: oldChallenges
   })
 
@@ -295,6 +330,7 @@ test('challenge invalidation is an O(1) credential epoch change that rejects eve
     transactionRepository.invalidateChallenges('u-1', new Date('2026-08-06T00:15:00.000Z')))
 
   assert.equal(fake.documents('user_credentials')[0].challengeEpoch, 1)
+  assert.equal(fake.documents('user_credentials')[0].credentialVersion, 1)
   assert.equal(fake.documents('auth_challenges').filter(challenge => challenge.consumedAt).length, 0)
   assert.deepEqual(fake.transactionQueries, [])
   let callbackCount = 0
@@ -344,9 +380,11 @@ test('recovery prelookup is revalidated by fixed user document and prevents TOCT
 
 test('recovery callback runs once and atomically consumes recovery state with the shared admin guard', async () => {
   const recoveryCodeHash = 'recovery-digest'
+  const previousOpenid = 'wx-recovery-old'
   const { fake, repository } = createRepository({
-    users: [{ _id: 'recover-1', username: 'recover', usernameNormalized: 'recover', role: 'user', status: 'disabled' }],
+    users: [{ _id: 'recover-1', username: 'recover', usernameNormalized: 'recover', role: 'user', status: 'disabled', openid: previousOpenid }],
     user_credentials: [{ _id: 'recover-1', userId: 'recover-1', challengeEpoch: 0 }],
+    wechat_bindings: [{ _id: bindingIdForOpenid(previousOpenid), userId: 'recover-1' }],
     system_settings: [{
       _id: ADMIN_GUARD_ID,
       activeSuperAdminCount: 1,
@@ -363,7 +401,7 @@ test('recovery callback runs once and atomically consumes recovery state with th
     apply: async transactionRepository => {
       callbackCount += 1
       const user = await transactionRepository.findUserByUsername('recover')
-      await transactionRepository.updateUser(user._id, { role: 'super_admin', status: 'active' })
+      await transactionRepository.updateUser(user._id, { role: 'super_admin', status: 'active', openid: '' })
       await transactionRepository.invalidateChallenges(user._id, new Date('2026-08-06T00:00:00.000Z'))
       return user._id
     }
@@ -374,6 +412,7 @@ test('recovery callback runs once and atomically consumes recovery state with th
   assert.equal(fake.documents('system_settings')[0].revision, 3)
   assert.equal(fake.documents('system_settings')[0].recoveryConsumedAt instanceof Date, true)
   assert.equal(fake.documents('user_credentials')[0].challengeEpoch, 1)
+  assert.equal(fake.documents('wechat_bindings').length, 0)
   await assert.rejects(repository.consumeRecoveryCode({
     recoveryCodeHash,
     username: 'recover',
@@ -416,21 +455,166 @@ test('initial super-admin creation uses a pre-generated random id and increments
   assert.equal(fake.documents('system_settings')[0].activeSuperAdminCount, 1)
   assert.equal(fake.documents('system_settings')[0].revision, 1)
   assert.equal(fake.documents('system_settings')[0].recoveryConsumedAt instanceof Date, true)
+  assert.equal(fake.documents('wechat_bindings')[0]._id, bindingIdForOpenid('wx-root'))
+  assert.equal(fake.documents('wechat_bindings')[0].userId, 'initial-user')
   assert.deepEqual(fake.transactionQueries, [])
 })
 
-test('OpenID binding is atomic and maps sparse unique-index collisions to a stable code', async () => {
+test('OpenID binding uses a deterministic reservation document and maps collisions to a stable code', async () => {
+  const boundId = bindingIdForOpenid('wx-bound')
   const { fake, repository } = createRepository({
     users: [
       { _id: 'u-1', username: 'first', usernameNormalized: 'first', role: 'user', status: 'active' },
       { _id: 'u-2', username: 'second', usernameNormalized: 'second', role: 'user', status: 'active', openid: 'wx-bound' }
     ],
+    user_credentials: [
+      { _id: 'u-1', userId: 'u-1', credentialVersion: 0, mustChangePassword: false },
+      { _id: 'u-2', userId: 'u-2', credentialVersion: 0, mustChangePassword: false }
+    ],
+    wechat_bindings: [{ _id: boundId, userId: 'u-2' }],
     system_settings: [{ _id: ADMIN_GUARD_ID, activeSuperAdminCount: 1, revision: 1 }]
   })
 
-  await assert.rejects(repository.bindOpenid('u-1', 'wx-bound'), error => error.code === 'OPENID_ALREADY_BOUND')
+  await assert.rejects(repository.bindOpenid('u-1', 'wx-bound', 0), error => error.code === 'OPENID_ALREADY_BOUND')
   assert.equal(Object.hasOwn(fake.documents('users').find(user => user._id === 'u-1'), 'openid'), false)
-  const bound = await repository.bindOpenid('u-1', 'wx-new')
-  assert.equal(bound.openid, 'wx-new')
+  const bound = await repository.bindOpenid('u-1', 'wx-new', 0)
+  assert.equal(bound.user.openid, 'wx-new')
+  assert.equal(bound.credential.credentialVersion, 1)
   assert.equal(fake.documents('users').find(user => user._id === 'u-1').openid, 'wx-new')
+  assert.equal(fake.documents('wechat_bindings').find(binding => binding.userId === 'u-1')._id, bindingIdForOpenid('wx-new'))
+})
+
+test('binding fails closed when the credential changes after password verification', async () => {
+  const { fake, repository } = createRepository({
+    users: [{ _id: 'u-1', username: 'first', usernameNormalized: 'first', role: 'user', status: 'active' }],
+    user_credentials: [{ _id: 'u-1', userId: 'u-1', credentialVersion: 0, mustChangePassword: false }],
+    system_settings: [{ _id: ADMIN_GUARD_ID, activeSuperAdminCount: 1, revision: 1 }]
+  })
+  fake.beforeNextTransaction(() => {
+    fake.replace('user_credentials', 'u-1', {
+      userId: 'u-1',
+      credentialVersion: 1,
+      mustChangePassword: true
+    })
+  })
+
+  await assert.rejects(repository.bindOpenid('u-1', 'wx-new', 0), error => error.code === 'CREDENTIAL_CHANGED')
+  assert.equal(fake.documents('wechat_bindings').length, 0)
+  assert.equal(Object.hasOwn(fake.documents('users')[0], 'openid'), false)
+})
+
+test('challenge creation rejects an administrator reset instead of adopting the newer credential version', async () => {
+  const { fake, repository } = createRepository({
+    users: [{ _id: 'u-1', username: 'first', usernameNormalized: 'first', role: 'user', status: 'active' }],
+    user_credentials: [{ _id: 'u-1', userId: 'u-1', credentialVersion: 0, mustChangePassword: true }]
+  }, ['challenge-stale'])
+  fake.beforeNextTransaction(() => {
+    fake.replace('user_credentials', 'u-1', {
+      userId: 'u-1',
+      credentialVersion: 1,
+      mustChangePassword: true
+    })
+  })
+
+  await assert.rejects(repository.createChallenge({
+    userId: 'u-1',
+    username: 'first',
+    openid: 'wx-new',
+    tokenHash: 'digest',
+    expiresAt: new Date('2026-08-06T00:10:00.000Z'),
+    expectedCredentialVersion: 0
+  }), error => error.code === 'CREDENTIAL_CHANGED')
+  assert.equal(fake.documents('auth_challenges').length, 0)
+})
+
+test('unbind removes the binding atomically so another account can reserve the same OpenID', async () => {
+  const openid = 'wx-rebind'
+  const bindingId = bindingIdForOpenid(openid)
+  const { fake, repository } = createRepository({
+    users: [
+      { _id: 'u-1', username: 'first', usernameNormalized: 'first', role: 'user', status: 'active', openid },
+      { _id: 'u-2', username: 'second', usernameNormalized: 'second', role: 'user', status: 'active' }
+    ],
+    user_credentials: [
+      { _id: 'u-1', userId: 'u-1', credentialVersion: 0, mustChangePassword: false },
+      { _id: 'u-2', userId: 'u-2', credentialVersion: 0, mustChangePassword: false }
+    ],
+    wechat_bindings: [{ _id: bindingId, userId: 'u-1' }],
+    system_settings: [{ _id: ADMIN_GUARD_ID, activeSuperAdminCount: 1, revision: 1 }]
+  })
+
+  await repository.runUserTransaction(transactionRepository => transactionRepository.updateUser('u-1', { openid: '' }))
+  const rebound = await repository.bindOpenid('u-2', openid, 0)
+  assert.equal(rebound.user._id, 'u-2')
+  assert.equal(fake.documents('wechat_bindings').find(binding => binding._id === bindingId).userId, 'u-2')
+  assert.equal(Object.hasOwn(fake.documents('users').find(user => user._id === 'u-1'), 'openid'), false)
+})
+
+test('unbind invalidation revokes a login credential version verified before the transaction', async () => {
+  const openid = 'wx-revoked'
+  const { fake, repository } = createRepository({
+    users: [{ _id: 'u-1', username: 'first', usernameNormalized: 'first', role: 'user', status: 'active', openid }],
+    user_credentials: [{ _id: 'u-1', userId: 'u-1', credentialVersion: 0, challengeEpoch: 0, mustChangePassword: false }],
+    wechat_bindings: [{ _id: bindingIdForOpenid(openid), userId: 'u-1' }],
+    system_settings: [{ _id: ADMIN_GUARD_ID, activeSuperAdminCount: 1, revision: 1 }]
+  })
+
+  await repository.runUserTransaction(async transactionRepository => {
+    await transactionRepository.updateUser('u-1', { openid: '' })
+    await transactionRepository.invalidateChallenges('u-1', new Date('2026-08-06T00:00:00.000Z'))
+  })
+
+  await assert.rejects(repository.bindOpenid('u-1', 'wx-attacker', 0), error => error.code === 'CREDENTIAL_CHANGED')
+  assert.equal(fake.documents('wechat_bindings').length, 0)
+  assert.equal(fake.documents('user_credentials')[0].credentialVersion, 1)
+})
+
+test('credential versions accept only an absent legacy value or a nonnegative safe integer', async () => {
+  for (const corruptVersion of [null, false, '0', -1, Number.MAX_SAFE_INTEGER]) {
+    const { fake, repository } = createRepository({
+      user_credentials: [{ _id: 'u-1', userId: 'u-1', credentialVersion: corruptVersion }]
+    })
+    await assert.rejects(
+      repository.updateCredential('u-1', { failedAttempts: 0 }),
+      error => error.code === 'ACCOUNT_STATE_INVALID'
+    )
+    assert.equal(fake.documents('user_credentials')[0].credentialVersion, corruptVersion)
+  }
+
+  const { fake, repository } = createRepository({
+    user_credentials: [{ _id: 'legacy', userId: 'legacy' }]
+  })
+  assert.equal((await repository.updateCredential('legacy', { failedAttempts: 0 })).credentialVersion, 1)
+  assert.equal(fake.documents('user_credentials')[0].credentialVersion, 1)
+})
+
+test('binding and challenge creation reject coerced credential versions', async () => {
+  const { fake, repository } = createRepository({
+    users: [{ _id: 'u-1', username: 'first', usernameNormalized: 'first', role: 'user', status: 'active' }],
+    user_credentials: [{ _id: 'u-1', userId: 'u-1', credentialVersion: 0, mustChangePassword: false }]
+  }, ['challenge-invalid-version'])
+
+  await assert.rejects(repository.bindOpenid('u-1', 'wx-new', '0'), error => error.code === 'ACCOUNT_STATE_INVALID')
+  await assert.rejects(repository.createChallenge({
+    userId: 'u-1',
+    username: 'first',
+    openid: 'wx-new',
+    tokenHash: 'digest',
+    expiresAt: new Date('2026-08-06T00:10:00.000Z'),
+    expectedCredentialVersion: '0'
+  }), error => error.code === 'ACCOUNT_STATE_INVALID')
+  assert.equal(fake.documents('wechat_bindings').length, 0)
+  assert.equal(fake.documents('auth_challenges').length, 0)
+})
+
+test('OpenID lookup follows the deterministic binding to a fixed user document and revalidates it', async () => {
+  const openid = 'wx-fixed'
+  const bindingId = bindingIdForOpenid(openid)
+  const { fake, repository } = createRepository({
+    users: [{ _id: 'u-1', username: 'first', usernameNormalized: 'first', role: 'user', status: 'active', openid }],
+    wechat_bindings: [{ _id: bindingId, userId: 'u-1' }]
+  })
+  assert.equal((await repository.findUserByOpenid(openid))._id, 'u-1')
+  fake.replace('users', 'u-1', { username: 'first', usernameNormalized: 'first', role: 'user', status: 'active', openid: 'wx-other' })
+  assert.equal(await repository.findUserByOpenid(openid), null)
 })

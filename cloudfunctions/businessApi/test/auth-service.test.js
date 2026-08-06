@@ -1,6 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const { createAuthHarness } = require('./helpers/auth-harness')
+const { hashPassword, verifyPassword } = require('../lib/password')
 
 const RECOVERY_CODE = 'RECOVERY9-TEST-ONLY'
 const INVALID_OPENIDS = [undefined, '', '   ', 42]
@@ -65,6 +66,29 @@ test('temporary-password login returns a ten-minute challenge and does not bind 
   assert.equal(harness.state.users[0].openid, '')
   assert.notEqual(harness.state.challenges[0].tokenHash, result.challengeToken)
   assert.equal(harness.state.challenges[0].expiresAt - harness.state.challenges[0].createdAt, 10 * 60 * 1000)
+  assert.equal(harness.state.challenges[0].credentialVersion, 1)
+})
+
+test('temporary login fails closed when an administrator reset lands before challenge creation', async () => {
+  const harness = createAuthHarness()
+  const user = harness.seedAccount({ username: 'user01', password: 'TempPass8', mustChangePassword: true })
+  const createChallenge = harness.repository.createChallenge
+  harness.repository.createChallenge = async challenge => {
+    await harness.repository.updateCredential(user._id, {
+      ...hashPassword('ResetPass9'),
+      mustChangePassword: true,
+      failedAttempts: 0,
+      lockedUntil: null
+    })
+    return createChallenge(challenge)
+  }
+
+  await assert.rejects(
+    harness.service.login({ openid: 'wx-1', username: 'user01', password: 'TempPass8' }),
+    error => error.code === 'CREDENTIAL_CHANGED'
+  )
+  assert.equal(harness.state.challenges.length, 0)
+  assert.equal(verifyPassword('ResetPass9', harness.state.credentials[0]), true)
 })
 
 test('login rejects missing, blank, and non-string trusted OpenID without challenge, binding, or audit mutation', async () => {
@@ -93,6 +117,7 @@ test('completing first login changes password, consumes challenge, and binds Ope
   )
   const relogin = await harness.service.login({ openid: 'wx-1', username: 'user01', password: 'NewPass99' })
   assert.equal(relogin.authenticated, true)
+  assert.equal(harness.state.credentials[0].credentialVersion, 5)
 })
 
 test('completeFirstLogin rejects missing, blank, and non-string trusted OpenID before consuming a challenge', async () => {
@@ -116,6 +141,7 @@ test('five bad passwords lock the account for thirty minutes', async () => {
     await assert.rejects(harness.service.login({ openid: 'wx-1', username: 'user01', password: 'Wrong999' }))
   }
   assert.equal(harness.state.credentials[0].failedAttempts, 5)
+  assert.equal(harness.state.credentials[0].credentialVersion, 5)
   assert.equal(harness.state.credentials[0].lockedUntil - Date.parse('2026-08-06T00:00:00.000Z'), 30 * 60 * 1000)
   await assert.rejects(
     harness.service.login({ openid: 'wx-1', username: 'user01', password: 'TempPass8' }),
@@ -153,6 +179,29 @@ test('a valid permanent password resets failures and immediately binds an unboun
   assert.equal(harness.state.users[0].openid, 'wx-1')
   assert.equal(harness.state.credentials[0].failedAttempts, 0)
   assert.equal(harness.state.credentials[0].lockedUntil, null)
+  assert.equal(harness.state.credentials[0].credentialVersion, 2)
+})
+
+test('permanent login cannot bind after an administrator reset changes the credential version', async () => {
+  const harness = createAuthHarness()
+  const user = harness.seedAccount({ username: 'user01', password: 'OldPass88', mustChangePassword: false })
+  const bindOpenid = harness.repository.bindOpenid
+  harness.repository.bindOpenid = async (...args) => {
+    await harness.repository.updateCredential(user._id, {
+      ...hashPassword('ResetPass9'),
+      mustChangePassword: true,
+      failedAttempts: 0,
+      lockedUntil: null
+    })
+    return bindOpenid(...args)
+  }
+
+  await assert.rejects(
+    harness.service.login({ openid: 'wx-1', username: 'user01', password: 'OldPass88' }),
+    error => error.code === 'CREDENTIAL_CHANGED'
+  )
+  assert.equal(harness.state.users[0].openid, '')
+  assert.equal(verifyPassword('ResetPass9', harness.state.credentials[0]), true)
 })
 
 test('disabled accounts cannot obtain sessions or log in', async () => {
@@ -293,6 +342,32 @@ test('a signed-in actor can change a permanent password', async () => {
   assert.equal(login.authenticated, true)
 })
 
+test('password change verifies the current password against the latest reset credential atomically', async () => {
+  const harness = createAuthHarness()
+  const actor = harness.seedAccount({ username: 'user01', password: 'OldPass88', openid: 'wx-1' })
+  const updateCredential = harness.repository.updateCredential
+  let intercepted = false
+  harness.repository.updateCredential = async (...args) => {
+    if (!intercepted) {
+      intercepted = true
+      await updateCredential(actor._id, {
+        ...hashPassword('ResetPass9'),
+        mustChangePassword: true,
+        failedAttempts: 0,
+        lockedUntil: null
+      })
+    }
+    return updateCredential(...args)
+  }
+
+  await assert.rejects(
+    harness.service.changePassword({ actor, currentPassword: 'OldPass88', newPassword: 'ChangedPass9' }),
+    error => error.code === 'INVALID_CREDENTIALS'
+  )
+  assert.equal(verifyPassword('ResetPass9', harness.state.credentials[0]), true)
+  assert.equal(verifyPassword('ChangedPass9', harness.state.credentials[0]), false)
+})
+
 test('password change fails closed when the actor credential is missing', async () => {
   const harness = createAuthHarness()
   const actor = harness.seedAccount({ username: 'user01', password: 'OldPass88', openid: 'wx-1' })
@@ -315,6 +390,7 @@ test('the first super administrator can be initialized exactly once', async () =
   assert.equal(result.user.role, 'super_admin')
   assert.equal(result.user.openidBound, true)
   assert.equal(result.user.mustChangePassword, true)
+  assert.equal(harness.state.bindings.length, 1)
   await assert.rejects(
     harness.service.initializeSuperAdmin({
       openid: 'wx-second',
@@ -428,9 +504,11 @@ test('emergency recovery requires no OpenID, promotes and activates the account,
   assert.equal(result.user.role, 'super_admin')
   assert.equal(result.user.status, 'active')
   assert.equal(result.user.openidBound, false)
+  assert.equal(harness.state.bindings.length, 0)
   assert.equal(result.user.mustChangePassword, true)
   assert.equal(harness.state.credentials[0].failedAttempts, 0)
   assert.equal(harness.state.credentials[0].lockedUntil, null)
+  assert.equal(harness.state.credentials[0].credentialVersion, 2)
   const recoveryAudit = harness.state.audit.find(entry => entry.action === 'RECOVER_SUPER_ADMIN')
   assert.equal(recoveryAudit.priority, 'high')
   assert.equal(recoveryAudit.roleBefore, 'user')

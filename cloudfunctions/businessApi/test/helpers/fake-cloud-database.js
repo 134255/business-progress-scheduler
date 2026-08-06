@@ -50,9 +50,6 @@ function createFakeCloudDatabase(seed = {}) {
       if (candidate.usernameNormalized && user.usernameNormalized === candidate.usernameNormalized) {
         throw duplicateError('username_normalized_unique')
       }
-      if (candidate.openid && user.openid === candidate.openid) {
-        throw duplicateError('openid_unique')
-      }
     }
   }
 
@@ -64,6 +61,10 @@ function createFakeCloudDatabase(seed = {}) {
       async set({ data }) {
         const stored = materialize(data, id)
         if (name === 'users') enforceUserIndexes(stored, id)
+        if (name === 'wechat_bindings') {
+          const current = documents(name).get(id)
+          if (current && current.userId !== stored.userId) throw duplicateError('wechat_binding_primary')
+        }
         documents(name).set(id, stored)
         return { stats: { created: 1, updated: 0 } }
       },

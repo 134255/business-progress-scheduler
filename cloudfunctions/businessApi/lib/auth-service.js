@@ -61,15 +61,16 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
     throw createError(code)
   }
 
-  async function recordBadPassword(user) {
-    const updatedCredential = await repository.updateCredential(user._id, current => {
-      const lockExpired = current.lockedUntil && current.lockedUntil <= clock()
-      const failedAttempts = (lockExpired ? 0 : Number(current.failedAttempts || 0)) + 1
-      return {
-        failedAttempts,
-        lockedUntil: failedAttempts >= MAX_FAILURES ? clock() + LOCK_MS : null
-      }
-    })
+  function badPasswordChanges(current) {
+    const lockExpired = current.lockedUntil && current.lockedUntil <= clock()
+    const failedAttempts = (lockExpired ? 0 : Number(current.failedAttempts || 0)) + 1
+    return {
+      failedAttempts,
+      lockedUntil: failedAttempts >= MAX_FAILURES ? clock() + LOCK_MS : null
+    }
+  }
+
+  async function rejectBadPassword(user, updatedCredential) {
     const code = updatedCredential.failedAttempts >= MAX_FAILURES ? 'ACCOUNT_LOCKED' : 'INVALID_CREDENTIALS'
     return rejectLogin(user.username, code)
   }
@@ -104,20 +105,22 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
     const normalized = normalizeUsername(username)
     const { user, credential } = await accountRecords(normalized)
     if (!user || !credential) return rejectLogin(normalized, 'INVALID_CREDENTIALS')
+    let passwordAccepted = false
+    let updatedCredential
     try {
-      assertAvailable(user, credential)
+      updatedCredential = await repository.updateCredential(user._id, current => {
+        assertAvailable(user, current)
+        passwordAccepted = verifyPassword(password, current)
+        return passwordAccepted
+          ? { failedAttempts: 0, lockedUntil: null }
+          : badPasswordChanges(current)
+      })
     } catch (error) {
       return rejectLogin(normalized, error.code)
     }
-    if (!verifyPassword(password, credential)) return recordBadPassword(user)
+    if (!passwordAccepted) return rejectBadPassword(user, updatedCredential)
 
-    await repository.updateCredential(user._id, { failedAttempts: 0, lockedUntil: null })
-    credential.failedAttempts = 0
-    credential.lockedUntil = null
-
-    if (user.openid && user.openid !== openid) return rejectLogin(normalized, 'WECHAT_ALREADY_BOUND')
-
-    if (credential.mustChangePassword) {
+    if (updatedCredential.mustChangePassword) {
       const challengeToken = randomToken()
       const createdAt = clock()
       await repository.createChallenge({
@@ -127,7 +130,8 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
         tokenHash: sha256(challengeToken),
         createdAt,
         expiresAt: createdAt + CHALLENGE_MS,
-        consumedAt: null
+        consumedAt: null,
+        expectedCredentialVersion: updatedCredential.credentialVersion
       })
       await audit(repository.writeAudit, {
         action: 'LOGIN',
@@ -137,9 +141,9 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
       return { authenticated: false, passwordChangeRequired: true, challengeToken, expiresAt: createdAt + CHALLENGE_MS }
     }
 
-    const authenticatedUser = user.openid ? user : await repository.bindOpenid(user._id, openid)
+    const authenticated = await repository.bindOpenid(user._id, openid, updatedCredential.credentialVersion)
     await audit(repository.writeAudit, { action: 'LOGIN', username: user.username, resultCode: 'AUTHENTICATED' })
-    return { authenticated: true, user: publicUser(authenticatedUser, credential) }
+    return { authenticated: true, user: publicUser(authenticated.user, authenticated.credential) }
   }
 
   async function completeFirstLogin({ openid, challengeToken, newPassword }) {
@@ -163,13 +167,13 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
           failedAttempts: 0,
           lockedUntil: null
         })
-        const updatedUser = await transactionRepository.bindOpenid(user._id, openid)
+        const authenticated = await transactionRepository.bindOpenid(user._id, openid, updatedCredential.credentialVersion)
         await audit(transactionRepository.writeAudit, {
           action: 'COMPLETE_FIRST_LOGIN',
           username: user.username,
           resultCode: 'PASSWORD_CHANGED_AND_BOUND'
         })
-        return { user: updatedUser, credential: updatedCredential }
+        return authenticated
       }
     })
     return { authenticated: true, user: publicUser(result.user, result.credential) }
@@ -178,19 +182,23 @@ function createAuthService({ repository, clock, randomToken, sha256, recoveryCod
   async function changePassword({ actor, currentPassword, newPassword }) {
     const user = actor && await repository.findUserByUsername(actor.username)
     if (!user || user._id !== actor._id) throw createError('UNAUTHENTICATED')
-    const credential = await repository.findCredential(user._id)
-    if (!credential) throw createError('ACCOUNT_STATE_INVALID')
-    assertAvailable(user, credential)
-    if (!verifyPassword(currentPassword, credential)) {
-      return recordBadPassword(user)
-    }
     assertPasswordPolicy(newPassword)
-    const updatedCredential = await repository.updateCredential(user._id, {
-      ...hashPassword(newPassword),
-      mustChangePassword: false,
-      failedAttempts: 0,
-      lockedUntil: null
+    if (!(await repository.findCredential(user._id))) throw createError('ACCOUNT_STATE_INVALID')
+    const passwordRecord = hashPassword(newPassword)
+    let passwordAccepted = false
+    const updatedCredential = await repository.updateCredential(user._id, current => {
+      assertAvailable(user, current)
+      passwordAccepted = verifyPassword(currentPassword, current)
+      return passwordAccepted
+        ? {
+            ...passwordRecord,
+            mustChangePassword: false,
+            failedAttempts: 0,
+            lockedUntil: null
+          }
+        : badPasswordChanges(current)
     })
+    if (!passwordAccepted) return rejectBadPassword(user, updatedCredential)
     await audit(repository.writeAudit, {
       action: 'CHANGE_PASSWORD',
       username: user.username,

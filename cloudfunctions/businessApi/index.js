@@ -38,6 +38,47 @@ const PUBLIC_ACTIONS = new Set([
   'recoverSuperAdmin'
 ])
 
+const ACCOUNT_ACTIONS = new Set([
+  'getSession',
+  'bootstrap',
+  'login',
+  'completeFirstLogin',
+  'initializeSuperAdmin',
+  'recoverSuperAdmin',
+  'changePassword',
+  'listUsers',
+  'createUser',
+  'updateUser',
+  'resetUserPassword',
+  'unlockUser',
+  'unbindWechat'
+])
+
+const ADMIN_TARGET_ACTIONS = new Set([
+  'updateUser',
+  'resetUserPassword',
+  'unlockUser',
+  'unbindWechat'
+])
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
+function safeTargetUserId(action, payload) {
+  if (!ADMIN_TARGET_ACTIONS.has(action)) return ''
+  const targetUserId = payload.userId || payload.id
+  return typeof targetUserId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(targetUserId)
+    ? targetUserId
+    : ''
+}
+
+function safeErrorCode(value) {
+  return typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
+    ? value
+    : 'INTERNAL_ERROR'
+}
+
 function isPublicAction(action) {
   return PUBLIC_ACTIONS.has(action)
 }
@@ -64,7 +105,7 @@ function createBusinessApi({
   }
 
   function accountRoutes(openid, payload, actor) {
-    return {
+    return Object.assign(Object.create(null), {
       getSession: () => authService.getSession({ openid }),
       bootstrap: () => authService.getSession({ openid }),
       login: () => authService.login({ ...payload, openid }),
@@ -78,7 +119,7 @@ function createBusinessApi({
       resetUserPassword: () => adminUserService.resetUserPassword({ actor, userId: payload.userId || payload.id, temporaryPassword: payload.temporaryPassword }),
       unlockUser: () => adminUserService.unlockUser({ actor, userId: payload.userId || payload.id }),
       unbindWechat: () => adminUserService.unbindWechat({ actor, userId: payload.userId || payload.id })
-    }
+    })
   }
 
   async function main(event = {}) {
@@ -87,23 +128,22 @@ function createBusinessApi({
     const action = event.action
     const payload = event.payload || {}
     try {
-      const knownAccountAction = [
-        'getSession', 'bootstrap', 'login', 'completeFirstLogin', 'initializeSuperAdmin', 'recoverSuperAdmin',
-        'changePassword', 'listUsers', 'createUser', 'updateUser', 'resetUserPassword', 'unlockUser', 'unbindWechat'
-      ].includes(action)
-      assert(knownAccountAction || legacyRoutes[action], 'Unsupported action', 'UNKNOWN_ACTION')
+      const knownAccountAction = ACCOUNT_ACTIONS.has(action)
+      const knownLegacyAction = hasOwn(legacyRoutes, action) && typeof legacyRoutes[action] === 'function'
+      assert(knownAccountAction || knownLegacyAction, 'Unsupported action', 'UNKNOWN_ACTION')
       const actor = isPublicAction(action) ? null : await resolveActor(openid)
-      const route = accountRoutes(openid, payload, actor)[action]
+      const routes = accountRoutes(openid, payload, actor)
+      const route = hasOwn(routes, action) ? routes[action] : null
       const data = route
         ? await route()
         : await legacyRoutes[action](actor.openid, payload)
       return ok(data)
     } catch (error) {
       logger.error('[businessApi]', {
-        action,
-        code: error.code || 'INTERNAL_ERROR',
+        action: ACCOUNT_ACTIONS.has(action) || hasOwn(legacyRoutes, action) ? action : 'UNKNOWN_ACTION',
+        code: safeErrorCode(error.code),
         requestId: context.REQUESTID || context.requestId || '',
-        targetUserId: payload.userId || payload.id || ''
+        targetUserId: safeTargetUserId(action, payload)
       })
       return fail(error.message || 'Service error', error.code || 'INTERNAL_ERROR')
     }

@@ -4,6 +4,7 @@ const COLLECTIONS = Object.freeze({
   users: 'users',
   credentials: 'user_credentials',
   challenges: 'auth_challenges',
+  bindings: 'wechat_bindings',
   settings: 'system_settings',
   audit: 'audit_logs'
 })
@@ -14,10 +15,29 @@ function defaultIdFactory(prefix) {
   return `${prefix}_${crypto.randomBytes(16).toString('hex')}`
 }
 
+function bindingIdForOpenid(openid) {
+  return crypto.createHash('sha256').update(String(openid)).digest('hex')
+}
+
 function createError(code, message = code) {
   const error = new Error(message)
   error.code = code
   return error
+}
+
+function assertCredentialVersion(value) {
+  if (!Number.isSafeInteger(value) || value < 0) throw createError('ACCOUNT_STATE_INVALID')
+  return value
+}
+
+function storedCredentialVersion(record) {
+  return Object.prototype.hasOwnProperty.call(record, 'credentialVersion')
+    ? assertCredentialVersion(record.credentialVersion)
+    : 0
+}
+
+function requiredCredentialVersion(value) {
+  return assertCredentialVersion(value)
 }
 
 function isActiveSuperAdmin(user) {
@@ -66,9 +86,7 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
 
   async function countActiveSuperAdmins() {
     const guard = await readDocument(db, COLLECTIONS.settings, ADMIN_GUARD_ID)
-    return guard && Number.isSafeInteger(guard.activeSuperAdminCount)
-      ? guard.activeSuperAdminCount
-      : 0
+    return assertGuard(guard).activeSuperAdminCount
   }
 
   function assertGuard(guard) {
@@ -94,7 +112,7 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
         const storedUser = persistedUser(user)
         await transaction.collection(COLLECTIONS.users).doc(userId).set({ data: storedUser })
         await transaction.collection(COLLECTIONS.credentials).doc(userId).set({
-          data: { ...credential, userId }
+          data: { ...concreteDates(credential), userId, credentialVersion: 0 }
         })
         await transaction.collection(COLLECTIONS.settings).doc(ADMIN_GUARD_ID).update({
           data: {
@@ -136,6 +154,12 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
       if (!Number.isSafeInteger(nextCount) || nextCount < 0) throw createError('ACCOUNT_STATE_INVALID')
       const storedChanges = { ...changes }
       if (Object.prototype.hasOwnProperty.call(storedChanges, 'openid') && !storedChanges.openid) {
+        if (user.openid) {
+          const bindingId = bindingIdForOpenid(user.openid)
+          const binding = await readDocument(transaction, COLLECTIONS.bindings, bindingId)
+          if (binding && binding.userId !== userId) throw createError('ACCOUNT_STATE_INVALID')
+          if (binding) await transaction.collection(COLLECTIONS.bindings).doc(bindingId).remove()
+        }
         storedChanges.openid = db.command.remove()
       }
       const userResult = await transaction.collection(COLLECTIONS.users).doc(userId).update({ data: storedChanges })
@@ -150,24 +174,42 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
     async function updateCredential(userId, changesOrUpdater) {
       const credential = await findCredential(userId)
       if (!credential) throw createError('ACCOUNT_NOT_FOUND')
+      const currentVersion = storedCredentialVersion(credential)
+      if (currentVersion === Number.MAX_SAFE_INTEGER) throw createError('ACCOUNT_STATE_INVALID')
       const requestedChanges = typeof changesOrUpdater === 'function'
         ? await changesOrUpdater({ ...credential })
         : changesOrUpdater
       const changes = concreteDates(requestedChanges)
-      await transaction.collection(COLLECTIONS.credentials).doc(userId).update({ data: changes })
-      return { ...credential, ...changes }
+      const nextVersion = currentVersion + 1
+      await transaction.collection(COLLECTIONS.credentials).doc(userId).update({
+        data: { ...changes, credentialVersion: nextVersion }
+      })
+      return { ...credential, ...changes, credentialVersion: nextVersion }
     }
 
-    async function bindOpenid(userId, openid) {
+    async function bindOpenid(userId, openid, expectedCredentialVersion) {
       const user = await findUserById(userId)
+      const credential = await findCredential(userId)
       if (!user) throw createError('ACCOUNT_NOT_FOUND')
-      if (user.openid && user.openid !== openid) throw createError('WECHAT_ALREADY_BOUND')
-      try {
-        await transaction.collection(COLLECTIONS.users).doc(userId).update({ data: { openid } })
-      } catch (error) {
-        throw mapDuplicateError(error)
+      if (!credential) throw createError('ACCOUNT_STATE_INVALID')
+      if (storedCredentialVersion(credential) !== requiredCredentialVersion(expectedCredentialVersion) ||
+          user.status !== 'active' || credential.mustChangePassword) {
+        throw createError('CREDENTIAL_CHANGED')
       }
-      return { ...user, openid }
+      if (user.openid && user.openid !== openid) throw createError('WECHAT_ALREADY_BOUND')
+      const bindingId = bindingIdForOpenid(openid)
+      const binding = await readDocument(transaction, COLLECTIONS.bindings, bindingId)
+      if (binding && binding.userId !== userId) throw createError('OPENID_ALREADY_BOUND')
+      await transaction.collection(COLLECTIONS.bindings).doc(bindingId).set({
+        data: {
+          userId,
+          createdAt: binding && binding.createdAt ? binding.createdAt : db.serverDate(),
+          updatedAt: db.serverDate()
+        }
+      })
+      await transaction.collection(COLLECTIONS.users).doc(userId).update({ data: { openid } })
+      const updatedCredential = await updateCredential(userId, { lastAuthenticatedAt: db.serverDate() })
+      return { user: { ...user, openid }, credential: updatedCredential }
     }
 
     async function invalidateChallenges(userId, invalidatedAt) {
@@ -198,9 +240,22 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
         openid,
         wecomUserId: ''
       })
+      if (openid) {
+        const bindingId = bindingIdForOpenid(openid)
+        const binding = await readDocument(transaction, COLLECTIONS.bindings, bindingId)
+        if (binding && binding.userId !== options.initialUserId) throw createError('OPENID_ALREADY_BOUND')
+        await transaction.collection(COLLECTIONS.bindings).doc(bindingId).set({
+          data: { userId: options.initialUserId, createdAt: db.serverDate(), updatedAt: db.serverDate() }
+        })
+      }
       await transaction.collection(COLLECTIONS.users).doc(options.initialUserId).set({ data: user })
       await transaction.collection(COLLECTIONS.credentials).doc(options.initialUserId).set({
-        data: { ...concreteDates(credential), userId: options.initialUserId, challengeEpoch: Number(credential.challengeEpoch || 0) }
+        data: {
+          ...concreteDates(credential),
+          userId: options.initialUserId,
+          challengeEpoch: Number(credential.challengeEpoch || 0),
+          credentialVersion: 0
+        }
       })
       await transaction.collection(COLLECTIONS.settings).doc(ADMIN_GUARD_ID).update({
         data: { activeSuperAdminCount: 1, revision: guard.revision + 1 }
@@ -248,7 +303,10 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
   }
 
   async function findUserByOpenid(openid) {
-    return findOneBy({ openid })
+    const binding = await readDocument(db, COLLECTIONS.bindings, bindingIdForOpenid(openid))
+    if (!binding || !binding.userId) return null
+    const user = await findUserById(binding.userId)
+    return user && user.openid === openid ? user : null
   }
 
   async function findCredential(userId) {
@@ -283,8 +341,8 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
     return runUserTransaction(transaction => transaction.updateCredential(userId, changesOrUpdater))
   }
 
-  async function bindOpenid(userId, openid) {
-    return runUserTransaction(transaction => transaction.bindOpenid(userId, openid))
+  async function bindOpenid(userId, openid, expectedCredentialVersion) {
+    return runUserTransaction(transaction => transaction.bindOpenid(userId, openid, expectedCredentialVersion))
   }
 
   async function createChallenge(challenge) {
@@ -292,10 +350,16 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
     return db.runTransaction(async transaction => {
       const credential = await readDocument(transaction, COLLECTIONS.credentials, challenge.userId)
       if (!credential) throw createError('ACCOUNT_STATE_INVALID')
+      const currentVersion = storedCredentialVersion(credential)
+      if (currentVersion !== requiredCredentialVersion(challenge.expectedCredentialVersion)) {
+        throw createError('CREDENTIAL_CHANGED')
+      }
       const stored = concreteDates({
         ...challenge,
-        challengeEpoch: Number(credential.challengeEpoch || 0)
+        challengeEpoch: Number(credential.challengeEpoch || 0),
+        credentialVersion: currentVersion
       })
+      delete stored.expectedCredentialVersion
       await transaction.collection(COLLECTIONS.challenges).doc(challengeId).set({ data: stored })
       return { _id: challengeId, ...stored }
     })
@@ -315,6 +379,7 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
       if (!challenge || challenge.tokenHash !== tokenHash || challenge.openid !== openid || challenge.consumedAt ||
           !Number.isFinite(expiresAt) || expiresAt <= currentTime || !credential || !user ||
           Number(challenge.challengeEpoch || 0) !== Number(credential.challengeEpoch || 0) ||
+          storedCredentialVersion(challenge) !== storedCredentialVersion(credential) ||
           !sameUsername(user, challenge.username)) {
         throw createError('INVALID_CHALLENGE')
       }
@@ -401,6 +466,7 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
 
 module.exports = {
   ADMIN_GUARD_ID,
+  bindingIdForOpenid,
   COLLECTIONS,
   createCloudAccountRepository
 }

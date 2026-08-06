@@ -19,6 +19,7 @@ function createAdminUserHarness() {
   const state = {
     users: [],
     credentials: [],
+    bindings: [],
     challenges: [],
     audit: [],
     adminGuard: {
@@ -84,16 +85,25 @@ function createAdminUserHarness() {
         for (const challenge of state.challenges) {
           if (challenge.userId === userId && !challenge.consumedAt) challenge.consumedAt = consumedAt
         }
+        const credential = findCredential(userId)
+        credential.challengeEpoch = Number(credential.challengeEpoch || 0) + 1
+        credential.credentialVersion = Number(credential.credentialVersion || 0) + 1
       },
       updateCredential(userId, changes) {
         const credential = findCredential(userId)
         if (!credential) throw createError('ACCOUNT_NOT_FOUND')
-        Object.assign(credential, clone(changes))
+        Object.assign(credential, clone(changes), {
+          credentialVersion: Number(credential.credentialVersion || 0) + 1
+        })
         return clone(credential)
       },
       updateUser(userId, changes) {
         const user = findUserById(userId)
         if (!user) throw createError('ACCOUNT_NOT_FOUND')
+        if (Object.prototype.hasOwnProperty.call(changes, 'openid') && !changes.openid && user.openid) {
+          const bindingIndex = state.bindings.findIndex(binding => binding.openid === user.openid && binding.userId === userId)
+          if (bindingIndex >= 0) state.bindings.splice(bindingIndex, 1)
+        }
         Object.assign(user, clone(changes))
         return clone(user)
       },
@@ -122,7 +132,7 @@ function createAdminUserHarness() {
           sequence += 1
           const storedUser = { _id: `created-user-${sequence}`, ...clone(user) }
           state.users.push(storedUser)
-          state.credentials.push({ userId: storedUser._id, ...clone(credential) })
+          state.credentials.push({ userId: storedUser._id, credentialVersion: 0, ...clone(credential) })
           if (storedUser.role === 'super_admin' && storedUser.status === 'active') {
             state.adminGuard.activeSuperAdminCount += 1
           }
@@ -210,12 +220,14 @@ function createAdminUserHarness() {
       wecomUserId: ''
     }
     state.users.push(user)
+    if (openid) state.bindings.push({ openid, userId: id })
     state.credentials.push({
       userId: id,
       ...hashPassword(password, { salt: Buffer.alloc(16, (++sequence % 250) + 1) }),
       mustChangePassword,
       failedAttempts,
-      lockedUntil
+      lockedUntil,
+      credentialVersion: 0
     })
     if (user.role === 'super_admin' && user.status === 'active') {
       state.adminGuard.activeSuperAdminCount += 1

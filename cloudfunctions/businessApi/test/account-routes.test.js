@@ -158,13 +158,63 @@ test('route error logging excludes payloads, passwords, identity values, and err
   }
   const result = await harness.api.main({
     action: 'login',
-    payload: { username: 'secret-user', password: 'secret-password', openid: 'wx-forged' }
+    payload: { username: 'secret-user', password: 'secret-password', openid: 'wx-forged', userId: 'target-must-not-log' }
   })
 
   assert.equal(result.code, 'INVALID_CREDENTIALS')
   assert.equal(harness.errors.length, 1)
   const logged = JSON.stringify(harness.errors)
-  assert.doesNotMatch(logged, /secret-password|secret-user|wx-sensitive|wx-forged/)
+  assert.doesNotMatch(logged, /secret-password|secret-user|wx-sensitive|wx-forged|target-must-not-log/)
   assert.match(logged, /INVALID_CREDENTIALS/)
   assert.match(logged, /request-1/)
+})
+
+test('route error logging replaces unsafe error codes with INTERNAL_ERROR', async () => {
+  const harness = createRouteHarness()
+  harness.authService.login = async () => {
+    const error = new Error('secret-error-message')
+    error.code = 'INVALID\nsecret-code'
+    throw error
+  }
+
+  const result = await harness.api.main({ action: 'login', payload: {} })
+  assert.equal(result.ok, false)
+  const logged = JSON.stringify(harness.errors)
+  assert.match(logged, /INTERNAL_ERROR/)
+  assert.doesNotMatch(logged, /secret-error-message|secret-code/)
+})
+
+test('prototype property names are rejected as unknown actions', async () => {
+  for (const action of ['toString', 'constructor', '__proto__']) {
+    const harness = createRouteHarness()
+    const result = await harness.api.main({ action, payload: {} })
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'UNKNOWN_ACTION')
+  }
+})
+
+test('unknown actions are sanitized in logs and never contribute a payload target id', async () => {
+  const harness = createRouteHarness()
+  const result = await harness.api.main({
+    action: 'secret-action-name',
+    payload: { userId: 'target-must-not-log' }
+  })
+  assert.equal(result.code, 'UNKNOWN_ACTION')
+  const logged = JSON.stringify(harness.errors)
+  assert.doesNotMatch(logged, /secret-action-name|target-must-not-log/)
+  assert.match(logged, /UNKNOWN_ACTION/)
+})
+
+test('only validated admin target actions may add a safe target id to logs', async () => {
+  for (const { targetId, expected } of [
+    { targetId: 'user_123-safe', expected: true },
+    { targetId: '../sensitive', expected: false },
+    { targetId: 'x'.repeat(65), expected: false },
+    { targetId: 42, expected: false }
+  ]) {
+    const harness = createRouteHarness({ user: null, credential: null })
+    await harness.api.main({ action: 'updateUser', payload: { userId: targetId, changes: { status: 'disabled' } } })
+    const logged = JSON.stringify(harness.errors)
+    assert.equal(logged.includes(String(targetId)), expected)
+  }
 })

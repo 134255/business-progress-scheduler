@@ -23,6 +23,7 @@ function createAuthHarness() {
   const state = {
     users: [],
     credentials: [],
+    bindings: [],
     challenges: [],
     recoveryStates: [{ recoveryCodeHash, consumedAt: null }],
     audit: []
@@ -49,7 +50,9 @@ function createAuthHarness() {
   }
 
   function findUserByOpenid(openid) {
-    return state.users.find(user => user.openid === openid) || null
+    const binding = state.bindings.find(candidate => candidate._id === sha256(openid))
+    const user = binding && state.users.find(candidate => candidate._id === binding.userId)
+    return user && user.openid === openid ? user : null
   }
 
   function findUserByUsername(username) {
@@ -64,6 +67,10 @@ function createAuthHarness() {
   function updateUser(userId, changes) {
     const user = state.users.find(candidate => candidate._id === userId)
     if (!user) throw createError('ACCOUNT_NOT_FOUND')
+    if (Object.prototype.hasOwnProperty.call(changes, 'openid') && !changes.openid && user.openid) {
+      const bindingIndex = state.bindings.findIndex(binding => binding._id === sha256(user.openid) && binding.userId === userId)
+      if (bindingIndex >= 0) state.bindings.splice(bindingIndex, 1)
+    }
     Object.assign(user, clone(changes))
     return user
   }
@@ -74,7 +81,9 @@ function createAuthHarness() {
     const changes = typeof changesOrUpdater === 'function'
       ? changesOrUpdater(clone(credential))
       : changesOrUpdater
-    Object.assign(credential, clone(changes))
+    Object.assign(credential, clone(changes), {
+      credentialVersion: Number(credential.credentialVersion || 0) + 1
+    })
     return credential
   }
 
@@ -85,10 +94,18 @@ function createAuthHarness() {
     })
   }
 
-  function bindOpenid(userId, openid) {
+  function bindOpenid(userId, openid, expectedCredentialVersion) {
     const user = state.users.find(candidate => candidate._id === userId)
+    const credential = findCredential(userId)
     if (!user) throw createError('ACCOUNT_NOT_FOUND')
-    if (openid && state.users.some(candidate => candidate._id !== userId && candidate.openid === openid)) {
+    if (!credential) throw createError('ACCOUNT_STATE_INVALID')
+    if (Number(credential.credentialVersion || 0) !== Number(expectedCredentialVersion)) {
+      throw createError('CREDENTIAL_CHANGED')
+    }
+    if (user.status !== 'active' || credential.mustChangePassword) throw createError('CREDENTIAL_CHANGED')
+    const bindingId = sha256(openid)
+    const binding = state.bindings.find(candidate => candidate._id === bindingId)
+    if (binding && binding.userId !== userId) {
       throw createError('OPENID_ALREADY_BOUND')
     }
     if (openid && user.openid && user.openid !== openid) {
@@ -96,7 +113,9 @@ function createAuthHarness() {
     }
     const updated = { ...user, openid: openid || '' }
     state.users.splice(state.users.indexOf(user), 1, updated)
-    return updated
+    if (!binding) state.bindings.push({ _id: bindingId, userId })
+    const updatedCredential = directUpdateCredential(userId, { lastAuthenticatedAt: now })
+    return { user: updated, credential: clone(updatedCredential) }
   }
 
   function countActiveSuperAdmins() {
@@ -106,7 +125,7 @@ function createAuthHarness() {
   function createInitialSuperAdmin({ username, displayName, openid, credential }) {
     if (countActiveSuperAdmins() !== 0) throw createError('ALREADY_INITIALIZED')
     if (findUserByUsername(username)) throw createError('USERNAME_TAKEN')
-    if (openid && findUserByOpenid(openid)) throw createError('OPENID_ALREADY_BOUND')
+    if (openid && state.bindings.some(binding => binding._id === sha256(openid))) throw createError('OPENID_ALREADY_BOUND')
     sequence += 1
     const user = {
       _id: `test-user-${sequence}`,
@@ -119,13 +138,23 @@ function createAuthHarness() {
       wecomUserId: ''
     }
     state.users.push(user)
-    state.credentials.push({ userId: user._id, ...clone(credential) })
+    if (openid) state.bindings.push({ _id: sha256(openid), userId: user._id })
+    state.credentials.push({ userId: user._id, credentialVersion: 0, ...clone(credential) })
     return user
   }
 
   function createChallenge(challenge) {
+    const credential = findCredential(challenge.userId)
+    if (!credential || Number(credential.credentialVersion || 0) !== Number(challenge.expectedCredentialVersion)) {
+      throw createError('CREDENTIAL_CHANGED')
+    }
     sequence += 1
-    const stored = { _id: `test-challenge-${sequence}`, ...clone(challenge) }
+    const stored = {
+      _id: `test-challenge-${sequence}`,
+      ...clone(challenge),
+      credentialVersion: Number(credential.credentialVersion || 0)
+    }
+    delete stored.expectedCredentialVersion
     state.challenges.push(stored)
     return stored
   }
@@ -134,6 +163,9 @@ function createAuthHarness() {
     for (const challenge of state.challenges) {
       if (challenge.userId === userId && !challenge.consumedAt) challenge.consumedAt = consumedAt
     }
+    directUpdateCredential(userId, {
+      challengeEpoch: Number(findCredential(userId).challengeEpoch || 0) + 1
+    })
   }
 
   function writeAudit(entry) {
@@ -157,7 +189,9 @@ function createAuthHarness() {
   async function consumeChallenge({ tokenHash, openid, now: consumedAt, apply }) {
     return serialize(async () => {
       const challenge = state.challenges.find(candidate => candidate.tokenHash === tokenHash)
-      if (!challenge || challenge.consumedAt || challenge.expiresAt <= consumedAt || challenge.openid !== openid) {
+      const credential = challenge && findCredential(challenge.userId)
+      if (!challenge || !credential || challenge.consumedAt || challenge.expiresAt <= consumedAt || challenge.openid !== openid ||
+          Number(challenge.credentialVersion || 0) !== Number(credential.credentialVersion || 0)) {
         throw createError('INVALID_CHALLENGE')
       }
       await Promise.resolve()
@@ -240,12 +274,14 @@ function createAuthHarness() {
       wecomUserId: ''
     }
     state.users.push(user)
+    if (openid) state.bindings.push({ _id: sha256(openid), userId: user._id })
     state.credentials.push({
       userId: user._id,
       ...hashPassword(password),
       mustChangePassword,
       failedAttempts: 0,
-      lockedUntil: null
+      lockedUntil: null,
+      credentialVersion: 0
     })
     return user
   }
