@@ -4,7 +4,7 @@ Status captured: 2026-08-06 (Asia/Shanghai)
 
 ## Verified state
 
-- Feature branch `codex/account-admin` implements the account-administration milestone through Task 6, including formal-review fixes at `cdf2977`.
+- Feature branch `codex/account-admin` implements the locally verifiable account-administration milestone through Task 7, including reviewed UI fixes at `cdf2977` and the reviewed deployment/runbook closeout at `7feac41`.
 - Implemented: password hashing, account/password authentication, first-login password change, lockout, emergency initialization/recovery, super-administrator user lifecycle, last-active-admin protection, CloudBase repositories, protected routes, deterministic WeChat identity reservations, and audit-safe logging.
 - Mini Program account flow now includes silent account service calls with preserved backend error codes, session restoration, initialization gating, memory-only first-login challenge handoff, forced and normal password change, app-owned auth reset, and a dashboard guard without legacy profile bootstrapping.
 - The Mini Program now includes protected super-administrator user listing, creation, editing, status changes, password reset, unlock, WeChat unbind, last-active-administrator messaging, gated dashboard entry, and profile password/logout controls. Password values stay out of global state, storage, datasets, and navigation parameters.
@@ -27,7 +27,7 @@ Executed on 2026-08-06 for commit `db8dbf3`:
 | `git diff --check` | Passed. |
 | Independent formal review | READY; no remaining Critical, Important, or Minor code findings. |
 
-Executed on 2026-08-06 for the current Task 7 documentation changes:
+Executed on 2026-08-06 for Task 7 completed at `7feac41`:
 
 | Command | Result |
 |---|---|
@@ -80,6 +80,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Review and commit Task 7's explicit documentation and memory paths after its local verification is recorded.
-2. Run Task 8 manual WeChat DevTools deployment, simulator, migration, index, and database acceptance for the exact commit.
-3. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
+1. Follow `docs/deployment/account-admin-setup.md` in a maintenance window to execute Task 8 migration, index, recovery configuration, deployment, and redacted consistency checks for exact commit `7feac41` or its memory-only successor.
+2. Run the Task 8 WeChat DevTools simulator and account-lifecycle acceptance, recording only redacted outcomes; never place operator credentials, identity values, recovery material, or hashes in Git.
+3. After Task 8 passes, run the final whole-branch review and choose the branch integration method.
+4. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
