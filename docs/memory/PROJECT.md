@@ -25,7 +25,9 @@ The complete approved requirements are in `docs/superpowers/specs/2026-08-05-bus
 - External holiday source is isolated behind an adapter. The approved endpoint is `https://holiday.ailcc.com/api/holiday/allyear/{year}`; production use requires renewed terms and availability verification.
 - Enterprise WeChat sending must remain behind an adapter and disabled until approved secure configuration is supplied.
 
-Primary planned collections are `users`, `user_credentials`, `auth_challenges`, `system_settings`, `templates`, `template_nodes`, `business_lines`, `business_nodes`, `node_feedback`, `evidences`, `work_calendar`, `notifications`, notification-delivery records, and `audit_logs`.
+Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `business_lines`, `business_nodes`, `node_feedback`, `evidences`, `work_calendar`, `notifications`, notification-delivery records, and `audit_logs`.
+
+Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 
 ## Environment
 

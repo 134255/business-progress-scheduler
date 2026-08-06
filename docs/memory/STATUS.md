@@ -4,38 +4,37 @@ Status captured: 2026-08-06 (Asia/Shanghai)
 
 ## Verified state
 
-- Git is on `main`, two commits ahead of `origin/main` before the memory initialization commit.
-- The working tree already contains a large, pre-existing uncommitted baseline across the cloud function, Mini Program pages/services, project configuration, tests, tooling, README, and a generated schedule workbook. These changes belong to the user and must remain isolated from the memory-only commit.
-- Current code implements WeChat-context bootstrap, profile update, dashboard/list/detail queries, business-line create/edit/logical-delete, node history/feedback, evidence metadata, sequential node activation, basic notifications, audit records, membership/manager checks, and optimistic business-line version checks.
-- Current Mini Program routes include dashboard, business list/detail/edit, node feedback, a template-list UI stub, and profile pages.
-- Project configuration currently points to the real AppID and CloudBase environment identifiers recorded in `PROJECT.md`.
-- The global `maintaining-project-memory` skill is installed under the user Codex skills directory; its staged and installed files had matching SHA-256 hashes and the skill-creator validator reported `Skill is valid!`.
-
-The current implementation is a baseline, not the approved V1. In particular, the account/password administrator subsystem, controlled template lifecycle, SLA calendar engine, hourly reminder scheduler, server-side evidence type/size/content validation, video flow, and Enterprise WeChat adapter are not implemented in the current code.
+- Feature branch `codex/account-admin` implements the reviewed backend account-administration milestone through Task 4 of `docs/superpowers/plans/2026-08-05-account-admin.md`.
+- Implemented: password hashing, account/password authentication, first-login password change, lockout, emergency initialization/recovery, super-administrator user lifecycle, last-active-admin protection, CloudBase repositories, protected routes, deterministic WeChat identity reservations, and audit-safe logging.
+- CloudBase account state uses a singleton `system_settings/account_admin_state` guard so all active-super-admin transitions contend on one document.
+- WeChat identity uniqueness uses `wechat_bindings/<sha256(openid)>`; it does not rely on an unsupported sparse unique `users.openid` index.
+- Credential mutations use monotonic `credentialVersion`; challenge invalidation uses strict monotonic `challengeEpoch`. Both fail closed on corrupt or overflowing state.
+- `wx-server-sdk` is pinned and locked at `4.0.2`.
 
 ## Verification
 
-Executed on 2026-08-06:
+Executed on 2026-08-06 for commit `db8dbf3`:
 
 | Command | Result |
 |---|---|
-| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 5 tests, 0 failures. |
+| `npm.cmd ci --ignore-scripts` | Passed; installed the locked 4.0.2 SDK tree. |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 120 tests, 0 failures. |
 | `node tools/test-wxml-structure.mjs` | Passed: 1 test, 0 failures. |
-| `git diff --check` | Passed; only expected LF-to-CRLF working-copy warnings were printed. |
-| Installed project-memory validator | Passed against the initialized repository structure. |
-| Skill behavior pressure tests | Passed: startup-memory preflight, dirty-tree/unverified completion, and sensitive-data scenarios followed the installed rules. |
-| Memory validator positive/negative fixtures | Passed: complete fixture accepted; credential/unfinished-marker fixture rejected with two errors. |
+| JavaScript syntax checks | Passed. |
+| `git diff --check` | Passed. |
+| Independent formal review | READY; no remaining Critical, Important, or Minor code findings. |
 
 ## Blockers
 
-- No local blocker prevents the next account-administration implementation task.
-- Deployment of the exact current dirty working tree, simulator acceptance, database indexes, and end-to-end CloudBase behavior are `unverified` in this task.
-- Enterprise WeChat production identifiers and secret are intentionally unavailable; real strong-message delivery remains deferred.
-- Holiday API production terms and availability require re-verification before production release.
+- `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
+- Cloud deployment, creation/backfill of `wechat_bindings`, removal of the legacy `users.openid` unique index, real transaction-conflict behavior, and simulator acceptance are unverified.
+- Client login/password-change UI and super-administrator account-management UI (Tasks 5 and 6) are not yet implemented.
+- Enterprise WeChat production identifiers and secret remain intentionally unavailable; strong-message delivery is deferred.
 
 ## Next actions
 
-1. Resume `docs/superpowers/plans/2026-08-05-account-admin.md` at Task 0: preserve, verify, explicitly stage, and commit the existing baseline without mixing the memory commit.
-2. Execute Tasks 1–8 with test-driven development: password primitives, authentication/binding, administrator lifecycle, protected cloud routes, login UI, administrator UI, deployment runbook, and full acceptance.
-3. After account administration, implement templates, SLA/calendar, evidence/video enforcement, scheduled reminders, and the disabled-by-default Enterprise WeChat adapter from the approved V1 design.
-4. Deploy through WeChat DevTools and record simulator/database acceptance evidence for the exact commit tested.
+1. Execute Task 5: Mini Program login, first-login password change, session state, and dashboard guard.
+2. Execute Task 6: super-administrator user-management pages.
+3. Execute Task 7: deployment/migration runbook, including binding backfill, guard initialization, recovery hash configuration, and dependency-risk note.
+4. Run Task 8 manual WeChat DevTools deployment and simulator/database acceptance for the exact commit.
+5. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
