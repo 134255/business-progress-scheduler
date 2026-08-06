@@ -607,6 +607,126 @@ test('binding and challenge creation reject coerced credential versions', async 
   assert.equal(fake.documents('auth_challenges').length, 0)
 })
 
+test('challenge epochs accept only absent legacy state or nonnegative safe integers during creation', async () => {
+  for (const corruptEpoch of ['0', -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const { fake, repository } = createRepository({
+      user_credentials: [{ _id: 'u-1', userId: 'u-1', credentialVersion: 0, challengeEpoch: corruptEpoch }]
+    }, ['challenge-corrupt-epoch'])
+    await assert.rejects(repository.createChallenge({
+      userId: 'u-1',
+      username: 'first',
+      openid: 'wx-new',
+      tokenHash: 'digest',
+      expiresAt: new Date('2026-08-06T00:10:00.000Z'),
+      expectedCredentialVersion: 0
+    }), error => error.code === 'ACCOUNT_STATE_INVALID')
+    assert.equal(fake.documents('auth_challenges').length, 0)
+    assert.equal(fake.documents('user_credentials')[0].challengeEpoch, corruptEpoch)
+  }
+
+  const { fake, repository } = createRepository({
+    user_credentials: [{ _id: 'legacy', userId: 'legacy', credentialVersion: 0 }]
+  }, ['challenge-legacy-epoch'])
+  await repository.createChallenge({
+    userId: 'legacy',
+    username: 'legacy',
+    openid: 'wx-legacy',
+    tokenHash: 'legacy-digest',
+    expiresAt: new Date('2026-08-06T00:10:00.000Z'),
+    expectedCredentialVersion: 0
+  })
+  assert.equal(fake.documents('auth_challenges')[0].challengeEpoch, 0)
+})
+
+test('challenge invalidation rejects corrupt epochs and overflow without mutating credentials', async () => {
+  for (const corruptEpoch of ['0', -1, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER]) {
+    const { fake, repository } = createRepository({
+      user_credentials: [{
+        _id: 'u-1',
+        userId: 'u-1',
+        credentialVersion: 0,
+        challengeEpoch: corruptEpoch,
+        failedAttempts: 3
+      }]
+    })
+    await assert.rejects(
+      repository.runUserTransaction(transaction => transaction.invalidateChallenges('u-1', new Date('2026-08-06T00:00:00.000Z'))),
+      error => error.code === 'ACCOUNT_STATE_INVALID'
+    )
+    assert.deepEqual(fake.documents('user_credentials')[0], {
+      _id: 'u-1',
+      userId: 'u-1',
+      credentialVersion: 0,
+      challengeEpoch: corruptEpoch,
+      failedAttempts: 3
+    })
+  }
+})
+
+test('challenge epoch overflow rolls back an unbind transaction', async () => {
+  const openid = 'wx-overflow'
+  const bindingId = bindingIdForOpenid(openid)
+  const { fake, repository } = createRepository({
+    users: [{ _id: 'u-1', username: 'first', usernameNormalized: 'first', role: 'user', status: 'active', openid }],
+    user_credentials: [{
+      _id: 'u-1',
+      userId: 'u-1',
+      credentialVersion: 0,
+      challengeEpoch: Number.MAX_SAFE_INTEGER,
+      mustChangePassword: false
+    }],
+    wechat_bindings: [{ _id: bindingId, userId: 'u-1' }],
+    system_settings: [{ _id: ADMIN_GUARD_ID, activeSuperAdminCount: 1, revision: 1 }]
+  })
+
+  await assert.rejects(repository.runUserTransaction(async transaction => {
+    await transaction.updateUser('u-1', { openid: '' })
+    await transaction.invalidateChallenges('u-1', new Date('2026-08-06T00:00:00.000Z'))
+  }), error => error.code === 'ACCOUNT_STATE_INVALID')
+
+  assert.equal(fake.documents('users')[0].openid, openid)
+  assert.equal(fake.documents('wechat_bindings')[0]._id, bindingId)
+  assert.equal(fake.documents('user_credentials')[0].challengeEpoch, Number.MAX_SAFE_INTEGER)
+  assert.equal(fake.documents('user_credentials')[0].credentialVersion, 0)
+})
+
+test('challenge consumption validates both stored epochs exactly and rolls back before apply', async () => {
+  for (const { challengeEpoch, credentialEpoch } of [
+    { challengeEpoch: '0', credentialEpoch: 0 },
+    { challengeEpoch: 0, credentialEpoch: -1 },
+    { challengeEpoch: 0.5, credentialEpoch: 0 },
+    { challengeEpoch: 0, credentialEpoch: Number.MAX_SAFE_INTEGER + 1 }
+  ]) {
+    const { fake, repository } = createRepository({
+      users: [{ _id: 'u-1', username: 'first', usernameNormalized: 'first', status: 'active' }],
+      user_credentials: [{
+        _id: 'u-1', userId: 'u-1', credentialVersion: 0, challengeEpoch: credentialEpoch
+      }],
+      auth_challenges: [{
+        _id: 'challenge-1',
+        userId: 'u-1',
+        username: 'first',
+        openid: 'wx-first',
+        tokenHash: 'digest',
+        expiresAt: new Date('2026-08-06T00:10:00.000Z'),
+        consumedAt: null,
+        credentialVersion: 0,
+        challengeEpoch
+      }]
+    })
+    let applied = false
+    await assert.rejects(repository.consumeChallenge({
+      tokenHash: 'digest',
+      openid: 'wx-first',
+      now: new Date('2026-08-06T00:00:00.000Z'),
+      apply: async () => { applied = true }
+    }), error => error.code === 'ACCOUNT_STATE_INVALID')
+    assert.equal(applied, false)
+    assert.equal(fake.documents('auth_challenges')[0].consumedAt, null)
+    assert.equal(fake.documents('user_credentials')[0].challengeEpoch, credentialEpoch)
+  }
+})
+
 test('OpenID lookup follows the deterministic binding to a fixed user document and revalidates it', async () => {
   const openid = 'wx-fixed'
   const bindingId = bindingIdForOpenid(openid)

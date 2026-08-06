@@ -169,19 +169,27 @@ test('route error logging excludes payloads, passwords, identity values, and err
   assert.match(logged, /request-1/)
 })
 
-test('route error logging replaces unsafe error codes with INTERNAL_ERROR', async () => {
-  const harness = createRouteHarness()
-  harness.authService.login = async () => {
-    const error = new Error('secret-error-message')
-    error.code = 'INVALID\nsecret-code'
-    throw error
-  }
+test('route error logging preserves known application codes and maps all other codes to INTERNAL_ERROR', async () => {
+  for (const { code, loggedCode } of [
+    { code: 'INVALID_CREDENTIALS', loggedCode: 'INVALID_CREDENTIALS' },
+    { code: 'SECRET_API_TOKEN', loggedCode: 'INTERNAL_ERROR' },
+    { code: 'SDK_RUNTIME_ERROR', loggedCode: 'INTERNAL_ERROR' },
+    { code: 'INVALID\nsecret-code', loggedCode: 'INTERNAL_ERROR' }
+  ]) {
+    const harness = createRouteHarness()
+    harness.authService.login = async () => {
+      const error = new Error('secret-error-message')
+      error.code = code
+      throw error
+    }
 
-  const result = await harness.api.main({ action: 'login', payload: {} })
-  assert.equal(result.ok, false)
-  const logged = JSON.stringify(harness.errors)
-  assert.match(logged, /INTERNAL_ERROR/)
-  assert.doesNotMatch(logged, /secret-error-message|secret-code/)
+    const result = await harness.api.main({ action: 'login', payload: {} })
+    assert.equal(result.ok, false)
+    const logged = JSON.stringify(harness.errors)
+    assert.match(logged, new RegExp(loggedCode))
+    if (loggedCode === 'INTERNAL_ERROR') assert.equal(logged.includes(code), false)
+    assert.doesNotMatch(logged, /secret-error-message|secret-code/)
+  }
 })
 
 test('prototype property names are rejected as unknown actions', async () => {

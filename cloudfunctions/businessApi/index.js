@@ -61,6 +61,45 @@ const ADMIN_TARGET_ACTIONS = new Set([
   'unbindWechat'
 ])
 
+const LOGGABLE_ERROR_CODES = new Set([
+  'ACCOUNT_DISABLED',
+  'ACCOUNT_LOCKED',
+  'ACCOUNT_NOT_FOUND',
+  'ACCOUNT_STATE_INVALID',
+  'ALREADY_INITIALIZED',
+  'BUSINESS_ERROR',
+  'CREDENTIAL_CHANGED',
+  'DUPLICATE_CODE',
+  'FORBIDDEN',
+  'IMMUTABLE_USERNAME',
+  'INTERNAL_ERROR',
+  'INVALID_CHALLENGE',
+  'INVALID_CHANGES',
+  'INVALID_CREDENTIALS',
+  'INVALID_KEYWORD',
+  'INVALID_PAGINATION',
+  'INVALID_QUERY',
+  'INVALID_RECOVERY_CODE',
+  'INVALID_ROLE',
+  'INVALID_STATUS',
+  'INVALID_TRANSITION',
+  'INVALID_USERNAME',
+  'INVALID_WECHAT_IDENTITY',
+  'LAST_SUPER_ADMIN',
+  'NODE_STRUCTURE_LOCKED',
+  'NOT_FOUND',
+  'OPENID_ALREADY_BOUND',
+  'PASSWORD_CHANGE_REQUIRED',
+  'UNAUTHENTICATED',
+  'UNAUTHORIZED',
+  'UNKNOWN_ACTION',
+  'USERNAME_TAKEN',
+  'VALIDATION_ERROR',
+  'VERSION_CONFLICT',
+  'WEAK_PASSWORD',
+  'WECHAT_ALREADY_BOUND'
+])
+
 function hasOwn(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key)
 }
@@ -74,9 +113,7 @@ function safeTargetUserId(action, payload) {
 }
 
 function safeErrorCode(value) {
-  return typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
-    ? value
-    : 'INTERNAL_ERROR'
+  return LOGGABLE_ERROR_CODES.has(value) ? value : 'INTERNAL_ERROR'
 }
 
 function isPublicAction(action) {

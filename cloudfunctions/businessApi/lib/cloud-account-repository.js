@@ -40,6 +40,23 @@ function requiredCredentialVersion(value) {
   return assertCredentialVersion(value)
 }
 
+function assertChallengeEpoch(value) {
+  if (!Number.isSafeInteger(value) || value < 0) throw createError('ACCOUNT_STATE_INVALID')
+  return value
+}
+
+function storedChallengeEpoch(record) {
+  return Object.prototype.hasOwnProperty.call(record, 'challengeEpoch')
+    ? assertChallengeEpoch(record.challengeEpoch)
+    : 0
+}
+
+function nextChallengeEpoch(record) {
+  const currentEpoch = storedChallengeEpoch(record)
+  if (currentEpoch === Number.MAX_SAFE_INTEGER) throw createError('ACCOUNT_STATE_INVALID')
+  return currentEpoch + 1
+}
+
 function isActiveSuperAdmin(user) {
   return user && user.role === 'super_admin' && user.status === 'active'
 }
@@ -110,9 +127,10 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
       return await db.runTransaction(async transaction => {
         const guard = assertGuard(await readDocument(transaction, COLLECTIONS.settings, ADMIN_GUARD_ID))
         const storedUser = persistedUser(user)
+        const challengeEpoch = storedChallengeEpoch(credential)
         await transaction.collection(COLLECTIONS.users).doc(userId).set({ data: storedUser })
         await transaction.collection(COLLECTIONS.credentials).doc(userId).set({
-          data: { ...concreteDates(credential), userId, credentialVersion: 0 }
+          data: { ...concreteDates(credential), userId, challengeEpoch, credentialVersion: 0 }
         })
         await transaction.collection(COLLECTIONS.settings).doc(ADMIN_GUARD_ID).update({
           data: {
@@ -175,11 +193,15 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
       const credential = await findCredential(userId)
       if (!credential) throw createError('ACCOUNT_NOT_FOUND')
       const currentVersion = storedCredentialVersion(credential)
+      storedChallengeEpoch(credential)
       if (currentVersion === Number.MAX_SAFE_INTEGER) throw createError('ACCOUNT_STATE_INVALID')
       const requestedChanges = typeof changesOrUpdater === 'function'
         ? await changesOrUpdater({ ...credential })
         : changesOrUpdater
       const changes = concreteDates(requestedChanges)
+      if (Object.prototype.hasOwnProperty.call(changes, 'challengeEpoch')) {
+        assertChallengeEpoch(changes.challengeEpoch)
+      }
       const nextVersion = currentVersion + 1
       await transaction.collection(COLLECTIONS.credentials).doc(userId).update({
         data: { ...changes, credentialVersion: nextVersion }
@@ -214,7 +236,7 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
 
     async function invalidateChallenges(userId, invalidatedAt) {
       return updateCredential(userId, credential => ({
-        challengeEpoch: Number(credential.challengeEpoch || 0) + 1,
+        challengeEpoch: nextChallengeEpoch(credential),
         challengesInvalidatedAt: new Date(invalidatedAt === undefined ? clock() : invalidatedAt)
       }))
     }
@@ -253,7 +275,7 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
         data: {
           ...concreteDates(credential),
           userId: options.initialUserId,
-          challengeEpoch: Number(credential.challengeEpoch || 0),
+          challengeEpoch: storedChallengeEpoch(credential),
           credentialVersion: 0
         }
       })
@@ -356,7 +378,7 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
       }
       const stored = concreteDates({
         ...challenge,
-        challengeEpoch: Number(credential.challengeEpoch || 0),
+        challengeEpoch: storedChallengeEpoch(credential),
         credentialVersion: currentVersion
       })
       delete stored.expectedCredentialVersion
@@ -378,7 +400,7 @@ function createCloudAccountRepository({ db, clock = () => new Date(), idFactory 
       const currentTime = new Date(now === undefined ? clock() : now).getTime()
       if (!challenge || challenge.tokenHash !== tokenHash || challenge.openid !== openid || challenge.consumedAt ||
           !Number.isFinite(expiresAt) || expiresAt <= currentTime || !credential || !user ||
-          Number(challenge.challengeEpoch || 0) !== Number(credential.challengeEpoch || 0) ||
+          storedChallengeEpoch(challenge) !== storedChallengeEpoch(credential) ||
           storedCredentialVersion(challenge) !== storedCredentialVersion(credential) ||
           !sameUsername(user, challenge.username)) {
         throw createError('INVALID_CHALLENGE')
