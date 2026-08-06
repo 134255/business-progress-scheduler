@@ -18,17 +18,22 @@
 2. 用微信开发者工具导入本目录。
 3. 将 `project.config.json` 中的 `appid` 替换为真实 AppID。
 4. 在开发者工具中开通云开发环境。
-5. 创建 `users`、`business_lines`、`business_nodes`、`node_feedback`、`evidences`、`templates`、`template_nodes`、`invitations`、`notifications`、`audit_logs` 集合。
-6. 将这些集合的客户端写权限设置为“仅管理端可写”；业务读取也建议先通过云函数完成。
-7. 右键 `cloudfunctions/businessApi`，选择“上传并部署：云端安装依赖”。
-8. 编译并打开首页。
+5. 按 [账户管理部署、首位管理员与恢复运行手册](docs/deployment/account-admin-setup.md) 创建或核对账户集合、索引、`account_admin_state` 守卫和 OpenID 绑定回填；不要创建 `users.openid` 唯一索引。
+6. 为云函数安全配置 `ADMIN_RECOVERY_CODE_SHA256`，并使守卫文档的恢复哈希与之匹配；不在仓库、终端记录或测试请求中保存恢复码或哈希。
+7. 右键 `cloudfunctions/businessApi`，选择“上传并部署：云端安装依赖”。部署后调用 `initializeSuperAdmin`，用临时密码完成强制改密，再创建普通用户。
+8. 编译并打开首页。部署、迁移和开发者工具验收均须由目标环境操作员另行完成。
 
 ## 本地检查
 
-无需安装云函数依赖即可运行纯领域测试：
+从仓库根目录运行账户管理的本地检查：
 
 ```powershell
-node --test cloudfunctions/businessApi/test/domain.test.js
+npm.cmd ci --ignore-scripts --prefix cloudfunctions/businessApi
+npm.cmd test --prefix cloudfunctions/businessApi
+node --test miniprogram/test/account-flow.test.js miniprogram/test/admin-users-flow.test.js
+node tools/test-wxml-structure.mjs
+git diff --check
+python "C:\Users\87579\.codex\skills\maintaining-project-memory\scripts\validate_memory.py" .
 ```
 
 > `project.config.json` 当前使用 `touristappid` 便于导入，但云开发必须使用真实 AppID。

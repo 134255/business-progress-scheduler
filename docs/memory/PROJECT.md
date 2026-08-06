@@ -30,6 +30,8 @@ Primary collections include `users`, `user_credentials`, `auth_challenges`, `wec
 
 Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 
+Account deployment requires the `system_settings/account_admin_state` guard, deterministic `wechat_bindings/<sha256(openid)>` backfill, and removal of the legacy `users.openid` unique index only after a verified migration. The security-redacted operator procedure is `docs/deployment/account-admin-setup.md`.
+
 ## Environment
 
 - WeChat Mini Program AppID identifier: `wx6dcce945f944e52f`.
