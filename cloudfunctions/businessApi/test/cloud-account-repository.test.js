@@ -47,23 +47,37 @@ test('fixed-document reads normalize only CloudBase missing-document failures', 
 
   assert.equal(await repository.findUserByOpenid('wx-unbound'), null)
 
-  const permissionFailure = new Error('document.get:fail permission denied')
-  const failingRepository = createCloudAccountRepository({
+  const createFailingRepository = failure => createCloudAccountRepository({
     db: {
       collection() {
         return {
           doc() {
-            return { get: async () => { throw permissionFailure } }
+            return { get: async () => { throw failure } }
           }
         }
       }
     }
   })
 
-  await assert.rejects(
-    failingRepository.findUserById('unreadable-user'),
-    error => error === permissionFailure
+  const structuredMissing = new Error('database request failed')
+  structuredMissing.code = 'DOCUMENT_NOT_FOUND'
+  assert.equal(
+    await createFailingRepository(structuredMissing).findUserById('missing-user'),
+    null
   )
+
+  const failures = [
+    new Error('document.get:fail permission denied'),
+    new Error('document.get:fail collection does not exist'),
+    new Error('document.get:fail network unavailable'),
+    new Error('document.get:fail timeout')
+  ]
+  for (const failure of failures) {
+    await assert.rejects(
+      createFailingRepository(failure).findUserById('unreadable-user'),
+      error => error === failure
+    )
+  }
 })
 
 test('guarded account creation atomically writes user, credential, guard, and patched audit', async () => {

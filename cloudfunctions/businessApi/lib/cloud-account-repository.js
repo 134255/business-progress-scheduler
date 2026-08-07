@@ -94,8 +94,13 @@ function sameUsername(user, username) {
 }
 
 function isMissingDocumentError(error) {
+  const codes = [error && error.code, error && error.errCode]
+    .map(value => String(value || '').toUpperCase())
+  if (codes.includes('DOCUMENT_NOT_FOUND')) return true
   const text = `${error && error.message || ''} ${error && error.errMsg || ''}`.toLowerCase()
-  return text.includes('document.get:fail') && text.includes('does not exist')
+  return text.includes('document.get:fail') &&
+    text.includes('document with _id') &&
+    text.includes('does not exist')
 }
 
 function createCloudAccountRepository({ db, clock = () => new Date(), idFactory = defaultIdFactory }) {
