@@ -17,6 +17,8 @@ const {
 const { createAuthService } = require('./lib/auth-service')
 const { createAdminUserService } = require('./lib/admin-user-service')
 const { createCloudAccountRepository } = require('./lib/cloud-account-repository')
+const { createTemplateService } = require('./lib/template-service')
+const { createCloudTemplateRepository } = require('./lib/cloud-template-repository')
 const { hashPassword } = require('./lib/password')
 
 const COLLECTIONS = {
@@ -67,15 +69,21 @@ const LOGGABLE_ERROR_CODES = new Set([
   'ACCOUNT_NOT_FOUND',
   'ACCOUNT_STATE_INVALID',
   'ALREADY_INITIALIZED',
+  'ASSIGNEE_INACTIVE',
+  'BUSINESS_FROZEN',
   'BUSINESS_ERROR',
   'CREDENTIAL_CHANGED',
   'DUPLICATE_CODE',
+  'EVIDENCE_EXPIRED',
+  'FEEDBACK_TOTAL_TOO_LARGE',
+  'FILE_TOO_LARGE',
   'FORBIDDEN',
   'IMMUTABLE_USERNAME',
   'INTERNAL_ERROR',
   'INVALID_CHALLENGE',
   'INVALID_CHANGES',
   'INVALID_CREDENTIALS',
+  'INVALID_FIELD_VALUE',
   'INVALID_KEYWORD',
   'INVALID_PAGINATION',
   'INVALID_QUERY',
@@ -87,9 +95,14 @@ const LOGGABLE_ERROR_CODES = new Set([
   'INVALID_WECHAT_IDENTITY',
   'LAST_SUPER_ADMIN',
   'NODE_STRUCTURE_LOCKED',
+  'NODE_NOT_ACTIVE',
   'NOT_FOUND',
   'OPENID_ALREADY_BOUND',
   'PASSWORD_CHANGE_REQUIRED',
+  'REJECTION_NOT_ALLOWED',
+  'TEMPLATE_INVALID',
+  'TEMPLATE_NOT_EDITABLE',
+  'TEMPLATE_NOT_ENABLED',
   'UNAUTHENTICATED',
   'UNAUTHORIZED',
   'UNKNOWN_ACTION',
@@ -120,16 +133,49 @@ function isPublicAction(action) {
   return PUBLIC_ACTIONS.has(action)
 }
 
+function createTemplateRoutes(templateService) {
+  return {
+    listTemplates: ({ actor, payload }) => templateService.listTemplates({ actor, query: payload }),
+    getTemplate: ({ actor, payload }) => templateService.getTemplate({ actor, templateId: payload.templateId }),
+    createTemplate: ({ actor, payload }) => templateService.createTemplate({ actor, input: payload }),
+    updateTemplate: ({ actor, payload }) => templateService.updateTemplate({
+      actor,
+      templateId: payload.templateId,
+      expectedVersion: payload.expectedVersion,
+      input: payload.definition
+    }),
+    changeTemplateStatus: ({ actor, payload }) => templateService.changeTemplateStatus({
+      actor,
+      templateId: payload.templateId,
+      expectedVersion: payload.expectedVersion,
+      status: payload.status
+    }),
+    deleteTemplate: ({ actor, payload }) => templateService.deleteTemplate({
+      actor,
+      templateId: payload.templateId,
+      expectedVersion: payload.expectedVersion
+    }),
+    listEnabledTemplates: ({ actor }) => templateService.listEnabledTemplates({ actor })
+  }
+}
+
 function createBusinessApi({
   repository,
   authService,
   adminUserService,
+  templateService,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
   getContext,
   clock = Date.now,
   logger = console
 }) {
+  const domainRoutes = Object.assign(
+    Object.create(null),
+    templateService ? createTemplateRoutes(templateService) : null,
+    protectedRoutes
+  )
+
   async function resolveActor(openid) {
     assert(openid, 'Unable to identify the current WeChat user', 'UNAUTHORIZED')
     const actor = await repository.findUserByOpenid(openid)
@@ -167,7 +213,7 @@ function createBusinessApi({
     const payload = event.payload || {}
     try {
       const knownAccountAction = ACCOUNT_ACTIONS.has(action)
-      const knownProtectedAction = hasOwn(protectedRoutes, action) && typeof protectedRoutes[action] === 'function'
+      const knownProtectedAction = hasOwn(domainRoutes, action) && typeof domainRoutes[action] === 'function'
       const knownLegacyAction = hasOwn(legacyRoutes, action) && typeof legacyRoutes[action] === 'function'
       assert(knownAccountAction || knownProtectedAction || knownLegacyAction, 'Unsupported action', 'UNKNOWN_ACTION')
       const actor = isPublicAction(action) ? null : await resolveActor(openid)
@@ -176,17 +222,20 @@ function createBusinessApi({
       const data = route
         ? await route()
         : knownProtectedAction
-          ? await protectedRoutes[action]({ actor, payload })
+          ? await domainRoutes[action]({ actor, payload })
           : await legacyRoutes[action](actor.openid, payload)
       return ok(data)
     } catch (error) {
+      const responseCode = safeErrorCode(error.code)
       logger.error('[businessApi]', {
-        action: ACCOUNT_ACTIONS.has(action) || hasOwn(protectedRoutes, action) || hasOwn(legacyRoutes, action) ? action : 'UNKNOWN_ACTION',
-        code: safeErrorCode(error.code),
+        action: ACCOUNT_ACTIONS.has(action) || hasOwn(domainRoutes, action) || hasOwn(legacyRoutes, action) ? action : 'UNKNOWN_ACTION',
+        code: responseCode,
         requestId: context.REQUESTID || context.requestId || '',
         targetUserId: safeTargetUserId(action, payload)
       })
-      return fail(error.message || 'Service error', error.code || 'INTERNAL_ERROR')
+      return responseCode === 'INTERNAL_ERROR'
+        ? fail('Service error', responseCode)
+        : fail(error.message || 'Service error', responseCode)
     }
   }
 
@@ -563,6 +612,7 @@ async function submitNodeFeedback(openid, payload) {
 
 function createDefaultBusinessApi() {
   const repository = createCloudAccountRepository({ db, clock: () => new Date() })
+  const templateRepository = createCloudTemplateRepository({ db })
   const clock = Date.now
   const authService = createAuthService({
     repository,
@@ -572,10 +622,16 @@ function createDefaultBusinessApi() {
     recoveryCodeHash: process.env.ADMIN_RECOVERY_CODE_SHA256 || ''
   })
   const adminUserService = createAdminUserService({ repository, hashPassword, clock })
+  const templateService = createTemplateService({
+    repository: templateRepository,
+    clock: () => new Date(),
+    keyFactory: prefix => `${prefix}_${crypto.randomBytes(16).toString('hex')}`
+  })
   return createBusinessApi({
     repository,
     authService,
     adminUserService,
+    templateService,
     getContext: () => cloud.getWXContext(),
     clock,
     legacyRoutes: {

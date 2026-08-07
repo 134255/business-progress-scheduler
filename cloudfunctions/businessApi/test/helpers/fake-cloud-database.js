@@ -8,6 +8,7 @@ function createFakeCloudDatabase(seed = {}) {
   const transactionQueries = []
   const transactionRuns = []
   const beforeTransactionHooks = []
+  const pendingWriteFailures = []
   let serverDateSequence = 0
   let transactionQueue = Promise.resolve()
 
@@ -53,6 +54,14 @@ function createFakeCloudDatabase(seed = {}) {
     }
   }
 
+  function maybeFailWrite(name, operation) {
+    const index = pendingWriteFailures.findIndex(failure =>
+      failure.collection === name && failure.operation === operation)
+    if (index < 0) return
+    const [failure] = pendingWriteFailures.splice(index, 1)
+    throw failure.error
+  }
+
   function createDocument(name, id) {
     return {
       async get() {
@@ -63,6 +72,7 @@ function createFakeCloudDatabase(seed = {}) {
         return { data: clone(document) }
       },
       async set({ data }) {
+        maybeFailWrite(name, 'set')
         const stored = materialize(data, id)
         if (name === 'users') enforceUserIndexes(stored, id)
         if (name === 'wechat_bindings') {
@@ -73,6 +83,7 @@ function createFakeCloudDatabase(seed = {}) {
         return { stats: { created: 1, updated: 0 } }
       },
       async update({ data }) {
+        maybeFailWrite(name, 'update')
         const current = documents(name).get(id)
         if (!current) return { stats: { updated: 0 } }
         const updated = merge(current, data)
@@ -81,6 +92,7 @@ function createFakeCloudDatabase(seed = {}) {
         return { stats: { updated: 1 } }
       },
       async remove() {
+        maybeFailWrite(name, 'remove')
         const removed = documents(name).delete(id)
         return { stats: { removed: removed ? 1 : 0 } }
       }
@@ -91,7 +103,7 @@ function createFakeCloudDatabase(seed = {}) {
     return Object.entries(criteria || {}).every(([key, value]) => document[key] === value)
   }
 
-  function createQuery(name, transaction, criteria = null, order = [], offset = 0, maximum = Infinity) {
+  function createQuery(name, transaction, criteria = null, order = [], offset = 0, maximum = 100) {
     function rejectTransactionQuery(operation) {
       if (!transaction) return
       transactionQueries.push({ collection: name, operation })
@@ -209,6 +221,9 @@ function createFakeCloudDatabase(seed = {}) {
     },
     beforeNextTransaction(hook) {
       beforeTransactionHooks.push(hook)
+    },
+    failNextWrite(failure) {
+      pendingWriteFailures.push(failure)
     }
   }
 }

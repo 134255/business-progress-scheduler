@@ -4,9 +4,10 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
-- Task 2 of the template/node/field plan is implemented on its isolated worktree: pure CommonJS `field-domain` and `template-domain` modules normalize the seven supported field types, validate denormalized submitted-value snapshots, enforce stable node/field keys and contiguous sequences, apply the 22-work-hour SLA default, restrict evidence types, require active assignee account document IDs for enablement, and reject definition edits while a template is enabled. Text regular-expression definitions use a conservative non-grouped grammar so stored patterns cannot trigger catastrophic backtracking during feedback validation. Task 3 (template persistence, service, and API routes) is next.
+- Task 3 of the template/node/field plan is implemented on its isolated worktree: protected template routes now expose administrator lifecycle operations and an ordinary-user enabled-template projection; the template service enforces super-administrator writes, disabled-before-edit, active account-document assignees, stable keys, optimistic versions, logical deletion, and a 48-node transaction-safe definition limit. The CloudBase repository paginates beyond the SDK's 100-document query window and atomically writes template metadata, fixed-ID node replacements, and one secret-free audit record using server dates after fixed-document status/version revalidation. Unknown repository failures return a generic `INTERNAL_ERROR`. Task 4 (super-administrator template pages) is next.
+- Task 2 of the template/node/field plan is implemented on its isolated worktree: pure CommonJS `field-domain` and `template-domain` modules normalize the seven supported field types, validate denormalized submitted-value snapshots, enforce stable node/field keys and contiguous sequences, apply the 22-work-hour SLA default, restrict evidence types, require active assignee account document IDs for enablement, and reject definition edits while a template is enabled. Text regular-expression definitions use a conservative non-grouped grammar so stored patterns cannot trigger catastrophic backtracking during feedback validation.
 - Task 1 of the template/node/field plan is implemented on its isolated worktree: `createBusinessApi` accepts injected `protectedRoutes`; recognized protected actions receive the trusted resolved actor and payload separately, are rejected before handler invocation when authentication fails, and retain the existing account and legacy-route behavior.
-- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Tasks 1 and 2 are complete; Task 3 is next.
+- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Tasks 1 through 3 are implemented; Task 4 is next.
 - WeChat DevTools account-administration smoke acceptance now covers automatic dashboard restoration, the authoritative super-administrator list state, creation of two ordinary test accounts and a second super administrator, case-insensitive duplicate-username rejection, safe disable/re-enable of the second administrator, rejection of disabling or demoting the final active super administrator, five-failure account lockout, administrator unlock, and read-only compatibility navigation through dashboard, business list, business detail, node feedback/history, and profile pages. No credential or identity value was recorded.
 - The obsolete `account-admin` linked worktree is fully cleaned up: its accidental deployment-manual edit was explicitly discarded, Git worktree registration and contents were removed, the merged local `codex/account-admin` branch was deleted through the non-force path, and the final empty `.worktrees/account-admin` directory was removed after WeChat DevTools released it.
 - Local `main` was fast-forwarded from `22a78f3` to the accepted account-administration head `f39c89e`. The merged result passed the full backend, client, WXML, syntax, diff, and project-memory checks. `origin/main` was then fast-forwarded through the integrated milestone and cleanup record at `b314785`.
@@ -28,6 +29,20 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+Executed on 2026-08-07 for template/node/field Task 3 template persistence and protected routes:
+
+| Command or boundary | Result |
+|---|---|
+| Service TDD RED: `node --test cloudfunctions/businessApi/test/template-service.test.js` | Failed as expected with `MODULE_NOT_FOUND` because `../lib/template-service` did not yet exist. |
+| Repository TDD RED: `node --test cloudfunctions/businessApi/test/cloud-template-repository.test.js` | Failed as expected with `MODULE_NOT_FOUND` because `../lib/cloud-template-repository` did not yet exist. |
+| Route TDD RED: `node --test cloudfunctions/businessApi/test/account-routes.test.js` | Failed as expected: 2 failures because default template routes were not wired and template errors returned `UNKNOWN_ACTION`. |
+| Review-regression RED: focused Task 3 suites | Failed as expected: 3 failures exposed the 100-document query window, missing transaction-node cap, and unsanitized unknown error response. |
+| Transaction-boundary RED: focused service/repository suites | Failed as expected: 2 failures exposed the 49-to-49 replacement's 101-operation cost. |
+| Final focused Task 3 suites | Passed: 41 tests, 0 failures. |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 156 tests, 0 failures; npm emitted the two pre-existing malformed user-config warnings. |
+| `node tools/test-wxml-structure.mjs` | Passed: 1 test, 0 failures. |
+| Read-only formal review and fix re-review | Passed; no Critical or Important findings remain. |
 
 Executed on 2026-08-07 for template/node/field Task 2 fix round 1 safe regular-expression policy:
 
@@ -237,7 +252,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Execute Task 2 from `docs/superpowers/plans/2026-08-07-template-node-fields.md`: implement template/node/field validation and policy services behind the protected-route seam.
+1. Execute Task 4 from `docs/superpowers/plans/2026-08-07-template-node-fields.md`: build the super-administrator template list and definition editors against the protected Task 3 routes.
 2. Continue the remaining template-management, snapshot, rejection, freeze, and evidence-retention tasks in plan order from the isolated `codex/` worktree.
 3. Continue SLA/calendar, hourly reminder, and Enterprise WeChat adapter phases.
 4. Replace the administrator reset-password editable modal with masked inputs, then complete the remaining second-identity binding/unbinding acceptance.

@@ -39,7 +39,7 @@ test('deployed getSession wiring returns an unauthenticated session without auto
   assert.equal(defaultFake.documents('users').length, 0)
 })
 
-function createRouteHarness({ user, credential, protectedRoutes, contextOpenid = 'wx-context' } = {}) {
+function createRouteHarness({ user, credential, protectedRoutes, templateService, contextOpenid = 'wx-context' } = {}) {
   const calls = []
   const errors = []
   const repository = {
@@ -82,6 +82,7 @@ function createRouteHarness({ user, credential, protectedRoutes, contextOpenid =
     legacyRoutes: {
       dashboard: (openid, payload) => method('dashboard')({ openid, payload })
     },
+    templateService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
     clock: () => Date.parse('2026-08-06T00:00:00.000Z'),
@@ -165,6 +166,89 @@ test('protected domain routes require an authenticated actor', async () => {
   assert.equal(result.ok, false)
   assert.equal(result.code, 'UNAUTHORIZED')
   assert.equal(called, false)
+})
+
+test('default template routes pass trusted actors and exact payload contracts to the service', async () => {
+  const serviceCalls = []
+  const templateMethod = name => async input => {
+    serviceCalls.push([name, input])
+    return { name }
+  }
+  const templateService = {
+    listTemplates: templateMethod('listTemplates'),
+    getTemplate: templateMethod('getTemplate'),
+    createTemplate: templateMethod('createTemplate'),
+    updateTemplate: templateMethod('updateTemplate'),
+    changeTemplateStatus: templateMethod('changeTemplateStatus'),
+    deleteTemplate: templateMethod('deleteTemplate'),
+    listEnabledTemplates: templateMethod('listEnabledTemplates')
+  }
+  const harness = createRouteHarness({ templateService })
+  const definition = { name: '模板', nodes: [] }
+
+  for (const [action, payload] of [
+    ['listTemplates', { status: 'draft' }],
+    ['getTemplate', { templateId: 't1' }],
+    ['createTemplate', definition],
+    ['updateTemplate', { templateId: 't1', expectedVersion: 2, definition }],
+    ['changeTemplateStatus', { templateId: 't1', expectedVersion: 3, status: 'enabled' }],
+    ['deleteTemplate', { templateId: 't1', expectedVersion: 4 }],
+    ['listEnabledTemplates', { ignored: true }]
+  ]) {
+    const result = await harness.api.main({ action, payload })
+    assert.equal(result.ok, true)
+  }
+
+  const actor = { _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound' }
+  assert.deepEqual(serviceCalls, [
+    ['listTemplates', { actor, query: { status: 'draft' } }],
+    ['getTemplate', { actor, templateId: 't1' }],
+    ['createTemplate', { actor, input: definition }],
+    ['updateTemplate', { actor, templateId: 't1', expectedVersion: 2, input: definition }],
+    ['changeTemplateStatus', { actor, templateId: 't1', expectedVersion: 3, status: 'enabled' }],
+    ['deleteTemplate', { actor, templateId: 't1', expectedVersion: 4 }],
+    ['listEnabledTemplates', { actor }]
+  ])
+})
+
+test('template application errors retain safe codes without logging payload values', async () => {
+  for (const code of [
+    'TEMPLATE_NOT_EDITABLE', 'TEMPLATE_NOT_ENABLED', 'TEMPLATE_INVALID',
+    'ASSIGNEE_INACTIVE', 'INVALID_FIELD_VALUE'
+  ]) {
+    const harness = createRouteHarness({
+      templateService: {
+        async createTemplate() {
+          const error = new Error('secret-template-payload')
+          error.code = code
+          throw error
+        }
+      }
+    })
+    const result = await harness.api.main({
+      action: 'createTemplate', payload: { name: 'secret-template-name' }
+    })
+    assert.equal(result.code, code)
+    const logged = JSON.stringify(harness.errors)
+    assert.match(logged, new RegExp(code))
+    assert.doesNotMatch(logged, /secret-template-payload|secret-template-name/)
+  }
+})
+
+test('unknown template failures return a generic response without database details', async () => {
+  const harness = createRouteHarness({
+    templateService: {
+      async listTemplates() {
+        const error = new Error('database permission denied for templates')
+        error.code = 'DATABASE_PERMISSION_DENIED'
+        throw error
+      }
+    }
+  })
+  const result = await harness.api.main({ action: 'listTemplates', payload: {} })
+
+  assert.deepEqual(result, { ok: false, code: 'INTERNAL_ERROR', message: 'Service error' })
+  assert.doesNotMatch(JSON.stringify(harness.errors), /permission denied|DATABASE_PERMISSION_DENIED/)
 })
 
 test('protected routes fail closed for missing, disabled, locked, and password-change-required account state', async t => {
