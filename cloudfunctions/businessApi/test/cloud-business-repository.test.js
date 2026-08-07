@@ -352,3 +352,91 @@ test('business detail reads hide creating reservations and deny non-members in b
     )
   }
 })
+
+test('present malformed account membership fields never inherit legacy OpenID access', async () => {
+  const seed = seedDefinition({
+    extra: {
+      business_lines: [
+        {
+          _id: 'null-member', status: 'active', memberUserIds: null,
+          memberIds: ['wx-user-1'], updatedAt: 3
+        },
+        {
+          _id: 'object-manager', status: 'active', managerUserIds: { user: 'user-1' },
+          managerIds: ['wx-user-1'], updatedAt: 2
+        },
+        {
+          _id: 'null-manager-account-member', status: 'active', managerUserIds: null,
+          memberUserIds: ['user-1'], managerIds: ['wx-user-1'], updatedAt: 1
+        }
+      ]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+  const actor = { _id: 'user-1', openid: 'wx-user-1', status: 'active' }
+
+  const listed = await repository.listBusinessLines({ actor, query: { page: 1, pageSize: 20 } })
+  assert.deepEqual(listed.items.map(line => line._id), ['null-manager-account-member'])
+
+  for (const lineId of ['null-member', 'object-manager']) {
+    await assert.rejects(
+      repository.getBusinessLine({ actor, lineId }),
+      error => error.code === 'FORBIDDEN'
+    )
+  }
+
+  const accountMember = await repository.getBusinessLine({
+    actor,
+    lineId: 'null-manager-account-member'
+  })
+  assert.equal(accountMember.canManage, false)
+})
+
+test('valid account arrays take precedence over differing legacy arrays while pure legacy remains compatible', async () => {
+  const seed = seedDefinition({
+    extra: {
+      business_lines: [
+        {
+          _id: 'new-manager-only', status: 'active', managerUserIds: ['user-1'],
+          memberUserIds: [], managerIds: ['wx-other'], memberIds: ['wx-other'], updatedAt: 4
+        },
+        {
+          _id: 'hybrid-account-member', status: 'active', managerUserIds: ['user-2'],
+          memberUserIds: ['user-1'], managerIds: ['wx-user-1'], memberIds: ['wx-other'], updatedAt: 3
+        },
+        {
+          _id: 'hybrid-legacy-only', status: 'active', managerUserIds: ['user-2'],
+          memberUserIds: ['user-2'], managerIds: ['wx-user-1'], memberIds: ['wx-user-1'], updatedAt: 2
+        },
+        {
+          _id: 'legacy-manager-only', status: 'active', managerIds: ['wx-user-1'],
+          memberIds: [], updatedAt: 1
+        }
+      ]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+  const actor = { _id: 'user-1', openid: 'wx-user-1', status: 'active' }
+
+  const listed = await repository.listBusinessLines({ actor, query: { page: 1, pageSize: 20 } })
+  assert.deepEqual(listed.items.map(line => line._id), [
+    'new-manager-only', 'hybrid-account-member', 'legacy-manager-only'
+  ])
+
+  assert.equal((await repository.getBusinessLine({
+    actor,
+    lineId: 'new-manager-only'
+  })).canManage, true)
+  assert.equal((await repository.getBusinessLine({
+    actor,
+    lineId: 'hybrid-account-member'
+  })).canManage, false)
+  assert.equal((await repository.getBusinessLine({
+    actor,
+    lineId: 'legacy-manager-only'
+  })).canManage, true)
+  await assert.rejects(
+    repository.getBusinessLine({ actor, lineId: 'hybrid-legacy-only' }),
+    error => error.code === 'FORBIDDEN'
+  )
+})

@@ -136,16 +136,23 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     }
   }
 
+  function membershipArray(value) {
+    return Array.isArray(value) ? value : []
+  }
+
   function isNewLineMember(line, actorId) {
-    return [...(line.managerUserIds || []), ...(line.memberUserIds || [])].includes(actorId)
+    return [...membershipArray(line.managerUserIds), ...membershipArray(line.memberUserIds)]
+      .includes(actorId)
   }
 
   function isLegacyLineMember(line, openid) {
-    return Boolean(openid) && [...(line.managerIds || []), ...(line.memberIds || [])].includes(openid)
+    return Boolean(openid) && [...membershipArray(line.managerIds), ...membershipArray(line.memberIds)]
+      .includes(openid)
   }
 
   function usesAccountMembership(line) {
-    return Array.isArray(line.managerUserIds) || Array.isArray(line.memberUserIds)
+    return Object.prototype.hasOwnProperty.call(line, 'managerUserIds') ||
+      Object.prototype.hasOwnProperty.call(line, 'memberUserIds')
   }
 
   function assertLineMember(line, actor) {
@@ -166,15 +173,28 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
   }
 
   async function listBusinessLines({ actor, query = {} }) {
-    const accountLines = await readAll(() => db.collection(COLLECTIONS.lines)
+    const accountMemberLines = await readAll(() => db.collection(COLLECTIONS.lines)
       .where({ memberUserIds: actor._id })
       .orderBy('updatedAt', 'desc'))
-    const legacyLines = actor.openid
+    const accountManagerLines = await readAll(() => db.collection(COLLECTIONS.lines)
+      .where({ managerUserIds: actor._id })
+      .orderBy('updatedAt', 'desc'))
+    const legacyMemberLines = actor.openid
       ? await readAll(() => db.collection(COLLECTIONS.lines)
         .where({ memberIds: actor.openid })
         .orderBy('updatedAt', 'desc'))
       : []
-    const byId = new Map([...accountLines, ...legacyLines].map(line => [line._id, line]))
+    const legacyManagerLines = actor.openid
+      ? await readAll(() => db.collection(COLLECTIONS.lines)
+        .where({ managerIds: actor.openid })
+        .orderBy('updatedAt', 'desc'))
+      : []
+    const byId = new Map([
+      ...accountMemberLines,
+      ...accountManagerLines,
+      ...legacyMemberLines,
+      ...legacyManagerLines
+    ].map(line => [line._id, line]))
     const keyword = String(query.keyword || '').trim().toLowerCase()
     const start = query.startDate ? new Date(`${query.startDate}T00:00:00+08:00`) : null
     const end = query.endDate ? new Date(`${query.endDate}T23:59:59+08:00`) : null
@@ -213,13 +233,13 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
       .orderBy('sequence', 'asc'))).sort(compareNodes)
     const accountSchema = usesAccountMembership(line)
     const canManage = accountSchema
-      ? (line.managerUserIds || []).includes(actor._id)
-      : Boolean(actor.openid) && (line.managerIds || []).includes(actor.openid)
+      ? membershipArray(line.managerUserIds).includes(actor._id)
+      : Boolean(actor.openid) && membershipArray(line.managerIds).includes(actor.openid)
     const projectedNodes = nodes.map(node => ({
       ...node,
       canFeedback: canManage || (accountSchema
-        ? (node.assigneeUserIds || []).includes(actor._id)
-        : Boolean(actor.openid) && (node.assigneeIds || []).includes(actor.openid)),
+        ? membershipArray(node.assigneeUserIds).includes(actor._id)
+        : Boolean(actor.openid) && membershipArray(node.assigneeIds).includes(actor.openid)),
       assigneeNamesText: (node.assigneeNames || []).join('、')
     }))
     const canEditNodes = !accountSchema && canManage && Number(line.progress || 0) === 0 &&
