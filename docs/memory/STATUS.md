@@ -4,6 +4,7 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
+- The obsolete `account-admin` linked worktree is fully cleaned up: its accidental deployment-manual edit was explicitly discarded, Git worktree registration and contents were removed, the merged local `codex/account-admin` branch was deleted through the non-force path, and the final empty `.worktrees/account-admin` directory was removed after WeChat DevTools released it.
 - Local `main` was fast-forwarded from `22a78f3` to the accepted account-administration head `f39c89e`. The merged result passed the full backend, client, WXML, syntax, diff, and project-memory checks. It remains local and has not been pushed to `origin/main`.
 - The safe Mini Program super-administrator recovery entry is implemented at `8e62b98` and `f38f26d` and manually accepted in WeChat DevTools. The operator rotated the one-time recovery state through the approved offline workflow, completed recovery and forced permanent-password change, entered the dashboard, and confirmed redacted guard, credential, binding, recovery-consumption, and audit outcomes. No secret or identity value was recorded.
 - Persistent-logout manual acceptance is complete for the corrected flow: explicit logout remained on the password form, recompilation preserved the logged-out state, successful forced password completion cleared the manual-login preference, and the next recompilation restored the bound session automatically.
@@ -169,7 +170,6 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Blockers
 
-- The accidental linked-worktree deployment-manual edit was explicitly discarded, Git removed the worktree registration and its contents, and the fully merged local `codex/account-admin` branch was deleted through the non-force merged-branch path. An empty `.worktrees/account-admin` directory remains because WeChat DevTools currently holds it open; close that project before deleting the empty directory.
 - `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
 - Task 5 simulator acceptance in WeChat DevTools is unverified.
 - Task 6 WeChat DevTools compilation, navigation, rendering, and ordinary-user manual-route smoke acceptance are unverified.
@@ -177,7 +177,6 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Close the obsolete `account-admin` project in WeChat DevTools, then delete the empty `.worktrees/account-admin` directory.
-2. Push local `main` to `origin/main` when remote publication is approved.
-3. Run the remaining Task 5 and Task 6 WeChat DevTools page/navigation smoke acceptance if it is required before release.
-4. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
+1. Push local `main` to `origin/main` when remote publication is approved.
+2. Run the remaining Task 5 and Task 6 WeChat DevTools page/navigation smoke acceptance if it is required before release.
+3. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
