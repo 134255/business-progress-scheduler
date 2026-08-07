@@ -24,6 +24,8 @@ const {
   createCloudTemplateRepository
 } = require('./lib/cloud-template-repository')
 const { createCloudBusinessRepository } = require('./lib/cloud-business-repository')
+const { createEvidenceService } = require('./lib/evidence-service')
+const { createCloudEvidenceRepository } = require('./lib/cloud-evidence-repository')
 const { hashPassword } = require('./lib/password')
 
 const COLLECTIONS = {
@@ -80,6 +82,7 @@ const LOGGABLE_ERROR_CODES = new Set([
   'CREDENTIAL_CHANGED',
   'DUPLICATE_CODE',
   'EVIDENCE_EXPIRED',
+  'EVIDENCE_NOT_ATTACHABLE',
   'FEEDBACK_TOTAL_TOO_LARGE',
   'FILE_TOO_LARGE',
   'FORBIDDEN',
@@ -111,6 +114,7 @@ const LOGGABLE_ERROR_CODES = new Set([
   'TEMPLATE_NOT_ENABLED',
   'UNAUTHENTICATED',
   'UNAUTHORIZED',
+  'UNSUPPORTED_FILE_TYPE',
   'UNKNOWN_ACTION',
   'USERNAME_TAKEN',
   'VALIDATION_ERROR',
@@ -177,12 +181,26 @@ function createBusinessRoutes(businessService) {
   }
 }
 
+function createEvidenceRoutes(evidenceService) {
+  return {
+    registerEvidenceUpload: ({ actor, payload }) => evidenceService.registerUpload({
+      actor,
+      input: payload
+    }),
+    getEvidenceAccess: ({ actor, payload }) => evidenceService.getAccessGrant({
+      actor,
+      evidenceId: payload.evidenceId
+    })
+  }
+}
+
 function createBusinessApi({
   repository,
   authService,
   adminUserService,
   templateService,
   businessService,
+  evidenceService,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
   getContext,
@@ -193,6 +211,7 @@ function createBusinessApi({
     Object.create(null),
     templateService ? createTemplateRoutes(templateService) : null,
     businessService ? createBusinessRoutes(businessService) : null,
+    evidenceService ? createEvidenceRoutes(evidenceService) : null,
     protectedRoutes
   )
 
@@ -541,6 +560,7 @@ function createDefaultBusinessApi() {
   const repository = createCloudAccountRepository({ db, clock: () => new Date() })
   const templateRepository = createCloudTemplateRepository({ db })
   const businessRepository = createCloudBusinessRepository({ db, clock: () => new Date() })
+  const evidenceRepository = createCloudEvidenceRepository({ db, cloud, clock: () => new Date() })
   const clock = Date.now
   const authService = createAuthService({
     repository,
@@ -556,12 +576,14 @@ function createDefaultBusinessApi() {
     keyFactory: prefix => `${prefix}_${crypto.randomBytes(16).toString('hex')}`
   })
   const businessService = createBusinessService({ repository: businessRepository })
+  const evidenceService = createEvidenceService({ repository: evidenceRepository })
   return createBusinessApi({
     repository,
     authService,
     adminUserService,
     templateService,
     businessService,
+    evidenceService,
     getContext: () => cloud.getWXContext(),
     clock,
     legacyRoutes: createDefaultLegacyRoutes()

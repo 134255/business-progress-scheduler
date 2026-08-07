@@ -14,6 +14,8 @@ Module._load = function loadWithCloudStub(request, parent, isMain) {
       DYNAMIC_CURRENT_ENV: 'test',
       init() {},
       database: () => defaultFake.db,
+      downloadFile: async () => ({ fileContent: Buffer.from('%PDF') }),
+      getTempFileURL: async () => ({ fileList: [] }),
       getWXContext: () => ({ OPENID: 'wx-default', REQUESTID: 'default-request' })
     }
   }
@@ -46,6 +48,7 @@ function createRouteHarness({
   protectedRoutes,
   templateService,
   businessService,
+  evidenceService,
   legacyRoutes,
   contextOpenid = 'wx-context'
 } = {}) {
@@ -93,6 +96,7 @@ function createRouteHarness({
     },
     templateService,
     businessService,
+    evidenceService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
     clock: () => Date.parse('2026-08-06T00:00:00.000Z'),
@@ -306,6 +310,83 @@ test('business metadata update route delegates a trusted actor and exact optimis
     },
     input: payload
   }])
+})
+
+test('default evidence routes delegate trusted actors and exact registration/access contracts', async () => {
+  const calls = []
+  const evidenceService = {
+    async registerUpload(input) {
+      calls.push(['registerUpload', input])
+      return {
+        evidenceId: 'evidence-1',
+        metadata: { fileName: 'report.pdf', category: 'pdf', size: 100 }
+      }
+    },
+    async getAccessGrant(input) {
+      calls.push(['getAccessGrant', input])
+      return {
+        url: 'https://temporary.example/report.pdf', fileName: 'report.pdf', category: 'pdf',
+        expiresAt: new Date('2026-08-07T00:05:00.000Z')
+      }
+    }
+  }
+  const harness = createRouteHarness({ evidenceService })
+  const upload = {
+    businessLineId: 'business-1', nodeId: 'node-1',
+    fileId: 'cloud://env/evidence/report.pdf', fileName: 'report.pdf', declaredSize: 100,
+    actor: { _id: 'forged' }, url: 'https://attacker.example/file'
+  }
+  const registered = await harness.api.main({ action: 'registerEvidenceUpload', payload: upload })
+  const accessed = await harness.api.main({
+    action: 'getEvidenceAccess', payload: { evidenceId: 'evidence-1', actorId: 'forged' }
+  })
+
+  assert.equal(registered.ok, true)
+  assert.equal(accessed.ok, true)
+  const actor = {
+    _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+  }
+  assert.deepEqual(calls, [
+    ['registerUpload', { actor, input: upload }],
+    ['getAccessGrant', { actor, evidenceId: 'evidence-1' }]
+  ])
+})
+
+test('evidence application errors are safe while unmarked storage errors remain generic', async () => {
+  for (const code of [
+    'UNSUPPORTED_FILE_TYPE', 'FILE_TOO_LARGE', 'EVIDENCE_EXPIRED', 'EVIDENCE_NOT_ATTACHABLE'
+  ]) {
+    const harness = createRouteHarness({
+      evidenceService: {
+        async registerUpload() {
+          const error = new Error('secret evidence detail')
+          error.code = code
+          error[APPLICATION_ERROR_MARKER] = true
+          throw error
+        }
+      }
+    })
+    const result = await harness.api.main({
+      action: 'registerEvidenceUpload', payload: { fileName: 'secret-name.pdf' }
+    })
+    assert.equal(result.code, code)
+    assert.doesNotMatch(JSON.stringify(harness.errors), /secret evidence detail|secret-name/)
+  }
+
+  const failed = createRouteHarness({
+    evidenceService: {
+      async getAccessGrant() {
+        const error = new Error('storage bucket internals')
+        error.code = 'EVIDENCE_EXPIRED'
+        throw error
+      }
+    }
+  })
+  const result = await failed.api.main({
+    action: 'getEvidenceAccess', payload: { evidenceId: 'evidence-1' }
+  })
+  assert.deepEqual(result, { ok: false, code: 'INTERNAL_ERROR', message: 'Service error' })
+  assert.doesNotMatch(JSON.stringify(failed.errors), /storage bucket internals/)
 })
 
 test('the deployed legacy route map rejects caller-authored business codes and nodes', async () => {
