@@ -4,11 +4,11 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
-- The safe Mini Program super-administrator recovery entry is implemented at `8e62b98` and `f38f26d`. The initialized login form exposes the guarded entry, the account service forwards only the exact silent recovery payload, and the dedicated public page validates synthetic operator input, calls recovery at most once, clears page-bound secrets, requires a first-login challenge, and falls back to ordinary login without retrying a consumed recovery. No backend, database, dependency, environment, or transaction invariant changed.
-- Persistent-logout manual acceptance confirmed that explicit logout remains on the password form and that recompiling the Mini Program preserves the logged-out state. Password-login completion is blocked because the structurally valid super-administrator credential does not match the operator-held permanent password; no secret or identity value was recorded. The existing backend recovery route is covered by automated tests, and the approved safe client entry is specified in `docs/superpowers/specs/2026-08-07-super-admin-recovery-page-design.md`.
+- The safe Mini Program super-administrator recovery entry is implemented at `8e62b98` and `f38f26d` and manually accepted in WeChat DevTools. The operator rotated the one-time recovery state through the approved offline workflow, completed recovery and forced permanent-password change, entered the dashboard, and confirmed redacted guard, credential, binding, recovery-consumption, and audit outcomes. No secret or identity value was recorded.
+- Persistent-logout manual acceptance is complete for the corrected flow: explicit logout remained on the password form, recompilation preserved the logged-out state, successful forced password completion cleared the manual-login preference, and the next recompilation restored the bound session automatically.
 - Persistent explicit logout is implemented at `c4c5fea` and `b0e9cbf`. A focused utility persists only a boolean manual-login requirement, `app.js` exposes it through the authentication owner, profile logout sets it before clearing memory, the login page still checks initialization but suppresses binding-based restoration while it is active, and successful password authentication clears it. No backend or database interface changed.
 - Manual CloudBase acceptance completed the guarded first-super-administrator initialization, forced first-login password change, dashboard entry, and redacted post-initialization checks. The singleton guard reports one active super administrator with consumed recovery state; the user, credential, binding, and initialization/password-change audit outcomes were confirmed without recording sensitive values.
-- Manual acceptance exposed the original persistent-logout defect: profile logout cleared only in-memory state, after which the login page called `getSession` and immediately restored the permanently bound account. The approved correction is now implemented; simulator restart re-acceptance remains pending.
+- Manual acceptance originally exposed a persistent-logout defect in which profile logout cleared only in-memory state and `getSession` immediately restored the permanently bound account. The corrected boolean-preference flow and its restart behavior have now passed manual re-acceptance.
 - Feature branch `codex/account-admin` implements the locally verifiable account-administration milestone through Task 7, including reviewed UI fixes at `cdf2977` and the reviewed deployment/runbook closeout at `7feac41`.
 - The guarded first-super-administrator Mini Program flow is implemented through `a1db212`, `62b8cdf`, and `9b8b034`: the account service exposes initialization, the login page gates the entry, and the dedicated page rechecks server state, submits credentials from the trusted Mini Program runtime, clears sensitive fields, and hands successful initialization to forced password change.
 - CloudBase fixed-document reads now normalize only explicit missing-document failures to `null` through `0f16140` and the reviewed boundary correction at `5fc1957`; collection, permission, network, timeout, and other database failures still propagate. The test database now reproduces the real SDK behavior instead of returning a synthetic null record.
@@ -38,7 +38,14 @@ Executed on 2026-08-07 for the super-administrator recovery page at `8e62b98` an
 | `git diff --check` and project-memory validation | Passed; line-ending warnings only. |
 | Scope inspection | Recovery commits changed only the 10 planned Mini Program and test files; the pre-existing deployment-manual edit remains unstaged and untouched. |
 
-CloudBase recovery-state rotation, WeChat DevTools recovery, forced permanent-password change, and redacted post-recovery checks remain unverified manual acceptance items.
+Manual recovery acceptance on 2026-08-07:
+
+| Check | Result |
+|---|---|
+| Offline recovery rotation | Operator-confirmed that a new recovery value was stored safely, both digest locations were updated in order, the consumed marker alone was reset, and the local helper/clipboard were cleared. No value was recorded. |
+| Mini Program recovery and forced password change | Operator-confirmed that the guarded recovery form opened, handed off to forced password change, and entered the dashboard. |
+| Redacted CloudBase state | Operator-confirmed active-super-admin count one, consumed recovery state, unlocked permanent credential, restored user/binding state, and both recovery and first-login audit outcomes. |
+| Persistent-logout restart completion | Operator-confirmed that recompilation after successful password completion automatically restored the bound session and dashboard. |
 
 Executed on 2026-08-07 for persistent logout at `c4c5fea` and `b0e9cbf`:
 
@@ -62,7 +69,8 @@ Manual operator acceptance on 2026-08-07:
 | Updated `businessApi` deployment and environment configuration | Operator-confirmed successful; the required environment variable remained effective. |
 | Guarded initialization, forced password change, and dashboard entry | Operator-confirmed successful in WeChat DevTools. |
 | Redacted guard, user, credential, binding, and audit outcomes | Operator-confirmed correct without recording sensitive values. |
-| Explicit profile logout | Failed acceptance: the login page immediately restored the bound account. Root cause and approved correction are recorded in the persistent-logout design. |
+| Historical pre-fix explicit profile logout | Failed as expected before the correction: the login page immediately restored the bound account. Root cause is recorded in the persistent-logout design. |
+| Corrected explicit logout and restart sequence | Operator-confirmed passed: logout and recompilation stayed on login; successful password completion then restored ordinary automatic login on the next recompilation. |
 
 Executed on 2026-08-07 for the CloudBase missing-document fix at `0f16140` and reviewed boundary correction at `5fc1957`:
 
@@ -151,8 +159,6 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Blockers
 
-- The only available super administrator cannot complete password authentication. Its credential structure is valid but password verification fails; do not retry or edit credential records. The recovery page is locally verified, but a newly rotated one-time recovery state and manual WeChat DevTools recovery are still required before acceptance can continue.
-- Persistent logout is locally verified but still requires WeChat DevTools restart acceptance: logout, remain on login, restart and remain on login, password login, then restart and confirm ordinary automatic restoration.
 - `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
 - Task 5 simulator acceptance in WeChat DevTools is unverified.
 - Task 6 WeChat DevTools compilation, navigation, rendering, and ordinary-user manual-route smoke acceptance are unverified.
@@ -160,8 +166,6 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Rotate a new one-time recovery code through the approved offline workflow, then recompile the Mini Program and use the recovery page to establish a new temporary password.
-2. Complete forced permanent-password change and verify only redacted guard, credential, binding, recovery-consumption, and audit outcomes.
-3. Resume persistent-logout acceptance by verifying password login and automatic restoration after restart; record only redacted outcomes.
-4. After account-administration acceptance passes, complete the branch integration decision.
-5. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
+1. Complete the `codex/account-admin` branch integration decision while preserving the pre-existing deployment-manual edit.
+2. Run the remaining Task 5 and Task 6 WeChat DevTools page/navigation smoke acceptance if it is required before release.
+3. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
