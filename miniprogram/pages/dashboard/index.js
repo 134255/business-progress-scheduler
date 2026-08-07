@@ -4,27 +4,39 @@ Page({
   data: {
     loading: true,
     profile: null,
-    stats: { active: 0, pendingMine: 0, completed: 0 },
+    stats: { active: 0, pendingMine: null, pendingMineAvailable: false, completed: 0 },
     recent: []
   },
 
   onShow() {
-    const currentUser = getApp().globalData.currentUser
-    if (!currentUser) {
-      wx.reLaunch({ url: '/pages/login/index' })
-      return
-    }
+    const currentUser = this.requireActiveUser()
+    if (!currentUser) return
     this.setData({ profile: currentUser })
-    return this.loadDashboard()
+    return this.loadDashboard(currentUser._id)
   },
 
-  async loadDashboard() {
+  requireActiveUser(expectedUserId) {
+    const currentUser = getApp().globalData.currentUser
+    if (currentUser && currentUser.status === 'active' &&
+        (!expectedUserId || currentUser._id === expectedUserId)) {
+      this.authRedirected = false
+      return currentUser
+    }
+    if (!this.authRedirected) {
+      this.authRedirected = true
+      wx.reLaunch({ url: '/pages/login/index' })
+    }
+    return null
+  },
+
+  async loadDashboard(expectedUserId) {
     this.setData({ loading: true })
     try {
       const data = await businessService.dashboard()
+      if (!this.requireActiveUser(expectedUserId)) return
       this.setData({ stats: data.stats, recent: data.recent || [] })
     } finally {
-      this.setData({ loading: false })
+      if (this.requireActiveUser(expectedUserId)) this.setData({ loading: false })
     }
   },
 

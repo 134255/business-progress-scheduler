@@ -261,7 +261,7 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
       const line = await readDocument(transaction, COLLECTIONS.lines, lineId)
       if (!line || line.status === 'creating') throw createError('NOT_FOUND')
       if (FROZEN_BUSINESS_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
-      if (!isLineManager(line, actor)) throw createError('FORBIDDEN')
+      if (!isLineManager(line, currentActor)) throw createError('FORBIDDEN')
       if (line.version !== expectedVersion) throw createError('VERSION_CONFLICT')
       if (!Number.isSafeInteger(line.version) || line.version < 1 || line.version === Number.MAX_SAFE_INTEGER) {
         throw createError('VERSION_CONFLICT')

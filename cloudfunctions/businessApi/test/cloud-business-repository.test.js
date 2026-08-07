@@ -544,3 +544,43 @@ test('metadata update denies non-managers, stale versions, inactive actors, and 
     await assert.rejects(promise, error => error.code === 'NOT_FOUND')
   })
 })
+
+test('legacy metadata update authorizes the current transactional binding, not the stale route actor', async () => {
+  function legacySeed() {
+    return seedDefinition({
+      users: [
+        { _id: 'user-1', status: 'active', openid: 'wx-current-binding' },
+        { _id: 'user-2', status: 'active' },
+        { _id: 'user-3', status: 'active' }
+      ],
+      extra: {
+        business_lines: [{
+          _id: 'legacy-business', name: '旧名称', status: 'active', version: 4,
+          managerIds: ['wx-current-binding'], memberIds: ['wx-current-binding']
+        }]
+      }
+    })
+  }
+  const metadata = { name: '新名称', description: '', plannedStartDate: '', plannedEndDate: '' }
+
+  const bound = createRepositoryHarness(legacySeed())
+  const updated = await bound.repository.updateBusinessMetadata({
+    actor: { _id: 'user-1', openid: 'wx-current-binding' },
+    lineId: 'legacy-business', expectedVersion: 4, metadata
+  })
+  assert.equal(updated.version, 5)
+
+  const unbound = createRepositoryHarness(legacySeed())
+  unbound.fake.beforeNextTransaction(() => {
+    unbound.fake.replace('users', 'user-1', { status: 'active' })
+  })
+  await assert.rejects(
+    unbound.repository.updateBusinessMetadata({
+      actor: { _id: 'user-1', openid: 'wx-current-binding' },
+      lineId: 'legacy-business', expectedVersion: 4, metadata
+    }),
+    error => error.code === 'FORBIDDEN'
+  )
+  assert.equal(unbound.fake.documents('business_lines')[0].version, 4)
+  assert.equal(unbound.fake.documents('audit_logs').length, 0)
+})

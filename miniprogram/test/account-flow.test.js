@@ -1070,7 +1070,7 @@ test('dashboard redirects before loading business data when no current user exis
 })
 
 test('dashboard uses the authenticated app user and no longer bootstraps a profile', async () => {
-  const user = { _id: 'user-1', displayName: '测试用户', role: 'member' }
+  const user = { _id: 'user-1', displayName: '测试用户', role: 'member', status: 'active' }
   let bootstrapCalls = 0
   let dashboardCalls = 0
   global.getApp = () => ({ globalData: { currentUser: user } })
@@ -1093,4 +1093,23 @@ test('dashboard uses the authenticated app user and no longer bootstraps a profi
   assert.equal(page.data.profile, user)
   assert.deepEqual(page.data.stats, { active: 2, pendingMine: 1, completed: 3 })
   assert.equal(page.data.loading, false)
+})
+
+test('dashboard discards a pending protected read after the authenticated account changes', async () => {
+  let resolveDashboard
+  const pending = new Promise(resolve => { resolveDashboard = resolve })
+  const app = { globalData: { currentUser: { _id: 'user-before', role: 'user', status: 'active' } } }
+  const launches = []
+  global.getApp = () => app
+  global.wx = { reLaunch: options => launches.push(options) }
+  const page = loadDashboard({ dashboard: () => pending })
+
+  const loading = page.onShow()
+  app.globalData.currentUser = null
+  resolveDashboard({ stats: { active: 99 }, recent: [{ _id: 'stale-line' }] })
+  await loading
+
+  assert.deepEqual(page.data.stats, { active: 0, pendingMine: null, pendingMineAvailable: false, completed: 0 })
+  assert.deepEqual(page.data.recent, [])
+  assert.deepEqual(launches, [{ url: '/pages/login/index' }])
 })

@@ -69,6 +69,12 @@ function activeUser(id = 'user-1') {
   return { _id: id, role: 'user', status: 'active' }
 }
 
+function fakeUnavailableReasonMessage(reason) {
+  if (reason === 'ASSIGNEE_INACTIVE') return '模板负责人不可用，请联系管理员'
+  if (reason === 'TEMPLATE_LIMIT_EXCEEDED') return '模板节点或负责人过多，请联系管理员调整'
+  return '模板当前不可创建业务，请联系管理员'
+}
+
 test('business service creates only through the template route and builds dashboard from protected account-aware reads', async () => {
   const calls = []
   const cloud = {
@@ -106,9 +112,15 @@ test('business service creates only through the template route and builds dashbo
     ['updateBusinessMetadata', { businessLineId: 'line-new', expectedVersion: 1, name: '更新' }]
   ])
   assert.deepEqual(dashboard, {
-    stats: { active: 1, pendingMine: 0, completed: 1 },
+    stats: { active: 1, pendingMine: null, pendingMineAvailable: false, completed: 1 },
     recent: [{ _id: 'line-new', status: 'active' }, { _id: 'line-done', status: 'completed' }]
   })
+})
+
+test('dashboard presents an unavailable pending assignment count honestly', () => {
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/dashboard/index.wxml'), 'utf8')
+  assert.match(wxml, /pendingMineAvailable\s*\?\s*stats\.pendingMine\s*:\s*'—'/)
+  assert.match(wxml, /pendingMineAvailable[^}]+暂不可用/)
 })
 
 test('ordinary template list loads server availability and navigates with only an available template id', async () => {
@@ -122,23 +134,31 @@ test('ordinary template list loads server availability and navigates with only a
   }
   const page = loadPage('pages/template-list/index.js', {
     'services/templates.js': {
+      unavailableReasonMessage: fakeUnavailableReasonMessage,
       listEnabledTemplates: async () => ({
         items: [
           { _id: 'template/available', name: '交付流程', description: '标准交付', nodeCount: 3, available: true, unavailableReason: '' },
-          { _id: 'template-disabled-owner', name: '归档流程', description: '', nodeCount: 2, available: false, unavailableReason: '节点负责人已停用' }
+          { _id: 'template-disabled-owner', name: '归档流程', description: '', nodeCount: 2, available: false, unavailableReason: 'ASSIGNEE_INACTIVE' },
+          { _id: 'template-over-limit', name: '大型流程', description: '', nodeCount: 48, available: false, unavailableReason: 'TEMPLATE_LIMIT_EXCEEDED' }
         ]
       })
     }
   })
 
   await page.onShow()
-  page.selectTemplate({ currentTarget: { dataset: { id: 'template-disabled-owner', available: false, reason: '节点负责人已停用' } } })
+  page.selectTemplate({ currentTarget: { dataset: { id: 'template-disabled-owner', available: false } } })
+  page.selectTemplate({ currentTarget: { dataset: { id: 'template-over-limit', available: false } } })
   page.selectTemplate({ currentTarget: { dataset: { id: 'template/available', available: true } } })
 
   assert.equal(page.data.loading, false)
   assert.equal(page.data.errorMessage, '')
-  assert.equal(page.data.items.length, 2)
-  assert.equal(toasts[0].title, '节点负责人已停用')
+  assert.equal(page.data.items.length, 3)
+  assert.equal(page.data.items[1].unavailableMessage, '模板负责人不可用，请联系管理员')
+  assert.equal(page.data.items[2].unavailableMessage, '模板节点或负责人过多，请联系管理员调整')
+  assert.deepEqual(toasts.map(item => item.title), [
+    '模板负责人不可用，请联系管理员',
+    '模板节点或负责人过多，请联系管理员调整'
+  ])
   assert.deepEqual(navigations, [{ url: '/pages/business-edit/index?templateId=template%2Favailable' }])
 })
 
@@ -162,7 +182,7 @@ test('ordinary template list exposes loading, error, empty, and unavailable stat
   assert.match(wxml, /loading/)
   assert.match(wxml, /errorMessage/)
   assert.match(wxml, /!loading\s*&&\s*!errorMessage\s*&&\s*!items\.length/)
-  assert.match(wxml, /unavailableReason/)
+  assert.match(wxml, /unavailableMessage/)
 })
 
 test('create mode loads a server-backed preview and blocks unavailable or missing templates', async () => {
@@ -175,8 +195,9 @@ test('create mode loads a server-backed preview and blocks unavailable or missin
   }
   const page = loadPage('pages/business-edit/index.js', {
     'services/templates.js': {
+      unavailableReasonMessage: fakeUnavailableReasonMessage,
       listEnabledTemplates: async () => ({
-        items: [{ _id: 'template-1', name: '交付流程', description: '标准交付', nodeCount: 3, available: false, unavailableReason: '负责人不可用' }]
+        items: [{ _id: 'template-1', name: '交付流程', description: '标准交付', nodeCount: 3, available: false, unavailableReason: 'ASSIGNEE_INACTIVE' }]
       })
     },
     'services/business.js': { createBusinessFromTemplate: async input => calls.push(['create', input]) }
@@ -187,7 +208,8 @@ test('create mode loads a server-backed preview and blocks unavailable or missin
 
   assert.equal(page.data.templatePreview.name, '交付流程')
   assert.equal(page.data.templateAvailable, false)
-  assert.equal(page.data.errorMessage, '负责人不可用')
+  assert.equal(page.data.templatePreview.unavailableMessage, '模板负责人不可用，请联系管理员')
+  assert.equal(page.data.errorMessage, '模板负责人不可用，请联系管理员')
   assert.deepEqual(calls, [])
 })
 
@@ -209,6 +231,41 @@ test('create mode validates real planned dates before sending a request', async 
   await page.save()
   assert.deepEqual(calls, [])
   assert.match(page.data.errorMessage, /日期/)
+})
+
+test('template unavailability uses a safe fallback consistently in list and create preview', async () => {
+  const templatesService = freshRequire('services/templates.js')
+  const fallback = '模板当前不可创建业务，请联系管理员'
+  const item = {
+    _id: 'template-unknown', name: '未知限制模板', description: '', nodeCount: 1,
+    available: false, unavailableReason: 'UNKNOWN_REASON'
+  }
+  const toasts = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    showToast: options => toasts.push(options),
+    reLaunch: () => assert.fail('must stay authenticated')
+  }
+  const templateFake = {
+    listEnabledTemplates: async () => ({ items: [item] }),
+    unavailableReasonMessage: templatesService.unavailableReasonMessage
+  }
+  const listPage = loadPage('pages/template-list/index.js', { 'services/templates.js': templateFake })
+  await listPage.onShow()
+  listPage.selectTemplate({ currentTarget: { dataset: { id: item._id, available: false } } })
+
+  const createPage = loadPage('pages/business-edit/index.js', {
+    'services/templates.js': templateFake,
+    'services/business.js': {}
+  })
+  await createPage.onLoad({ templateId: item._id })
+
+  assert.equal(templatesService.unavailableReasonMessage('UNKNOWN_REASON'), fallback)
+  assert.equal(listPage.data.items[0].unavailableMessage, fallback)
+  assert.equal(toasts[0].title, fallback)
+  assert.equal(createPage.data.templatePreview.unavailableMessage, fallback)
+  assert.equal(createPage.data.errorMessage, fallback)
 })
 
 test('create mode uses one request key across retry, prevents rapid duplicates, and redirects by returned id', async () => {
@@ -330,6 +387,13 @@ test('edit mode surfaces frozen state and never sends frozen metadata', async ()
   assert.equal(page.data.frozen, true)
   assert.match(page.data.errorMessage, /冻结|完成/)
   assert.equal(updates, 0)
+})
+
+test('business edit registers every custom component used by its WXML', () => {
+  const config = JSON.parse(fs.readFileSync(path.join(miniProgramRoot, 'pages/business-edit/index.json'), 'utf8'))
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/business-edit/index.wxml'), 'utf8')
+  assert.match(wxml, /<status-pill\b/)
+  assert.equal(config.usingComponents && config.usingComponents['status-pill'], '/components/status-pill/index')
 })
 
 test('pending server reads fail closed when the authenticated account changes', async () => {

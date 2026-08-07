@@ -12,7 +12,6 @@
     wx:key="_id"
     data-id="{{item._id}}"
     data-available="{{item.available}}"
-    data-reason="{{item.unavailableReason}}"
     bindtap="selectTemplate"
   >
     <view class="row-between">
@@ -20,7 +19,7 @@
       <text class="node-count">{{item.nodeCount}} 个节点</text>
     </view>
     <text class="muted block">{{item.description || '暂无说明'}}</text>
-    <text wx:if="{{!item.available}}" class="unavailable-reason">{{item.unavailableReason || '模板当前不可创建业务'}}</text>
+    <text wx:if="{{!item.available}}" class="unavailable-reason">{{item.unavailableMessage}}</text>
     <text wx:else class="available-action">选择此模板 →</text>
   </view>
 </view>

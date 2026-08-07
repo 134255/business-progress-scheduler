@@ -104,10 +104,14 @@ Page({
       this.setData({ templatePreview: null, templateAvailable: false, errorMessage: '模板不可用或已停用，请重新选择' })
       return
     }
+    const templatePreview = {
+      ...preview,
+      unavailableMessage: preview.available ? '' : templates.unavailableReasonMessage(preview.unavailableReason)
+    }
     this.setData({
-      templatePreview: preview,
-      templateAvailable: Boolean(preview.available),
-      errorMessage: preview.available ? '' : (preview.unavailableReason || '模板当前不可创建业务')
+      templatePreview,
+      templateAvailable: Boolean(templatePreview.available),
+      errorMessage: templatePreview.available ? '' : templatePreview.unavailableMessage
     })
   },
 

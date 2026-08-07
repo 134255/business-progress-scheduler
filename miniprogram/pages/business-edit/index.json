@@ -1,4 +1,7 @@
 {
-  "navigationBarTitleText": "新建业务线"
+  "navigationBarTitleText": "新建业务线",
+  "usingComponents": {
+    "status-pill": "/components/status-pill/index"
+  }
 }
 

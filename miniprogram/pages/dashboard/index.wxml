@@ -13,7 +13,7 @@
 
   <view class="stats">
     <view class="stat card"><text class="stat-value">{{stats.active}}</text><text class="muted">进行中</text></view>
-    <view class="stat card"><text class="stat-value">{{stats.pendingMine}}</text><text class="muted">待我处理</text></view>
+    <view class="stat card"><text class="stat-value">{{stats.pendingMineAvailable ? stats.pendingMine : '—'}}</text><text class="muted">{{stats.pendingMineAvailable ? '待我处理' : '待我处理（暂不可用）'}}</text></view>
     <view class="stat card"><text class="stat-value">{{stats.completed}}</text><text class="muted">已完成</text></view>
   </view>
 

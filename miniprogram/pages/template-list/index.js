@@ -37,7 +37,11 @@ Page({
     try {
       const result = await templates.listEnabledTemplates()
       if (!this.requireActiveUser(expectedUserId)) return
-      this.setData({ items: Array.isArray(result.items) ? result.items : [] })
+      const items = (Array.isArray(result.items) ? result.items : []).map(item => ({
+        ...item,
+        unavailableMessage: item.available ? '' : templates.unavailableReasonMessage(item.unavailableReason)
+      }))
+      this.setData({ items })
     } catch (error) {
       if (!this.requireActiveUser(expectedUserId)) return
       this.setData({ items: [], errorMessage: messageFor(error) })
@@ -53,12 +57,13 @@ Page({
 
   selectTemplate(event) {
     if (!this.requireActiveUser()) return
-    const { id, available, reason } = event.currentTarget.dataset
-    if (!available) {
-      wx.showToast({ title: reason || '模板负责人不可用，请联系管理员', icon: 'none' })
+    const { id } = event.currentTarget.dataset
+    const item = this.data.items.find(candidate => candidate._id === id)
+    if (!item) return
+    if (!item.available) {
+      wx.showToast({ title: item.unavailableMessage, icon: 'none' })
       return
     }
-    if (!id) return
     wx.navigateTo({ url: `/pages/business-edit/index?templateId=${encodeURIComponent(id)}` })
   }
 })

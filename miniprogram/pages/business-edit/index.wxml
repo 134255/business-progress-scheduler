@@ -8,7 +8,7 @@
         <text class="node-count">{{templatePreview.nodeCount}} 个节点</text>
       </view>
       <text class="muted block">{{templatePreview.description || '暂无模板说明'}}</text>
-      <text wx:if="{{!templateAvailable}}" class="frozen-note">{{templatePreview.unavailableReason || '模板当前不可创建业务'}}</text>
+      <text wx:if="{{!templateAvailable}}" class="frozen-note">{{templatePreview.unavailableMessage}}</text>
     </view>
 
     <view wx:if="{{editMode}}" class="card immutable-summary">

@@ -14,7 +14,8 @@ async function dashboard() {
   return {
     stats: {
       active: items.filter(item => item.status === 'active').length,
-      pendingMine: 0,
+      pendingMine: null,
+      pendingMineAvailable: false,
       completed: items.filter(item => item.status === 'completed').length
     },
     recent: items.slice(0, 5)
