@@ -68,11 +68,12 @@ Page({
   async logout() {
     const result = await wx.showModal({
       title: '退出登录',
-      content: '退出后可使用其他账号登录，不会解除当前微信绑定。',
+      content: '退出后需重新输入账号密码。当前微信绑定不会解除；如需切换账号，请先由超级管理员解除微信绑定。',
       confirmText: '退出'
     })
     if (!result.confirm) return
     const app = getApp()
+    if (typeof app.requireManualLogin === 'function') app.requireManualLogin()
     if (typeof app.resetAuthState === 'function') app.resetAuthState()
     else {
       app.globalData.currentUser = null

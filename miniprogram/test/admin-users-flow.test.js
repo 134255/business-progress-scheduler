@@ -570,15 +570,19 @@ test('edit page keeps username immutable and updates only editable account field
   assert.deepEqual(navigations, [{ delta: 1 }])
 })
 
-test('profile uses the authenticated account and logout only resets in-memory auth state', () => {
+test('profile logout requires password login before resetting in-memory auth state', () => {
   const launches = []
-  let resetCalls = 0
+  const events = []
+  const modalCalls = []
   let bootstrapCalls = 0
   const user = { username: 'operator', displayName: '操作员', role: 'user', avatarUrl: '' }
   const app = {
     globalData: { currentUser: user, loginChallenge: 'stale' },
+    requireManualLogin() {
+      events.push('require-manual-login')
+    },
     resetAuthState() {
-      resetCalls += 1
+      events.push('reset-auth')
       this.globalData.currentUser = null
       this.globalData.loginChallenge = null
     }
@@ -586,7 +590,10 @@ test('profile uses the authenticated account and logout only resets in-memory au
   global.getApp = () => app
   global.wx = {
     reLaunch: options => launches.push(options),
-    showModal: async () => ({ confirm: true })
+    showModal: async options => {
+      modalCalls.push(options)
+      return { confirm: true }
+    }
   }
   const page = loadPage('pages/profile/index.js', 'services/business.js', {
     bootstrap: async () => { bootstrapCalls += 1 }
@@ -598,10 +605,36 @@ test('profile uses the authenticated account and logout only resets in-memory au
     assert.equal(bootstrapCalls, 0)
     assert.equal(page.data.username, 'operator')
     assert.equal(page.data.roleLabel, '普通用户')
-    assert.equal(resetCalls, 1)
+    assert.deepEqual(events, ['require-manual-login', 'reset-auth'])
     assert.equal(app.globalData.currentUser, null)
     assert.deepEqual(launches, [{ url: '/pages/login/index' }])
+    assert.match(modalCalls[0].content, /重新输入账号密码/)
+    assert.match(modalCalls[0].content, /超级管理员解除微信绑定/)
   })
+})
+
+test('profile logout cancellation preserves authentication and navigation state', async () => {
+  const events = []
+  const launches = []
+  const user = { username: 'operator', displayName: 'operator', role: 'user', avatarUrl: '' }
+  const app = {
+    globalData: { currentUser: user, loginChallenge: null },
+    requireManualLogin() { events.push('require-manual-login') },
+    resetAuthState() { events.push('reset-auth') }
+  }
+  global.getApp = () => app
+  global.wx = {
+    reLaunch: options => launches.push(options),
+    showModal: async () => ({ confirm: false })
+  }
+  const page = loadPage('pages/profile/index.js', 'services/business.js', {})
+
+  page.onLoad()
+  await page.logout()
+
+  assert.deepEqual(events, [])
+  assert.equal(app.globalData.currentUser, user)
+  assert.deepEqual(launches, [])
 })
 
 test('dashboard opens user management only for an active super-administrator', () => {

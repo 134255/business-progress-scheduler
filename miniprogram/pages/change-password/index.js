@@ -50,6 +50,9 @@ Page({
         if (typeof app.resetAuthState === 'function') app.resetAuthState()
         else app.globalData.loginChallenge = null
       }
+      if (typeof app.clearManualLoginRequirement === 'function') {
+        app.clearManualLoginRequirement()
+      }
       app.globalData.currentUser = result.user
       this.clearPasswordFields()
       wx.reLaunch({ url: '/pages/dashboard/index' })

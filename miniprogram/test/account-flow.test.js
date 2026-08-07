@@ -212,8 +212,32 @@ test('login restores an authenticated session into app state and opens the dashb
   assert.equal(page.data.checking, false)
 })
 
+test('login keeps the password form after explicit logout even when the binding is authenticated', async () => {
+  const user = { _id: 'user-1', displayName: 'bound user', role: 'user' }
+  const app = {
+    globalData: { currentUser: null, loginChallenge: null },
+    isManualLoginRequired: () => true
+  }
+  const launches = []
+  global.getApp = () => app
+  global.wx = { reLaunch: options => launches.push(options) }
+  const page = loadPage('pages/login/index.js', {
+    getSession: async () => ({ authenticated: true, requiresInitialization: false, user })
+  })
+
+  await page.onLoad()
+
+  assert.equal(app.globalData.currentUser, null)
+  assert.deepEqual(launches, [])
+  assert.equal(page.data.checking, false)
+  assert.equal(page.data.requiresInitialization, false)
+})
+
 test('login reports initialization state without exposing a credential form as ready', async () => {
-  const app = { globalData: { currentUser: null, loginChallenge: null } }
+  const app = {
+    globalData: { currentUser: null, loginChallenge: null },
+    isManualLoginRequired: () => true
+  }
   global.getApp = () => app
   global.wx = { reLaunch: () => assert.fail('must not launch') }
   const page = loadPage('pages/login/index.js', {
@@ -567,7 +591,11 @@ test('login keeps only the first-login challenge in app memory and clears the pa
 
 test('login stores a successfully authenticated public user and clears any stale challenge', async () => {
   const user = { _id: 'user-1', displayName: '测试用户', role: 'member' }
-  const app = { globalData: { currentUser: null, loginChallenge: 'stale-challenge' } }
+  let clearCalls = 0
+  const app = {
+    globalData: { currentUser: null, loginChallenge: 'stale-challenge' },
+    clearManualLoginRequirement() { clearCalls += 1 }
+  }
   const launches = []
   global.getApp = () => app
   global.wx = { reLaunch: options => launches.push(options) }
@@ -581,6 +609,7 @@ test('login stores a successfully authenticated public user and clears any stale
 
   assert.equal(app.globalData.currentUser, user)
   assert.equal(app.globalData.loginChallenge, null)
+  assert.equal(clearCalls, 1)
   assert.deepEqual(launches, [{ url: '/pages/dashboard/index' }])
 })
 
@@ -643,12 +672,14 @@ test('first-login password change consumes the memory challenge and opens the da
   const user = { _id: 'user-1', displayName: '测试用户', role: 'member' }
   const launches = []
   const calls = []
+  let clearCalls = 0
   const app = {
     globalData: { currentUser: null, loginChallenge: 'temporary-challenge' },
     resetAuthState() {
       this.globalData.currentUser = null
       this.globalData.loginChallenge = null
-    }
+    },
+    clearManualLoginRequirement() { clearCalls += 1 }
   }
   global.getApp = () => app
   global.wx = {
@@ -670,6 +701,7 @@ test('first-login password change consumes the memory challenge and opens the da
   assert.deepEqual(calls, [['temporary-challenge', 'replacement-value']])
   assert.equal(app.globalData.loginChallenge, null)
   assert.equal(app.globalData.currentUser, user)
+  assert.equal(clearCalls, 1)
   assert.equal(page.data.newPassword, '')
   assert.equal(page.data.confirmPassword, '')
   assert.deepEqual(launches, [{ url: '/pages/dashboard/index' }])

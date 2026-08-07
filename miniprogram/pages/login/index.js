@@ -15,16 +15,20 @@ Page({
   async onLoad() {
     try {
       const session = await accountService.getSession()
-      if (session.authenticated) {
-        getApp().globalData.currentUser = session.user
-        wx.reLaunch({ url: '/pages/dashboard/index' })
-        return
-      }
+      const app = getApp()
+      const manualLoginRequired = typeof app.isManualLoginRequired === 'function' &&
+        app.isManualLoginRequired()
       if (session.requiresInitialization) {
         this.setData({
           requiresInitialization: true,
           errorMessage: INITIALIZATION_MESSAGE
         })
+        return
+      }
+      if (session.authenticated && !manualLoginRequired) {
+        app.globalData.currentUser = session.user
+        wx.reLaunch({ url: '/pages/dashboard/index' })
+        return
       }
     } catch (error) {
       this.setData({ errorMessage: error && error.message ? error.message : '网络异常，请稍后重试' })
@@ -59,6 +63,9 @@ Page({
       }
       if (result.authenticated) {
         const app = getApp()
+        if (typeof app.clearManualLoginRequirement === 'function') {
+          app.clearManualLoginRequirement()
+        }
         app.globalData.currentUser = result.user
         app.globalData.loginChallenge = null
         wx.reLaunch({ url: '/pages/dashboard/index' })
