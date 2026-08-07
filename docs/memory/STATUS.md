@@ -4,7 +4,8 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
-- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Implementation remains unstarted pending the owner's execution-mode selection.
+- Task 1 of the template/node/field plan is implemented on its isolated worktree: `createBusinessApi` accepts injected `protectedRoutes`; recognized protected actions receive the trusted resolved actor and payload separately, are rejected before handler invocation when authentication fails, and retain the existing account and legacy-route behavior.
+- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Task 1 is complete; Task 2 is next.
 - WeChat DevTools account-administration smoke acceptance now covers automatic dashboard restoration, the authoritative super-administrator list state, creation of two ordinary test accounts and a second super administrator, case-insensitive duplicate-username rejection, safe disable/re-enable of the second administrator, rejection of disabling or demoting the final active super administrator, five-failure account lockout, administrator unlock, and read-only compatibility navigation through dashboard, business list, business detail, node feedback/history, and profile pages. No credential or identity value was recorded.
 - The obsolete `account-admin` linked worktree is fully cleaned up: its accidental deployment-manual edit was explicitly discarded, Git worktree registration and contents were removed, the merged local `codex/account-admin` branch was deleted through the non-force path, and the final empty `.worktrees/account-admin` directory was removed after WeChat DevTools released it.
 - Local `main` was fast-forwarded from `22a78f3` to the accepted account-administration head `f39c89e`. The merged result passed the full backend, client, WXML, syntax, diff, and project-memory checks. `origin/main` was then fast-forwarded through the integrated milestone and cleanup record at `b314785`.
@@ -26,6 +27,14 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+Executed on 2026-08-07 for template/node/field Task 1 protected-route seam:
+
+| Command or boundary | Result |
+|---|---|
+| Focused route-seam TDD RED: `node --test cloudfunctions/businessApi/test/account-routes.test.js` | Failed as expected: 2 failures because `createBusinessApi` did not recognize injected protected routes; the authenticated route returned `UNKNOWN_ACTION`, and the unauthenticated route did not reach `UNAUTHORIZED`. |
+| Focused route suite after implementation | Passed: 18 tests, 0 failures. |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 123 tests, 0 failures; npm emitted two pre-existing malformed user-config warnings. |
 
 Executed on 2026-08-07 for the template/node/field implementation plan:
 
@@ -209,7 +218,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Ask the project owner to choose subagent-driven or inline execution for `docs/superpowers/plans/2026-08-07-template-node-fields.md`.
-2. At implementation start, create an isolated `codex/` worktree and execute the approved template-management, node/field configuration, snapshot, rejection, freeze, and evidence-retention tasks in order.
+1. Execute Task 2 from `docs/superpowers/plans/2026-08-07-template-node-fields.md`: implement template/node/field validation and policy services behind the protected-route seam.
+2. Continue the remaining template-management, snapshot, rejection, freeze, and evidence-retention tasks in plan order from the isolated `codex/` worktree.
 3. Continue SLA/calendar, hourly reminder, and Enterprise WeChat adapter phases.
 4. Replace the administrator reset-password editable modal with masked inputs, then complete the remaining second-identity binding/unbinding acceptance.

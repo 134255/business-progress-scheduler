@@ -39,7 +39,7 @@ test('deployed getSession wiring returns an unauthenticated session without auto
   assert.equal(defaultFake.documents('users').length, 0)
 })
 
-function createRouteHarness({ user, credential, contextOpenid = 'wx-context' } = {}) {
+function createRouteHarness({ user, credential, protectedRoutes, contextOpenid = 'wx-context' } = {}) {
   const calls = []
   const errors = []
   const repository = {
@@ -82,6 +82,7 @@ function createRouteHarness({ user, credential, contextOpenid = 'wx-context' } =
     legacyRoutes: {
       dashboard: (openid, payload) => method('dashboard')({ openid, payload })
     },
+    protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
     clock: () => Date.parse('2026-08-06T00:00:00.000Z'),
     logger: { error: (...args) => errors.push(args) }
@@ -129,6 +130,41 @@ test('changePassword ignores a forged payload actor and uses the trusted resolve
   assert.equal(result.ok, true)
   assert.equal(result.data.input.actor._id, 'actor-1')
   assert.equal(result.data.input.currentPassword, 'KnownPass8')
+})
+
+test('protected domain routes receive the resolved actor and payload separately', async () => {
+  const calls = []
+  const activeUser = { _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active' }
+  const harness = createRouteHarness({
+    user: activeUser,
+    protectedRoutes: {
+      listTemplates: async ({ actor, payload }) => {
+        calls.push({ actorId: actor._id, forged: payload.actorId })
+        return { items: [] }
+      }
+    }
+  })
+  const result = await harness.api.main({ action: 'listTemplates', payload: { actorId: 'forged' } })
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls, [{ actorId: activeUser._id, forged: 'forged' }])
+})
+
+test('protected domain routes require an authenticated actor', async () => {
+  let called = false
+  const harness = createRouteHarness({
+    user: null,
+    credential: null,
+    protectedRoutes: {
+      listTemplates: async () => {
+        called = true
+        return { items: [] }
+      }
+    }
+  })
+  const result = await harness.api.main({ action: 'listTemplates', payload: {} })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'UNAUTHORIZED')
+  assert.equal(called, false)
 })
 
 test('protected routes fail closed for missing, disabled, locked, and password-change-required account state', async t => {

@@ -124,7 +124,8 @@ function createBusinessApi({
   repository,
   authService,
   adminUserService,
-  legacyRoutes = {},
+  protectedRoutes = Object.create(null),
+  legacyRoutes = Object.create(null),
   getContext,
   clock = Date.now,
   logger = console
@@ -166,18 +167,21 @@ function createBusinessApi({
     const payload = event.payload || {}
     try {
       const knownAccountAction = ACCOUNT_ACTIONS.has(action)
+      const knownProtectedAction = hasOwn(protectedRoutes, action) && typeof protectedRoutes[action] === 'function'
       const knownLegacyAction = hasOwn(legacyRoutes, action) && typeof legacyRoutes[action] === 'function'
-      assert(knownAccountAction || knownLegacyAction, 'Unsupported action', 'UNKNOWN_ACTION')
+      assert(knownAccountAction || knownProtectedAction || knownLegacyAction, 'Unsupported action', 'UNKNOWN_ACTION')
       const actor = isPublicAction(action) ? null : await resolveActor(openid)
       const routes = accountRoutes(openid, payload, actor)
       const route = hasOwn(routes, action) ? routes[action] : null
       const data = route
         ? await route()
-        : await legacyRoutes[action](actor.openid, payload)
+        : knownProtectedAction
+          ? await protectedRoutes[action]({ actor, payload })
+          : await legacyRoutes[action](actor.openid, payload)
       return ok(data)
     } catch (error) {
       logger.error('[businessApi]', {
-        action: ACCOUNT_ACTIONS.has(action) || hasOwn(legacyRoutes, action) ? action : 'UNKNOWN_ACTION',
+        action: ACCOUNT_ACTIONS.has(action) || hasOwn(protectedRoutes, action) || hasOwn(legacyRoutes, action) ? action : 'UNKNOWN_ACTION',
         code: safeErrorCode(error.code),
         requestId: context.REQUESTID || context.requestId || '',
         targetUserId: safeTargetUserId(action, payload)
