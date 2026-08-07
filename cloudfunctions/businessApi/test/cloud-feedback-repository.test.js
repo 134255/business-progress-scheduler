@@ -299,6 +299,65 @@ test('published lookup is exact and revalidates the current active account befor
   assert.deepEqual(await finalHarness.repository.findPublishedFeedback(finalValue), finalResult)
 })
 
+test('disabled actors cannot distinguish feedback reservation existence, status, or payload across actor-facing entrypoints', async () => {
+  async function prepare(state, suffix) {
+    const harness = createFeedbackHarness({ evidenceCount: 0 })
+    const exact = submission({ input: { requestKey: `actor-order-${suffix}` } })
+    let identity = { feedbackId: 'missing-reservation' }
+    if (state === 'reserved' || state === 'published') {
+      identity = await harness.repository.beginFeedback(exact)
+    }
+    if (state === 'published') {
+      await harness.repository.claimEvidenceChunk(exact, identity)
+      await harness.repository.finalizeFeedback(exact, identity)
+    }
+    harness.fake.replace('users', 'account-a', { _id: 'account-a', status: 'disabled' })
+    return { ...harness, exact, identity }
+  }
+
+  function payload(exact, mode) {
+    if (mode === 'exact') return exact
+    if (mode === 'changed') {
+      return submission({ input: { requestKey: exact.input.requestKey, comment: 'changed' } })
+    }
+    return submission({ input: { requestKey: `${exact.input.requestKey}-missing` } })
+  }
+
+  const failures = []
+  for (const entrypoint of ['findPublishedFeedback', 'beginFeedback', 'claimEvidenceChunk', 'finalizeFeedback']) {
+    for (const state of ['missing', 'reserved', 'published']) {
+      for (const mode of ['exact', 'changed', 'missing']) {
+        const prepared = await prepare(state, `${entrypoint}-${state}-${mode}`)
+        try {
+          const value = payload(prepared.exact, mode)
+          if (entrypoint === 'claimEvidenceChunk' || entrypoint === 'finalizeFeedback') {
+            await prepared.repository[entrypoint](value, prepared.identity)
+          } else {
+            await prepared.repository[entrypoint](value)
+          }
+          failures.push(`${entrypoint}/${state}/${mode}:RETURNED`)
+        } catch (error) {
+          if (error.code !== 'FORBIDDEN') failures.push(`${entrypoint}/${state}/${mode}:${error.code}`)
+        }
+      }
+    }
+  }
+
+  for (const state of ['missing', 'reserved', 'published']) {
+    const prepared = await prepare(state, `history-${state}`)
+    try {
+      await prepared.repository.getNodeHistory({
+        actor: { _id: 'account-a' }, businessLineId: 'line-1', nodeId: 'node-1'
+      })
+      failures.push(`getNodeHistory/${state}:RETURNED`)
+    } catch (error) {
+      if (error.code !== 'FORBIDDEN') failures.push(`getNodeHistory/${state}:${error.code}`)
+    }
+  }
+
+  assert.deepEqual(failures, [])
+})
+
 test('a published non-completion winner conflicts and a live reservation times out retryably', async () => {
   const progressSeed = seed({ evidenceCount: 0 })
   const firstHarness = createFeedbackHarness({ seed: progressSeed })

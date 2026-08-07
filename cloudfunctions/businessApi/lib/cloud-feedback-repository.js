@@ -204,6 +204,15 @@ function createCloudFeedbackRepository({
         !membership(node.assigneeUserIds).includes(actor._id)) throw createError('FORBIDDEN')
   }
 
+  function assertCurrentActorAuthorization(actor, line, node) {
+    if (!actor || actor.status !== 'active') throw createError('FORBIDDEN')
+    if (!line || line.status === 'creating' || !node || node.businessLineId !== line._id) {
+      throw createError('NOT_FOUND')
+    }
+    if (!accountSchema(line, node) || !isAccountMember(line, actor._id) ||
+        !membership(node.assigneeUserIds).includes(actor._id)) throw createError('FORBIDDEN')
+  }
+
   function assertExactPublishedRetry(current, reservation, id, value) {
     assertPublishedRetry(current.actor, current.line, current.node, reservation)
     if (!reservation || reservation.publishState !== 'published' || reservation._id !== id.feedbackId ||
@@ -244,9 +253,10 @@ function createCloudFeedbackRepository({
     const requestHash = hash(`${actor._id}\0${input.nodeId}\0${input.requestKey}`)
     const feedbackId = `feedback-${requestHash}`
     return db.runTransaction(async transaction => {
+      const current = await readSubmissionDocuments(transaction, actor._id, input)
+      assertCurrentActorAuthorization(current.actor, current.line, current.node)
       const existing = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
       if (!existing || existing.publishState !== 'published') return null
-      const current = await readSubmissionDocuments(transaction, actor._id, input)
       assertPublishedRetry(current.actor, current.line, current.node, existing)
       if (existing.requestHash !== requestHash || existing.requestFingerprint !== requestFingerprint ||
           existing.submittedBy !== actor._id) {
@@ -260,8 +270,9 @@ function createCloudFeedbackRepository({
     const id = identity(value)
     const at = now()
     return db.runTransaction(async transaction => {
-      const existing = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
+      assertCurrentActorAuthorization(current.actor, current.line, current.node)
+      const existing = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       if (existing) {
         if (existing.publishState === 'published') {
           assertPublishedRetry(current.actor, current.line, current.node, existing)
@@ -369,13 +380,10 @@ function createCloudFeedbackRepository({
     const id = identity(value)
     const at = now()
     return db.runTransaction(async transaction => {
-      const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
+      assertCurrentActorAuthorization(current.actor, current.line, current.node)
+      const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       if (id.feedbackId !== reservationIdentity.feedbackId) {
-        assertPublishedRetry(current.actor, current.line, current.node, {
-          businessLineId: value.input.businessLineId,
-          nodeId: value.input.nodeId
-        })
         throw createError('VERSION_CONFLICT')
       }
       if (reservation && reservation.publishState === 'published') {
@@ -458,8 +466,9 @@ function createCloudFeedbackRepository({
   async function finalizeFeedback(value, reservationIdentity) {
     const id = identity(value)
     return db.runTransaction(async transaction => {
-      const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
+      assertCurrentActorAuthorization(current.actor, current.line, current.node)
+      const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       if (reservation && reservation.publishState === 'published') {
         assertExactPublishedRetry(current, reservation, id, value)
         return publicResult(reservation)
