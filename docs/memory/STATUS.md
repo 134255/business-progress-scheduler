@@ -142,7 +142,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Implement `docs/superpowers/specs/2026-08-07-super-admin-recovery-page-design.md` with client tests first.
+1. Execute `docs/superpowers/plans/2026-08-07-super-admin-recovery-page.md` with client tests first.
 2. Rotate a new one-time recovery code through the approved offline workflow, then use the Mini Program recovery page to establish a new temporary password and complete forced password change.
 3. Resume persistent-logout acceptance by verifying password login and automatic restoration after restart; record only redacted outcomes.
 4. After account-administration acceptance passes, complete the branch integration decision.
