@@ -251,6 +251,8 @@ test('history hides reservations, authorizes members with schema precedence, and
   data.evidences[0].feedbackId = 'new'
   data.evidences[0].feedbackRevision = 2
   data.evidences[0].attachmentState = 'attached'
+  data.evidences[0].retentionScope = 'business_line'
+  data.evidences[0].retentionSource = 'node_feedback'
   const { repository } = createFeedbackHarness({ seed: data })
   const result = await repository.getNodeHistory({ actor: { _id: 'manager', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1' })
 
@@ -279,6 +281,14 @@ test('published lookup is exact and revalidates the current active account befor
   )
   fake.replace('users', 'account-a', { _id: 'account-a', status: 'disabled' })
   await assert.rejects(repository.findPublishedFeedback(value), error => error.code === 'FORBIDDEN')
+  await assert.rejects(
+    repository.findPublishedFeedback(submission({ input: { comment: 'changed' } })),
+    error => error.code === 'FORBIDDEN'
+  )
+  await assert.rejects(
+    repository.commitFeedback(submission({ input: { comment: 'changed' } })),
+    error => error.code === 'FORBIDDEN'
+  )
 
   const finalSeed = seed({ evidenceCount: 0 })
   finalSeed.business_lines[0].nodeCount = 1
@@ -532,21 +542,63 @@ test('late claim and finalize paths return only an exact active-actor published 
     const publishedIdentity = { ...reservation, published }
     await assert.rejects(repository.claimEvidenceChunk(value, publishedIdentity), error => error.code === 'FORBIDDEN')
     await assert.rejects(repository.finalizeFeedback(value, publishedIdentity), error => error.code === 'FORBIDDEN')
+    const changed = submission({ input: { requestKey: value.input.requestKey, comment: 'changed' } })
+    await assert.rejects(repository.claimEvidenceChunk(changed, reservation), error => error.code === 'FORBIDDEN')
+    await assert.rejects(repository.finalizeFeedback(changed, reservation), error => error.code === 'FORBIDDEN')
+    const changedRequest = submission({ input: { requestKey: `${value.input.requestKey}-changed` } })
+    await assert.rejects(repository.claimEvidenceChunk(changedRequest, reservation), error => error.code === 'FORBIDDEN')
+    await assert.rejects(repository.finalizeFeedback(changedRequest, reservation), error => error.code === 'FORBIDDEN')
   }
 })
 
 test('new feedback history includes only evidence attached to the exact published revision', async () => {
-  const data = seed({ evidenceCount: 4 })
+  const data = seed({ evidenceCount: 7 })
   data.node_feedback = [{
     _id: 'new', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
     revision: 2, status: 'blocked', comment: '', submittedBy: 'account-a', submittedAt: NOW
   }]
-  Object.assign(data.evidences[0], { feedbackId: 'new', feedbackRevision: 2, attachmentState: 'attached' })
-  Object.assign(data.evidences[1], { feedbackId: 'new', feedbackRevision: 999, attachmentState: 'attached' })
-  Object.assign(data.evidences[2], { feedbackId: 'new', attachmentState: 'attached' })
-  Object.assign(data.evidences[3], { feedbackId: 'new', feedbackRevision: 1, attachmentState: 'attached' })
+  const ordinary = { retentionScope: 'business_line', retentionSource: 'node_feedback' }
+  Object.assign(data.evidences[0], { feedbackId: 'new', feedbackRevision: 2, attachmentState: 'attached', ...ordinary })
+  Object.assign(data.evidences[1], { feedbackId: 'new', feedbackRevision: 999, attachmentState: 'attached', ...ordinary })
+  Object.assign(data.evidences[2], { feedbackId: 'new', attachmentState: 'attached', ...ordinary })
+  Object.assign(data.evidences[3], { feedbackId: 'new', feedbackRevision: 1, attachmentState: 'attached', ...ordinary })
+  Object.assign(data.evidences[4], { feedbackId: 'new', feedbackRevision: 2, attachmentState: 'attached' })
+  Object.assign(data.evidences[5], { feedbackId: 'new', feedbackRevision: 2, attachmentState: 'attached', retentionScope: 'business_line', retentionSource: 'audit_amendment' })
+  Object.assign(data.evidences[6], {
+    feedbackId: 'new', feedbackRevision: 2, attachmentState: 'attached',
+    retentionScope: 'evidence', retentionSource: 'audit_amendment', purgeDueAt: new Date(NOW.getTime() + 1)
+  })
   const { repository } = createFeedbackHarness({ seed: data })
   const result = await repository.getNodeHistory({ actor: { _id: 'manager' }, businessLineId: 'line-1', nodeId: 'node-1' })
 
-  assert.deepEqual(result.history[0].evidences.map(item => item.evidenceId), ['evidence-1'])
+  assert.deepEqual(result.history[0].evidences.map(item => item.evidenceId), ['evidence-1', 'evidence-7'])
+  assert.deepEqual(result.history[0].evidences.map(item => item.purgeDueAt), [null, new Date(NOW.getTime() + 1)])
+})
+
+test('terminal history excludes ordinary evidence without a strict line deadline but keeps valid explicit amendments', async () => {
+  const data = seed({ evidenceCount: 3 })
+  Object.assign(data.business_lines[0], { status: 'completed', purgeDueAt: null })
+  data.node_feedback = [
+    {
+      _id: 'new', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
+      revision: 1, status: 'completed', comment: '', submittedBy: 'account-a', submittedAt: NOW
+    },
+    {
+      _id: 'legacy', businessLineId: 'line-1', nodeId: 'node-1', status: 'completed',
+      submittedBy: 'legacy', createdAt: new Date(NOW.getTime() - 1), evidenceIds: ['evidence-3']
+    }
+  ]
+  Object.assign(data.evidences[0], {
+    feedbackId: 'new', feedbackRevision: 1, attachmentState: 'attached',
+    retentionScope: 'business_line', retentionSource: 'node_feedback'
+  })
+  Object.assign(data.evidences[1], {
+    feedbackId: 'new', feedbackRevision: 1, attachmentState: 'attached',
+    retentionScope: 'evidence', retentionSource: 'audit_amendment', purgeDueAt: new Date(NOW.getTime() + 1)
+  })
+  Object.assign(data.evidences[2], { feedbackId: null, attachmentState: undefined })
+  const { repository } = createFeedbackHarness({ seed: data })
+  const result = await repository.getNodeHistory({ actor: { _id: 'manager' }, businessLineId: 'line-1', nodeId: 'node-1' })
+  assert.deepEqual(result.history[0].evidences.map(item => item.evidenceId), ['evidence-2'])
+  assert.deepEqual(result.history[1].evidences, [])
 })

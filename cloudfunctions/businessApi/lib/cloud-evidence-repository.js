@@ -3,6 +3,7 @@ const crypto = require('node:crypto')
 const { MAX_SINGLE_FILE_SIZE, classifyAndValidateFile } = require('./evidence-policy')
 const { normalizeCloudFileId } = require('./evidence-service')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
+const { classifyEvidenceRetention } = require('./evidence-retention')
 
 const COLLECTIONS = Object.freeze({
   users: 'users',
@@ -286,29 +287,12 @@ function createCloudEvidenceRepository({
       const accountSchema = usesAccountAuthorization(line, node)
       if (!isMember(line, currentActor, accountSchema)) throw createError('FORBIDDEN')
       const orphanExpiresAt = parseOptionalTimestamp(currentEvidence.orphanExpiresAt)
-      const evidencePurgeDueAt = parseOptionalTimestamp(currentEvidence.purgeDueAt)
-      const linePurgeDueAt = parseOptionalTimestamp(line.purgeDueAt)
       const purgedAt = parseOptionalTimestamp(currentEvidence.purgedAt)
-      const attached = typeof currentEvidence.feedbackId === 'string' && currentEvidence.feedbackId &&
-        currentEvidence.attachmentState === 'attached'
-      let effectivePurgeDueAt = evidencePurgeDueAt
-      if (attached) {
-        if (currentEvidence.retentionScope === RETENTION_SCOPES.BUSINESS_LINE &&
-            currentEvidence.retentionSource === RETENTION_SOURCES.NODE_FEEDBACK) {
-          effectivePurgeDueAt = linePurgeDueAt
-        } else if (currentEvidence.retentionScope === RETENTION_SCOPES.EVIDENCE &&
-            currentEvidence.retentionSource === RETENTION_SOURCES.AUDIT_AMENDMENT && evidencePurgeDueAt) {
-          effectivePurgeDueAt = evidencePurgeDueAt
-        } else {
-          throw createError('EVIDENCE_EXPIRED')
-        }
-      } else if (currentEvidence.retentionScope !== null && currentEvidence.retentionScope !== undefined ||
-          currentEvidence.retentionSource !== null && currentEvidence.retentionSource !== undefined) {
-        throw createError('EVIDENCE_EXPIRED')
-      }
+      const retention = classifyEvidenceRetention(currentEvidence, line)
+      if (!retention) throw createError('EVIDENCE_EXPIRED')
       if (currentEvidence.storageStatus !== 'available' || purgedAt ||
           (orphanExpiresAt && orphanExpiresAt.getTime() <= now.getTime()) ||
-          (effectivePurgeDueAt && effectivePurgeDueAt.getTime() <= now.getTime())) {
+          (retention.effectivePurgeDueAt && retention.effectivePurgeDueAt.getTime() <= now.getTime())) {
         throw createError('EVIDENCE_EXPIRED')
       }
       if (typeof currentEvidence.fileName !== 'string' || !currentEvidence.fileName ||

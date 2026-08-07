@@ -573,6 +573,30 @@ test('ordinary attached evidence uses the strict line deadline for every feedbac
   }
 })
 
+test('terminal lines require a strict ordinary evidence deadline while active lines may omit it', async () => {
+  for (const status of ['completed', 'cancelled', 'closed', 'deleted']) {
+    for (const due of [undefined, null, '2026-13-40T00:00:00.000Z', NOW, new Date(NOW.getTime() - 1)]) {
+      const documents = seed({ evidences: [attachedEvidence()] })
+      Object.assign(documents.business_lines[0], { status, purgeDueAt: due })
+      const harness = createHarness({ documents })
+      await assert.rejects(
+        harness.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: 'evidence-1' }),
+        assertCode('EVIDENCE_EXPIRED')
+      )
+      assert.deepEqual(harness.calls, [])
+    }
+    const futureDocuments = seed({ evidences: [attachedEvidence()] })
+    Object.assign(futureDocuments.business_lines[0], { status, purgeDueAt: new Date(NOW.getTime() + 1) })
+    const future = createHarness({ documents: futureDocuments })
+    assert.equal((await future.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: 'evidence-1' })).url,
+      'https://temporary.example/report.pdf')
+  }
+
+  const active = createHarness({ documents: seed({ evidences: [attachedEvidence()] }) })
+  assert.equal((await active.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: 'evidence-1' })).url,
+    'https://temporary.example/report.pdf')
+})
+
 test('unattached evidence uses orphan expiry while explicit amendment evidence uses its own later deadline', async () => {
   const unattachedDocuments = seed({ evidences: [accessibleEvidence()] })
   Object.assign(unattachedDocuments.business_lines[0], { status: 'active', purgeDueAt: NOW })

@@ -2,6 +2,7 @@ const crypto = require('node:crypto')
 
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
+const { classifyEvidenceRetention } = require('./evidence-retention')
 
 const COLLECTIONS = Object.freeze({
   users: 'users', lines: 'business_lines', nodes: 'business_nodes',
@@ -99,9 +100,7 @@ function publicResult(feedback) {
   }
 }
 
-function evidenceProjection(evidence, line) {
-  const amendmentDeadline = evidence.retentionScope === 'evidence' &&
-    evidence.retentionSource === 'audit_amendment'
+function evidenceProjection(evidence, retention) {
   return {
     evidenceId: evidence._id,
     fileName: evidence.fileName,
@@ -109,9 +108,7 @@ function evidenceProjection(evidence, line) {
     extension: evidence.extension,
     size: evidence.size,
     storageStatus: evidence.storageStatus,
-    purgeDueAt: amendmentDeadline
-      ? evidence.purgeDueAt === undefined ? null : evidence.purgeDueAt
-      : line.purgeDueAt === undefined ? null : line.purgeDueAt,
+    purgeDueAt: retention.effectivePurgeDueAt,
     purgedAt: evidence.purgedAt === undefined ? null : evidence.purgedAt
   }
 }
@@ -208,12 +205,12 @@ function createCloudFeedbackRepository({
   }
 
   function assertExactPublishedRetry(current, reservation, id, value) {
+    assertPublishedRetry(current.actor, current.line, current.node, reservation)
     if (!reservation || reservation.publishState !== 'published' || reservation._id !== id.feedbackId ||
         reservation.requestHash !== id.requestHash || reservation.inputHash !== id.inputHash ||
         reservation.requestFingerprint !== id.requestFingerprint || reservation.submittedBy !== value.actor._id) {
       throw createError('VERSION_CONFLICT')
     }
-    assertPublishedRetry(current.actor, current.line, current.node, reservation)
   }
 
   async function readSubmissionDocuments(database, actorId, input) {
@@ -249,12 +246,12 @@ function createCloudFeedbackRepository({
     return db.runTransaction(async transaction => {
       const existing = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
       if (!existing || existing.publishState !== 'published') return null
+      const current = await readSubmissionDocuments(transaction, actor._id, input)
+      assertPublishedRetry(current.actor, current.line, current.node, existing)
       if (existing.requestHash !== requestHash || existing.requestFingerprint !== requestFingerprint ||
           existing.submittedBy !== actor._id) {
         throw createError('VERSION_CONFLICT')
       }
-      const current = await readSubmissionDocuments(transaction, actor._id, input)
-      assertPublishedRetry(current.actor, current.line, current.node, existing)
       return publicResult(existing)
     })
   }
@@ -266,11 +263,13 @@ function createCloudFeedbackRepository({
       const existing = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
       if (existing) {
+        if (existing.publishState === 'published') {
+          assertPublishedRetry(current.actor, current.line, current.node, existing)
+        }
         if (existing.requestHash !== id.requestHash || existing.inputHash !== id.inputHash ||
             existing.requestFingerprint !== id.requestFingerprint ||
             existing.submittedBy !== value.actor._id) throw createError('VERSION_CONFLICT')
         if (existing.publishState === 'published') {
-          assertPublishedRetry(current.actor, current.line, current.node, existing)
           return { ...id, published: publicResult(existing) }
         }
       }
@@ -368,11 +367,17 @@ function createCloudFeedbackRepository({
 
   async function claimEvidenceChunk(value, reservationIdentity) {
     const id = identity(value)
-    if (id.feedbackId !== reservationIdentity.feedbackId) throw createError('VERSION_CONFLICT')
     const at = now()
     return db.runTransaction(async transaction => {
       const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
+      if (id.feedbackId !== reservationIdentity.feedbackId) {
+        assertPublishedRetry(current.actor, current.line, current.node, {
+          businessLineId: value.input.businessLineId,
+          nodeId: value.input.nodeId
+        })
+        throw createError('VERSION_CONFLICT')
+      }
       if (reservation && reservation.publishState === 'published') {
         assertExactPublishedRetry(current, reservation, id, value)
         return { done: true, published: publicResult(reservation) }
@@ -732,23 +737,28 @@ function createCloudFeedbackRepository({
       const associated = await readAll(() => db.collection(COLLECTIONS.evidences).where({ feedbackId: feedback._id }))
       const evidenceById = new Map()
       for (const evidence of associated) {
+        const retention = classifyEvidenceRetention(evidence, context.line)
         if (evidence.feedbackId === feedback._id && evidence.attachmentState === 'attached' &&
             evidence.businessLineId === businessLineId && evidence.nodeId === nodeId &&
             safeInteger(feedback.revision, { minimum: 1 }) &&
             safeInteger(evidence.feedbackRevision, { minimum: 1 }) &&
-            evidence.feedbackRevision === feedback.revision) evidenceById.set(evidence._id, evidence)
+            evidence.feedbackRevision === feedback.revision && retention) {
+          evidenceById.set(evidence._id, { evidence, retention })
+        }
       }
       if (feedback.publishState === undefined && Array.isArray(feedback.evidenceIds)) {
         for (const evidenceId of [...new Set(feedback.evidenceIds)]) {
           if (typeof evidenceId !== 'string' || !evidenceId) continue
           const evidence = await readDocument(db, COLLECTIONS.evidences, evidenceId)
+          const retention = classifyEvidenceRetention(evidence, context.line, { allowLegacy: true })
           if (evidence && evidence._id === evidenceId && evidence.businessLineId === businessLineId &&
               evidence.nodeId === nodeId && (evidence.feedbackId === null || evidence.feedbackId === undefined ||
-                evidence.feedbackId === feedback._id)) evidenceById.set(evidenceId, evidence)
+                evidence.feedbackId === feedback._id) && retention) evidenceById.set(evidenceId, { evidence, retention })
         }
       }
-      const evidences = [...evidenceById.values()].sort((left, right) => String(left._id).localeCompare(String(right._id)))
-      history.push(feedbackProjection(feedback, evidences.map(evidence => evidenceProjection(evidence, context.line))))
+      const evidences = [...evidenceById.values()].sort((left, right) =>
+        String(left.evidence._id).localeCompare(String(right.evidence._id)))
+      history.push(feedbackProjection(feedback, evidences.map(item => evidenceProjection(item.evidence, item.retention))))
     }
     const canSubmit = context.line.status === 'active' && isCurrentNode(context.line, context.node) &&
       ACTIVE_NODE_STATUSES.has(context.node.status) && accountSchema(context.line, context.node) &&
