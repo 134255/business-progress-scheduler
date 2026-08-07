@@ -18,10 +18,12 @@ const { createAuthService } = require('./lib/auth-service')
 const { createAdminUserService } = require('./lib/admin-user-service')
 const { createCloudAccountRepository } = require('./lib/cloud-account-repository')
 const { createTemplateService } = require('./lib/template-service')
+const { createBusinessService } = require('./lib/business-service')
 const {
   APPLICATION_ERROR_MARKER,
   createCloudTemplateRepository
 } = require('./lib/cloud-template-repository')
+const { createCloudBusinessRepository } = require('./lib/cloud-business-repository')
 const { hashPassword } = require('./lib/password')
 
 const COLLECTIONS = {
@@ -163,11 +165,21 @@ function createTemplateRoutes(templateService) {
   }
 }
 
+function createBusinessRoutes(businessService) {
+  return {
+    createBusinessFromTemplate: ({ actor, payload }) => businessService.createFromTemplate({
+      actor,
+      input: payload
+    })
+  }
+}
+
 function createBusinessApi({
   repository,
   authService,
   adminUserService,
   templateService,
+  businessService,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
   getContext,
@@ -177,6 +189,7 @@ function createBusinessApi({
   const domainRoutes = Object.assign(
     Object.create(null),
     templateService ? createTemplateRoutes(templateService) : null,
+    businessService ? createBusinessRoutes(businessService) : null,
     protectedRoutes
   )
 
@@ -621,6 +634,7 @@ async function submitNodeFeedback(openid, payload) {
 function createDefaultBusinessApi() {
   const repository = createCloudAccountRepository({ db, clock: () => new Date() })
   const templateRepository = createCloudTemplateRepository({ db })
+  const businessRepository = createCloudBusinessRepository({ db, clock: () => new Date() })
   const clock = Date.now
   const authService = createAuthService({
     repository,
@@ -635,11 +649,13 @@ function createDefaultBusinessApi() {
     clock: () => new Date(),
     keyFactory: prefix => `${prefix}_${crypto.randomBytes(16).toString('hex')}`
   })
+  const businessService = createBusinessService({ repository: businessRepository })
   return createBusinessApi({
     repository,
     authService,
     adminUserService,
     templateService,
+    businessService,
     getContext: () => cloud.getWXContext(),
     clock,
     legacyRoutes: {

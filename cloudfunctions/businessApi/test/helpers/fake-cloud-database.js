@@ -54,6 +54,20 @@ function createFakeCloudDatabase(seed = {}) {
     }
   }
 
+  function enforceBusinessIndexes(name, candidate, id) {
+    const uniqueField = name === 'business_lines'
+      ? 'code'
+      : name === 'business_nodes'
+        ? 'nodeCode'
+        : null
+    if (!uniqueField || !candidate[uniqueField]) return
+    for (const document of documents(name).values()) {
+      if (document._id !== id && document[uniqueField] === candidate[uniqueField]) {
+        throw duplicateError(`${name}_${uniqueField}_unique`)
+      }
+    }
+  }
+
   function maybeFailWrite(name, operation) {
     const index = pendingWriteFailures.findIndex(failure =>
       failure.collection === name && failure.operation === operation)
@@ -75,6 +89,7 @@ function createFakeCloudDatabase(seed = {}) {
         maybeFailWrite(name, 'set')
         const stored = materialize(data, id)
         if (name === 'users') enforceUserIndexes(stored, id)
+        enforceBusinessIndexes(name, stored, id)
         if (name === 'wechat_bindings') {
           const current = documents(name).get(id)
           if (current && current.userId !== stored.userId) throw duplicateError('wechat_binding_primary')
@@ -88,6 +103,7 @@ function createFakeCloudDatabase(seed = {}) {
         if (!current) return { stats: { updated: 0 } }
         const updated = merge(current, data)
         if (name === 'users') enforceUserIndexes(updated, id)
+        enforceBusinessIndexes(name, updated, id)
         documents(name).set(id, updated)
         return { stats: { updated: 1 } }
       },

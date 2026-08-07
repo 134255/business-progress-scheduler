@@ -40,7 +40,7 @@ test('deployed getSession wiring returns an unauthenticated session without auto
   assert.equal(defaultFake.documents('users').length, 0)
 })
 
-function createRouteHarness({ user, credential, protectedRoutes, templateService, contextOpenid = 'wx-context' } = {}) {
+function createRouteHarness({ user, credential, protectedRoutes, templateService, businessService, contextOpenid = 'wx-context' } = {}) {
   const calls = []
   const errors = []
   const repository = {
@@ -84,6 +84,7 @@ function createRouteHarness({ user, credential, protectedRoutes, templateService
       dashboard: (openid, payload) => method('dashboard')({ openid, payload })
     },
     templateService,
+    businessService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
     clock: () => Date.parse('2026-08-06T00:00:00.000Z'),
@@ -210,6 +211,40 @@ test('default template routes pass trusted actors and exact payload contracts to
     ['deleteTemplate', { actor, templateId: 't1', expectedVersion: 4 }],
     ['listEnabledTemplates', { actor }]
   ])
+})
+
+test('the template-backed business route delegates generated creation to the trusted service boundary', async () => {
+  const calls = []
+  const businessService = {
+    async createFromTemplate(input) {
+      calls.push(input)
+      return { id: 'business-1', code: 'BL-20260807-0001' }
+    }
+  }
+  const harness = createRouteHarness({ businessService })
+  const payload = {
+    templateId: 'template-1',
+    name: '新业务',
+    description: '',
+    plannedStartDate: '2026-08-08',
+    plannedEndDate: '2026-08-12',
+    requestKey: 'request-001',
+    actorId: 'forged-actor',
+    code: 'CLIENT-CODE',
+    nodes: [{ name: '客户端节点' }]
+  }
+  const result = await harness.api.main({ action: 'createBusinessFromTemplate', payload })
+
+  assert.deepEqual(result, {
+    ok: true,
+    data: { id: 'business-1', code: 'BL-20260807-0001' }
+  })
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    },
+    input: payload
+  }])
 })
 
 test('template application errors retain safe codes without logging payload values', async () => {
