@@ -7,7 +7,10 @@ const UNAVAILABLE_MESSAGES = Object.freeze({
 const DEFAULT_UNAVAILABLE_MESSAGE = '模板当前不可创建业务，请联系管理员'
 
 function unavailableReasonMessage(reason) {
-  return UNAVAILABLE_MESSAGES[reason] || DEFAULT_UNAVAILABLE_MESSAGE
+  if (typeof reason === 'string' && Object.prototype.hasOwnProperty.call(UNAVAILABLE_MESSAGES, reason)) {
+    return UNAVAILABLE_MESSAGES[reason]
+  }
+  return DEFAULT_UNAVAILABLE_MESSAGE
 }
 
 function listTemplates(query) { return callBusinessApi('listTemplates', query) }

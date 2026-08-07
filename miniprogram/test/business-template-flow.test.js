@@ -233,12 +233,12 @@ test('create mode validates real planned dates before sending a request', async 
   assert.match(page.data.errorMessage, /日期/)
 })
 
-test('template unavailability uses a safe fallback consistently in list and create preview', async () => {
+test('template unavailability uses a prototype-safe string fallback consistently in list and create preview', async () => {
   const templatesService = freshRequire('services/templates.js')
   const fallback = '模板当前不可创建业务，请联系管理员'
   const item = {
     _id: 'template-unknown', name: '未知限制模板', description: '', nodeCount: 1,
-    available: false, unavailableReason: 'UNKNOWN_REASON'
+    available: false, unavailableReason: 'constructor'
   }
   const toasts = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
@@ -261,7 +261,14 @@ test('template unavailability uses a safe fallback consistently in list and crea
   })
   await createPage.onLoad({ templateId: item._id })
 
-  assert.equal(templatesService.unavailableReasonMessage('UNKNOWN_REASON'), fallback)
+  for (const reason of [
+    'toString', 'constructor', '__proto__', 'UNKNOWN_REASON',
+    null, undefined, 42, true, {}, [], Symbol('reason')
+  ]) {
+    const message = templatesService.unavailableReasonMessage(reason)
+    assert.equal(typeof message, 'string')
+    assert.equal(message, fallback)
+  }
   assert.equal(listPage.data.items[0].unavailableMessage, fallback)
   assert.equal(toasts[0].title, fallback)
   assert.equal(createPage.data.templatePreview.unavailableMessage, fallback)
