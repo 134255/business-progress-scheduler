@@ -1,0 +1,11 @@
+.error { margin-bottom: 24rpx; padding: 18rpx; color: #be123c; background: #fff1f2; border-radius: 12rpx; }
+.readonly-banner { margin-bottom: 24rpx; padding: 20rpx; color: #92400e; background: #fef3c7; border-radius: 12rpx; }
+.meta, .node-meta { color: #6b7280; font-size: 24rpx; }
+.section-head { margin: 28rpx 4rpx 16rpx; }
+.section-title { margin: 0; }
+.node-name { margin-bottom: 8rpx; font-size: 31rpx; font-weight: 650; }
+.node-meta { margin: 22rpx 0; }
+.actions, .footer-actions { display: flex; flex-wrap: wrap; gap: 12rpx; }
+.actions button, .footer-actions button { margin: 0; }
+.footer-actions { margin-top: 28rpx; }
+.footer-actions .primary-button, .footer-actions .secondary-button { flex: 1; }

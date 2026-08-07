@@ -45,6 +45,11 @@ Page({
     wx.navigateTo({ url: '/pages/admin-users/index' })
   },
 
+  openAdminTemplates() {
+    if (!this.data.profile || this.data.profile.role !== 'super_admin' || this.data.profile.status !== 'active') return
+    wx.navigateTo({ url: '/pages/admin-templates/index' })
+  },
+
   openProfile() {
     wx.navigateTo({ url: '/pages/profile/index' })
   },

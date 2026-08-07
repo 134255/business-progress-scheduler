@@ -1,0 +1,44 @@
+<view class="page">
+  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view wx:if="{{readOnly}}" class="readonly-banner">模板已启用，定义为只读。请先停用后再编辑。</view>
+
+  <view class="card">
+    <view class="field">
+      <label class="field-label" for="template-name">模板名称</label>
+      <input id="template-name" class="input" value="{{name}}" maxlength="60" disabled="{{readOnly || loading}}" bindinput="onNameInput" />
+    </view>
+    <view class="field">
+      <label class="field-label" for="template-description">模板说明</label>
+      <textarea id="template-description" class="textarea" value="{{description}}" maxlength="500" disabled="{{readOnly || loading}}" bindinput="onDescriptionInput" />
+    </view>
+    <view wx:if="{{editMode}}" class="meta">状态：{{status === 'enabled' ? '已启用' : status === 'disabled' ? '已停用' : '草稿'}} · 版本 {{version}}</view>
+  </view>
+
+  <view class="row-between section-head">
+    <view class="section-title">节点定义（{{nodes.length}}）</view>
+    <button wx:if="{{!readOnly}}" size="mini" class="secondary-button" bindtap="openNodeEditor">新增节点</button>
+  </view>
+
+  <view wx:if="{{nodes.length}}">
+    <view class="card node-card" wx:for="{{nodes}}" wx:key="_uiKey">
+      <view class="row-between">
+        <view><view class="node-name">{{index + 1}}. {{item.name}}</view><text class="muted">SLA {{item.slaWorkHours}} 工时</text></view>
+        <text class="muted">字段 {{item.fields.length}} 个</text>
+      </view>
+      <view class="node-meta">负责人 {{item.assigneeUserIds.length}} 人 · {{item.requiresEvidence ? '需要凭证' : '无需凭证'}}</view>
+      <view class="actions">
+        <button size="mini" data-index="{{index}}" bindtap="openNodeEditor">{{readOnly ? '查看' : '编辑'}}</button>
+        <button wx:if="{{!readOnly && index > 0}}" size="mini" data-index="{{index}}" data-direction="-1" bindtap="moveNode">上移</button>
+        <button wx:if="{{!readOnly && index + 1 < nodes.length}}" size="mini" data-index="{{index}}" data-direction="1" bindtap="moveNode">下移</button>
+        <button wx:if="{{!readOnly}}" size="mini" class="danger-button" data-index="{{index}}" bindtap="removeNode">删除</button>
+      </view>
+    </view>
+  </view>
+  <view class="empty" wx:else>尚未添加节点</view>
+
+  <view wx:if="{{!readOnly}}" class="footer-actions">
+    <button class="primary-button" bindtap="submit" loading="{{submitting || loading}}" disabled="{{submitting || loading}}">保存模板</button>
+    <button wx:if="{{editMode}}" class="secondary-button" bindtap="enableTemplate" loading="{{submitting}}" disabled="{{submitting || loading}}">启用当前已保存版本</button>
+  </view>
+  <button wx:if="{{readOnly}}" class="secondary-button" bindtap="disableTemplate" loading="{{submitting}}" disabled="{{submitting || loading}}">停用后编辑</button>
+</view>

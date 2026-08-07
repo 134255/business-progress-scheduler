@@ -1,0 +1,70 @@
+<view class="page">
+  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view wx:if="{{readOnly}}" class="readonly-banner">模板已启用，此节点只能查看。</view>
+
+  <view class="card">
+    <view class="field">
+      <label class="field-label" for="node-name">节点名称</label>
+      <input id="node-name" class="input" value="{{name}}" maxlength="60" disabled="{{readOnly}}" bindinput="onNameInput" />
+    </view>
+    <view class="field">
+      <label class="field-label" for="node-description">节点说明</label>
+      <textarea id="node-description" class="textarea" value="{{description}}" maxlength="500" disabled="{{readOnly}}" bindinput="onDescriptionInput" />
+    </view>
+    <view class="field">
+      <label class="field-label" for="node-sla">SLA 工时</label>
+      <input id="node-sla" class="input" type="digit" value="{{slaWorkHours}}" disabled="{{readOnly}}" bindinput="onSlaInput" />
+    </view>
+    <view class="field">
+      <text class="field-label">负责人（任一人完成即通过）</text>
+      <checkbox-group class="option-list" bindchange="onAssigneesChange">
+        <label wx:for="{{assigneeOptions}}" wx:key="_id">
+          <checkbox value="{{item._id}}" checked="{{item.selected}}" disabled="{{readOnly}}" />{{item.displayName || item.username}}（@{{item.username}}）
+        </label>
+      </checkbox-group>
+    </view>
+    <view class="field">
+      <text class="field-label">凭证要求</text>
+      <switch checked="{{requiresEvidence}}" disabled="{{readOnly}}" bindchange="onRequiresEvidenceChange" />
+      <checkbox-group wx:if="{{requiresEvidence}}" class="evidence-options" bindchange="onEvidenceTypesChange">
+        <label wx:for="{{evidenceTypeOptions}}" wx:key="value">
+          <checkbox value="{{item.value}}" checked="{{item.selected}}" disabled="{{readOnly}}" />{{item.label}}
+        </label>
+      </checkbox-group>
+    </view>
+  </view>
+
+  <view class="row-between section-head">
+    <view class="section-title">动态字段（{{fields.length}}）</view>
+    <button wx:if="{{!readOnly}}" size="mini" class="secondary-button" bindtap="addField">新增字段</button>
+  </view>
+  <view class="card field-card" wx:for="{{fields}}" wx:key="_uiKey">
+    <view class="row-between field-heading"><text>字段 {{index + 1}}</text><text class="muted">{{item.fieldKey ? '稳定标识已保留' : '保存时生成标识'}}</text></view>
+    <input class="input compact" value="{{item.name}}" placeholder="字段名称" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldNameInput" />
+    <input class="input compact" value="{{item.description}}" placeholder="字段说明（可选）" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldDescriptionInput" />
+    <picker range="{{fieldTypeLabels}}" value="{{item.type === 'short_text' ? 0 : item.type === 'long_text' ? 1 : item.type === 'number' ? 2 : item.type === 'boolean' ? 3 : item.type === 'date' ? 4 : item.type === 'single_select' ? 5 : 6}}" disabled="{{readOnly}}" data-index="{{index}}" bindchange="onFieldTypeChange">
+      <view class="picker-value">类型：{{item.type}}</view>
+    </picker>
+    <label class="required-row"><switch checked="{{item.required}}" disabled="{{readOnly}}" data-index="{{index}}" bindchange="onFieldRequiredChange" />必填</label>
+
+    <view wx:if="{{item.type === 'short_text' || item.type === 'long_text'}}" class="constraint-grid">
+      <input class="input compact" type="number" value="{{item.constraints.minLength}}" placeholder="最小长度" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldMinLengthInput" />
+      <input class="input compact" type="number" value="{{item.constraints.maxLength}}" placeholder="最大长度" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldMaxLengthInput" />
+      <input class="input compact wide" value="{{item.constraints.pattern}}" placeholder="安全正则（可选）" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldPatternInput" />
+    </view>
+    <view wx:elif="{{item.type === 'number'}}" class="constraint-grid">
+      <input class="input compact" type="digit" value="{{item.constraints.min}}" placeholder="最小值" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldMinInput" />
+      <input class="input compact" type="digit" value="{{item.constraints.max}}" placeholder="最大值" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldMaxInput" />
+      <input class="input compact wide" type="number" value="{{item.constraints.decimalPlaces}}" placeholder="小数位数" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldDecimalPlacesInput" />
+    </view>
+    <input wx:elif="{{item.type === 'single_select' || item.type === 'multi_select'}}" class="input compact" value="{{item.optionText}}" placeholder="选项用逗号分隔" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldOptionsInput" />
+
+    <view wx:if="{{!readOnly}}" class="actions">
+      <button wx:if="{{index > 0}}" size="mini" data-index="{{index}}" data-direction="-1" bindtap="moveField">上移</button>
+      <button wx:if="{{index + 1 < fields.length}}" size="mini" data-index="{{index}}" data-direction="1" bindtap="moveField">下移</button>
+      <button size="mini" class="danger-button" data-index="{{index}}" bindtap="removeField">删除</button>
+    </view>
+  </view>
+
+  <button wx:if="{{!readOnly}}" class="primary-button submit" bindtap="submit">保存节点</button>
+</view>

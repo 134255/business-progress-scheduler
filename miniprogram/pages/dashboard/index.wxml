@@ -21,7 +21,8 @@
     <view class="section-title">最近业务</view>
     <view class="admin-links">
       <text wx:if="{{profile && profile.role === 'super_admin'}}" class="link" bindtap="openAdminUsers">用户管理</text>
-      <text class="link" bindtap="openTemplates">模板管理</text>
+      <text wx:if="{{profile && profile.role === 'super_admin'}}" class="link" bindtap="openAdminTemplates">模板管理</text>
+      <text class="link" bindtap="openTemplates">可用模板</text>
     </view>
   </view>
 

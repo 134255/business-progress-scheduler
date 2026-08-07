@@ -1,0 +1,16 @@
+.toolbar { padding-bottom: 20rpx; }
+.search-row { display: flex; gap: 14rpx; }
+.search-input { flex: 1; }
+.search-button { width: 150rpx; margin: 0; }
+.filter-row { margin-top: 22rpx; }
+.filter { color: #0f766e; padding: 14rpx 0; }
+.create-button { margin: 0; font-size: 26rpx; }
+.error { margin-bottom: 24rpx; padding: 18rpx; color: #be123c; background: #fff1f2; border-radius: 12rpx; }
+.template-name { font-size: 32rpx; font-weight: 650; margin-bottom: 8rpx; }
+.status { flex: none; margin-left: 20rpx; padding: 6rpx 14rpx; border-radius: 999rpx; font-size: 24rpx; }
+.status.draft { color: #92400e; background: #fef3c7; }
+.status.enabled { color: #047857; background: #d1fae5; }
+.status.disabled { color: #9f1239; background: #ffe4e6; }
+.meta { margin: 24rpx 0; color: #6b7280; font-size: 25rpx; }
+.actions { display: flex; flex-wrap: wrap; gap: 12rpx; }
+.actions button { margin: 0; }

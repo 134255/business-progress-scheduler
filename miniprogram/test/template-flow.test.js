@@ -1,0 +1,382 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+
+const miniProgramRoot = path.resolve(__dirname, '..')
+
+function withFakeModule(relativePath, exports, callback) {
+  const modulePath = path.join(miniProgramRoot, relativePath)
+  const resolved = require.resolve(modulePath)
+  const original = require.cache[resolved]
+  require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports }
+  try {
+    return callback()
+  } finally {
+    if (original) require.cache[resolved] = original
+    else delete require.cache[resolved]
+  }
+}
+
+function freshRequire(relativePath) {
+  const modulePath = path.join(miniProgramRoot, relativePath)
+  delete require.cache[require.resolve(modulePath)]
+  return require(modulePath)
+}
+
+function loadPage(relativePath, fakes = {}) {
+  let definition = null
+  global.Page = value => { definition = value }
+  const entries = Object.entries(fakes)
+
+  function loadAt(index) {
+    if (index === entries.length) return freshRequire(relativePath)
+    const [modulePath, fake] = entries[index]
+    return withFakeModule(modulePath, fake, () => loadAt(index + 1))
+  }
+
+  try {
+    loadAt(0)
+  } finally {
+    delete global.Page
+  }
+  assert.ok(definition, `${relativePath} should register a page`)
+  return {
+    ...definition,
+    data: JSON.parse(JSON.stringify(definition.data)),
+    setData(update) {
+      for (const [key, value] of Object.entries(update)) {
+        const match = /^(\w+)\[(\d+)\]\.(.+)$/.exec(key)
+        if (match) this.data[match[1]][Number(match[2])][match[3]] = value
+        else this.data[key] = value
+      }
+    }
+  }
+}
+
+test('template service forwards all seven protected actions with exact payloads', async () => {
+  const calls = []
+  const cloud = {
+    callBusinessApi: async (action, payload) => {
+      calls.push([action, payload])
+      return { action }
+    }
+  }
+  const templates = withFakeModule('utils/cloud.js', cloud, () => freshRequire('services/templates.js'))
+  const definition = { name: '交付模板', description: '', nodes: [] }
+
+  await templates.listTemplates({ status: 'draft', keyword: '交付' })
+  await templates.getTemplate('t1')
+  await templates.createTemplate(definition)
+  await templates.updateTemplate('t1', 3, definition)
+  await templates.changeTemplateStatus('t1', 4, 'enabled')
+  await templates.deleteTemplate('t1', 5)
+  await templates.listEnabledTemplates()
+
+  assert.deepEqual(calls, [
+    ['listTemplates', { status: 'draft', keyword: '交付' }],
+    ['getTemplate', { templateId: 't1' }],
+    ['createTemplate', definition],
+    ['updateTemplate', { templateId: 't1', expectedVersion: 3, definition }],
+    ['changeTemplateStatus', { templateId: 't1', expectedVersion: 4, status: 'enabled' }],
+    ['deleteTemplate', { templateId: 't1', expectedVersion: 5 }],
+    ['listEnabledTemplates', {}]
+  ])
+})
+
+test('application registers template pages and exposes administrator navigation only to super administrators', () => {
+  const appConfig = JSON.parse(fs.readFileSync(path.join(miniProgramRoot, 'app.json'), 'utf8'))
+  const dashboardWxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/dashboard/index.wxml'), 'utf8')
+  const dashboard = loadPage('pages/dashboard/index.js', {
+    'services/business.js': { dashboard: async () => ({ stats: {}, recent: [] }) }
+  })
+  const navigations = []
+  global.wx = { navigateTo: options => navigations.push(options) }
+
+  assert.deepEqual(appConfig.pages.filter(item => item.startsWith('pages/admin-template')), [
+    'pages/admin-templates/index',
+    'pages/admin-template-edit/index',
+    'pages/admin-template-node-edit/index'
+  ])
+  assert.match(dashboardWxml, /profile\s*&&\s*profile\.role\s*===\s*'super_admin'[\s\S]*openAdminTemplates/)
+
+  dashboard.data.profile = { role: 'user', status: 'active' }
+  dashboard.openAdminTemplates()
+  dashboard.data.profile = { role: 'super_admin', status: 'active' }
+  dashboard.openAdminTemplates()
+  assert.deepEqual(navigations, [{ url: '/pages/admin-templates/index' }])
+  delete global.wx
+})
+
+test('administrator template list rechecks authorization filters results and confirms lifecycle changes', async () => {
+  const serviceCalls = []
+  const templates = {
+    listTemplates: async query => {
+      serviceCalls.push(['list', query])
+      return { items: [{ _id: 't1', name: '交付模板', status: 'draft', version: 2, nodeCount: 1 }] }
+    },
+    changeTemplateStatus: async (...args) => {
+      serviceCalls.push(['status', ...args])
+      return { template: { _id: 't1', status: 'enabled', version: 3 } }
+    },
+    deleteTemplate: async (...args) => serviceCalls.push(['delete', ...args])
+  }
+  const launches = []
+  let confirmations = 0
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = {
+    reLaunch: options => launches.push(options),
+    showModal: async () => ({ confirm: ++confirmations > 1 }),
+    showToast: () => {}
+  }
+  const page = loadPage('pages/admin-templates/index.js', { 'services/templates.js': templates })
+
+  page.setData({ keyword: ' 交付 ', status: 'draft' })
+  await page.search()
+  assert.deepEqual(serviceCalls[0], ['list', { keyword: '交付', status: 'draft' }])
+  assert.equal(page.data.items.length, 1)
+
+  await page.changeStatus({ currentTarget: { dataset: { id: 't1', status: 'draft' } } })
+  assert.equal(serviceCalls.some(call => call[0] === 'status'), false, 'cancelled confirmation must not mutate')
+  await page.changeStatus({ currentTarget: { dataset: { id: 't1', status: 'draft' } } })
+  assert.deepEqual(serviceCalls.find(call => call[0] === 'status'), ['status', 't1', 2, 'enabled'])
+
+  global.getApp = () => ({ globalData: { currentUser: { role: 'user', status: 'active' } } })
+  assert.equal(page.requireSuperAdmin(), false)
+  assert.deepEqual(launches, [{ url: '/pages/dashboard/index' }])
+  delete global.getApp
+  delete global.wx
+})
+
+function storedNode(overrides = {}) {
+  return {
+    nodeKey: 'node-stable-1',
+    sequence: 0,
+    name: '需求确认',
+    description: '',
+    assigneeUserIds: ['account-1'],
+    slaWorkHours: 22,
+    requiresEvidence: false,
+    allowedEvidenceTypes: [],
+    fields: [{
+      fieldKey: 'field-stable-1', sequence: 0, name: '结论', description: '',
+      type: 'short_text', required: true, constraints: { maxLength: 80 }
+    }],
+    ...overrides
+  }
+}
+
+test('template editor loads every active account and preserves stable keys through node edits and reorder', async () => {
+  const userQueries = []
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { setNavigationBarTitle: () => {}, navigateTo: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {
+      getTemplate: async () => ({
+        template: { _id: 't1', name: '交付模板', description: '', status: 'disabled', version: 7 },
+        nodes: [storedNode(), storedNode({ nodeKey: 'node-stable-2', sequence: 1, name: '交付' })]
+      })
+    },
+    'services/admin-users.js': {
+      listUsers: async query => {
+        userQueries.push(query)
+        return query.page === 1
+          ? { items: [{ _id: 'account-1', displayName: '甲', username: 'alpha', status: 'active' }], hasMore: true }
+          : { items: [{ _id: 'account-2', displayName: '乙', username: 'beta', status: 'active' }], hasMore: false }
+      }
+    }
+  })
+
+  await page.onLoad({ id: 't1' })
+  assert.deepEqual(userQueries, [
+    { status: 'active', keyword: '', page: 1, pageSize: 100 },
+    { status: 'active', keyword: '', page: 2, pageSize: 100 }
+  ])
+  assert.deepEqual(page.data.assigneeOptions.map(item => item._id), ['account-1', 'account-2'])
+
+  page.acceptNodeFromEditor(0, {
+    ...page.data.nodes[0],
+    name: '更新后的需求确认',
+    fields: [{ ...page.data.nodes[0].fields[0], name: '更新后的结论' }]
+  })
+  page.moveNode({ currentTarget: { dataset: { index: 0, direction: 1 } } })
+
+  assert.deepEqual(page.data.nodes.map(node => node.nodeKey), ['node-stable-2', 'node-stable-1'])
+  assert.equal(page.data.nodes[1].fields[0].fieldKey, 'field-stable-1')
+  assert.deepEqual(page.data.nodes.map(node => node.sequence), [0, 1])
+  delete global.getApp
+  delete global.wx
+})
+
+test('template editor rejects an empty definition and refreshes stale versions without losing a server limit message', async () => {
+  const updates = []
+  let loads = 0
+  const limit = new Error('Template definitions support at most 48 nodes and must fit the transaction operation budget')
+  limit.code = 'TEMPLATE_LIMIT_EXCEEDED'
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { setNavigationBarTitle: () => {}, navigateBack: () => {}, showToast: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {
+      getTemplate: async () => ({
+        template: { _id: 't1', name: '交付模板', description: '', status: 'disabled', version: ++loads + 3 },
+        nodes: [storedNode()]
+      }),
+      updateTemplate: async (...args) => {
+        updates.push(args)
+        const conflict = new Error('conflict')
+        conflict.code = 'VERSION_CONFLICT'
+        throw conflict
+      },
+      changeTemplateStatus: async () => { throw limit }
+    },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  await page.onLoad({ id: 't1' })
+
+  page.setData({ nodes: [] })
+  await page.submit()
+  assert.match(page.data.errorMessage, /至少添加一个节点/)
+  assert.equal(updates.length, 0)
+
+  page.setData({ nodes: [storedNode()] })
+  await page.submit()
+  assert.equal(loads, 2, 'a version conflict must reload the latest definition')
+  assert.equal(page.data.version, 5)
+  assert.match(page.data.errorMessage, /其他管理员/)
+
+  await page.enableTemplate()
+  assert.equal(page.data.errorMessage, limit.message)
+  delete global.getApp
+  delete global.wx
+})
+
+test('enabled template definitions are fully read-only in page behavior and markup', async () => {
+  const navigations = []
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { setNavigationBarTitle: () => {}, navigateTo: options => navigations.push(options) }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {
+      getTemplate: async () => ({
+        template: { _id: 't1', name: '启用模板', description: '只读', status: 'enabled', version: 2 },
+        nodes: [storedNode()]
+      })
+    },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  await page.onLoad({ id: 't1' })
+  const original = JSON.parse(JSON.stringify(page.data.nodes))
+  page.onNameInput({ detail: { value: '不应写入' } })
+  page.removeNode({ currentTarget: { dataset: { index: 0 } } })
+  page.openNodeEditor({ currentTarget: { dataset: { index: 0 } } })
+
+  assert.equal(page.data.readOnly, true)
+  assert.equal(page.data.name, '启用模板')
+  assert.deepEqual(page.data.nodes, original)
+  assert.deepEqual(navigations, [{ url: '/pages/admin-template-node-edit/index?index=0' }])
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-edit/index.wxml'), 'utf8')
+  assert.match(wxml, /disabled="{{readOnly[^}]*}}"/)
+  assert.match(wxml, /wx:if="{{!readOnly}}"[\s\S]*保存/)
+  delete global.getApp
+  delete global.wx
+})
+
+test('node editor returns normalized stable-key data through the previous page without identities in URLs', async () => {
+  let accepted
+  const previousPage = {
+    getNodeEditorContext: () => ({
+      readOnly: false,
+      assigneeOptions: [
+        { _id: 'account-1', displayName: '甲', username: 'alpha' },
+        { _id: 'account-2', displayName: '乙', username: 'beta' }
+      ],
+      node: storedNode()
+    }),
+    acceptNodeFromEditor(index, node) { accepted = [index, node] }
+  }
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.getCurrentPages = () => [previousPage, {}]
+  global.wx = { setNavigationBarTitle: () => {}, navigateBack: () => {} }
+  const page = loadPage('pages/admin-template-node-edit/index.js')
+
+  page.onLoad({ index: '0' })
+  page.addField()
+  page.onFieldNameInput({ currentTarget: { dataset: { index: 1 } }, detail: { value: '验收项' } })
+  page.onFieldTypeChange({ currentTarget: { dataset: { index: 1 } }, detail: { value: '5' } })
+  page.onFieldOptionsInput({ currentTarget: { dataset: { index: 1 } }, detail: { value: '通过, 退回,通过' } })
+  page.onAssigneesChange({ detail: { value: ['account-2'] } })
+  await page.submit()
+
+  assert.equal(accepted[0], 0)
+  assert.equal(accepted[1].nodeKey, 'node-stable-1')
+  assert.equal(accepted[1].fields[0].fieldKey, 'field-stable-1')
+  assert.equal(Object.hasOwn(accepted[1].fields[1], 'fieldKey'), false)
+  assert.deepEqual(accepted[1].fields[1].constraints.options, ['通过', '退回'])
+  assert.deepEqual(accepted[1].assigneeUserIds, ['account-2'])
+  assert.deepEqual(accepted[1].fields.map(field => field.sequence), [0, 1])
+
+  const templateSource = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-edit/index.js'), 'utf8')
+  assert.doesNotMatch(templateSource, /navigateTo\([^)]*(?:assigneeUserIds|fields|nodeKey)/s)
+  assert.match(templateSource, /admin-template-node-edit\/index\?index=/)
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor precomputes checkbox and option display state for WXML compatibility', () => {
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8')
+  assert.doesNotMatch(wxml, /\.(?:includes|join)\s*\(/)
+  assert.match(wxml, /checked="{{item\.selected}}"/)
+  assert.match(wxml, /value="{{item\.optionText}}"/)
+})
+
+test('unsaved nodes and fields keep unique client keys that never enter template API payloads', async () => {
+  let submittedDefinition
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { setNavigationBarTitle: () => {}, navigateBack: () => {}, showToast: () => {} }
+  const templatePage = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {
+      getTemplate: async () => ({
+        template: { _id: 't1', name: '交付模板', description: '', status: 'disabled', version: 1 },
+        nodes: [storedNode()]
+      }),
+      updateTemplate: async (id, version, definition) => { submittedDefinition = definition }
+    },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  await templatePage.onLoad({ id: 't1' })
+  templatePage.acceptNodeFromEditor(-1, {
+    sequence: 1, name: '新增一', description: '', assigneeUserIds: ['account-1'],
+    slaWorkHours: 22, requiresEvidence: false, allowedEvidenceTypes: [], fields: []
+  })
+  templatePage.acceptNodeFromEditor(-1, {
+    sequence: 2, name: '新增二', description: '', assigneeUserIds: ['account-1'],
+    slaWorkHours: 22, requiresEvidence: false, allowedEvidenceTypes: [], fields: []
+  })
+  const newNodeKeys = templatePage.data.nodes.slice(1).map(node => node._uiKey)
+  assert.equal(new Set(newNodeKeys).size, 2)
+
+  await templatePage.submit()
+  assert.doesNotMatch(JSON.stringify(submittedDefinition), /_uiKey/)
+
+  const previousPage = {
+    getNodeEditorContext: () => ({ readOnly: false, assigneeOptions: [], node: null }),
+    acceptNodeFromEditor: () => {}
+  }
+  global.getCurrentPages = () => [previousPage, {}]
+  const nodePage = loadPage('pages/admin-template-node-edit/index.js')
+  nodePage.onLoad({ index: '-1' })
+  nodePage.addField()
+  nodePage.addField()
+  const fieldKeys = nodePage.data.fields.map(field => field._uiKey)
+  assert.equal(new Set(fieldKeys).size, 2)
+  nodePage.moveField({ currentTarget: { dataset: { index: 0, direction: 1 } } })
+  assert.deepEqual(nodePage.data.fields.map(field => field._uiKey), fieldKeys.slice().reverse())
+
+  const templateWxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-edit/index.wxml'), 'utf8')
+  const nodeWxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8')
+  assert.match(templateWxml, /wx:key="_uiKey"/)
+  assert.match(nodeWxml, /wx:key="_uiKey"/)
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
