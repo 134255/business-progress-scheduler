@@ -4,6 +4,7 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
+- WeChat DevTools account-administration smoke acceptance now covers automatic dashboard restoration, the authoritative super-administrator list state, creation of two ordinary test accounts and a second super administrator, case-insensitive duplicate-username rejection, safe disable/re-enable of the second administrator, rejection of disabling or demoting the final active super administrator, five-failure account lockout, administrator unlock, and read-only compatibility navigation through dashboard, business list, business detail, node feedback/history, and profile pages. No credential or identity value was recorded.
 - The obsolete `account-admin` linked worktree is fully cleaned up: its accidental deployment-manual edit was explicitly discarded, Git worktree registration and contents were removed, the merged local `codex/account-admin` branch was deleted through the non-force path, and the final empty `.worktrees/account-admin` directory was removed after WeChat DevTools released it.
 - Local `main` was fast-forwarded from `22a78f3` to the accepted account-administration head `f39c89e`. The merged result passed the full backend, client, WXML, syntax, diff, and project-memory checks. `origin/main` was then fast-forwarded through the integrated milestone and cleanup record at `b314785`.
 - The safe Mini Program super-administrator recovery entry is implemented at `8e62b98` and `f38f26d` and manually accepted in WeChat DevTools. The operator rotated the one-time recovery state through the approved offline workflow, completed recovery and forced permanent-password change, entered the dashboard, and confirmed redacted guard, credential, binding, recovery-consumption, and audit outcomes. No secret or identity value was recorded.
@@ -180,12 +181,14 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Blockers
 
+- Administrator password reset manual acceptance is deferred because the current editable reset modal cannot mask the temporary password. The backend reset path remains automated-test covered; the client must move password entry to masked fields before manual use.
+- First-login binding, unbinding, rebinding with another identity, and ordinary-user route denial remain unverified because they require a second WeChat identity. These do not block the next core feature phase.
+- WeChat DevTools changed the uncommitted `project.config.json` base-library selection from `trial` to `3.17.1`. This operator-owned change is preserved and must not be mixed into feature commits without an explicit decision.
 - `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
-- Task 5 simulator acceptance in WeChat DevTools is unverified.
-- Task 6 WeChat DevTools compilation, navigation, rendering, and ordinary-user manual-route smoke acceptance are unverified.
 - Enterprise WeChat production identifiers and secret remain intentionally unavailable; strong-message delivery is deferred.
 
 ## Next actions
 
-1. Run the remaining Task 5 and Task 6 WeChat DevTools page/navigation smoke acceptance if it is required before release.
-2. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
+1. Implement the approved template-management and node-configuration phase.
+2. Continue SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
+3. Replace the administrator reset-password editable modal with masked inputs, then complete the remaining second-identity binding/unbinding acceptance.
