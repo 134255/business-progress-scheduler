@@ -8,8 +8,17 @@ function updateUserProfile(input) {
   return callBusinessApi('updateUserProfile', input)
 }
 
-function dashboard() {
-  return callBusinessApi('dashboard')
+async function dashboard() {
+  const result = await callBusinessApi('listBusinessLines', { page: 1, pageSize: 20 })
+  const items = Array.isArray(result.items) ? result.items : []
+  return {
+    stats: {
+      active: items.filter(item => item.status === 'active').length,
+      pendingMine: 0,
+      completed: items.filter(item => item.status === 'completed').length
+    },
+    recent: items.slice(0, 5)
+  }
 }
 
 function listBusinessLines(filters) {
@@ -20,12 +29,16 @@ function getBusinessLine(id) {
   return callBusinessApi('getBusinessLine', { id })
 }
 
-function createBusinessLine(input) {
-  return callBusinessApi('createBusinessLine', input)
+function createBusinessFromTemplate(input) {
+  return callBusinessApi('createBusinessFromTemplate', input)
 }
 
 function updateBusinessLine(input) {
   return callBusinessApi('updateBusinessLine', input)
+}
+
+function updateBusinessMetadata(input) {
+  return callBusinessApi('updateBusinessMetadata', input)
 }
 
 function deleteBusinessLine(id) {
@@ -46,8 +59,9 @@ module.exports = {
   dashboard,
   listBusinessLines,
   getBusinessLine,
-  createBusinessLine,
+  createBusinessFromTemplate,
   updateBusinessLine,
+  updateBusinessMetadata,
   deleteBusinessLine,
   submitNodeFeedback,
   getNodeHistory

@@ -1,12 +1,64 @@
+const templates = require('../../services/templates')
+
+function messageFor(error) {
+  return error && error.message ? error.message : '网络异常，请稍后重试'
+}
+
 Page({
   data: {
-    templates: [
-      { id: 'demo-1', name: '通用三节点流程', nodeCount: 3, builtIn: true }
-    ]
+    loading: false,
+    items: [],
+    errorMessage: ''
   },
 
-  createFromTemplate() {
-    wx.navigateTo({ url: '/pages/business-edit/index' })
+  onShow() {
+    const actor = this.requireActiveUser()
+    if (!actor) return
+    return this.loadTemplates(actor._id)
+  },
+
+  requireActiveUser(expectedUserId) {
+    const currentUser = getApp().globalData.currentUser
+    if (currentUser && currentUser.status === 'active' &&
+        (!expectedUserId || currentUser._id === expectedUserId)) {
+      this.authRedirected = false
+      return currentUser
+    }
+    if (!this.authRedirected) {
+      this.authRedirected = true
+      wx.reLaunch({ url: '/pages/login/index' })
+    }
+    return null
+  },
+
+  async loadTemplates(expectedUserId) {
+    if (this.data.loading) return
+    this.setData({ loading: true, errorMessage: '' })
+    try {
+      const result = await templates.listEnabledTemplates()
+      if (!this.requireActiveUser(expectedUserId)) return
+      this.setData({ items: Array.isArray(result.items) ? result.items : [] })
+    } catch (error) {
+      if (!this.requireActiveUser(expectedUserId)) return
+      this.setData({ items: [], errorMessage: messageFor(error) })
+    } finally {
+      if (this.requireActiveUser(expectedUserId)) this.setData({ loading: false })
+    }
+  },
+
+  retry() {
+    const actor = this.requireActiveUser()
+    if (actor) return this.loadTemplates(actor._id)
+  },
+
+  selectTemplate(event) {
+    if (!this.requireActiveUser()) return
+    const { id, available, reason } = event.currentTarget.dataset
+    if (!available) {
+      wx.showToast({ title: reason || '模板负责人不可用，请联系管理员', icon: 'none' })
+      return
+    }
+    if (!id) return
+    wx.navigateTo({ url: `/pages/business-edit/index?templateId=${encodeURIComponent(id)}` })
   }
 })
-

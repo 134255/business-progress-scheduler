@@ -1,11 +1,26 @@
 <view class="page">
-  <view class="card" wx:for="{{templates}}" wx:key="id" bindtap="createFromTemplate">
-    <view class="row-between"><text class="name">{{item.name}}</text><text class="muted">{{item.nodeCount}} 个节点</text></view>
-    <text class="muted block">{{item.builtIn ? '内置示例模板' : '自定义模板'}}</text>
+  <view class="empty" wx:if="{{loading}}">正在加载可用模板…</view>
+  <view class="card error-card" wx:elif="{{errorMessage}}">
+    <text>{{errorMessage}}</text>
+    <button class="secondary-button retry" bindtap="retry">重新加载</button>
   </view>
-  <view class="card hint">
-    <text class="section-title">下一迭代</text>
-    <text class="muted block">支持把现有业务线保存为模板、编辑模板节点、从模板快速创建业务线。</text>
+  <view class="empty" wx:elif="{{!loading && !errorMessage && !items.length}}">暂无已启用模板，请联系管理员</view>
+  <view
+    wx:else
+    class="card template-card {{item.available ? '' : 'template-unavailable'}}"
+    wx:for="{{items}}"
+    wx:key="_id"
+    data-id="{{item._id}}"
+    data-available="{{item.available}}"
+    data-reason="{{item.unavailableReason}}"
+    bindtap="selectTemplate"
+  >
+    <view class="row-between">
+      <text class="name">{{item.name}}</text>
+      <text class="node-count">{{item.nodeCount}} 个节点</text>
+    </view>
+    <text class="muted block">{{item.description || '暂无说明'}}</text>
+    <text wx:if="{{!item.available}}" class="unavailable-reason">{{item.unavailableReason || '模板当前不可创建业务'}}</text>
+    <text wx:else class="available-action">选择此模板 →</text>
   </view>
 </view>
-

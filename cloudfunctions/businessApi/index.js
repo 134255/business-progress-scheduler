@@ -169,6 +169,7 @@ function createBusinessRoutes(businessService) {
   return {
     listBusinessLines: ({ actor, payload }) => businessService.listBusinessLines({ actor, query: payload }),
     getBusinessLine: ({ actor, payload }) => businessService.getBusinessLine({ actor, lineId: payload.id }),
+    updateBusinessMetadata: ({ actor, payload }) => businessService.updateMetadata({ actor, input: payload }),
     createBusinessFromTemplate: ({ actor, payload }) => businessService.createFromTemplate({
       actor,
       input: payload

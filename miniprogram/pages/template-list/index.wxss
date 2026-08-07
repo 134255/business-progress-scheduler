@@ -1,4 +1,9 @@
 .name { font-size: 31rpx; font-weight: 650; }
 .block { display: block; margin-top: 12rpx; }
-.hint { border-style: dashed; }
-
+.template-card { border: 1rpx solid transparent; }
+.template-unavailable { opacity: 0.75; background: #f9fafb; }
+.node-count { color: #0f766e; font-size: 25rpx; }
+.available-action { display: block; margin-top: 18rpx; color: #0f766e; font-weight: 600; }
+.unavailable-reason { display: block; margin-top: 18rpx; color: #b45309; }
+.error-card { color: #b91c1c; }
+.retry { margin-top: 20rpx; }

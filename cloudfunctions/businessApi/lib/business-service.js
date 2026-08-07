@@ -7,6 +7,10 @@ const {
 
 const REQUEST_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+const METADATA_INPUT_KEYS = new Set([
+  'businessLineId', 'expectedVersion', 'name', 'description',
+  'plannedStartDate', 'plannedEndDate'
+])
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -59,6 +63,29 @@ function normalizeInput(input) {
   }
 }
 
+function normalizeMetadataInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw createError('VALIDATION_ERROR')
+  if (Object.keys(input).some(key => !METADATA_INPUT_KEYS.has(key))) throw createError('VALIDATION_ERROR')
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    throw createError('VALIDATION_ERROR')
+  }
+  const plannedStartDate = normalizeDate(input.plannedStartDate)
+  const plannedEndDate = normalizeDate(input.plannedEndDate)
+  if (plannedStartDate && plannedEndDate && plannedStartDate > plannedEndDate) {
+    throw createError('VALIDATION_ERROR')
+  }
+  return {
+    lineId: requireText(input.businessLineId),
+    expectedVersion: input.expectedVersion,
+    metadata: {
+      name: requireText(input.name),
+      description: typeof input.description === 'string' ? input.description.trim() : '',
+      plannedStartDate,
+      plannedEndDate
+    }
+  }
+}
+
 function requireEnabledDefinition(definition) {
   if (!definition || !definition.template || definition.template.status !== 'enabled') {
     throw createError('TEMPLATE_NOT_ENABLED')
@@ -101,7 +128,13 @@ function createBusinessService({ repository }) {
     return repository.getBusinessLine({ actor, lineId: requireText(lineId) })
   }
 
-  return { createFromTemplate, listBusinessLines, getBusinessLine }
+  async function updateMetadata({ actor, input }) {
+    requireActiveActor(actor)
+    const normalized = normalizeMetadataInput(input)
+    return repository.updateBusinessMetadata({ actor, ...normalized })
+  }
+
+  return { createFromTemplate, listBusinessLines, getBusinessLine, updateMetadata }
 }
 
 module.exports = { createBusinessService }

@@ -20,6 +20,7 @@ const QUERY_PAGE_SIZE = 100
 const MAX_TRANSACTION_OPERATIONS = 100
 const MAX_DUPLICATE_RETRIES = 3
 const SNAPSHOT_LIMIT_MESSAGE = 'Template snapshot transaction operation budget exceeded; reduce distinct assignees'
+const FROZEN_BUSINESS_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -162,6 +163,12 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     if (!allowed) throw createError('FORBIDDEN')
   }
 
+  function isLineManager(line, actor) {
+    return usesAccountMembership(line)
+      ? membershipArray(line.managerUserIds).includes(actor._id)
+      : Boolean(actor.openid) && membershipArray(line.managerIds).includes(actor.openid)
+  }
+
   function compareUpdatedDesc(left, right) {
     const leftValue = left.updatedAt instanceof Date ? left.updatedAt.getTime() : Number(left.updatedAt)
     const rightValue = right.updatedAt instanceof Date ? right.updatedAt.getTime() : Number(right.updatedAt)
@@ -245,6 +252,44 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     const canEditNodes = !accountSchema && canManage && Number(line.progress || 0) === 0 &&
       projectedNodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
     return { line, nodes: projectedNodes, canManage, canEditNodes }
+  }
+
+  async function updateBusinessMetadata({ actor, lineId, expectedVersion, metadata }) {
+    return db.runTransaction(async transaction => {
+      const currentActor = await readDocument(transaction, COLLECTIONS.users, actor && actor._id)
+      if (!currentActor || currentActor.status !== 'active') throw createError('FORBIDDEN')
+      const line = await readDocument(transaction, COLLECTIONS.lines, lineId)
+      if (!line || line.status === 'creating') throw createError('NOT_FOUND')
+      if (FROZEN_BUSINESS_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
+      if (!isLineManager(line, actor)) throw createError('FORBIDDEN')
+      if (line.version !== expectedVersion) throw createError('VERSION_CONFLICT')
+      if (!Number.isSafeInteger(line.version) || line.version < 1 || line.version === Number.MAX_SAFE_INTEGER) {
+        throw createError('VERSION_CONFLICT')
+      }
+      const nextVersion = line.version + 1
+      await transaction.collection(COLLECTIONS.lines).doc(lineId).update({
+        data: {
+          name: metadata.name,
+          description: metadata.description,
+          plannedStartDate: metadata.plannedStartDate,
+          plannedEndDate: metadata.plannedEndDate,
+          version: nextVersion,
+          updatedAt: db.serverDate()
+        }
+      })
+      await transaction.collection(COLLECTIONS.audit).doc(`business-metadata-${lineId}-${nextVersion}`).set({
+        data: {
+          actorId: actor._id,
+          action: 'UPDATE_BUSINESS_METADATA',
+          targetType: 'business_line',
+          targetId: lineId,
+          beforeVersion: line.version,
+          afterVersion: nextVersion,
+          createdAt: db.serverDate()
+        }
+      })
+      return { id: lineId, version: nextVersion }
+    })
   }
 
   function nodeId(lineId, sequence) {
@@ -433,7 +478,8 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     findCreationResult,
     createBusinessSnapshot,
     listBusinessLines,
-    getBusinessLine
+    getBusinessLine,
+    updateBusinessMetadata
   }
 }
 

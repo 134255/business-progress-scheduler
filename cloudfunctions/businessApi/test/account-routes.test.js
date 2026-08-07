@@ -283,6 +283,31 @@ test('business list and detail routes pass the trusted actor to the dual-schema 
   ])
 })
 
+test('business metadata update route delegates a trusted actor and exact optimistic payload', async () => {
+  const calls = []
+  const businessService = {
+    async updateMetadata(input) {
+      calls.push(input)
+      return { id: 'business-1', version: 5 }
+    }
+  }
+  const harness = createRouteHarness({ businessService })
+  const payload = {
+    businessLineId: 'business-1', expectedVersion: 4,
+    name: '新名称', description: '', plannedStartDate: '', plannedEndDate: '',
+    actorId: 'forged'
+  }
+  const result = await harness.api.main({ action: 'updateBusinessMetadata', payload })
+
+  assert.deepEqual(result, { ok: true, data: { id: 'business-1', version: 5 } })
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    },
+    input: payload
+  }])
+})
+
 test('the deployed legacy route map rejects caller-authored business codes and nodes', async () => {
   const harness = createRouteHarness({ legacyRoutes: createDefaultLegacyRoutes() })
   const result = await harness.api.main({

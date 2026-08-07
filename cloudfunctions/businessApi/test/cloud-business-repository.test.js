@@ -440,3 +440,107 @@ test('valid account arrays take precedence over differing legacy arrays while pu
     error => error.code === 'FORBIDDEN'
   )
 })
+
+test('account-id manager updates metadata atomically without changing immutable snapshot fields', async () => {
+  const original = {
+    _id: 'business-1', code: 'BL-20260807-0001', name: '旧名称', description: '',
+    plannedStartDate: '2026-08-08', plannedEndDate: '2026-08-12', status: 'active', version: 4,
+    managerUserIds: ['user-1'], memberUserIds: ['user-1', 'user-2'],
+    sourceTemplateId: 'template-1', sourceTemplateVersion: 3, currentNodeId: 'node-1', nodeCount: 1
+  }
+  const { fake, repository } = createRepositoryHarness(seedDefinition({
+    extra: {
+      business_lines: [original],
+      business_nodes: [{ _id: 'node-1', businessLineId: 'business-1', name: '不可变节点', status: 'ready' }]
+    }
+  }))
+
+  const result = await repository.updateBusinessMetadata({
+    actor: { _id: 'user-1', openid: 'wx-user-1' },
+    lineId: 'business-1',
+    expectedVersion: 4,
+    metadata: {
+      name: '新名称', description: '新说明',
+      plannedStartDate: '2026-08-09', plannedEndDate: '2026-08-13'
+    }
+  })
+
+  assert.deepEqual(result, { id: 'business-1', version: 5 })
+  const line = fake.documents('business_lines')[0]
+  assert.equal(line.name, '新名称')
+  assert.equal(line.description, '新说明')
+  assert.equal(line.version, 5)
+  for (const field of ['code', 'managerUserIds', 'memberUserIds', 'sourceTemplateId', 'sourceTemplateVersion', 'currentNodeId', 'nodeCount']) {
+    assert.deepEqual(line[field], original[field], field)
+  }
+  assert.deepEqual(fake.documents('business_nodes'), [
+    { _id: 'node-1', businessLineId: 'business-1', name: '不可变节点', status: 'ready' }
+  ])
+  assert.deepEqual(fake.documents('audit_logs').map(item => ({
+    actorId: item.actorId, action: item.action, targetId: item.targetId,
+    beforeVersion: item.beforeVersion, afterVersion: item.afterVersion
+  })), [{
+    actorId: 'user-1', action: 'UPDATE_BUSINESS_METADATA', targetId: 'business-1',
+    beforeVersion: 4, afterVersion: 5
+  }])
+})
+
+test('metadata update denies non-managers, stale versions, inactive actors, and non-editable states', async t => {
+  async function attempt(line, actor = { _id: 'user-1', openid: 'wx-user-1' }, expectedVersion = 4, beforeTransaction) {
+    const { fake, repository } = createRepositoryHarness(seedDefinition({ extra: { business_lines: [line] } }))
+    if (beforeTransaction) fake.beforeNextTransaction(beforeTransaction(fake))
+    const promise = repository.updateBusinessMetadata({
+      actor,
+      lineId: line._id,
+      expectedVersion,
+      metadata: { name: '新名称', description: '', plannedStartDate: '', plannedEndDate: '' }
+    })
+    return { fake, promise }
+  }
+
+  await t.test('account-id non-manager', async () => {
+    const { fake, promise } = await attempt({
+      _id: 'business-1', status: 'active', version: 4,
+      managerUserIds: ['user-2'], memberUserIds: ['user-1', 'user-2']
+    })
+    await assert.rejects(promise, error => error.code === 'FORBIDDEN')
+    assert.equal(fake.documents('audit_logs').length, 0)
+  })
+
+  await t.test('stale expected version', async () => {
+    const { promise } = await attempt({
+      _id: 'business-1', status: 'active', version: 5,
+      managerUserIds: ['user-1'], memberUserIds: ['user-1']
+    })
+    await assert.rejects(promise, error => error.code === 'VERSION_CONFLICT')
+  })
+
+  await t.test('actor disabled after route resolution', async () => {
+    const { fake, promise } = await attempt({
+      _id: 'business-1', status: 'active', version: 4,
+      managerUserIds: ['user-1'], memberUserIds: ['user-1']
+    }, { _id: 'user-1', openid: 'wx-user-1' }, 4, fake => () => {
+      fake.replace('users', 'user-1', { status: 'disabled' })
+    })
+    await assert.rejects(promise, error => error.code === 'FORBIDDEN')
+    assert.equal(fake.documents('business_lines')[0].name, undefined)
+  })
+
+  for (const status of ['completed', 'cancelled', 'closed', 'deleted']) {
+    await t.test(status, async () => {
+      const { promise } = await attempt({
+        _id: `business-${status}`, status, version: 4,
+        managerUserIds: ['user-1'], memberUserIds: ['user-1']
+      })
+      await assert.rejects(promise, error => error.code === 'BUSINESS_FROZEN')
+    })
+  }
+
+  await t.test('creating reservation remains hidden', async () => {
+    const { promise } = await attempt({
+      _id: 'business-creating', status: 'creating', version: 4,
+      managerUserIds: ['user-1'], memberUserIds: ['user-1']
+    })
+    await assert.rejects(promise, error => error.code === 'NOT_FOUND')
+  })
+})

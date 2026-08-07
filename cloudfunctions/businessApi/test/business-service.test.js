@@ -100,3 +100,55 @@ test('business reads use the trusted account actor and validated identifiers', a
     error => error.code === 'VALIDATION_ERROR'
   )
 })
+
+test('metadata update accepts only normalized metadata and an expected version', async () => {
+  const calls = []
+  const repository = {
+    async updateBusinessMetadata(input) {
+      calls.push(input)
+      return { id: input.lineId, version: input.expectedVersion + 1 }
+    }
+  }
+  const { createBusinessService } = require('../lib/business-service')
+  const service = createBusinessService({ repository })
+  const actor = { _id: 'user-1', status: 'active' }
+
+  const result = await service.updateMetadata({
+    actor,
+    input: {
+      businessLineId: ' business-1 ',
+      expectedVersion: 4,
+      name: ' 新名称 ',
+      description: ' 新说明 ',
+      plannedStartDate: '2026-08-08',
+      plannedEndDate: '2026-08-12'
+    }
+  })
+
+  assert.deepEqual(result, { id: 'business-1', version: 5 })
+  assert.deepEqual(calls, [{
+    actor,
+    lineId: 'business-1',
+    expectedVersion: 4,
+    metadata: {
+      name: '新名称',
+      description: '新说明',
+      plannedStartDate: '2026-08-08',
+      plannedEndDate: '2026-08-12'
+    }
+  }])
+
+  for (const input of [
+    { businessLineId: 'business-1', expectedVersion: 4, name: '名称', code: 'FORGED' },
+    { businessLineId: 'business-1', expectedVersion: 0, name: '名称' },
+    { businessLineId: 'business-1', expectedVersion: 4, name: ' ', description: '' },
+    { businessLineId: 'business-1', expectedVersion: 4, name: '名称', plannedStartDate: '2026-02-30' },
+    { businessLineId: 'business-1', expectedVersion: 4, name: '名称', plannedStartDate: '2026-08-13', plannedEndDate: '2026-08-12' }
+  ]) {
+    await assert.rejects(
+      service.updateMetadata({ actor, input }),
+      error => error.code === 'VALIDATION_ERROR'
+    )
+  }
+  assert.equal(calls.length, 1)
+})
