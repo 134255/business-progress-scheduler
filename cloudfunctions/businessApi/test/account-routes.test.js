@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const Module = require('node:module')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
+const { APPLICATION_ERROR_MARKER } = require('../lib/cloud-template-repository')
 
 const originalLoad = Module._load
 const defaultFake = createFakeCloudDatabase({
@@ -214,13 +215,14 @@ test('default template routes pass trusted actors and exact payload contracts to
 test('template application errors retain safe codes without logging payload values', async () => {
   for (const code of [
     'TEMPLATE_NOT_EDITABLE', 'TEMPLATE_NOT_ENABLED', 'TEMPLATE_INVALID',
-    'ASSIGNEE_INACTIVE', 'INVALID_FIELD_VALUE'
+    'TEMPLATE_LIMIT_EXCEEDED', 'ASSIGNEE_INACTIVE', 'INVALID_FIELD_VALUE'
   ]) {
     const harness = createRouteHarness({
       templateService: {
         async createTemplate() {
           const error = new Error('secret-template-payload')
           error.code = code
+          error[APPLICATION_ERROR_MARKER] = true
           throw error
         }
       }
@@ -249,6 +251,24 @@ test('unknown template failures return a generic response without database detai
 
   assert.deepEqual(result, { ok: false, code: 'INTERNAL_ERROR', message: 'Service error' })
   assert.doesNotMatch(JSON.stringify(harness.errors), /permission denied|DATABASE_PERMISSION_DENIED/)
+})
+
+test('unmarked infrastructure failures cannot borrow an allowlisted application code', async () => {
+  const harness = createRouteHarness({
+    templateService: {
+      async getTemplate() {
+        const error = new Error('document.get failed for internal collection templates')
+        error.code = 'NOT_FOUND'
+        throw error
+      }
+    }
+  })
+  const result = await harness.api.main({
+    action: 'getTemplate', payload: { templateId: 't1' }
+  })
+
+  assert.deepEqual(result, { ok: false, code: 'INTERNAL_ERROR', message: 'Service error' })
+  assert.doesNotMatch(JSON.stringify(harness.errors), /document\.get|internal collection/)
 })
 
 test('protected routes fail closed for missing, disabled, locked, and password-change-required account state', async t => {

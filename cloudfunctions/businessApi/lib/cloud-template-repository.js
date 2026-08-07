@@ -9,6 +9,8 @@ const COLLECTIONS = Object.freeze({
 const QUERY_PAGE_SIZE = 100
 const MAX_TRANSACTION_OPERATIONS = 100
 const MAX_TEMPLATE_NODES = 48
+const TEMPLATE_LIMIT_MESSAGE = `Template definitions support at most ${MAX_TEMPLATE_NODES} nodes and must fit the transaction operation budget`
+const APPLICATION_ERROR_MARKER = Symbol('businessApi.applicationError')
 
 function defaultIdFactory(prefix) {
   return `${prefix}_${crypto.randomBytes(16).toString('hex')}`
@@ -17,7 +19,12 @@ function defaultIdFactory(prefix) {
 function createError(code, message = code) {
   const error = new Error(message)
   error.code = code
+  error[APPLICATION_ERROR_MARKER] = true
   return error
+}
+
+function createTemplateLimitError() {
+  return createError('TEMPLATE_LIMIT_EXCEEDED', TEMPLATE_LIMIT_MESSAGE)
 }
 
 function clone(value) {
@@ -95,6 +102,13 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     return result
   }
 
+  async function assertActiveAssigneeDocuments(database, userIds) {
+    for (const userId of userIds) {
+      const user = await readDocument(database, COLLECTIONS.users, userId)
+      if (!user || user.status !== 'active') throw createError('ASSIGNEE_INACTIVE')
+    }
+  }
+
   function timestampedTemplate(template, { create = false } = {}) {
     const stored = clone(template)
     delete stored._id
@@ -141,15 +155,17 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     return { _id: auditId, ...stored }
   }
 
-  async function createTemplateDefinition({ actor, definition, audit }) {
+  async function createTemplateDefinition({ actor, assigneeUserIds = [], definition, audit }) {
+    const assigneeIds = [...new Set(assigneeUserIds)].sort()
     if (definition.nodes.length > MAX_TEMPLATE_NODES ||
-        definition.nodes.length + 2 > MAX_TRANSACTION_OPERATIONS) {
-      throw createError('TEMPLATE_INVALID')
+        definition.nodes.length + assigneeIds.length + 2 > MAX_TRANSACTION_OPERATIONS) {
+      throw createTemplateLimitError()
     }
     const templateId = idFactory('template')
     const preparedNodes = definition.nodes.map(node => ({ id: idFactory('template_node'), node }))
     const auditId = idFactory('audit')
     return db.runTransaction(async transaction => {
+      await assertActiveAssigneeDocuments(transaction, assigneeIds)
       const template = {
         ...timestampedTemplate(definition.template, { create: true }),
         version: 1
@@ -172,6 +188,7 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     templateId,
     expectedVersion,
     expectedStatus,
+    assigneeUserIds,
     definition,
     audit
   }) {
@@ -184,9 +201,11 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
         const existing = initialByKey.get(node.nodeKey)
         return { id: existing ? existing._id : idFactory('template_node'), node, existing }
       })
-    if (preparedNodes !== undefined && (preparedNodes.length > MAX_TEMPLATE_NODES ||
-        initial.nodes.length + preparedNodes.length + 3 > MAX_TRANSACTION_OPERATIONS)) {
-      throw createError('TEMPLATE_INVALID')
+    const assigneeIds = assigneeUserIds === undefined ? [] : [...new Set(assigneeUserIds)].sort()
+    const definitionOperations = preparedNodes === undefined ? 0 : initial.nodes.length + preparedNodes.length
+    if ((preparedNodes !== undefined && preparedNodes.length > MAX_TEMPLATE_NODES) ||
+        definitionOperations + assigneeIds.length + 3 > MAX_TRANSACTION_OPERATIONS) {
+      throw createTemplateLimitError()
     }
     const auditId = idFactory('audit')
 
@@ -198,6 +217,7 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
           current.status !== expectedStatus) {
         throw createError('VERSION_CONFLICT')
       }
+      await assertActiveAssigneeDocuments(transaction, assigneeIds)
       const version = current.version + 1
       const changes = { ...timestampedTemplate(definition.template), version }
       const updated = await transaction.collection(COLLECTIONS.templates).doc(templateId).update({ data: changes })
@@ -233,4 +253,10 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
   }
 }
 
-module.exports = { COLLECTIONS, createCloudTemplateRepository }
+module.exports = {
+  APPLICATION_ERROR_MARKER,
+  COLLECTIONS,
+  MAX_TEMPLATE_NODES,
+  TEMPLATE_LIMIT_MESSAGE,
+  createCloudTemplateRepository
+}

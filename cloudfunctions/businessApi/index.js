@@ -18,7 +18,10 @@ const { createAuthService } = require('./lib/auth-service')
 const { createAdminUserService } = require('./lib/admin-user-service')
 const { createCloudAccountRepository } = require('./lib/cloud-account-repository')
 const { createTemplateService } = require('./lib/template-service')
-const { createCloudTemplateRepository } = require('./lib/cloud-template-repository')
+const {
+  APPLICATION_ERROR_MARKER,
+  createCloudTemplateRepository
+} = require('./lib/cloud-template-repository')
 const { hashPassword } = require('./lib/password')
 
 const COLLECTIONS = {
@@ -101,6 +104,7 @@ const LOGGABLE_ERROR_CODES = new Set([
   'PASSWORD_CHANGE_REQUIRED',
   'REJECTION_NOT_ALLOWED',
   'TEMPLATE_INVALID',
+  'TEMPLATE_LIMIT_EXCEEDED',
   'TEMPLATE_NOT_EDITABLE',
   'TEMPLATE_NOT_ENABLED',
   'UNAUTHENTICATED',
@@ -226,7 +230,10 @@ function createBusinessApi({
           : await legacyRoutes[action](actor.openid, payload)
       return ok(data)
     } catch (error) {
-      const responseCode = safeErrorCode(error.code)
+      const protectedAction = hasOwn(domainRoutes, action) && typeof domainRoutes[action] === 'function'
+      const responseCode = protectedAction && error[APPLICATION_ERROR_MARKER] !== true
+        ? 'INTERNAL_ERROR'
+        : safeErrorCode(error.code)
       logger.error('[businessApi]', {
         action: ACCOUNT_ACTIONS.has(action) || hasOwn(domainRoutes, action) || hasOwn(legacyRoutes, action) ? action : 'UNKNOWN_ACTION',
         code: responseCode,
@@ -254,6 +261,7 @@ function assert(condition, message, code) {
   if (!condition) {
     const error = new Error(message)
     error.code = code || 'VALIDATION_ERROR'
+    error[APPLICATION_ERROR_MARKER] = true
     throw error
   }
 }

@@ -3,14 +3,30 @@ const {
   validateTemplateForEnable,
   assertTemplateEditable
 } = require('./template-domain')
+const {
+  APPLICATION_ERROR_MARKER,
+  MAX_TEMPLATE_NODES,
+  TEMPLATE_LIMIT_MESSAGE
+} = require('./cloud-template-repository')
 
 const TEMPLATE_STATUSES = new Set(['draft', 'enabled', 'disabled', 'deleted'])
-const MAX_TEMPLATE_NODES = 48
 
 function createError(code, message = code) {
   const error = new Error(message)
   error.code = code
+  error[APPLICATION_ERROR_MARKER] = true
   return error
+}
+
+function callTemplateDomain(operation) {
+  try {
+    return operation()
+  } catch (error) {
+    if (['TEMPLATE_INVALID', 'TEMPLATE_NOT_EDITABLE', 'ASSIGNEE_INACTIVE', 'NOT_FOUND'].includes(error.code)) {
+      error[APPLICATION_ERROR_MARKER] = true
+    }
+    throw error
+  }
 }
 
 function requireSuperAdmin(actor) {
@@ -42,12 +58,15 @@ function normalizeMetadata(input) {
 }
 
 function requireNodeBudget(nodes) {
-  if (!Array.isArray(nodes) || nodes.length > MAX_TEMPLATE_NODES) throw createError('TEMPLATE_INVALID')
+  if (!Array.isArray(nodes)) throw createError('TEMPLATE_INVALID')
+  if (nodes.length > MAX_TEMPLATE_NODES) {
+    throw createError('TEMPLATE_LIMIT_EXCEEDED', TEMPLATE_LIMIT_MESSAGE)
+  }
   return nodes
 }
 
 function normalizeNodeInput(node, sequence, nodeKey) {
-  return normalizeTemplateNode({ ...node, nodeKey, sequence })
+  return callTemplateDomain(() => normalizeTemplateNode({ ...node, nodeKey, sequence }))
 }
 
 function uniqueKey(keyFactory, prefix, occupied) {
@@ -188,6 +207,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     const at = clock()
     return repository.createTemplateDefinition({
       actor,
+      assigneeUserIds: allAssigneeIds(nodes),
       definition: {
         template: {
           ...metadata,
@@ -208,7 +228,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     requireSuperAdmin(actor)
     const current = requireCurrent(await repository.getTemplateDefinition(requireText(templateId)))
     assertExpectedVersion(current, expectedVersion)
-    assertTemplateEditable(current.template)
+    callTemplateDomain(() => assertTemplateEditable(current.template))
     const metadata = normalizeMetadata(input)
     const nodes = assignUpdateKeys(
       current,
@@ -221,6 +241,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       templateId: current.template._id,
       expectedVersion,
       expectedStatus: current.template.status,
+      assigneeUserIds: allAssigneeIds(nodes),
       definition: {
         template: { ...metadata, nodeCount: nodes.length, updatedBy: actor._id, updatedAt: clock() },
         nodes
@@ -240,8 +261,9 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       : currentStatus === 'enabled'
     if (!validTransition) throw createError('INVALID_STATUS')
     if (status === 'enabled') {
+      requireNodeBudget(current.nodes)
       const active = await assertActiveAssignees(repository, current.nodes, { requireNodes: true })
-      validateTemplateForEnable(current.template, current.nodes, active)
+      callTemplateDomain(() => validateTemplateForEnable(current.template, current.nodes, active))
     }
     const timestampField = status === 'enabled' ? 'enabledAt' : 'disabledAt'
     return repository.mutateTemplateDefinition({
@@ -249,6 +271,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       templateId: current.template._id,
       expectedVersion,
       expectedStatus: currentStatus,
+      ...(status === 'enabled' ? { assigneeUserIds: allAssigneeIds(current.nodes) } : {}),
       definition: {
         template: { status, [timestampField]: clock(), updatedBy: actor._id, updatedAt: clock() }
       },
@@ -263,7 +286,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     requireSuperAdmin(actor)
     const current = requireCurrent(await repository.getTemplateDefinition(requireText(templateId)))
     assertExpectedVersion(current, expectedVersion)
-    assertTemplateEditable(current.template)
+    callTemplateDomain(() => assertTemplateEditable(current.template))
     const at = clock()
     return repository.mutateTemplateDefinition({
       actor,

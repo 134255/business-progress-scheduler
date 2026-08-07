@@ -4,7 +4,7 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
-- Task 3 of the template/node/field plan is implemented on its isolated worktree: protected template routes now expose administrator lifecycle operations and an ordinary-user enabled-template projection; the template service enforces super-administrator writes, disabled-before-edit, active account-document assignees, stable keys, optimistic versions, logical deletion, and a 48-node transaction-safe definition limit. The CloudBase repository paginates beyond the SDK's 100-document query window and atomically writes template metadata, fixed-ID node replacements, and one secret-free audit record using server dates after fixed-document status/version revalidation. Unknown repository failures return a generic `INTERNAL_ERROR`. Task 4 (super-administrator template pages) is next.
+- Task 3 of the template/node/field plan is implemented on its isolated worktree: protected template routes now expose administrator lifecycle operations and an ordinary-user enabled-template projection; the template service enforces super-administrator writes, disabled-before-edit, active account-document assignees, stable keys, optimistic versions, logical deletion, and a formally supported maximum of 48 nodes. The CloudBase repository paginates beyond the SDK's 100-document query window and atomically writes template metadata, fixed-ID node replacements, and one secret-free audit record using server dates after fixed-document template and active-assignee revalidation. Distinct assignee reads count against the 100-operation transaction budget; definitions that exceed the node or operation boundary return the safe `TEMPLATE_LIMIT_EXCEEDED` code and maximum-bearing message. Only template application errors carrying the shared private server-side `Symbol` may retain an allowlisted response; unmarked infrastructure failures return generic `INTERNAL_ERROR`. Task 4 (super-administrator template pages) is next.
 - Task 2 of the template/node/field plan is implemented on its isolated worktree: pure CommonJS `field-domain` and `template-domain` modules normalize the seven supported field types, validate denormalized submitted-value snapshots, enforce stable node/field keys and contiguous sequences, apply the 22-work-hour SLA default, restrict evidence types, require active assignee account document IDs for enablement, and reject definition edits while a template is enabled. Text regular-expression definitions use a conservative non-grouped grammar so stored patterns cannot trigger catastrophic backtracking during feedback validation.
 - Task 1 of the template/node/field plan is implemented on its isolated worktree: `createBusinessApi` accepts injected `protectedRoutes`; recognized protected actions receive the trusted resolved actor and payload separately, are rejected before handler invocation when authentication fails, and retain the existing account and legacy-route behavior.
 - The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Tasks 1 through 3 are implemented; Task 4 is next.
@@ -29,6 +29,23 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+Executed on 2026-08-07 for template/node/field Task 3 fix round 1:
+
+| Command or boundary | Result |
+|---|---|
+| Error-trust TDD RED: `node --test cloudfunctions/businessApi/test/account-routes.test.js` | Failed as expected: 21 passed and 1 failed because an unmarked infrastructure `NOT_FOUND` retained its raw message and code. |
+| Error-trust GREEN: same route suite | Passed: 22 tests, 0 failures; protected authentication codes remained compatible. |
+| Transactional-assignee TDD RED: `node --test cloudfunctions/businessApi/test/cloud-template-repository.test.js` | Failed as expected: 9 passed and 3 failed because creation, update, and enablement did not revalidate active assignee documents in their write transactions. |
+| Transactional-assignee GREEN plus account regression: service, template repository, and cloud-account repository suites | Passed: 51 tests, 0 failures. |
+| Limit-contract TDD RED: final Task 3 focused suites | Failed as expected: 42 passed and 4 failed because limit violations still used `TEMPLATE_INVALID` and the route did not allow the new dedicated code. |
+| Enable-limit review RED: `node --test cloudfunctions/businessApi/test/template-service.test.js` | Failed as expected: 11 passed and 1 failed because a legacy 49-node disabled template could still be enabled. |
+| Final Task 3 focused suites | Passed: 47 tests, 0 failures. |
+| `node --test cloudfunctions/businessApi/test/cloud-account-repository.test.js` | Passed: 28 tests, 0 failures. |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 162 tests, 0 failures; npm emitted the two pre-existing malformed user-config warnings. |
+| `node tools/test-wxml-structure.mjs` | Passed: 1 test, 0 failures. |
+| JavaScript syntax, `git diff --check`, and project-memory validation | Passed; Git emitted only expected LF-to-CRLF working-copy warnings. |
+| Read-only fix review and re-review | Passed after the enable-path limit regression and private `Symbol` hardening; no Critical or Important code findings remain. |
 
 Executed on 2026-08-07 for template/node/field Task 3 template persistence and protected routes:
 

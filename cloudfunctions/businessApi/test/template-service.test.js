@@ -83,7 +83,7 @@ test('definition size is rejected before it can exceed the transaction operation
   const harness = createTemplateHarness({ users: [{ _id: 'account-1', status: 'active' }] })
   await assert.rejects(
     harness.service.createTemplate({ actor: harness.admin, input: validDefinition({ nodes }) }),
-    error => error.code === 'TEMPLATE_INVALID'
+    error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' && /at most 48 nodes/.test(error.message)
   )
   assert.equal(harness.definitions.size, 0)
 })
@@ -149,6 +149,27 @@ test('enabling validates node rules and active assignees', async () => {
     }),
     error => error.code === 'ASSIGNEE_INACTIVE'
   )
+})
+
+test('enablement rejects legacy definitions above the documented node maximum', async () => {
+  const nodes = Array.from({ length: 49 }, (_, index) => storedNode('t1', {
+    _id: `t1-node-${index}`,
+    nodeKey: `node-${index}`,
+    sequence: index
+  }))
+  const harness = createTemplateHarness({
+    templates: [{ _id: 't1', name: '模板', status: 'disabled', version: 1, nodeCount: 49 }],
+    nodes,
+    users: [{ _id: 'account-1', status: 'active' }]
+  })
+
+  await assert.rejects(harness.service.changeTemplateStatus({
+    actor: harness.admin,
+    templateId: 't1',
+    expectedVersion: 1,
+    status: 'enabled'
+  }), error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' && /at most 48 nodes/.test(error.message))
+  assert.equal(harness.audits.length, 0)
 })
 
 test('logical deletion requires a disabled definition and hides it from administrators', async () => {
