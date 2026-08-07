@@ -249,6 +249,7 @@ test('history hides reservations, authorizes members with schema precedence, and
     { _id: 'legacy', businessLineId: 'line-1', nodeId: 'node-1', status: 'in_progress', comment: 'legacy', submittedBy: 'wx-old', createdAt: NOW }
   ]
   data.evidences[0].feedbackId = 'new'
+  data.evidences[0].feedbackRevision = 2
   data.evidences[0].attachmentState = 'attached'
   const { repository } = createFeedbackHarness({ seed: data })
   const result = await repository.getNodeHistory({ actor: { _id: 'manager', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1' })
@@ -488,4 +489,64 @@ test('every persisted counter increment rejects unsafe integers without publishi
     await assert.rejects(repository.commitFeedback(submission({ actor, input: { requestKey: `overflow-${index}` } })), error => error.code === 'VERSION_CONFLICT')
     assert.equal(fake.documents('node_feedback').every(item => item.publishState !== 'published'), true)
   }
+})
+
+test('concurrent exact retries both resolve the same published result after next-node and final-line completion', async () => {
+  for (const finalLine of [false, true]) {
+    const data = seed({ evidenceCount: 0 })
+    if (finalLine) {
+      data.business_lines[0].nodeCount = 1
+      data.business_nodes = [data.business_nodes[0]]
+    }
+    const { repository } = createOptimisticFeedbackHarness({ seed: data })
+    const value = submission({ input: { requestKey: finalLine ? 'same-final' : 'same-next' } })
+    const results = await Promise.all([repository.commitFeedback(value), repository.commitFeedback(value)])
+    assert.deepEqual(results[1], results[0])
+    assert.equal(results[0].lineStatus, finalLine ? 'completed' : 'active')
+  }
+})
+
+test('late claim and finalize paths return only an exact active-actor published retry', async () => {
+  for (const finalLine of [false, true]) {
+    const data = seed({ evidenceCount: 0 })
+    if (finalLine) {
+      data.business_lines[0].nodeCount = 1
+      data.business_nodes = [data.business_nodes[0]]
+    }
+    const { fake, repository } = createFeedbackHarness({ seed: data })
+    const value = submission({ input: { requestKey: finalLine ? 'late-final' : 'late-next' } })
+    const reservation = await repository.beginFeedback(value)
+    await repository.claimEvidenceChunk(value, reservation)
+    const published = await repository.finalizeFeedback(value, reservation)
+
+    assert.deepEqual(await repository.claimEvidenceChunk(value, reservation), { done: true, published })
+    assert.deepEqual(await repository.finalizeFeedback(value, reservation), published)
+    await assert.rejects(
+      repository.claimEvidenceChunk(submission({ input: { requestKey: value.input.requestKey, comment: 'changed' } }), reservation),
+      error => error.code === 'VERSION_CONFLICT'
+    )
+
+    fake.replace('users', 'account-a', { _id: 'account-a', status: 'disabled' })
+    await assert.rejects(repository.claimEvidenceChunk(value, reservation), error => error.code === 'FORBIDDEN')
+    await assert.rejects(repository.finalizeFeedback(value, reservation), error => error.code === 'FORBIDDEN')
+    const publishedIdentity = { ...reservation, published }
+    await assert.rejects(repository.claimEvidenceChunk(value, publishedIdentity), error => error.code === 'FORBIDDEN')
+    await assert.rejects(repository.finalizeFeedback(value, publishedIdentity), error => error.code === 'FORBIDDEN')
+  }
+})
+
+test('new feedback history includes only evidence attached to the exact published revision', async () => {
+  const data = seed({ evidenceCount: 4 })
+  data.node_feedback = [{
+    _id: 'new', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
+    revision: 2, status: 'blocked', comment: '', submittedBy: 'account-a', submittedAt: NOW
+  }]
+  Object.assign(data.evidences[0], { feedbackId: 'new', feedbackRevision: 2, attachmentState: 'attached' })
+  Object.assign(data.evidences[1], { feedbackId: 'new', feedbackRevision: 999, attachmentState: 'attached' })
+  Object.assign(data.evidences[2], { feedbackId: 'new', attachmentState: 'attached' })
+  Object.assign(data.evidences[3], { feedbackId: 'new', feedbackRevision: 1, attachmentState: 'attached' })
+  const { repository } = createFeedbackHarness({ seed: data })
+  const result = await repository.getNodeHistory({ actor: { _id: 'manager' }, businessLineId: 'line-1', nodeId: 'node-1' })
+
+  assert.deepEqual(result.history[0].evidences.map(item => item.evidenceId), ['evidence-1'])
 })

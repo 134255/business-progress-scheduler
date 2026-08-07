@@ -407,6 +407,15 @@ function accessibleEvidence(overrides = {}) {
   }
 }
 
+function attachedEvidence(overrides = {}) {
+  return accessibleEvidence({
+    feedbackId: 'feedback-1', feedbackRevision: 1, attachmentState: 'attached',
+    retentionScope: 'business_line', retentionSource: 'node_feedback',
+    orphanExpiresAt: null, purgeDueAt: null,
+    ...overrides
+  })
+}
+
 test('issues only a short-lived safe access projection to active business members', async () => {
   const documents = seed({ evidences: [accessibleEvidence()] })
   const harness = createHarness({ documents })
@@ -544,5 +553,59 @@ test('does not return a permanent URL when the temporary URL adapter fails or is
     await assert.rejects(harness.repository.getAccessGrant({
       actor: { _id: 'account-1', openid: 'wx-current' }, evidenceId: 'evidence-1'
     }))
+  }
+})
+
+test('ordinary attached evidence uses the strict line deadline for every feedback revision', async () => {
+  for (const { due, allowed } of [
+    { due: new Date(NOW.getTime() + 1), allowed: true },
+    { due: NOW, allowed: false },
+    { due: new Date(NOW.getTime() - 1), allowed: false }
+  ]) {
+    for (const revision of [1, 2]) {
+      const documents = seed({ evidences: [attachedEvidence({ feedbackRevision: revision })] })
+      Object.assign(documents.business_lines[0], { status: 'completed', purgeDueAt: due })
+      const harness = createHarness({ documents })
+      const promise = harness.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: 'evidence-1' })
+      if (allowed) assert.equal((await promise).url, 'https://temporary.example/report.pdf')
+      else await assert.rejects(promise, assertCode('EVIDENCE_EXPIRED'))
+    }
+  }
+})
+
+test('unattached evidence uses orphan expiry while explicit amendment evidence uses its own later deadline', async () => {
+  const unattachedDocuments = seed({ evidences: [accessibleEvidence()] })
+  Object.assign(unattachedDocuments.business_lines[0], { status: 'active', purgeDueAt: NOW })
+  const unattached = createHarness({ documents: unattachedDocuments })
+  assert.equal((await unattached.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: 'evidence-1' })).url,
+    'https://temporary.example/report.pdf')
+
+  const amendmentDocuments = seed({ evidences: [attachedEvidence({
+    retentionScope: 'evidence', retentionSource: 'audit_amendment',
+    purgeDueAt: new Date(NOW.getTime() + 1)
+  })] })
+  Object.assign(amendmentDocuments.business_lines[0], { status: 'completed', purgeDueAt: NOW })
+  const amendment = createHarness({ documents: amendmentDocuments })
+  assert.equal((await amendment.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: 'evidence-1' })).url,
+    'https://temporary.example/report.pdf')
+})
+
+test('malformed line, evidence, or retention-scope metadata denies access before a temporary URL', async () => {
+  const cases = [
+    { lineDue: '2026-13-40T00:00:00.000Z', evidence: attachedEvidence() },
+    { lineDue: new Date(NOW.getTime() + 1), evidence: attachedEvidence({ purgeDueAt: 'invalid' }) },
+    { lineDue: NOW, evidence: attachedEvidence({ retentionScope: 'evidence', retentionSource: 'audit_amendment', purgeDueAt: 'invalid' }) },
+    { lineDue: new Date(NOW.getTime() + 1), evidence: attachedEvidence({ retentionScope: 'unknown' }) },
+    { lineDue: new Date(NOW.getTime() + 1), evidence: attachedEvidence({ retentionSource: 'unknown' }) }
+  ]
+  for (const item of cases) {
+    const documents = seed({ evidences: [item.evidence] })
+    Object.assign(documents.business_lines[0], { status: 'completed', purgeDueAt: item.lineDue })
+    const harness = createHarness({ documents })
+    await assert.rejects(
+      harness.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: 'evidence-1' }),
+      assertCode('EVIDENCE_EXPIRED')
+    )
+    assert.deepEqual(harness.calls, [])
   }
 })

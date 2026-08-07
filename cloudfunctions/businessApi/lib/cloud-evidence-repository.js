@@ -15,6 +15,14 @@ const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_BUSINESS_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const ORPHAN_LIFETIME_MS = 24 * 60 * 60 * 1000
 const DEFAULT_TEMPORARY_URL_TTL_SECONDS = 300
+const RETENTION_SCOPES = Object.freeze({
+  BUSINESS_LINE: 'business_line',
+  EVIDENCE: 'evidence'
+})
+const RETENTION_SOURCES = Object.freeze({
+  NODE_FEEDBACK: 'node_feedback',
+  AUDIT_AMENDMENT: 'audit_amendment'
+})
 const MIME_TYPES = Object.freeze({
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
@@ -238,6 +246,8 @@ function createCloudEvidenceRepository({
           orphanExpiresAt,
           retentionStartedAt: null,
           purgeDueAt: null,
+          retentionScope: null,
+          retentionSource: null,
           purgedAt: null,
           purgeFailureCount: 0,
           lastPurgeError: ''
@@ -276,11 +286,29 @@ function createCloudEvidenceRepository({
       const accountSchema = usesAccountAuthorization(line, node)
       if (!isMember(line, currentActor, accountSchema)) throw createError('FORBIDDEN')
       const orphanExpiresAt = parseOptionalTimestamp(currentEvidence.orphanExpiresAt)
-      const purgeDueAt = parseOptionalTimestamp(currentEvidence.purgeDueAt)
+      const evidencePurgeDueAt = parseOptionalTimestamp(currentEvidence.purgeDueAt)
+      const linePurgeDueAt = parseOptionalTimestamp(line.purgeDueAt)
       const purgedAt = parseOptionalTimestamp(currentEvidence.purgedAt)
+      const attached = typeof currentEvidence.feedbackId === 'string' && currentEvidence.feedbackId &&
+        currentEvidence.attachmentState === 'attached'
+      let effectivePurgeDueAt = evidencePurgeDueAt
+      if (attached) {
+        if (currentEvidence.retentionScope === RETENTION_SCOPES.BUSINESS_LINE &&
+            currentEvidence.retentionSource === RETENTION_SOURCES.NODE_FEEDBACK) {
+          effectivePurgeDueAt = linePurgeDueAt
+        } else if (currentEvidence.retentionScope === RETENTION_SCOPES.EVIDENCE &&
+            currentEvidence.retentionSource === RETENTION_SOURCES.AUDIT_AMENDMENT && evidencePurgeDueAt) {
+          effectivePurgeDueAt = evidencePurgeDueAt
+        } else {
+          throw createError('EVIDENCE_EXPIRED')
+        }
+      } else if (currentEvidence.retentionScope !== null && currentEvidence.retentionScope !== undefined ||
+          currentEvidence.retentionSource !== null && currentEvidence.retentionSource !== undefined) {
+        throw createError('EVIDENCE_EXPIRED')
+      }
       if (currentEvidence.storageStatus !== 'available' || purgedAt ||
           (orphanExpiresAt && orphanExpiresAt.getTime() <= now.getTime()) ||
-          (purgeDueAt && purgeDueAt.getTime() <= now.getTime())) {
+          (effectivePurgeDueAt && effectivePurgeDueAt.getTime() <= now.getTime())) {
         throw createError('EVIDENCE_EXPIRED')
       }
       if (typeof currentEvidence.fileName !== 'string' || !currentEvidence.fileName ||
@@ -317,6 +345,8 @@ function createCloudEvidenceRepository({
 module.exports = {
   COLLECTIONS,
   ORPHAN_LIFETIME_MS,
+  RETENTION_SCOPES,
+  RETENTION_SOURCES,
   hasOwnAccountRelationship,
   createCloudEvidenceRepository
 }

@@ -100,6 +100,8 @@ function publicResult(feedback) {
 }
 
 function evidenceProjection(evidence, line) {
+  const amendmentDeadline = evidence.retentionScope === 'evidence' &&
+    evidence.retentionSource === 'audit_amendment'
   return {
     evidenceId: evidence._id,
     fileName: evidence.fileName,
@@ -107,9 +109,9 @@ function evidenceProjection(evidence, line) {
     extension: evidence.extension,
     size: evidence.size,
     storageStatus: evidence.storageStatus,
-    purgeDueAt: evidence.purgeDueAt === undefined || evidence.purgeDueAt === null
-      ? line.purgeDueAt === undefined ? null : line.purgeDueAt
-      : evidence.purgeDueAt,
+    purgeDueAt: amendmentDeadline
+      ? evidence.purgeDueAt === undefined ? null : evidence.purgeDueAt
+      : line.purgeDueAt === undefined ? null : line.purgeDueAt,
     purgedAt: evidence.purgedAt === undefined ? null : evidence.purgedAt
   }
 }
@@ -203,6 +205,15 @@ function createCloudFeedbackRepository({
     }
     if (!accountSchema(line, node) || !isAccountMember(line, actor._id) ||
         !membership(node.assigneeUserIds).includes(actor._id)) throw createError('FORBIDDEN')
+  }
+
+  function assertExactPublishedRetry(current, reservation, id, value) {
+    if (!reservation || reservation.publishState !== 'published' || reservation._id !== id.feedbackId ||
+        reservation.requestHash !== id.requestHash || reservation.inputHash !== id.inputHash ||
+        reservation.requestFingerprint !== id.requestFingerprint || reservation.submittedBy !== value.actor._id) {
+      throw createError('VERSION_CONFLICT')
+    }
+    assertPublishedRetry(current.actor, current.line, current.node, reservation)
   }
 
   async function readSubmissionDocuments(database, actorId, input) {
@@ -356,18 +367,20 @@ function createCloudFeedbackRepository({
   }
 
   async function claimEvidenceChunk(value, reservationIdentity) {
-    if (reservationIdentity.published) return { done: true, published: reservationIdentity.published }
     const id = identity(value)
     if (id.feedbackId !== reservationIdentity.feedbackId) throw createError('VERSION_CONFLICT')
     const at = now()
     return db.runTransaction(async transaction => {
-      const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
-      assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
       const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
+      const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
+      if (reservation && reservation.publishState === 'published') {
+        assertExactPublishedRetry(current, reservation, id, value)
+        return { done: true, published: publicResult(reservation) }
+      }
+      assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
       if (!reservation || reservation.inputHash !== id.inputHash || reservation.requestHash !== id.requestHash) {
         throw createError('VERSION_CONFLICT')
       }
-      if (reservation.publishState === 'published') return { done: true, published: publicResult(reservation) }
       const cursorValid = safeInteger(reservation.evidenceCount, { maximum: value.input.evidenceIds.length }) &&
         reservation.evidenceCount === value.input.evidenceIds.length &&
         safeInteger(reservation.claimedCount, { maximum: reservation.evidenceCount }) &&
@@ -404,7 +417,9 @@ function createCloudFeedbackRepository({
               : evidence.orphanExpiresAt,
             orphanExpiresAt: null,
             retentionStartedAt: null,
-            purgeDueAt: null
+            purgeDueAt: null,
+            retentionScope: 'business_line',
+            retentionSource: 'node_feedback'
           }
         })
       }
@@ -436,12 +451,14 @@ function createCloudFeedbackRepository({
   }
 
   async function finalizeFeedback(value, reservationIdentity) {
-    if (reservationIdentity.published) return reservationIdentity.published
     const id = identity(value)
     return db.runTransaction(async transaction => {
-      const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
       const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
-      if (reservation && reservation.publishState === 'published') return publicResult(reservation)
+      const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
+      if (reservation && reservation.publishState === 'published') {
+        assertExactPublishedRetry(current, reservation, id, value)
+        return publicResult(reservation)
+      }
       assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
       const cursorValid = reservation && reservation.publishState === 'reserved' &&
         reservation.inputHash === id.inputHash && reservation.requestFingerprint === id.requestFingerprint &&
@@ -608,7 +625,9 @@ function createCloudFeedbackRepository({
             orphanExpiresAt: evidence.attachmentPreviousOrphanExpiresAt,
             attachmentPreviousOrphanExpiresAt: db.command.remove(),
             retentionStartedAt: evidence.retentionStartedAt === undefined ? null : evidence.retentionStartedAt,
-            purgeDueAt: evidence.purgeDueAt === undefined ? null : evidence.purgeDueAt
+            purgeDueAt: evidence.purgeDueAt === undefined ? null : evidence.purgeDueAt,
+            retentionScope: null,
+            retentionSource: null
           } })
         }
       })
@@ -714,7 +733,10 @@ function createCloudFeedbackRepository({
       const evidenceById = new Map()
       for (const evidence of associated) {
         if (evidence.feedbackId === feedback._id && evidence.attachmentState === 'attached' &&
-            evidence.businessLineId === businessLineId && evidence.nodeId === nodeId) evidenceById.set(evidence._id, evidence)
+            evidence.businessLineId === businessLineId && evidence.nodeId === nodeId &&
+            safeInteger(feedback.revision, { minimum: 1 }) &&
+            safeInteger(evidence.feedbackRevision, { minimum: 1 }) &&
+            evidence.feedbackRevision === feedback.revision) evidenceById.set(evidence._id, evidence)
       }
       if (feedback.publishState === undefined && Array.isArray(feedback.evidenceIds)) {
         for (const evidenceId of [...new Set(feedback.evidenceIds)]) {
