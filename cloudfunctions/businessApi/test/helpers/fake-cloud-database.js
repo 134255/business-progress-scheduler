@@ -76,9 +76,13 @@ function createFakeCloudDatabase(seed = {}) {
     throw failure.error
   }
 
-  function createDocument(name, id) {
+  function createDocument(name, id, transactionRecord = null) {
+    function countOperation() {
+      if (transactionRecord) transactionRecord.operations += 1
+    }
     return {
       async get() {
+        countOperation()
         const document = documents(name).get(id)
         if (!document) {
           throw new Error(`document.get:fail document with _id ${id} does not exist`)
@@ -86,6 +90,7 @@ function createFakeCloudDatabase(seed = {}) {
         return { data: clone(document) }
       },
       async set({ data }) {
+        countOperation()
         maybeFailWrite(name, 'set')
         const stored = materialize(data, id)
         if (name === 'users') enforceUserIndexes(stored, id)
@@ -98,6 +103,7 @@ function createFakeCloudDatabase(seed = {}) {
         return { stats: { created: 1, updated: 0 } }
       },
       async update({ data }) {
+        countOperation()
         maybeFailWrite(name, 'update')
         const current = documents(name).get(id)
         if (!current) return { stats: { updated: 0 } }
@@ -108,6 +114,7 @@ function createFakeCloudDatabase(seed = {}) {
         return { stats: { updated: 1 } }
       },
       async remove() {
+        countOperation()
         maybeFailWrite(name, 'remove')
         const removed = documents(name).delete(id)
         return { stats: { removed: removed ? 1 : 0 } }
@@ -130,7 +137,7 @@ function createFakeCloudDatabase(seed = {}) {
 
     return {
       doc(id) {
-        return createDocument(name, id)
+        return createDocument(name, id, transaction && typeof transaction === 'object' ? transaction : null)
       },
       where(nextCriteria) {
         rejectTransactionQuery('where')
@@ -207,13 +214,13 @@ function createFakeCloudDatabase(seed = {}) {
         const hook = beforeTransactionHooks.shift()
         if (hook) await hook()
         const saved = snapshot()
-        const record = { callbacks: 0 }
+        const record = { callbacks: 0, operations: 0 }
         transactionRuns.push(record)
         try {
           record.callbacks += 1
           return await callback({
             collection(name) {
-              return createQuery(name, true)
+              return createQuery(name, record)
             }
           })
         } catch (error) {

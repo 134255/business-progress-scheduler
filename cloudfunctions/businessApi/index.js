@@ -26,6 +26,8 @@ const {
 const { createCloudBusinessRepository } = require('./lib/cloud-business-repository')
 const { createEvidenceService } = require('./lib/evidence-service')
 const { createCloudEvidenceRepository } = require('./lib/cloud-evidence-repository')
+const { createFeedbackService } = require('./lib/feedback-service')
+const { createCloudFeedbackRepository } = require('./lib/cloud-feedback-repository')
 const { hashPassword } = require('./lib/password')
 
 const COLLECTIONS = {
@@ -103,6 +105,7 @@ const LOGGABLE_ERROR_CODES = new Set([
   'INVALID_WECHAT_IDENTITY',
   'LAST_SUPER_ADMIN',
   'NODE_STRUCTURE_LOCKED',
+  'NODE_ALREADY_COMPLETED',
   'NODE_NOT_ACTIVE',
   'NOT_FOUND',
   'OPENID_ALREADY_BOUND',
@@ -194,6 +197,17 @@ function createEvidenceRoutes(evidenceService) {
   }
 }
 
+function createFeedbackRoutes(feedbackService) {
+  return {
+    submitFeedback: ({ actor, payload }) => feedbackService.submitFeedback({ actor, input: payload }),
+    getNodeHistory: ({ actor, payload }) => feedbackService.getNodeHistory({
+      actor,
+      businessLineId: payload.businessLineId,
+      nodeId: payload.nodeId
+    })
+  }
+}
+
 function createBusinessApi({
   repository,
   authService,
@@ -201,6 +215,7 @@ function createBusinessApi({
   templateService,
   businessService,
   evidenceService,
+  feedbackService,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
   getContext,
@@ -212,6 +227,7 @@ function createBusinessApi({
     templateService ? createTemplateRoutes(templateService) : null,
     businessService ? createBusinessRoutes(businessService) : null,
     evidenceService ? createEvidenceRoutes(evidenceService) : null,
+    feedbackService ? createFeedbackRoutes(feedbackService) : null,
     protectedRoutes
   )
 
@@ -549,10 +565,8 @@ function createDefaultLegacyRoutes() {
   return {
     updateUserProfile,
     dashboard,
-    getNodeHistory,
     updateBusinessLine,
-    deleteBusinessLine,
-    submitNodeFeedback
+    deleteBusinessLine
   }
 }
 
@@ -561,6 +575,7 @@ function createDefaultBusinessApi() {
   const templateRepository = createCloudTemplateRepository({ db })
   const businessRepository = createCloudBusinessRepository({ db, clock: () => new Date() })
   const evidenceRepository = createCloudEvidenceRepository({ db, cloud, clock: () => new Date() })
+  const feedbackRepository = createCloudFeedbackRepository({ db, clock: () => new Date() })
   const clock = Date.now
   const authService = createAuthService({
     repository,
@@ -577,6 +592,7 @@ function createDefaultBusinessApi() {
   })
   const businessService = createBusinessService({ repository: businessRepository })
   const evidenceService = createEvidenceService({ repository: evidenceRepository })
+  const feedbackService = createFeedbackService({ repository: feedbackRepository })
   return createBusinessApi({
     repository,
     authService,
@@ -584,6 +600,7 @@ function createDefaultBusinessApi() {
     templateService,
     businessService,
     evidenceService,
+    feedbackService,
     getContext: () => cloud.getWXContext(),
     clock,
     legacyRoutes: createDefaultLegacyRoutes()

@@ -49,6 +49,7 @@ function createRouteHarness({
   templateService,
   businessService,
   evidenceService,
+  feedbackService,
   legacyRoutes,
   contextOpenid = 'wx-context'
 } = {}) {
@@ -97,6 +98,7 @@ function createRouteHarness({
     templateService,
     businessService,
     evidenceService,
+    feedbackService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
     clock: () => Date.parse('2026-08-06T00:00:00.000Z'),
@@ -350,6 +352,37 @@ test('default evidence routes delegate trusted actors and exact registration/acc
     ['registerUpload', { actor, input: upload }],
     ['getAccessGrant', { actor, evidenceId: 'evidence-1' }]
   ])
+})
+
+test('default feedback routes use the trusted account and protect both writes and history', async () => {
+  const calls = []
+  const feedbackService = {
+    async submitFeedback(value) { calls.push(['submit', value]); return { feedbackId: 'feedback-1', revision: 1 } },
+    async getNodeHistory(value) { calls.push(['history', value]); return { history: [] } }
+  }
+  const harness = createRouteHarness({ feedbackService })
+  const payload = {
+    businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 2,
+    status: 'completed', fieldValues: [], comment: '', evidenceIds: [], requestKey: 'request-1',
+    actor: { _id: 'forged' }
+  }
+  assert.equal((await harness.api.main({ action: 'submitFeedback', payload })).ok, true)
+  assert.equal((await harness.api.main({ action: 'getNodeHistory', payload: {
+    businessLineId: 'line-1', nodeId: 'node-1', actorId: 'forged'
+  } })).ok, true)
+  const actor = {
+    _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+  }
+  assert.deepEqual(calls, [
+    ['submit', { actor, input: payload }],
+    ['history', { actor, businessLineId: 'line-1', nodeId: 'node-1' }]
+  ])
+})
+
+test('legacy feedback write and history handlers are absent after protected-route replacement', () => {
+  const routes = createDefaultLegacyRoutes()
+  assert.equal(Object.hasOwn(routes, 'submitNodeFeedback'), false)
+  assert.equal(Object.hasOwn(routes, 'getNodeHistory'), false)
 })
 
 test('evidence application errors are safe while unmarked storage errors remain generic', async () => {
