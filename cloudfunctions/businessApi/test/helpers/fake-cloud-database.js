@@ -56,7 +56,11 @@ function createFakeCloudDatabase(seed = {}) {
   function createDocument(name, id) {
     return {
       async get() {
-        return { data: clone(documents(name).get(id) || null) }
+        const document = documents(name).get(id)
+        if (!document) {
+          throw new Error(`document.get:fail document with _id ${id} does not exist`)
+        }
+        return { data: clone(document) }
       },
       async set({ data }) {
         const stored = materialize(data, id)

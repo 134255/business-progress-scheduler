@@ -42,6 +42,30 @@ test('active super-admin count fails closed when the singleton guard is missing 
   await assert.rejects(corrupt.repository.countActiveSuperAdmins(), error => error.code === 'ACCOUNT_STATE_INVALID')
 })
 
+test('fixed-document reads normalize only CloudBase missing-document failures', async () => {
+  const { repository } = createRepository()
+
+  assert.equal(await repository.findUserByOpenid('wx-unbound'), null)
+
+  const permissionFailure = new Error('document.get:fail permission denied')
+  const failingRepository = createCloudAccountRepository({
+    db: {
+      collection() {
+        return {
+          doc() {
+            return { get: async () => { throw permissionFailure } }
+          }
+        }
+      }
+    }
+  })
+
+  await assert.rejects(
+    failingRepository.findUserById('unreadable-user'),
+    error => error === permissionFailure
+  )
+})
+
 test('guarded account creation atomically writes user, credential, guard, and patched audit', async () => {
   const { fake, repository } = createRepository({
     system_settings: [{

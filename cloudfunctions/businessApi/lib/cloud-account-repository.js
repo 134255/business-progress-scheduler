@@ -93,12 +93,22 @@ function sameUsername(user, username) {
   return user && (user.usernameNormalized || normalizeUsername(user.username)) === normalizeUsername(username)
 }
 
+function isMissingDocumentError(error) {
+  const text = `${error && error.message || ''} ${error && error.errMsg || ''}`.toLowerCase()
+  return text.includes('document.get:fail') && text.includes('does not exist')
+}
+
 function createCloudAccountRepository({ db, clock = () => new Date(), idFactory = defaultIdFactory }) {
   if (!db) throw new TypeError('db is required')
 
   async function readDocument(database, collectionName, id) {
-    const result = await database.collection(collectionName).doc(id).get()
-    return result && result.data ? result.data : null
+    try {
+      const result = await database.collection(collectionName).doc(id).get()
+      return result && result.data ? result.data : null
+    } catch (error) {
+      if (isMissingDocumentError(error)) return null
+      throw error
+    }
   }
 
   async function countActiveSuperAdmins() {
