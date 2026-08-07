@@ -595,6 +595,237 @@ test('administrator initialization page keeps sensitive material out of persiste
   assert.equal((wxml.match(/password="true"/g) || []).length, 3)
 })
 
+test('super-administrator recovery rejects incomplete weak and mismatched credentials', async () => {
+  let recoverCalls = 0
+  let loginCalls = 0
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = {}
+  const page = loadPage('pages/admin-recovery/index.js', {
+    recoverSuperAdmin: async () => { recoverCalls += 1 },
+    login: async () => { loginCalls += 1 }
+  })
+
+  assert.ok(page, 'super-administrator recovery page should exist')
+  await page.submit()
+  assert.match(page.data.errorMessage, /完整填写/)
+
+  page.setData({
+    username: 'recovery-admin',
+    temporaryPassword: 'onlyletters',
+    confirmPassword: 'onlyletters',
+    recoveryCode: 'synthetic-recovery-value'
+  })
+  await page.submit()
+  assert.match(page.data.errorMessage, /8-64/)
+
+  page.setData({
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'different-pass-9'
+  })
+  await page.submit()
+  assert.match(page.data.errorMessage, /不一致/)
+  assert.equal(recoverCalls, 0)
+  assert.equal(loginCalls, 0)
+})
+
+test('super-administrator recovery submits once and enters forced password change', async () => {
+  const calls = []
+  const navigations = []
+  const app = { globalData: { currentUser: null, loginChallenge: null } }
+  let releaseRecovery
+  const recoveryPending = new Promise(resolve => { releaseRecovery = resolve })
+  global.getApp = () => app
+  global.wx = {
+    navigateTo: options => navigations.push(options),
+    setStorage: () => assert.fail('recovery material must not be persisted'),
+    setStorageSync: () => assert.fail('recovery material must not be persisted')
+  }
+  const page = loadPage('pages/admin-recovery/index.js', {
+    recoverSuperAdmin: async (...args) => {
+      calls.push(['recover', ...args])
+      await recoveryPending
+    },
+    login: async (...args) => {
+      calls.push(['login', ...args])
+      return {
+        authenticated: false,
+        passwordChangeRequired: true,
+        challengeToken: 'memory-only-recovery-challenge'
+      }
+    }
+  })
+  assert.ok(page, 'super-administrator recovery page should exist')
+  page.setData({
+    username: ' Recovery-Admin ',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: ' synthetic-recovery-value '
+  })
+
+  const firstSubmit = page.submit()
+  const secondSubmit = page.submit()
+  releaseRecovery()
+  await Promise.all([firstSubmit, secondSubmit])
+
+  assert.deepEqual(calls, [
+    ['recover', 'Recovery-Admin', 'temporary-pass-8', 'synthetic-recovery-value'],
+    ['login', 'Recovery-Admin', 'temporary-pass-8']
+  ])
+  assert.equal(app.globalData.loginChallenge, 'memory-only-recovery-challenge')
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+  assert.deepEqual(navigations, [{ url: '/pages/change-password/index?mode=first' }])
+})
+
+test('super-administrator recovery never retries after automatic login fails', async () => {
+  let recoverCalls = 0
+  let loginCalls = 0
+  const modals = []
+  const launches = []
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = {
+    showModal: async options => { modals.push(options) },
+    reLaunch: options => launches.push(options)
+  }
+  const page = loadPage('pages/admin-recovery/index.js', {
+    recoverSuperAdmin: async () => { recoverCalls += 1 },
+    login: async () => {
+      loginCalls += 1
+      throw new Error('synthetic automatic login failure')
+    }
+  })
+  assert.ok(page, 'super-administrator recovery page should exist')
+  page.setData({
+    username: 'recovery-admin',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'synthetic-recovery-value'
+  })
+
+  await page.submit()
+  await page.submit()
+
+  assert.equal(recoverCalls, 1)
+  assert.equal(loginCalls, 1)
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+  assert.deepEqual(modals, [{
+    title: '恢复已完成',
+    content: '恢复已完成，请返回登录页使用刚才设置的临时密码登录',
+    showCancel: false
+  }])
+  assert.deepEqual(launches, [{ url: '/pages/login/index' }])
+})
+
+test('super-administrator recovery treats a malformed automatic login result as completed recovery', async () => {
+  let recoverCalls = 0
+  const modals = []
+  const launches = []
+  const app = { globalData: { currentUser: null, loginChallenge: null } }
+  global.getApp = () => app
+  global.wx = {
+    showModal: async options => { modals.push(options) },
+    reLaunch: options => launches.push(options)
+  }
+  const page = loadPage('pages/admin-recovery/index.js', {
+    recoverSuperAdmin: async () => { recoverCalls += 1 },
+    login: async () => ({ authenticated: true, passwordChangeRequired: false, challengeToken: '' })
+  })
+  assert.ok(page, 'super-administrator recovery page should exist')
+  page.setData({
+    username: 'recovery-admin',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'synthetic-recovery-value'
+  })
+
+  await page.submit()
+
+  assert.equal(recoverCalls, 1)
+  assert.equal(app.globalData.loginChallenge, null)
+  assert.equal(modals.length, 1)
+  assert.deepEqual(launches, [{ url: '/pages/login/index' }])
+})
+
+test('super-administrator recovery clears failed secrets and permits an operator-controlled retry', async () => {
+  let recoverCalls = 0
+  let loginCalls = 0
+  const failure = new Error('恢复凭据无效')
+  failure.code = 'INVALID_RECOVERY_CODE'
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = {}
+  const page = loadPage('pages/admin-recovery/index.js', {
+    recoverSuperAdmin: async () => {
+      recoverCalls += 1
+      throw failure
+    },
+    login: async () => { loginCalls += 1 }
+  })
+  assert.ok(page, 'super-administrator recovery page should exist')
+  page.setData({
+    username: 'recovery-admin',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'synthetic-recovery-value'
+  })
+
+  await page.submit()
+  assert.equal(page.data.username, 'recovery-admin')
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+  assert.equal(page.data.errorMessage, '恢复凭据无效')
+
+  await page.submit()
+  assert.equal(recoverCalls, 1)
+  assert.equal(loginCalls, 0)
+
+  page.setData({
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'new-synthetic-recovery-value'
+  })
+  await page.submit()
+  assert.equal(recoverCalls, 2)
+})
+
+test('super-administrator recovery handlers own fields and unload clears the form', () => {
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = {}
+  const page = loadPage('pages/admin-recovery/index.js', {})
+  assert.ok(page, 'super-administrator recovery page should exist')
+
+  page.onUsernameInput({ detail: { value: 'recovery-admin' } })
+  page.onTemporaryPasswordInput({ detail: { value: 'temporary-pass-8' } })
+  page.onConfirmPasswordInput({ detail: { value: 'temporary-pass-8' } })
+  page.onRecoveryCodeInput({ detail: { value: 'synthetic-recovery-value' } })
+
+  assert.equal(page.data.username, 'recovery-admin')
+  assert.equal(page.data.temporaryPassword, 'temporary-pass-8')
+  assert.equal(page.data.confirmPassword, 'temporary-pass-8')
+  assert.equal(page.data.recoveryCode, 'synthetic-recovery-value')
+
+  page.onUnload()
+  assert.equal(page.data.username, '')
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+})
+
+test('super-administrator recovery page keeps sensitive material out of persistence logs routes and datasets', () => {
+  const appConfig = JSON.parse(fs.readFileSync(path.join(miniProgramRoot, 'app.json'), 'utf8'))
+  const source = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-recovery/index.js'), 'utf8')
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-recovery/index.wxml'), 'utf8')
+
+  assert.equal(appConfig.pages.includes('pages/admin-recovery/index'), true)
+  assert.doesNotMatch(source, /getSession|setStorage|setStorageSync|console\.(?:log|info|debug|warn|error)/)
+  assert.doesNotMatch(source, /[?&](?:username|password|recoveryCode)=/)
+  assert.doesNotMatch(wxml, /data-(?:username|password|recovery|challenge|openid|user)/i)
+  assert.equal((wxml.match(/password="true"/g) || []).length, 3)
+})
+
 test('login keeps only the first-login challenge in app memory and clears the password field', async () => {
   const app = { globalData: { currentUser: null, loginChallenge: null } }
   const navigations = []

@@ -1,0 +1,64 @@
+<view class="page recovery-page">
+  <view class="card recovery-card">
+    <view class="title">超级管理员紧急恢复</view>
+    <text class="muted intro">恢复码仅可成功使用一次；恢复后必须立即设置正式密码</text>
+    <view class="error" wx:if="{{errorMessage}}">{{errorMessage}}</view>
+
+    <view class="field">
+      <label class="field-label" for="username">管理员用户名</label>
+      <input
+        id="username"
+        class="input"
+        value="{{username}}"
+        maxlength="64"
+        placeholder="请输入管理员用户名"
+        bindinput="onUsernameInput"
+      />
+    </view>
+    <view class="field">
+      <label class="field-label" for="temporary-password">新临时密码</label>
+      <input
+        id="temporary-password"
+        class="input"
+        value="{{temporaryPassword}}"
+        password="true"
+        maxlength="64"
+        placeholder="8-64 位，至少包含字母和数字"
+        bindinput="onTemporaryPasswordInput"
+      />
+    </view>
+    <view class="field">
+      <label class="field-label" for="confirm-password">确认临时密码</label>
+      <input
+        id="confirm-password"
+        class="input"
+        value="{{confirmPassword}}"
+        password="true"
+        maxlength="64"
+        placeholder="请再次输入临时密码"
+        bindinput="onConfirmPasswordInput"
+      />
+    </view>
+    <view class="field">
+      <label class="field-label" for="recovery-code">一次性恢复码</label>
+      <input
+        id="recovery-code"
+        class="input recovery-input"
+        value="{{recoveryCode}}"
+        password="true"
+        maxlength="128"
+        placeholder="请从离线密码管理器输入"
+        bindinput="onRecoveryCodeInput"
+        confirm-type="done"
+        bindconfirm="submit"
+      />
+      <text class="hint">请勿截图、复制到聊天或保存在设备中</text>
+    </view>
+    <button
+      class="primary-button submit"
+      loading="{{submitting}}"
+      disabled="{{submitting}}"
+      bindtap="submit"
+    >恢复并设置正式密码</button>
+  </view>
+</view>

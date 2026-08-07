@@ -1,0 +1,44 @@
+.recovery-page {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.recovery-card {
+  width: 100%;
+  max-width: 680rpx;
+  margin: 0;
+  padding: 44rpx 36rpx;
+}
+
+.intro {
+  display: block;
+  margin: 16rpx 0 36rpx;
+  line-height: 1.6;
+}
+
+.error {
+  margin-bottom: 28rpx;
+  padding: 20rpx;
+  border: 1rpx solid #fecaca;
+  border-radius: 12rpx;
+  background: #fef2f2;
+  color: #b91c1c;
+  line-height: 1.5;
+}
+
+.hint {
+  display: block;
+  margin-top: 10rpx;
+  color: #6b7280;
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+.recovery-input {
+  font-family: monospace;
+}
+
+.submit {
+  margin-top: 36rpx;
+}
