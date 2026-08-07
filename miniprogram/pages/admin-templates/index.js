@@ -38,15 +38,17 @@ Page({
       const query = { keyword: this.data.keyword.trim() }
       if (this.data.status !== 'all') query.status = this.data.status
       const result = await templates.listTemplates(query)
+      if (!this.requireSuperAdmin()) return
       this.setData({ items: result.items || [] })
     } catch (error) {
+      if (!this.requireSuperAdmin()) return
       if (error && error.code === 'FORBIDDEN') {
         wx.reLaunch({ url: '/pages/dashboard/index' })
         return
       }
       this.setData({ errorMessage: errorMessage(error) })
     } finally {
-      this.setData({ loading: false })
+      if (this.requireSuperAdmin()) this.setData({ loading: false })
     }
   },
 
@@ -68,13 +70,18 @@ Page({
     if (!this.requireSuperAdmin()) return false
     try {
       await action()
+      if (!this.requireSuperAdmin()) return false
       wx.showToast({ title: '操作成功', icon: 'success' })
+      if (!this.requireSuperAdmin()) return false
       await this.loadTemplates()
+      if (!this.requireSuperAdmin()) return false
       return true
     } catch (error) {
+      if (!this.requireSuperAdmin()) return false
       const message = errorMessage(error)
       if (error && error.code === 'VERSION_CONFLICT') {
         await this.loadTemplates()
+        if (!this.requireSuperAdmin()) return false
         this.setData({ errorMessage: message })
       } else this.setData({ errorMessage: message })
       return false

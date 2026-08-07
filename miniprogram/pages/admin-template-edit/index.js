@@ -88,10 +88,11 @@ Page({
       if (!await this.loadActiveAccounts()) return
       if (templateId) await this.loadTemplate()
     } catch (error) {
+      if (!this.requireSuperAdmin()) return
       this.unavailable = true
       this.setData({ errorMessage: messageFor(error) })
     } finally {
-      this.setData({ loading: false })
+      if (this.requireSuperAdmin()) this.setData({ loading: false })
     }
   },
 
@@ -111,10 +112,12 @@ Page({
     while (hasMore) {
       if (!this.requireSuperAdmin()) return false
       const result = await adminUsers.listUsers({ status: 'active', keyword: '', page, pageSize: 100 })
+      if (!this.requireSuperAdmin()) return false
       items.push(...(result.items || []))
       hasMore = Boolean(result.hasMore)
       page += 1
     }
+    if (!this.requireSuperAdmin()) return false
     this.setData({ assigneeOptions: items })
     return true
   },
@@ -122,6 +125,7 @@ Page({
   async loadTemplate() {
     if (!this.requireSuperAdmin()) return null
     const definition = await templates.getTemplate(this.data.templateId)
+    if (!this.requireSuperAdmin()) return null
     const template = definition.template
     const readOnly = template.status === 'enabled'
     this.setData({
@@ -214,16 +218,20 @@ Page({
       } else {
         await templates.createTemplate(definition)
       }
+      if (!this.requireSuperAdmin()) return
       wx.showToast({ title: '保存成功', icon: 'success' })
+      if (!this.requireSuperAdmin()) return
       wx.navigateBack({ delta: 1 })
     } catch (error) {
+      if (!this.requireSuperAdmin()) return
       const message = messageFor(error)
       if (error && error.code === 'VERSION_CONFLICT' && this.data.editMode) {
         try { await this.loadTemplate() } catch (reloadError) { this.unavailable = true }
+        if (!this.requireSuperAdmin()) return
       }
       this.setData({ errorMessage: message })
     } finally {
-      this.setData({ submitting: false })
+      if (this.requireSuperAdmin()) this.setData({ submitting: false })
     }
   },
 
@@ -233,16 +241,20 @@ Page({
     try {
       if (!this.requireSuperAdmin()) return
       await templates.changeTemplateStatus(this.data.templateId, this.data.version, nextStatus)
+      if (!this.requireSuperAdmin()) return
       await this.loadTemplate()
+      if (!this.requireSuperAdmin()) return
       wx.showToast({ title: nextStatus === 'enabled' ? '模板已启用' : '模板已停用', icon: 'success' })
     } catch (error) {
+      if (!this.requireSuperAdmin()) return
       const message = messageFor(error)
       if (error && error.code === 'VERSION_CONFLICT') {
         try { await this.loadTemplate() } catch (reloadError) { this.unavailable = true }
+        if (!this.requireSuperAdmin()) return
       }
       this.setData({ errorMessage: message })
     } finally {
-      this.setData({ submitting: false })
+      if (this.requireSuperAdmin()) this.setData({ submitting: false })
     }
   },
 

@@ -24,6 +24,16 @@ function freshRequire(relativePath) {
   return require(modulePath)
 }
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 function loadPage(relativePath, fakes = {}) {
   let definition = null
   global.Page = value => { definition = value }
@@ -454,6 +464,145 @@ test('template pages recheck active super-administrator authority at every load 
 
   delete global.getApp
   delete global.getCurrentPages
+  delete global.wx
+})
+
+test('template list discards a pending load when the administrator is demoted', async () => {
+  const pendingList = deferred()
+  let currentUser = { role: 'super_admin', status: 'active' }
+  const launches = []
+  global.getApp = () => ({ globalData: { currentUser } })
+  global.wx = {
+    reLaunch: options => launches.push(options),
+    showToast: () => {}
+  }
+  const page = loadPage('pages/admin-templates/index.js', {
+    'services/templates.js': { listTemplates: () => pendingList.promise }
+  })
+  const originalItems = [{ _id: 'old', name: 'existing template' }]
+  page.setData({ items: originalItems })
+
+  const loading = page.loadTemplates()
+  currentUser = { role: 'user', status: 'active' }
+  pendingList.resolve({ items: [{ _id: 'new', name: 'stale response' }] })
+  await loading
+
+  assert.deepEqual(page.data.items, originalItems)
+  assert.ok(launches.length >= 1)
+  delete global.getApp
+  delete global.wx
+})
+
+test('template list suppresses success and refresh after a pending lifecycle action loses authority', async () => {
+  const pendingStatus = deferred()
+  let currentUser = { role: 'super_admin', status: 'active' }
+  let listCalls = 0
+  const toasts = []
+  global.getApp = () => ({ globalData: { currentUser } })
+  global.wx = {
+    reLaunch: () => {},
+    showModal: async () => ({ confirm: true }),
+    showToast: options => toasts.push(options)
+  }
+  const page = loadPage('pages/admin-templates/index.js', {
+    'services/templates.js': {
+      listTemplates: async () => { listCalls += 1; return { items: [] } },
+      changeTemplateStatus: () => pendingStatus.promise
+    }
+  })
+  page.setData({ items: [{ _id: 't1', status: 'draft', version: 1 }] })
+
+  const changing = page.changeStatus({ currentTarget: { dataset: { id: 't1' } } })
+  await Promise.resolve()
+  currentUser = { role: 'user', status: 'active' }
+  pendingStatus.resolve({ template: { _id: 't1', status: 'enabled', version: 2 } })
+  await changing
+
+  assert.equal(toasts.length, 0)
+  assert.equal(listCalls, 0)
+  delete global.getApp
+  delete global.wx
+})
+
+test('template editor discards active-account pages returned after demotion', async () => {
+  const pendingUsers = deferred()
+  let currentUser = { role: 'super_admin', status: 'active' }
+  global.getApp = () => ({ globalData: { currentUser } })
+  global.wx = { reLaunch: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {},
+    'services/admin-users.js': { listUsers: () => pendingUsers.promise }
+  })
+  const originalOptions = [{ _id: 'old', displayName: 'existing user' }]
+  page.setData({ assigneeOptions: originalOptions })
+
+  const loading = page.loadActiveAccounts()
+  currentUser = { role: 'user', status: 'active' }
+  pendingUsers.resolve({ items: [{ _id: 'new', displayName: 'stale user' }], hasMore: false })
+  const loaded = await loading
+
+  assert.equal(loaded, false)
+  assert.deepEqual(page.data.assigneeOptions, originalOptions)
+  delete global.getApp
+  delete global.wx
+})
+
+test('template editor discards a definition returned after demotion', async () => {
+  const pendingTemplate = deferred()
+  let currentUser = { role: 'super_admin', status: 'active' }
+  global.getApp = () => ({ globalData: { currentUser } })
+  global.wx = { reLaunch: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': { getTemplate: () => pendingTemplate.promise },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  page.setData({ templateId: 't1', name: 'existing definition' })
+
+  const loading = page.loadTemplate()
+  currentUser = { role: 'user', status: 'active' }
+  pendingTemplate.resolve({
+    template: { _id: 't1', name: 'stale definition', description: '', status: 'disabled', version: 2 },
+    nodes: [storedNode()]
+  })
+  const loaded = await loading
+
+  assert.equal(loaded, null)
+  assert.equal(page.data.name, 'existing definition')
+  delete global.getApp
+  delete global.wx
+})
+
+test('template editor suppresses success navigation when a pending save loses authority', async () => {
+  const pendingSave = deferred()
+  let currentUser = { role: 'super_admin', status: 'active' }
+  const toasts = []
+  const navigations = []
+  global.getApp = () => ({ globalData: { currentUser } })
+  global.wx = {
+    reLaunch: () => {},
+    showToast: options => toasts.push(options),
+    navigateBack: options => navigations.push(options)
+  }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': { updateTemplate: () => pendingSave.promise },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  page.setData({
+    editMode: true,
+    templateId: 't1',
+    version: 1,
+    name: 'valid template',
+    nodes: [storedNode()]
+  })
+
+  const saving = page.submit()
+  currentUser = { role: 'user', status: 'active' }
+  pendingSave.resolve({ template: { _id: 't1', version: 2 } })
+  await saving
+
+  assert.equal(toasts.length, 0)
+  assert.equal(navigations.length, 0)
+  delete global.getApp
   delete global.wx
 })
 
