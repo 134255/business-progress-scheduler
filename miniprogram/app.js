@@ -1,3 +1,5 @@
+const manualLogin = require('./utils/manual-login')
+
 App({
   globalData: {
     currentUser: null,
@@ -8,6 +10,18 @@ App({
   resetAuthState() {
     this.globalData.currentUser = null
     this.globalData.loginChallenge = null
+  },
+
+  requireManualLogin() {
+    manualLogin.requireManualLogin()
+  },
+
+  isManualLoginRequired() {
+    return manualLogin.isManualLoginRequired()
+  },
+
+  clearManualLoginRequirement() {
+    manualLogin.clearManualLoginRequirement()
   },
 
   onLaunch() {

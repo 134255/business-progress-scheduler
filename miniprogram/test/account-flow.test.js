@@ -76,6 +76,46 @@ function loadDashboard(businessFake) {
   return instance
 }
 
+test('manual-login preference persists only a boolean and survives a module restart', () => {
+  const stored = new Map()
+  const writes = []
+  global.wx = {
+    setStorageSync(key, value) {
+      writes.push([key, value])
+      stored.set(key, value)
+    },
+    getStorageSync: key => stored.get(key),
+    removeStorageSync: key => stored.delete(key)
+  }
+
+  let preference = freshRequire('utils/manual-login.js')
+  preference.requireManualLogin()
+  assert.equal(preference.isManualLoginRequired(), true)
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0][1], true)
+
+  preference = freshRequire('utils/manual-login.js')
+  assert.equal(preference.isManualLoginRequired(), true)
+  preference.clearManualLoginRequirement()
+  assert.equal(preference.isManualLoginRequired(), false)
+  assert.equal(stored.size, 0)
+})
+
+test('manual-login preference keeps the current process safe when storage operations fail', () => {
+  global.wx = {
+    setStorageSync() { throw new Error('write unavailable') },
+    getStorageSync() { throw new Error('read unavailable') },
+    removeStorageSync() { throw new Error('remove unavailable') }
+  }
+
+  const preference = freshRequire('utils/manual-login.js')
+  preference.requireManualLogin()
+  assert.equal(preference.isManualLoginRequired(), true)
+
+  preference.clearManualLoginRequirement()
+  assert.equal(preference.isManualLoginRequired(), false)
+})
+
 test('callBusinessApi preserves backend error codes and silent calls do not toast', async () => {
   const toasts = []
   global.wx = {
@@ -671,11 +711,19 @@ test('normal password change sends the current password and clears all fields on
 test('app owns resettable in-memory authentication state and preserves the CloudBase environment', () => {
   let definition
   const cloudInitializations = []
+  const stored = new Map()
+  const storageWrites = []
   global.App = value => { definition = value }
   global.wx = {
     cloud: {
       init: options => cloudInitializations.push(options)
-    }
+    },
+    setStorageSync(key, value) {
+      storageWrites.push([key, value])
+      stored.set(key, value)
+    },
+    getStorageSync: key => stored.get(key),
+    removeStorageSync: key => stored.delete(key)
   }
   freshRequire('app.js')
   delete global.App
@@ -687,6 +735,16 @@ test('app owns resettable in-memory authentication state and preserves the Cloud
   definition.resetAuthState()
   assert.equal(definition.globalData.currentUser, null)
   assert.equal(definition.globalData.loginChallenge, null)
+
+  assert.equal(typeof definition.requireManualLogin, 'function')
+  assert.equal(typeof definition.isManualLoginRequired, 'function')
+  assert.equal(typeof definition.clearManualLoginRequirement, 'function')
+  definition.requireManualLogin()
+  assert.equal(definition.isManualLoginRequired(), true)
+  assert.deepEqual(storageWrites.map(([, value]) => value), [true])
+  definition.clearManualLoginRequirement()
+  assert.equal(definition.isManualLoginRequired(), false)
+  assert.equal(stored.size, 0)
 
   definition.onLaunch()
   assert.deepEqual(cloudInitializations, [{ env: 'cloud1-d5gxt99rh492670d9', traceUser: true }])
