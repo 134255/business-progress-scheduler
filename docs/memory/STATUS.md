@@ -4,7 +4,7 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
-- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The written specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`; implementation remains unstarted until the written-spec review gate and implementation plan are complete.
+- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Implementation remains unstarted pending the owner's execution-mode selection.
 - WeChat DevTools account-administration smoke acceptance now covers automatic dashboard restoration, the authoritative super-administrator list state, creation of two ordinary test accounts and a second super administrator, case-insensitive duplicate-username rejection, safe disable/re-enable of the second administrator, rejection of disabling or demoting the final active super administrator, five-failure account lockout, administrator unlock, and read-only compatibility navigation through dashboard, business list, business detail, node feedback/history, and profile pages. No credential or identity value was recorded.
 - The obsolete `account-admin` linked worktree is fully cleaned up: its accidental deployment-manual edit was explicitly discarded, Git worktree registration and contents were removed, the merged local `codex/account-admin` branch was deleted through the non-force path, and the final empty `.worktrees/account-admin` directory was removed after WeChat DevTools released it.
 - Local `main` was fast-forwarded from `22a78f3` to the accepted account-administration head `f39c89e`. The merged result passed the full backend, client, WXML, syntax, diff, and project-memory checks. `origin/main` was then fast-forwarded through the integrated milestone and cleanup record at `b314785`.
@@ -26,6 +26,16 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+Executed on 2026-08-07 for the template/node/field implementation plan:
+
+| Command or boundary | Result |
+|---|---|
+| Requirements-to-task review | Passed; the 12 tasks cover authenticated routing, template/field policy, persistence, administrator UI, generated numbering and snapshots, ordinary creation, evidence validation/access, immutable feedback, rejection/freeze/amendment, client flows, retention worker, and deployment acceptance. |
+| Unfinished-marker and interface-consistency scan | Passed; no unfinished markers were found, all commit steps use explicit paths, and the snapshot-copy example uses a defined operation. |
+| `git diff --check` | Passed; line-ending warning only. |
+| Project-memory validation | Passed. |
+| Application test suites | Not rerun because this planning step changes documentation only; no executable code changed. |
 
 Executed on 2026-08-07 for the approved template/node/field design documentation:
 
@@ -199,7 +209,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Obtain the project owner's review of `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, then write the detailed implementation plan.
-2. Implement the approved template-management, node/field configuration, snapshot, rejection, freeze, and evidence-retention phase in reviewed steps.
+1. Ask the project owner to choose subagent-driven or inline execution for `docs/superpowers/plans/2026-08-07-template-node-fields.md`.
+2. At implementation start, create an isolated `codex/` worktree and execute the approved template-management, node/field configuration, snapshot, rejection, freeze, and evidence-retention tasks in order.
 3. Continue SLA/calendar, hourly reminder, and Enterprise WeChat adapter phases.
 4. Replace the administrator reset-password editable modal with masked inputs, then complete the remaining second-identity binding/unbinding acceptance.
