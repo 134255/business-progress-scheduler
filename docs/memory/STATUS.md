@@ -4,8 +4,9 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
+- Task 2 of the template/node/field plan is implemented on its isolated worktree: pure CommonJS `field-domain` and `template-domain` modules normalize the seven supported field types, validate denormalized submitted-value snapshots, enforce stable node/field keys and contiguous sequences, apply the 22-work-hour SLA default, restrict evidence types, require active assignee account document IDs for enablement, and reject definition edits while a template is enabled. Task 3 (template persistence, service, and API routes) is next.
 - Task 1 of the template/node/field plan is implemented on its isolated worktree: `createBusinessApi` accepts injected `protectedRoutes`; recognized protected actions receive the trusted resolved actor and payload separately, are rejected before handler invocation when authentication fails, and retain the existing account and legacy-route behavior.
-- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Task 1 is complete; Task 2 is next.
+- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Tasks 1 and 2 are complete; Task 3 is next.
 - WeChat DevTools account-administration smoke acceptance now covers automatic dashboard restoration, the authoritative super-administrator list state, creation of two ordinary test accounts and a second super administrator, case-insensitive duplicate-username rejection, safe disable/re-enable of the second administrator, rejection of disabling or demoting the final active super administrator, five-failure account lockout, administrator unlock, and read-only compatibility navigation through dashboard, business list, business detail, node feedback/history, and profile pages. No credential or identity value was recorded.
 - The obsolete `account-admin` linked worktree is fully cleaned up: its accidental deployment-manual edit was explicitly discarded, Git worktree registration and contents were removed, the merged local `codex/account-admin` branch was deleted through the non-force path, and the final empty `.worktrees/account-admin` directory was removed after WeChat DevTools released it.
 - Local `main` was fast-forwarded from `22a78f3` to the accepted account-administration head `f39c89e`. The merged result passed the full backend, client, WXML, syntax, diff, and project-memory checks. `origin/main` was then fast-forwarded through the integrated milestone and cleanup record at `b314785`.
@@ -27,6 +28,15 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+Executed on 2026-08-07 for template/node/field Task 2 domain policies:
+
+| Command or boundary | Result |
+|---|---|
+| Field-policy TDD RED: `node --test cloudfunctions/businessApi/test/field-domain.test.js` | Failed as expected with `MODULE_NOT_FOUND` because `../lib/field-domain` did not yet exist. |
+| Template-policy TDD RED: `node --test cloudfunctions/businessApi/test/template-domain.test.js` | Failed as expected with `MODULE_NOT_FOUND` because `../lib/template-domain` did not yet exist. |
+| Focused field and template suites: `node --test cloudfunctions/businessApi/test/field-domain.test.js cloudfunctions/businessApi/test/template-domain.test.js` | Passed: 9 tests, 0 failures. |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 132 tests, 0 failures; npm emitted two pre-existing malformed user-config warnings. |
 
 Executed on 2026-08-07 for template/node/field Task 1 protected-route seam:
 
