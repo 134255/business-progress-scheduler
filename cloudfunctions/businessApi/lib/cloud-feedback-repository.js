@@ -68,9 +68,26 @@ function isCurrentNode(line, node) {
 
 function parseDeadline(value) {
   if (value === null || value === undefined) return null
-  const date = value instanceof Date ? value : typeof value === 'string' ? new Date(value) : null
-  if (!date || Number.isNaN(date.getTime())) throw createError('EVIDENCE_NOT_ATTACHABLE')
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw createError('EVIDENCE_NOT_ATTACHABLE')
+    return new Date(value)
+  }
+  if (typeof value !== 'string' ||
+      !/^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/.test(value)) {
+    throw createError('EVIDENCE_NOT_ATTACHABLE')
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime()) || date.toISOString() !== value) throw createError('EVIDENCE_NOT_ATTACHABLE')
   return date
+}
+
+function safeInteger(value, { minimum = 0, maximum = Number.MAX_SAFE_INTEGER } = {}) {
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum
+}
+
+function increment(value) {
+  if (!safeInteger(value) || value === Number.MAX_SAFE_INTEGER) throw createError('VERSION_CONFLICT')
+  return value + 1
 }
 
 function publicResult(feedback) {
@@ -82,7 +99,7 @@ function publicResult(feedback) {
   }
 }
 
-function evidenceProjection(evidence) {
+function evidenceProjection(evidence, line) {
   return {
     evidenceId: evidence._id,
     fileName: evidence.fileName,
@@ -90,22 +107,26 @@ function evidenceProjection(evidence) {
     extension: evidence.extension,
     size: evidence.size,
     storageStatus: evidence.storageStatus,
-    purgeDueAt: evidence.purgeDueAt === undefined ? null : evidence.purgeDueAt,
+    purgeDueAt: evidence.purgeDueAt === undefined || evidence.purgeDueAt === null
+      ? line.purgeDueAt === undefined ? null : line.purgeDueAt
+      : evidence.purgeDueAt,
     purgedAt: evidence.purgedAt === undefined ? null : evidence.purgedAt
   }
 }
 
 function feedbackProjection(feedback, evidences) {
+  const legacy = feedback.publishState === undefined
   const result = {
     feedbackId: feedback._id,
     businessLineId: feedback.businessLineId,
     nodeId: feedback.nodeId,
     status: feedback.status,
     comment: typeof feedback.comment === 'string' ? feedback.comment : '',
-    submittedBy: feedback.submittedBy,
+    submittedBy: legacy ? null : feedback.submittedBy,
     submittedAt: feedback.submittedAt === undefined ? feedback.createdAt : feedback.submittedAt,
     evidences
   }
+  if (legacy) result.submittedByLabel = '历史用户'
   for (const key of ['revision', 'nodeCode', 'nodeName', 'fieldValues']) {
     if (Object.prototype.hasOwnProperty.call(feedback, key)) result[key] = clone(feedback[key])
   }
@@ -140,9 +161,10 @@ function createCloudFeedbackRepository({
   }
 
   function identity(value) {
-    const { actor, input, fieldSnapshots, evidenceTotalBytes } = value
+    const { actor, input, fieldSnapshots, evidenceTotalBytes, requestFingerprint } = value
     if (!actor || typeof actor._id !== 'string' || !input || !Array.isArray(input.evidenceIds) ||
         new Set(input.evidenceIds).size !== input.evidenceIds.length ||
+        typeof requestFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(requestFingerprint) ||
         !Number.isSafeInteger(evidenceTotalBytes) || evidenceTotalBytes < 0 || evidenceTotalBytes > FEEDBACK_TOTAL_LIMIT) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
@@ -151,9 +173,9 @@ function createCloudFeedbackRepository({
     const inputHash = hash(JSON.stringify([
       actor._id, input.businessLineId, input.nodeId, input.expectedNodeVersion,
       input.status, fieldSnapshots, input.comment, evidenceDigest, input.evidenceIds.length,
-      evidenceTotalBytes
+      evidenceTotalBytes, requestFingerprint
     ]))
-    return { feedbackId: `feedback-${requestHash}`, requestHash, evidenceDigest, inputHash }
+    return { feedbackId: `feedback-${requestHash}`, requestHash, evidenceDigest, inputHash, requestFingerprint }
   }
 
   function assertActiveAccountSubmission(actor, line, node, input, expectedVersion = true) {
@@ -167,7 +189,7 @@ function createCloudFeedbackRepository({
       throw createError('FORBIDDEN')
     }
     if (!isCurrentNode(line, node) || !ACTIVE_NODE_STATUSES.has(node.status)) {
-      if (input.status === 'completed' && node.status === 'completed') throw createError('NODE_ALREADY_COMPLETED')
+      if (input.status === 'completed' && node.status === 'completed') throw createError('VERSION_CONFLICT')
       throw createError('NODE_NOT_ACTIVE')
     }
     if (expectedVersion && node.version !== input.expectedNodeVersion) throw createError('VERSION_CONFLICT')
@@ -206,6 +228,26 @@ function createCloudFeedbackRepository({
     return { line: context.line, node: context.node, evidences }
   }
 
+  async function findPublishedFeedback(value) {
+    const { actor, input, requestFingerprint } = value
+    if (!actor || typeof actor._id !== 'string' || !input || typeof input.nodeId !== 'string' ||
+        typeof input.requestKey !== 'string' || typeof requestFingerprint !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(requestFingerprint)) throw createError('VERSION_CONFLICT')
+    const requestHash = hash(`${actor._id}\0${input.nodeId}\0${input.requestKey}`)
+    const feedbackId = `feedback-${requestHash}`
+    return db.runTransaction(async transaction => {
+      const existing = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
+      if (!existing || existing.publishState !== 'published') return null
+      if (existing.requestHash !== requestHash || existing.requestFingerprint !== requestFingerprint ||
+          existing.submittedBy !== actor._id) {
+        throw createError('VERSION_CONFLICT')
+      }
+      const current = await readSubmissionDocuments(transaction, actor._id, input)
+      assertPublishedRetry(current.actor, current.line, current.node, existing)
+      return publicResult(existing)
+    })
+  }
+
   async function beginFeedback(value) {
     const id = identity(value)
     const at = now()
@@ -214,6 +256,7 @@ function createCloudFeedbackRepository({
       const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
       if (existing) {
         if (existing.requestHash !== id.requestHash || existing.inputHash !== id.inputHash ||
+            existing.requestFingerprint !== id.requestFingerprint ||
             existing.submittedBy !== value.actor._id) throw createError('VERSION_CONFLICT')
         if (existing.publishState === 'published') {
           assertPublishedRetry(current.actor, current.line, current.node, existing)
@@ -223,7 +266,24 @@ function createCloudFeedbackRepository({
       if (existing && existing.publishState === 'reserved' && current.node &&
           current.node.feedbackClaimId === id.feedbackId) {
         assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
+        let expiresAt
+        try {
+          expiresAt = parseDeadline(existing.claimExpiresAt)
+        } catch (error) {
+          throw createError('RESERVATION_RECOVERY_REQUIRED', { feedbackId: id.feedbackId })
+        }
+        if (!expiresAt || expiresAt.getTime() <= at.getTime()) {
+          throw createError('RESERVATION_RECOVERY_REQUIRED', { feedbackId: id.feedbackId })
+        }
         return { ...id, cursor: existing.claimedCount }
+      }
+      if (value.input.status === 'completed' && current.node && current.node.status === 'completed') {
+        const winnerId = current.node.latestFeedbackId || current.node.feedbackClaimId
+        const winner = winnerId ? await readDocument(transaction, COLLECTIONS.feedback, winnerId) : null
+        const completedFlow = winner && winner.publishState === 'published' && winner.status === 'completed' &&
+          winner.businessLineId === value.input.businessLineId && winner.nodeId === value.input.nodeId &&
+          current.line && (current.line.status === 'completed' || !isCurrentNode(current.line, current.node))
+        if (completedFlow) throw createError('NODE_ALREADY_COMPLETED')
       }
       assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
       if (value.input.status === 'completed' && current.node.requiresEvidence && !value.input.evidenceIds.length) {
@@ -231,12 +291,17 @@ function createCloudFeedbackRepository({
       }
       if (current.node.feedbackClaimId && current.node.feedbackClaimId !== id.feedbackId) {
         const winner = await readDocument(transaction, COLLECTIONS.feedback, current.node.feedbackClaimId)
-        if (winner && winner.publishState === 'published') throw createError('NODE_ALREADY_COMPLETED')
+        if (winner && winner.publishState === 'published') {
+          if (winner.status === 'completed' && current.node.status === 'completed') {
+            throw createError('NODE_ALREADY_COMPLETED')
+          }
+          throw createError('VERSION_CONFLICT')
+        }
         throw createError('NODE_COMMIT_IN_PROGRESS', { winnerFeedbackId: current.node.feedbackClaimId })
       }
       const claimExpiresAt = new Date(at.getTime() + CLAIM_LIFETIME_MS)
-      const plannedRevision = Number(current.node.latestFeedbackRevision || 0) + 1
-      if (!Number.isSafeInteger(plannedRevision) || plannedRevision < 1) throw createError('VERSION_CONFLICT')
+      const currentRevision = current.node.latestFeedbackRevision === undefined ? 0 : current.node.latestFeedbackRevision
+      const plannedRevision = increment(currentRevision)
       const reservation = {
         businessLineId: current.line._id,
         nodeId: current.node._id,
@@ -248,6 +313,7 @@ function createCloudFeedbackRepository({
         comment: value.input.comment,
         publishState: 'reserved',
         requestHash: id.requestHash,
+        requestFingerprint: id.requestFingerprint,
         inputHash: id.inputHash,
         evidenceDigest: id.evidenceDigest,
         evidenceCount: value.input.evidenceIds.length,
@@ -255,12 +321,13 @@ function createCloudFeedbackRepository({
         claimedCount: 0,
         claimedBytes: 0,
         claimedDigest: hash(JSON.stringify([])),
+        claimedStateDigest: hash(JSON.stringify([0, 0, hash(JSON.stringify([]))])),
         expectedNodeVersion: value.input.expectedNodeVersion,
         plannedRevision,
-        freezesLine: Number(current.node.sequence) + 1 >= Number(current.line.nodeCount),
+        freezesLine: value.input.status === 'completed' && Number(current.node.sequence) + 1 >= Number(current.line.nodeCount),
         transitionAt: at,
         claimExpiresAt,
-        recoveryCount: Number(existing && existing.recoveryCount || 0),
+        recoveryCount: existing && existing.recoveryCount !== undefined ? existing.recoveryCount : 0,
         createdAt: existing ? existing.createdAt : db.serverDate(),
         updatedAt: db.serverDate()
       }
@@ -285,7 +352,7 @@ function createCloudFeedbackRepository({
     const purge = parseDeadline(evidence.purgeDueAt)
     if ((orphan && orphan.getTime() <= at.getTime() && evidence.feedbackId !== reservation._id) ||
         (purge && purge.getTime() <= at.getTime())) throw createError('EVIDENCE_NOT_ATTACHABLE')
-    if (!Number.isSafeInteger(evidence.size) || evidence.size < 0) throw createError('EVIDENCE_NOT_ATTACHABLE')
+    if (!Number.isSafeInteger(evidence.size) || evidence.size <= 0) throw createError('EVIDENCE_NOT_ATTACHABLE')
   }
 
   async function claimEvidenceChunk(value, reservationIdentity) {
@@ -301,15 +368,22 @@ function createCloudFeedbackRepository({
         throw createError('VERSION_CONFLICT')
       }
       if (reservation.publishState === 'published') return { done: true, published: publicResult(reservation) }
-      if (reservation.publishState !== 'reserved' || current.node.feedbackClaimId !== id.feedbackId ||
+      const cursorValid = safeInteger(reservation.evidenceCount, { maximum: value.input.evidenceIds.length }) &&
+        reservation.evidenceCount === value.input.evidenceIds.length &&
+        safeInteger(reservation.claimedCount, { maximum: reservation.evidenceCount }) &&
+        safeInteger(reservation.claimedBytes, { maximum: reservation.evidenceTotalBytes }) &&
+        safeInteger(reservation.evidenceTotalBytes, { maximum: FEEDBACK_TOTAL_LIMIT }) &&
+        reservation.evidenceTotalBytes === value.evidenceTotalBytes &&
+        reservation.claimedStateDigest === hash(JSON.stringify([
+          reservation.claimedCount, reservation.claimedBytes, reservation.claimedDigest
+        ]))
+      if (reservation.publishState !== 'reserved' || current.node.feedbackClaimId !== id.feedbackId || !cursorValid ||
           reservation.claimedDigest !== hash(JSON.stringify(value.input.evidenceIds.slice(0, reservation.claimedCount)))) {
         throw createError('VERSION_CONFLICT')
       }
       const ids = value.input.evidenceIds.slice(reservation.claimedCount, reservation.claimedCount + claimChunkSize)
+      if (reservation.claimedCount < reservation.evidenceCount && ids.length === 0) throw createError('VERSION_CONFLICT')
       let claimedBytes = reservation.claimedBytes
-      const purgeDueAt = reservation.freezesLine
-        ? new Date(new Date(reservation.transitionAt).getTime() + RETENTION_MS)
-        : null
       for (const evidenceId of ids) {
         const evidence = await readDocument(transaction, COLLECTIONS.evidences, evidenceId)
         validateEvidence(evidence, value, reservation, at)
@@ -329,18 +403,23 @@ function createCloudFeedbackRepository({
               ? evidence.attachmentPreviousOrphanExpiresAt
               : evidence.orphanExpiresAt,
             orphanExpiresAt: null,
-            retentionStartedAt: reservation.freezesLine ? reservation.transitionAt : null,
-            purgeDueAt
+            retentionStartedAt: null,
+            purgeDueAt: null
           }
         })
       }
       const claimedCount = reservation.claimedCount + ids.length
+      if (!safeInteger(claimedCount, { maximum: reservation.evidenceCount }) ||
+          !safeInteger(claimedBytes, { maximum: reservation.evidenceTotalBytes })) throw createError('VERSION_CONFLICT')
       const claimExpiresAt = new Date(at.getTime() + CLAIM_LIFETIME_MS)
       await transaction.collection(COLLECTIONS.feedback).doc(id.feedbackId).update({
         data: {
           claimedCount,
           claimedBytes,
           claimedDigest: hash(JSON.stringify(value.input.evidenceIds.slice(0, claimedCount))),
+          claimedStateDigest: hash(JSON.stringify([
+            claimedCount, claimedBytes, hash(JSON.stringify(value.input.evidenceIds.slice(0, claimedCount)))
+          ])),
           claimExpiresAt,
           updatedAt: db.serverDate()
         }
@@ -364,20 +443,29 @@ function createCloudFeedbackRepository({
       const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       if (reservation && reservation.publishState === 'published') return publicResult(reservation)
       assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
-      if (!reservation || reservation.publishState !== 'reserved' || reservation.inputHash !== id.inputHash ||
-          current.node.feedbackClaimId !== id.feedbackId || reservation.claimedCount !== reservation.evidenceCount ||
-          reservation.claimedCount !== value.input.evidenceIds.length ||
-          reservation.claimedBytes !== reservation.evidenceTotalBytes ||
-          reservation.claimedBytes !== value.evidenceTotalBytes ||
-          reservation.claimedDigest !== id.evidenceDigest) {
-        throw createError('EVIDENCE_NOT_ATTACHABLE')
-      }
+      const cursorValid = reservation && reservation.publishState === 'reserved' &&
+        reservation.inputHash === id.inputHash && reservation.requestFingerprint === id.requestFingerprint &&
+        current.node.feedbackClaimId === id.feedbackId &&
+        safeInteger(reservation.evidenceCount, { maximum: value.input.evidenceIds.length }) &&
+        safeInteger(reservation.claimedCount, { maximum: reservation.evidenceCount }) &&
+        safeInteger(reservation.evidenceTotalBytes, { maximum: FEEDBACK_TOTAL_LIMIT }) &&
+        safeInteger(reservation.claimedBytes, { maximum: reservation.evidenceTotalBytes }) &&
+        reservation.claimedStateDigest === hash(JSON.stringify([
+          reservation.claimedCount, reservation.claimedBytes, reservation.claimedDigest
+        ])) &&
+        reservation.claimedCount === reservation.evidenceCount &&
+        reservation.claimedCount === value.input.evidenceIds.length &&
+        reservation.claimedBytes === reservation.evidenceTotalBytes &&
+        reservation.claimedBytes === value.evidenceTotalBytes && reservation.claimedDigest === id.evidenceDigest
+      if (!cursorValid) throw createError('VERSION_CONFLICT')
       const revision = reservation.plannedRevision
-      if (revision !== Number(current.node.latestFeedbackRevision || 0) + 1) throw createError('VERSION_CONFLICT')
+      const latestRevision = current.node.latestFeedbackRevision === undefined ? 0 : current.node.latestFeedbackRevision
+      if (!safeInteger(revision, { minimum: 1 }) || revision !== increment(latestRevision)) throw createError('VERSION_CONFLICT')
       const nodeChanges = {
         status: value.input.status,
-        version: current.node.version + 1,
+        version: increment(current.node.version),
         latestFeedbackRevision: revision,
+        latestFeedbackId: id.feedbackId,
         latestComment: value.input.comment,
         feedbackClaimId: db.command.remove(),
         feedbackClaimHash: db.command.remove(),
@@ -390,10 +478,11 @@ function createCloudFeedbackRepository({
       let lineStatus = 'active'
       if (value.input.status === 'completed' && reservation.freezesLine) {
         lineStatus = 'completed'
+        const purgeDueAt = new Date(new Date(reservation.transitionAt).getTime() + RETENTION_MS)
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
-          status: 'completed', progress: 100, version: Number(current.line.version || 0) + 1,
+          status: 'completed', progress: 100, version: increment(current.line.version),
           completedAt: reservation.transitionAt, frozenAt: reservation.transitionAt,
-          retentionStartedAt: reservation.transitionAt, updatedAt: db.serverDate()
+          retentionStartedAt: reservation.transitionAt, purgeDueAt, updatedAt: db.serverDate()
         } })
       } else if (value.input.status === 'completed') {
         const nextId = nextNodeId(current.line._id, current.node.sequence)
@@ -401,16 +490,16 @@ function createCloudFeedbackRepository({
         if (!next || next.businessLineId !== current.line._id || Number(next.sequence) !== Number(current.node.sequence) + 1 ||
             next.status !== 'waiting') throw createError('NODE_NOT_ACTIVE')
         await transaction.collection(COLLECTIONS.nodes).doc(nextId).update({ data: {
-          status: 'ready', version: next.version + 1, activatedAt: reservation.transitionAt, updatedAt: db.serverDate()
+          status: 'ready', version: increment(next.version), activatedAt: reservation.transitionAt, updatedAt: db.serverDate()
         } })
         const progress = Math.floor(((Number(current.node.sequence) + 1) / Number(current.line.nodeCount)) * 100)
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
           currentNodeId: nextId, currentNodeIndex: next.sequence, currentNodeName: next.name,
-          progress, version: Number(current.line.version || 0) + 1, updatedAt: db.serverDate()
+          progress, version: increment(current.line.version), updatedAt: db.serverDate()
         } })
       } else {
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
-          version: Number(current.line.version || 0) + 1, updatedAt: db.serverDate()
+          version: increment(current.line.version), updatedAt: db.serverDate()
         } })
       }
       await transaction.collection(COLLECTIONS.feedback).doc(id.feedbackId).update({ data: {
@@ -430,18 +519,45 @@ function createCloudFeedbackRepository({
   async function waitForWinner(error, value) {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const winner = await readDocument(db, COLLECTIONS.feedback, error.winnerFeedbackId)
-      if (winner && winner.publishState === 'published') throw createError('NODE_ALREADY_COMPLETED')
-      if (winner && winner.publishState === 'reserved') {
-        const expiresAt = parseDeadline(winner.claimExpiresAt)
-        if (expiresAt && expiresAt.getTime() <= now().getTime() &&
-            await recoverExpiredReservation(error.winnerFeedbackId)) return null
-      }
       const node = await readDocument(db, COLLECTIONS.nodes, value.input.nodeId)
-      if (!node || node.status === 'completed') throw createError('NODE_ALREADY_COMPLETED')
+      const line = await readDocument(db, COLLECTIONS.lines, value.input.businessLineId)
+      if (winner && winner.publishState === 'published') {
+        const completedFlow = winner.businessLineId === value.input.businessLineId &&
+          winner.nodeId === value.input.nodeId && winner.status === 'completed' && node && node.status === 'completed' &&
+          line && (line.status === 'completed' || !isCurrentNode(line, node))
+        if (completedFlow) throw createError('NODE_ALREADY_COMPLETED')
+        throw createError('VERSION_CONFLICT')
+      }
+      if (winner && winner.publishState === 'aborted') {
+        await db.runTransaction(async transaction => {
+          const currentNode = await readDocument(transaction, COLLECTIONS.nodes, value.input.nodeId)
+          if (currentNode && currentNode.feedbackClaimId === error.winnerFeedbackId) {
+            await transaction.collection(COLLECTIONS.nodes).doc(currentNode._id).update({ data: {
+              feedbackClaimId: db.command.remove(), feedbackClaimHash: db.command.remove(),
+              feedbackClaimExpiresAt: db.command.remove()
+            } })
+          }
+        })
+        return null
+      }
+      if (winner && winner.publishState === 'reserved') {
+        let expiresAt
+        try {
+          expiresAt = parseDeadline(winner.claimExpiresAt)
+        } catch (parseError) {
+          if (await releaseReservation(error.winnerFeedbackId, { reason: 'CLAIM_EXPIRED' })) return null
+        }
+        if ((!expiresAt || expiresAt.getTime() <= now().getTime()) &&
+            await releaseReservation(error.winnerFeedbackId, { reason: 'CLAIM_EXPIRED' })) return null
+      }
+      if (!node) throw createError('NOT_FOUND')
+      if (node.status === 'completed') {
+        throw createError('VERSION_CONFLICT')
+      }
       if (!node.feedbackClaimId) return null
       await wait(5)
     }
-    throw createError('NODE_ALREADY_COMPLETED')
+    throw createError('FEEDBACK_COMMIT_IN_PROGRESS')
   }
 
   async function releaseReservation(feedbackId, { onlyExpired = false, reason = 'INTERRUPTED' } = {}) {
@@ -450,12 +566,17 @@ function createCloudFeedbackRepository({
       const reservation = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
       if (!reservation || reservation.publishState === 'published' || reservation.publishState === 'aborted') return false
       if (onlyExpired) {
-        const expiresAt = parseDeadline(reservation.claimExpiresAt)
-        if (!expiresAt || expiresAt.getTime() > at.getTime()) return false
+        let expiresAt
+        try {
+          expiresAt = parseDeadline(reservation.claimExpiresAt)
+        } catch (error) {
+          expiresAt = null
+        }
+        if (expiresAt && expiresAt.getTime() > at.getTime()) return false
       }
       const node = await readDocument(transaction, COLLECTIONS.nodes, reservation.nodeId)
       await transaction.collection(COLLECTIONS.feedback).doc(feedbackId).update({ data: {
-        publishState: 'aborting', recoveryCount: Number(reservation.recoveryCount || 0) + 1,
+        publishState: 'aborting', recoveryCount: increment(reservation.recoveryCount === undefined ? 0 : reservation.recoveryCount),
         recoveryReason: reason, recoveryStartedAt: at, updatedAt: db.serverDate()
       } })
       if (node && node.feedbackClaimId === feedbackId) {
@@ -486,8 +607,8 @@ function createCloudFeedbackRepository({
             attachmentClaimExpiresAt: db.command.remove(),
             orphanExpiresAt: evidence.attachmentPreviousOrphanExpiresAt,
             attachmentPreviousOrphanExpiresAt: db.command.remove(),
-            retentionStartedAt: null,
-            purgeDueAt: null
+            retentionStartedAt: evidence.retentionStartedAt === undefined ? null : evidence.retentionStartedAt,
+            purgeDueAt: evidence.purgeDueAt === undefined ? null : evidence.purgeDueAt
           } })
         }
       })
@@ -514,13 +635,19 @@ function createCloudFeedbackRepository({
           reservation = await beginFeedback(value)
           break
         } catch (error) {
+          if (error.code === 'RESERVATION_RECOVERY_REQUIRED') {
+            await releaseReservation(error.feedbackId, { reason: 'CLAIM_EXPIRED' })
+            continue
+          }
           if (error.code !== 'NODE_COMMIT_IN_PROGRESS') throw error
           const result = await waitForWinner(error, value)
           if (result === null) continue
         }
       }
       if (reservation.published) return reservation.published
-      for (;;) {
+      const maximumClaims = Math.ceil(value.input.evidenceIds.length / claimChunkSize) + 1
+      for (let attempt = 0; ; attempt += 1) {
+        if (attempt >= maximumClaims) throw createError('VERSION_CONFLICT')
         const claimed = await claimEvidenceChunk(value, reservation)
         if (claimed.published) return claimed.published
         if (claimed.done) break
@@ -556,18 +683,50 @@ function createCloudFeedbackRepository({
       if (!line || line.status === 'creating') throw createError('NOT_FOUND')
       const node = await readDocument(transaction, COLLECTIONS.nodes, nodeId)
       if (!node || node.businessLineId !== line._id) throw createError('NOT_FOUND')
-      const allowed = accountSchema(line, node) ? isAccountMember(line, currentActor._id) : isLegacyMember(line, actor)
+      const allowed = accountSchema(line, node) ? isAccountMember(line, currentActor._id) : isLegacyMember(line, currentActor)
       if (!allowed) throw createError('FORBIDDEN')
       return { line, node, actor: currentActor }
     })
-    const stored = await readAll(() => db.collection(COLLECTIONS.feedback)
-      .where({ nodeId }).orderBy('submittedAt', 'desc'))
-    const visible = stored.filter(item => item.publishState === undefined || item.publishState === 'published')
+    const stored = await readAll(() => db.collection(COLLECTIONS.feedback).where({ nodeId }))
+    const visible = stored.filter(item =>
+      item.businessLineId === businessLineId && item.nodeId === nodeId &&
+      (item.publishState === undefined || item.publishState === 'published'))
+    function timestamp(item) {
+      const value = item.submittedAt === undefined ? item.createdAt : item.submittedAt
+      if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getTime()
+      if (typeof value === 'string') {
+        const parsed = new Date(value)
+        if (!Number.isNaN(parsed.getTime())) return parsed.getTime()
+      }
+      return Number.NEGATIVE_INFINITY
+    }
+    visible.sort((left, right) => {
+      const time = timestamp(right) - timestamp(left)
+      if (time) return time
+      const revision = (safeInteger(right.revision) ? right.revision : -1) -
+        (safeInteger(left.revision) ? left.revision : -1)
+      if (revision) return revision
+      return String(left._id).localeCompare(String(right._id))
+    })
     const history = []
     for (const feedback of visible) {
-      const evidences = await readAll(() => db.collection(COLLECTIONS.evidences)
-        .where({ feedbackId: feedback._id }).orderBy('uploadedAt', 'asc'))
-      history.push(feedbackProjection(feedback, evidences.map(evidenceProjection)))
+      const associated = await readAll(() => db.collection(COLLECTIONS.evidences).where({ feedbackId: feedback._id }))
+      const evidenceById = new Map()
+      for (const evidence of associated) {
+        if (evidence.feedbackId === feedback._id && evidence.attachmentState === 'attached' &&
+            evidence.businessLineId === businessLineId && evidence.nodeId === nodeId) evidenceById.set(evidence._id, evidence)
+      }
+      if (feedback.publishState === undefined && Array.isArray(feedback.evidenceIds)) {
+        for (const evidenceId of [...new Set(feedback.evidenceIds)]) {
+          if (typeof evidenceId !== 'string' || !evidenceId) continue
+          const evidence = await readDocument(db, COLLECTIONS.evidences, evidenceId)
+          if (evidence && evidence._id === evidenceId && evidence.businessLineId === businessLineId &&
+              evidence.nodeId === nodeId && (evidence.feedbackId === null || evidence.feedbackId === undefined ||
+                evidence.feedbackId === feedback._id)) evidenceById.set(evidenceId, evidence)
+        }
+      }
+      const evidences = [...evidenceById.values()].sort((left, right) => String(left._id).localeCompare(String(right._id)))
+      history.push(feedbackProjection(feedback, evidences.map(evidence => evidenceProjection(evidence, context.line))))
     }
     const canSubmit = context.line.status === 'active' && isCurrentNode(context.line, context.node) &&
       ACTIVE_NODE_STATUSES.has(context.node.status) && accountSchema(context.line, context.node) &&
@@ -580,6 +739,7 @@ function createCloudFeedbackRepository({
   }
 
   return {
+    findPublishedFeedback,
     getSubmissionContext,
     beginFeedback,
     claimEvidenceChunk,

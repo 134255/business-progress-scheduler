@@ -1,3 +1,5 @@
+const crypto = require('node:crypto')
+
 const { validateFieldValues } = require('./field-domain')
 const { validateFeedbackTotalSize } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
@@ -9,6 +11,7 @@ const INPUT_KEYS = new Set([
   'businessLineId', 'nodeId', 'expectedNodeVersion', 'status',
   'fieldValues', 'comment', 'evidenceIds', 'requestKey'
 ])
+const REQUIRED_INPUT_KEYS = [...INPUT_KEYS]
 
 function createError(code) {
   const error = new Error(code)
@@ -33,9 +36,25 @@ function requireId(value) {
   return value
 }
 
+function isPlainOwnObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function createRequestFingerprint(actor, input) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    actor._id, input.businessLineId, input.nodeId, input.expectedNodeVersion,
+    input.status, input.fieldValues, input.comment, input.evidenceIds, input.requestKey
+  ])).digest('hex')
+}
+
 function normalizeInput(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input) ||
-      Object.keys(input).some(key => !INPUT_KEYS.has(key))) {
+  if (!isPlainOwnObject(input) || Reflect.ownKeys(input).some(key => typeof key !== 'string' || !INPUT_KEYS.has(key)) ||
+      REQUIRED_INPUT_KEYS.some(key => {
+        const descriptor = Object.getOwnPropertyDescriptor(input, key)
+        return !descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      })) {
     throw createError('VALIDATION_ERROR')
   }
   if (!Number.isSafeInteger(input.expectedNodeVersion) || input.expectedNodeVersion < 1 ||
@@ -83,6 +102,10 @@ function createFeedbackService({ repository }) {
   async function submitFeedback({ actor, input }) {
     requireActiveActor(actor)
     const normalized = normalizeInput(input)
+    const requestFingerprint = createRequestFingerprint(actor, normalized)
+    const { fieldValues, ...commitInput } = normalized
+    const published = await repository.findPublishedFeedback({ actor, input: commitInput, requestFingerprint })
+    if (published) return published
     const submission = await repository.getSubmissionContext({
       actor,
       businessLineId: normalized.businessLineId,
@@ -101,10 +124,10 @@ function createFeedbackService({ repository }) {
     if (normalized.status === 'completed' && submission.node.requiresEvidence && !normalized.evidenceIds.length) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
-    const { fieldValues, ...commitInput } = normalized
     return repository.commitFeedback({
       actor,
       input: commitInput,
+      requestFingerprint,
       fieldSnapshots,
       evidenceTotalBytes
     })
@@ -118,4 +141,4 @@ function createFeedbackService({ repository }) {
   return { submitFeedback, getNodeHistory }
 }
 
-module.exports = { createFeedbackService }
+module.exports = { createFeedbackService, createRequestFingerprint }

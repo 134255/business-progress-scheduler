@@ -538,6 +538,7 @@ test('route error logging excludes payloads, passwords, identity values, and err
 test('route error logging preserves known application codes and maps all other codes to INTERNAL_ERROR', async () => {
   for (const { code, loggedCode } of [
     { code: 'INVALID_CREDENTIALS', loggedCode: 'INVALID_CREDENTIALS' },
+    { code: 'FEEDBACK_COMMIT_IN_PROGRESS', loggedCode: 'FEEDBACK_COMMIT_IN_PROGRESS' },
     { code: 'SECRET_API_TOKEN', loggedCode: 'INTERNAL_ERROR' },
     { code: 'SDK_RUNTIME_ERROR', loggedCode: 'INTERNAL_ERROR' },
     { code: 'INVALID\nsecret-code', loggedCode: 'INTERNAL_ERROR' }

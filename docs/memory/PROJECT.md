@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact review: 2026-08-07 (Asia/Shanghai)
+Last stable-fact review: 2026-08-08 (Asia/Shanghai)
 
 ## Product
 
@@ -34,6 +34,7 @@ Primary collections include `users`, `user_credentials`, `auth_challenges`, `wec
 
 Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 Unbounded-count feedback evidence attachment uses hidden, deterministic, chunked reservations under the existing `node_feedback` and `evidences` collections; the invariant and Task 11 recovery obligation are recorded in `docs/memory/decisions/ADR-0003-feedback-evidence-reservations.md`.
+For ordinary feedback evidence, completed-line `retentionStartedAt` and `purgeDueAt` are authoritative for the whole business line. Task 11 must scan due completed lines and purge every associated evidence object by `businessLineId` in bounded chunks; earlier revisions therefore inherit the same deadline as the final revision. A later explicit evidence deadline is reserved for Task 9 audit amendments and takes precedence during cleanup.
 
 Account deployment requires the `system_settings/account_admin_state` guard, deterministic `wechat_bindings/<sha256(openid)>` backfill, and removal of the legacy `users.openid` unique index only after a verified migration. The security-redacted operator procedure is `docs/deployment/account-admin-setup.md`.
 

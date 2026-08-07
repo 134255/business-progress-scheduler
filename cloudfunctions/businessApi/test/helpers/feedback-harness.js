@@ -1,4 +1,5 @@
 const { createCloudFeedbackRepository } = require('../../lib/cloud-feedback-repository')
+const { createRequestFingerprint } = require('../../lib/feedback-service')
 const { createFakeCloudDatabase } = require('./fake-cloud-database')
 const { createOptimisticBusinessDatabase } = require('./business-harness')
 
@@ -48,14 +49,19 @@ function seed(overrides = {}) {
 
 function submission(overrides = {}) {
   const evidenceIds = overrides.evidenceIds || []
+  const actor = overrides.actor || { _id: 'account-a', status: 'active' }
+  const fieldValues = overrides.fieldValues || []
+  const requestInput = {
+    businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4,
+    status: 'completed', fieldValues, comment: '完成', evidenceIds,
+    requestKey: 'request-1',
+    ...(overrides.input || {})
+  }
+  const { fieldValues: ignored, ...input } = requestInput
   return {
-    actor: overrides.actor || { _id: 'account-a', status: 'active' },
-    input: {
-      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4,
-      status: 'completed', comment: '完成', evidenceIds,
-      requestKey: 'request-1',
-      ...(overrides.input || {})
-    },
+    actor,
+    input,
+    requestFingerprint: createRequestFingerprint(actor, requestInput),
     fieldSnapshots: overrides.fieldSnapshots || [],
     evidenceTotalBytes: overrides.evidenceTotalBytes === undefined ? evidenceIds.length : overrides.evidenceTotalBytes
   }
@@ -65,7 +71,7 @@ function createFeedbackHarness(overrides = {}) {
   const fake = createFakeCloudDatabase(overrides.seed || seed(overrides))
   const repository = createCloudFeedbackRepository({
     db: fake.db,
-    clock: () => new Date(NOW),
+    clock: overrides.clock || (() => new Date(NOW)),
     claimChunkSize: overrides.claimChunkSize || 40
   })
   return { fake, repository, now: new Date(NOW) }
@@ -77,7 +83,7 @@ function createOptimisticFeedbackHarness(overrides = {}) {
     db: fake.db,
     clock: () => new Date(NOW),
     claimChunkSize: overrides.claimChunkSize || 40,
-    wait: () => Promise.resolve()
+    wait: overrides.wait || (() => Promise.resolve())
   })
   return { fake, repository, now: new Date(NOW) }
 }

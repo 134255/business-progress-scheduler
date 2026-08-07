@@ -41,6 +41,10 @@ function input(overrides = {}) {
 function harness(overrides = {}) {
   const calls = []
   const repository = {
+    async findPublishedFeedback(value) {
+      calls.push(['published', structuredClone(value)])
+      return overrides.published || null
+    },
     async getSubmissionContext(value) {
       calls.push(['context', structuredClone(value)])
       return context(overrides.context)
@@ -62,13 +66,15 @@ test('submission snapshots typed field identity and delegates immutable normaliz
   const result = await service.submitFeedback({ actor, input: input() })
 
   assert.deepEqual(result, { feedbackId: 'feedback-1', revision: 1, nodeStatus: 'completed', lineStatus: 'completed' })
-  assert.deepEqual(calls[1][1], {
+  assert.equal(calls[0][0], 'published')
+  assert.deepEqual(calls[2][1], {
     actor,
     input: {
       businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 3,
       status: 'completed', comment: '完成说明', evidenceIds: ['evidence-1', 'evidence-2'],
       requestKey: 'feedback-request-1'
     },
+    requestFingerprint: calls[2][1].requestFingerprint,
     fieldSnapshots: [
       { fieldKey: 'summary', name: '摘要', type: 'short_text', value: '验收完成' },
       { fieldKey: 'accepted', name: '通过', type: 'boolean', value: true },
@@ -105,7 +111,7 @@ test('in-progress and blocked revisions may omit evidence and preserve null opti
       input: input({ status, evidenceIds: [], comment: undefined })
     })
     assert.equal(result.nodeStatus, status)
-    assert.equal(calls[1][1].input.comment, '')
+    assert.equal(calls[2][1].input.comment, '')
   }
 })
 
@@ -114,7 +120,7 @@ test('aggregate evidence validation has an exact 20MB boundary and no count cap'
   const ids = tiny.map(item => item._id)
   const allowed = harness({ context: { ...context(), evidences: tiny } })
   await allowed.service.submitFeedback({ actor: allowed.actor, input: input({ evidenceIds: ids }) })
-  assert.equal(allowed.calls[1][1].evidenceTotalBytes, 150)
+  assert.equal(allowed.calls[2][1].evidenceTotalBytes, 150)
 
   const tooLarge = harness({ context: { ...context(), evidences: [{ _id: 'evidence-1', size: 20 * 1024 * 1024 + 1 }] } })
   await assert.rejects(
@@ -138,4 +144,32 @@ test('history delegates only normalized identifiers for an active actor', async 
   const actor = { _id: 'account-1', status: 'active' }
   assert.deepEqual(await service.getNodeHistory({ actor, businessLineId: 'line-1', nodeId: 'node-1' }), { history: [] })
   assert.deepEqual(calls, [{ actor, businessLineId: 'line-1', nodeId: 'node-1' }])
+})
+
+test('exact published retry returns before active-node and frozen-line preflight', async () => {
+  const published = { feedbackId: 'feedback-1', revision: 7, nodeStatus: 'completed', lineStatus: 'completed' }
+  const { actor, calls, service } = harness({
+    published,
+    repository: {
+      async getSubmissionContext() { throw new Error('frozen preflight must not run') },
+      async commitFeedback() { throw new Error('commit must not run') }
+    }
+  })
+  assert.deepEqual(await service.submitFeedback({ actor, input: input() }), published)
+  assert.deepEqual(calls.map(call => call[0]), ['published'])
+})
+
+test('feedback input must be a plain own-property request with every required key', async () => {
+  const { actor, service } = harness()
+  const inherited = Object.create(input())
+  await assert.rejects(service.submitFeedback({ actor, input: inherited }), error => error.code === 'VALIDATION_ERROR')
+  const missingComment = input()
+  delete missingComment.comment
+  await assert.rejects(service.submitFeedback({ actor, input: missingComment }), error => error.code === 'VALIDATION_ERROR')
+  const hiddenExtra = input()
+  Object.defineProperty(hiddenExtra, 'hidden', { value: true })
+  await assert.rejects(service.submitFeedback({ actor, input: hiddenExtra }), error => error.code === 'VALIDATION_ERROR')
+  const accessor = input()
+  Object.defineProperty(accessor, 'comment', { get() { return 'unsafe' }, enumerable: true })
+  await assert.rejects(service.submitFeedback({ actor, input: accessor }), error => error.code === 'VALIDATION_ERROR')
 })
