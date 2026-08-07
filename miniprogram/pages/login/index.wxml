@@ -8,7 +8,12 @@
     <block wx:else>
       <view class="error" wx:if="{{errorMessage}}">{{errorMessage}}</view>
 
-      <block wx:if="{{!requiresInitialization}}">
+      <block wx:if="{{requiresInitialization}}">
+        <text class="muted intro">首次使用需要由授权操作员创建首位超级管理员</text>
+        <button class="primary-button submit" bindtap="openInitialization">初始化首位管理员</button>
+      </block>
+
+      <block wx:else>
         <view class="field">
           <label class="field-label" for="username">用户名</label>
           <input id="username" class="input" value="{{username}}" placeholder="请输入用户名" bindinput="onUsernameInput" />

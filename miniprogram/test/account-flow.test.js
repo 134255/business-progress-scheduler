@@ -184,7 +184,20 @@ test('login reports initialization state without exposing a credential form as r
 
   assert.equal(page.data.checking, false)
   assert.equal(page.data.requiresInitialization, true)
-  assert.equal(page.data.errorMessage, '系统尚未初始化，请由超级管理员在开发者工具中完成初始化')
+  assert.equal(page.data.errorMessage, '系统尚未初始化，请创建首位超级管理员')
+})
+
+test('login opens the guarded initialization page only when initialization is required', () => {
+  const navigations = []
+  global.wx = { navigateTo: options => navigations.push(options) }
+  const page = loadPage('pages/login/index.js', {})
+
+  page.openInitialization()
+  assert.deepEqual(navigations, [])
+
+  page.setData({ requiresInitialization: true })
+  page.openInitialization()
+  assert.deepEqual(navigations, [{ url: '/pages/admin-initialize/index' }])
 })
 
 test('login keeps only the first-login challenge in app memory and clears the password field', async () => {

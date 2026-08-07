@@ -1,6 +1,6 @@
 const accountService = require('../../services/account')
 
-const INITIALIZATION_MESSAGE = '系统尚未初始化，请由超级管理员在开发者工具中完成初始化'
+const INITIALIZATION_MESSAGE = '系统尚未初始化，请创建首位超级管理员'
 
 Page({
   data: {
@@ -31,6 +31,11 @@ Page({
     } finally {
       this.setData({ checking: false })
     }
+  },
+
+  openInitialization() {
+    if (!this.data.requiresInitialization) return
+    wx.navigateTo({ url: '/pages/admin-initialize/index' })
   },
 
   onUsernameInput(event) {
