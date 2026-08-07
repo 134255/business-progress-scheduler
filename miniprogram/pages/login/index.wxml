@@ -23,6 +23,11 @@
           <input id="password" class="input" value="{{password}}" password="true" placeholder="请输入密码" bindinput="onPasswordInput" confirm-type="done" bindconfirm="submit" />
         </view>
         <button class="primary-button submit" loading="{{submitting}}" disabled="{{submitting}}" bindtap="submit">登录</button>
+        <button
+          class="secondary-button recovery-entry"
+          disabled="{{submitting}}"
+          bindtap="openRecovery"
+        >超级管理员紧急恢复</button>
       </block>
     </block>
   </view>

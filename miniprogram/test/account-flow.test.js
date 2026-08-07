@@ -135,7 +135,7 @@ test('callBusinessApi preserves backend error codes and silent calls do not toas
   assert.deepEqual(toasts, [])
 })
 
-test('account service sends the five account actions through silent cloud calls', async () => {
+test('account service sends the six account actions through silent cloud calls', async () => {
   const calls = []
   const cloudPath = path.join(miniProgramRoot, 'utils/cloud.js')
   const accountPath = path.join(miniProgramRoot, 'services/account.js')
@@ -174,6 +174,11 @@ test('account service sends the five account actions through silent cloud calls'
     'temporary-pass-8',
     'paper-recovery-code'
   )
+  await account.recoverSuperAdmin(
+    'recovery-admin',
+    'temporary-pass-8',
+    'one-time-recovery-code'
+  )
 
   assert.deepEqual(calls, [
     ['getSession', {}, { silent: true }],
@@ -187,6 +192,15 @@ test('account service sends the five account actions through silent cloud calls'
         displayName: '首位管理员',
         temporaryPassword: 'temporary-pass-8',
         recoveryCode: 'paper-recovery-code'
+      },
+      { silent: true }
+    ],
+    [
+      'recoverSuperAdmin',
+      {
+        username: 'recovery-admin',
+        temporaryPassword: 'temporary-pass-8',
+        recoveryCode: 'one-time-recovery-code'
       },
       { silent: true }
     ]
@@ -263,6 +277,29 @@ test('login opens the guarded initialization page only when initialization is re
   page.setData({ requiresInitialization: true })
   page.openInitialization()
   assert.deepEqual(navigations, [{ url: '/pages/admin-initialize/index' }])
+})
+
+test('login opens super-administrator recovery only after initialization is ruled out', async () => {
+  const navigations = []
+  global.getApp = () => ({
+    globalData: { currentUser: null, loginChallenge: null },
+    isManualLoginRequired: () => true
+  })
+  global.wx = { navigateTo: options => navigations.push(options) }
+  const page = loadPage('pages/login/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: false })
+  })
+
+  page.openRecovery()
+  assert.deepEqual(navigations, [])
+
+  await page.onLoad()
+  page.openRecovery()
+  assert.deepEqual(navigations, [{ url: '/pages/admin-recovery/index' }])
+
+  page.setData({ requiresInitialization: true })
+  page.openRecovery()
+  assert.equal(navigations.length, 1)
 })
 
 test('administrator initialization page rechecks an available initialization state', async () => {

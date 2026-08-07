@@ -42,6 +42,11 @@ Page({
     wx.navigateTo({ url: '/pages/admin-initialize/index' })
   },
 
+  openRecovery() {
+    if (this.data.checking || this.data.requiresInitialization) return
+    wx.navigateTo({ url: '/pages/admin-recovery/index' })
+  },
+
   onUsernameInput(event) {
     this.setData({ username: event.detail.value })
   },

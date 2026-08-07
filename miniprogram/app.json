@@ -2,6 +2,7 @@
   "pages": [
     "pages/login/index",
     "pages/admin-initialize/index",
+    "pages/admin-recovery/index",
     "pages/change-password/index",
     "pages/dashboard/index",
     "pages/admin-users/index",

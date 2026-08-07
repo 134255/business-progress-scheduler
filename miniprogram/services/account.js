@@ -25,10 +25,19 @@ function initializeSuperAdmin(username, displayName, temporaryPassword, recovery
   }, { silent: true })
 }
 
+function recoverSuperAdmin(username, temporaryPassword, recoveryCode) {
+  return callBusinessApi('recoverSuperAdmin', {
+    username,
+    temporaryPassword,
+    recoveryCode
+  }, { silent: true })
+}
+
 module.exports = {
   getSession,
   login,
   completeFirstLogin,
   changePassword,
-  initializeSuperAdmin
+  initializeSuperAdmin,
+  recoverSuperAdmin
 }

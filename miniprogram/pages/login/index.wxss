@@ -35,3 +35,7 @@
 .submit {
   margin-top: 36rpx;
 }
+
+.recovery-entry {
+  margin-top: 20rpx;
+}
