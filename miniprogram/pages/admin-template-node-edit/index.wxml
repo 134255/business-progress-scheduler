@@ -66,5 +66,5 @@
     </view>
   </view>
 
-  <button wx:if="{{!readOnly}}" class="primary-button submit" bindtap="submit">保存节点</button>
+  <button wx:if="{{!readOnly}}" class="primary-button submit" bindtap="submit" loading="{{submitting}}" disabled="{{submitting}}">保存节点</button>
 </view>

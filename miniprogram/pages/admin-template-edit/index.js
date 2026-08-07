@@ -85,7 +85,7 @@ Page({
     wx.setNavigationBarTitle({ title: templateId ? '编辑模板' : '新建模板' })
     this.setData({ loading: true })
     try {
-      await this.loadActiveAccounts()
+      if (!await this.loadActiveAccounts()) return
       if (templateId) await this.loadTemplate()
     } catch (error) {
       this.unavailable = true
@@ -104,19 +104,23 @@ Page({
   },
 
   async loadActiveAccounts() {
+    if (!this.requireSuperAdmin()) return false
     const items = []
     let page = 1
     let hasMore = true
     while (hasMore) {
+      if (!this.requireSuperAdmin()) return false
       const result = await adminUsers.listUsers({ status: 'active', keyword: '', page, pageSize: 100 })
       items.push(...(result.items || []))
       hasMore = Boolean(result.hasMore)
       page += 1
     }
     this.setData({ assigneeOptions: items })
+    return true
   },
 
   async loadTemplate() {
+    if (!this.requireSuperAdmin()) return null
     const definition = await templates.getTemplate(this.data.templateId)
     const template = definition.template
     const readOnly = template.status === 'enabled'
@@ -132,11 +136,11 @@ Page({
   },
 
   onNameInput(event) {
-    if (!this.data.readOnly) this.setData({ name: event.detail.value })
+    if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ name: event.detail.value })
   },
 
   onDescriptionInput(event) {
-    if (!this.data.readOnly) this.setData({ description: event.detail.value })
+    if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ description: event.detail.value })
   },
 
   getNodeEditorContext(index) {
@@ -149,13 +153,14 @@ Page({
   },
 
   openNodeEditor(event) {
+    if (!this.requireSuperAdmin()) return
     const raw = event && event.currentTarget && event.currentTarget.dataset.index
     const index = raw === undefined ? -1 : Number(raw)
     wx.navigateTo({ url: `/pages/admin-template-node-edit/index?index=${Number.isInteger(index) ? index : -1}` })
   },
 
   acceptNodeFromEditor(index, node) {
-    if (this.data.readOnly || !node) return
+    if (!this.requireSuperAdmin() || this.data.readOnly || !node) return
     const nodes = this.data.nodes.slice()
     if (Number.isInteger(index) && index >= 0 && index < nodes.length) nodes[index] = clone(node)
     else nodes.push(clone(node))
@@ -163,7 +168,7 @@ Page({
   },
 
   removeNode(event) {
-    if (this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
     const index = Number(event.currentTarget.dataset.index)
     if (!Number.isInteger(index) || index < 0 || index >= this.data.nodes.length) return
     const nodes = this.data.nodes.slice()
@@ -172,7 +177,7 @@ Page({
   },
 
   moveNode(event) {
-    if (this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
     const index = Number(event.currentTarget.dataset.index)
     const direction = Number(event.currentTarget.dataset.direction)
     const target = index + direction
@@ -191,7 +196,7 @@ Page({
   },
 
   async submit() {
-    if (this.unavailable || this.data.loading || this.data.submitting || this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.unavailable || this.data.loading || this.data.submitting || this.data.readOnly) return
     const definition = this.definition()
     if (!definition.name) {
       this.setData({ errorMessage: '请填写模板名称' })
@@ -203,6 +208,7 @@ Page({
     }
     this.setData({ submitting: true, errorMessage: '' })
     try {
+      if (!this.requireSuperAdmin()) return
       if (this.data.editMode) {
         await templates.updateTemplate(this.data.templateId, this.data.version, definition)
       } else {
@@ -222,9 +228,10 @@ Page({
   },
 
   async changeStatus(nextStatus) {
-    if (!this.data.editMode || this.data.loading || this.data.submitting) return
+    if (!this.requireSuperAdmin() || !this.data.editMode || this.data.loading || this.data.submitting) return
     this.setData({ submitting: true, errorMessage: '' })
     try {
+      if (!this.requireSuperAdmin()) return
       await templates.changeTemplateStatus(this.data.templateId, this.data.version, nextStatus)
       await this.loadTemplate()
       wx.showToast({ title: nextStatus === 'enabled' ? '模板已启用' : '模板已停用', icon: 'success' })

@@ -380,3 +380,116 @@ test('unsaved nodes and fields keep unique client keys that never enter template
   delete global.getCurrentPages
   delete global.wx
 })
+
+test('template pages recheck active super-administrator authority at every load and mutation boundary', async () => {
+  let currentUser = { role: 'super_admin', status: 'active' }
+  let listCalls = 0
+  let statusCalls = 0
+  let updateCalls = 0
+  let acceptedNodes = 0
+  const launches = []
+  global.getApp = () => ({ globalData: { currentUser } })
+  global.wx = {
+    reLaunch: options => launches.push(options),
+    setNavigationBarTitle: () => {},
+    navigateBack: () => {},
+    showToast: () => {},
+    showModal: async () => {
+      currentUser = { role: 'user', status: 'active' }
+      return { confirm: true }
+    }
+  }
+
+  const listPage = loadPage('pages/admin-templates/index.js', {
+    'services/templates.js': {
+      listTemplates: async () => { listCalls += 1; return { items: [] } },
+      changeTemplateStatus: async () => { statusCalls += 1 }
+    }
+  })
+  listPage.setData({ items: [{ _id: 't1', status: 'draft', version: 1 }] })
+  currentUser = { role: 'user', status: 'active' }
+  await listPage.search()
+  assert.equal(listCalls, 0, 'demoted users must not start a template load')
+
+  currentUser = { role: 'super_admin', status: 'active' }
+  await listPage.changeStatus({ currentTarget: { dataset: { id: 't1' } } })
+  assert.equal(statusCalls, 0, 'authority must be checked again after modal confirmation')
+
+  const editPage = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {
+      updateTemplate: async () => { updateCalls += 1 }
+    },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  editPage.setData({
+    editMode: true,
+    templateId: 't1',
+    version: 1,
+    name: '交付模板',
+    nodes: [storedNode()]
+  })
+  currentUser = { role: 'user', status: 'active' }
+  await editPage.submit()
+  assert.equal(updateCalls, 0, 'demoted users must not save template definitions')
+
+  currentUser = { role: 'super_admin', status: 'active' }
+  const previousPage = {
+    getNodeEditorContext: () => ({
+      readOnly: false,
+      assigneeOptions: [{ _id: 'account-1', displayName: '甲', username: 'alpha' }],
+      node: null
+    }),
+    acceptNodeFromEditor: () => { acceptedNodes += 1 }
+  }
+  global.getCurrentPages = () => [previousPage, {}]
+  const nodePage = loadPage('pages/admin-template-node-edit/index.js')
+  nodePage.onLoad({ index: '-1' })
+  nodePage.setData({ name: '新增节点', assigneeUserIds: ['account-1'] })
+  currentUser = { role: 'user', status: 'active' }
+  nodePage.addField()
+  await nodePage.submit()
+  assert.equal(nodePage.data.fields.length, 0, 'demoted users must not mutate node draft state')
+  assert.equal(acceptedNodes, 0, 'demoted users must not commit a node to the owner page')
+  assert.ok(launches.length >= 4)
+
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor commits a new node only once across rapid submit calls', async () => {
+  let acceptedNodes = 0
+  const navigations = []
+  const previousPage = {
+    getNodeEditorContext: () => ({
+      readOnly: false,
+      assigneeOptions: [{ _id: 'account-1', displayName: '甲', username: 'alpha' }],
+      node: null
+    }),
+    acceptNodeFromEditor: () => { acceptedNodes += 1 }
+  }
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.getCurrentPages = () => [previousPage, {}]
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    navigateBack: options => navigations.push(options),
+    reLaunch: () => {}
+  }
+  const page = loadPage('pages/admin-template-node-edit/index.js')
+  page.onLoad({ index: '-1' })
+  page.setData({ name: '新增节点', assigneeUserIds: ['account-1'] })
+
+  const first = page.submit()
+  const second = page.submit()
+  await Promise.all([first, second])
+
+  assert.equal(acceptedNodes, 1)
+  assert.deepEqual(navigations, [{ delta: 1 }])
+  assert.equal(page.data.submitting, true)
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8')
+  assert.match(wxml, /bindtap="submit"[^>]*loading="{{submitting}}"[^>]*disabled="{{submitting}}"/)
+
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})

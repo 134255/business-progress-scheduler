@@ -32,7 +32,7 @@ Page({
   search() { return this.loadTemplates() },
 
   async loadTemplates() {
-    if (this.data.loading) return
+    if (!this.requireSuperAdmin() || this.data.loading) return
     this.setData({ loading: true, errorMessage: '' })
     try {
       const query = { keyword: this.data.keyword.trim() }
@@ -50,16 +50,22 @@ Page({
     }
   },
 
-  openCreate() { wx.navigateTo({ url: '/pages/admin-template-edit/index' }) },
+  openCreate() {
+    if (!this.requireSuperAdmin()) return
+    wx.navigateTo({ url: '/pages/admin-template-edit/index' })
+  },
 
   openEdit(event) {
+    if (!this.requireSuperAdmin()) return
     const templateId = event.currentTarget.dataset.id
     if (templateId) wx.navigateTo({ url: `/pages/admin-template-edit/index?id=${encodeURIComponent(templateId)}` })
   },
 
   async runConfirmed(options, action) {
+    if (!this.requireSuperAdmin()) return false
     const confirmation = await wx.showModal(options)
     if (!confirmation.confirm) return false
+    if (!this.requireSuperAdmin()) return false
     try {
       await action()
       wx.showToast({ title: '操作成功', icon: 'success' })

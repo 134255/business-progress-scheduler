@@ -47,16 +47,12 @@ Page({
     fieldTypeOptions: FIELD_TYPE_OPTIONS,
     fieldTypeLabels: FIELD_TYPE_OPTIONS.map(item => item[1]),
     evidenceTypeOptions: EVIDENCE_TYPE_OPTIONS.map(item => ({ value: item[0], label: item[1], selected: false })),
-    errorMessage: ''
+    errorMessage: '',
+    submitting: false
   },
 
   onLoad(options = {}) {
-    const currentUser = getApp().globalData.currentUser
-    if (!currentUser || currentUser.role !== 'super_admin' || currentUser.status !== 'active') {
-      this.unavailable = true
-      wx.reLaunch({ url: currentUser ? '/pages/dashboard/index' : '/pages/login/index' })
-      return
-    }
+    if (!this.requireSuperAdmin()) return
     const pages = getCurrentPages()
     this.ownerPage = pages.length > 1 ? pages[pages.length - 2] : null
     if (!this.ownerPage || typeof this.ownerPage.getNodeEditorContext !== 'function') {
@@ -97,11 +93,25 @@ Page({
     wx.setNavigationBarTitle({ title: context.node ? (context.readOnly ? '查看节点' : '编辑节点') : '新增节点' })
   },
 
-  onNameInput(event) { if (!this.data.readOnly) this.setData({ name: event.detail.value }) },
-  onDescriptionInput(event) { if (!this.data.readOnly) this.setData({ description: event.detail.value }) },
-  onSlaInput(event) { if (!this.data.readOnly) this.setData({ slaWorkHours: event.detail.value }) },
+  requireSuperAdmin() {
+    const currentUser = getApp().globalData.currentUser
+    if (currentUser && currentUser.role === 'super_admin' && currentUser.status === 'active') return true
+    this.unavailable = true
+    wx.reLaunch({ url: currentUser ? '/pages/dashboard/index' : '/pages/login/index' })
+    return false
+  },
+
+  onNameInput(event) {
+    if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ name: event.detail.value })
+  },
+  onDescriptionInput(event) {
+    if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ description: event.detail.value })
+  },
+  onSlaInput(event) {
+    if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ slaWorkHours: event.detail.value })
+  },
   onAssigneesChange(event) {
-    if (this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
     const selected = event.detail.value.slice()
     this.setData({
       assigneeUserIds: selected,
@@ -109,10 +119,12 @@ Page({
     })
   },
   onRequiresEvidenceChange(event) {
-    if (!this.data.readOnly) this.setData({ requiresEvidence: Boolean(event.detail.value) })
+    if (this.requireSuperAdmin() && !this.data.readOnly) {
+      this.setData({ requiresEvidence: Boolean(event.detail.value) })
+    }
   },
   onEvidenceTypesChange(event) {
-    if (this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
     const selected = event.detail.value.slice()
     this.setData({
       allowedEvidenceTypes: selected,
@@ -123,7 +135,7 @@ Page({
   },
 
   updateField(index, changes) {
-    if (this.data.readOnly || !this.data.fields[index]) return
+    if (!this.requireSuperAdmin() || this.data.readOnly || !this.data.fields[index]) return
     const fields = this.data.fields.slice()
     fields[index] = { ...fields[index], ...changes }
     this.setData({ fields })
@@ -161,11 +173,11 @@ Page({
   updateNumberConstraint(event, name) { this.updateRawConstraint(event, name) },
 
   addField() {
-    if (this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
     this.setData({ fields: this.data.fields.concat({ ...newField(), sequence: this.data.fields.length }) })
   },
   removeField(event) {
-    if (this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
     const index = Number(event.currentTarget.dataset.index)
     if (!Number.isInteger(index) || index < 0 || index >= this.data.fields.length) return
     const fields = this.data.fields.slice()
@@ -173,7 +185,7 @@ Page({
     this.setData({ fields: fields.map((field, sequence) => ({ ...field, sequence })) })
   },
   moveField(event) {
-    if (this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
     const index = Number(event.currentTarget.dataset.index)
     const direction = Number(event.currentTarget.dataset.direction)
     const target = index + direction
@@ -212,7 +224,7 @@ Page({
   },
 
   async submit() {
-    if (this.unavailable || this.data.readOnly) return
+    if (!this.requireSuperAdmin() || this.unavailable || this.data.readOnly || this.committed || this.data.submitting) return
     const name = this.data.name.trim()
     const slaWorkHours = Number(this.data.slaWorkHours)
     const fields = this.data.fields.map((field, sequence) => this.normalizedField(field, sequence))
@@ -241,8 +253,16 @@ Page({
       allowedEvidenceTypes: this.data.allowedEvidenceTypes.slice(),
       fields
     }
-    this.ownerPage.acceptNodeFromEditor(this.data.index, node)
-    wx.navigateBack({ delta: 1 })
+    if (!this.requireSuperAdmin()) return
+    this.committed = true
+    this.setData({ submitting: true, errorMessage: '' })
+    try {
+      this.ownerPage.acceptNodeFromEditor(this.data.index, node)
+      wx.navigateBack({ delta: 1 })
+    } catch (error) {
+      this.committed = false
+      this.setData({ submitting: false, errorMessage: '保存节点失败，请重试' })
+    }
   }
 })
 
