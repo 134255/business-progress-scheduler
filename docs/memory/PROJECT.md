@@ -10,11 +10,15 @@ Approved V1 rules include:
 
 - Account/password login with first-login password change, one-to-one WeChat identity binding, lockout, administrator reset, and at least one active super administrator.
 - Template snapshots, sequential nodes, multiple responsible accounts with first-completion-wins (`OR` signing), logical deletion, audit history, and optimistic/concurrent flow protection.
+- Templates contain stable node and dynamic-field identifiers. Enabled templates are read-only and must be disabled before editing. New business lines receive server-generated globally unique codes, and instance nodes receive immutable codes derived from the business code.
+- Node feedback is revisioned and immutable. An active node assignee may reject the immediately preceding completed node with a mandatory reason; original deadlines are not reset and rework history remains auditable.
+- Completed, cancelled, and closed business lines freeze their structured data. Only a super administrator may append a reasoned correction with before/after values; ordinary update paths remain blocked.
 - China workday calculations from a locally cached holiday adapter; default working hours are 09:00–20:00 without lunch break. Default node SLA is two workdays (22 work hours), and template nodes may override it.
 - In-app notifications as the fallback channel and a future Enterprise WeChat self-built application as the strong-reminder channel. Unfinished nodes are reminded every accumulated work hour during working time.
 - Evidence supports JPG/JPEG/PNG up to 5 MB each, PDF up to 20 MB each, and MP4/MOV/M4V up to 20 MB each. A feedback may contain multiple files but no more than 20 MB in total.
+- Evidence objects remain available for 60 calendar days after a business line is completed, cancelled, or closed. A scheduled idempotent cleanup then removes only the cloud file object while preserving metadata, hashes, feedback revisions, and audit history.
 
-The complete approved requirements are in `docs/superpowers/specs/2026-08-05-business-progress-v1-design.md`. Account-administration execution steps are in `docs/superpowers/plans/2026-08-05-account-admin.md`.
+The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-business-progress-v1-design.md`. The approved template, node, field, rejection, freeze, numbering, and evidence-retention refinement is in `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`. Account-administration execution steps are in `docs/superpowers/plans/2026-08-05-account-admin.md`.
 
 ## Architecture
 
@@ -26,7 +30,7 @@ The complete approved requirements are in `docs/superpowers/specs/2026-08-05-bus
 - External holiday source is isolated behind an adapter. The approved endpoint is `https://holiday.ailcc.com/api/holiday/allyear/{year}`; production use requires renewed terms and availability verification.
 - Enterprise WeChat sending must remain behind an adapter and disabled until approved secure configuration is supplied.
 
-Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `business_lines`, `business_nodes`, `node_feedback`, `evidences`, `work_calendar`, `notifications`, notification-delivery records, and `audit_logs`.
+Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `evidences`, `work_calendar`, `notifications`, notification-delivery records, and `audit_logs`.
 
 Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 
