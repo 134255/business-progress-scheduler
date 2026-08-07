@@ -124,7 +124,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Implement `docs/superpowers/specs/2026-08-07-persistent-logout-design.md` with client tests first, then rerun the full local verification suite.
+1. Execute `docs/superpowers/plans/2026-08-07-persistent-logout.md` with client tests first, then rerun the full local verification suite.
 2. Upload the corrected Mini Program build and manually verify persistent logout, password re-entry, and restored ordinary auto-login after successful authentication.
 3. After account-administration acceptance passes, complete the branch integration decision.
 4. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
