@@ -1,5 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const miniProgramRoot = path.resolve(__dirname, '..')
@@ -198,6 +199,299 @@ test('login opens the guarded initialization page only when initialization is re
   page.setData({ requiresInitialization: true })
   page.openInitialization()
   assert.deepEqual(navigations, [{ url: '/pages/admin-initialize/index' }])
+})
+
+test('administrator initialization page rechecks an available initialization state', async () => {
+  const launches = []
+  global.getApp = () => ({ globalData: { loginChallenge: null, currentUser: null } })
+  global.wx = { reLaunch: options => launches.push(options) }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: true })
+  })
+
+  assert.ok(page)
+  await page.onLoad()
+
+  assert.equal(page.data.checking, false)
+  assert.equal(page.data.available, true)
+  assert.deepEqual(launches, [])
+})
+
+test('administrator initialization page returns to login when initialization is no longer required', async () => {
+  const launches = []
+  global.getApp = () => ({ globalData: { loginChallenge: null, currentUser: null } })
+  global.wx = { reLaunch: options => launches.push(options) }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: false })
+  })
+
+  assert.ok(page)
+  await page.onLoad()
+
+  assert.equal(page.data.available, false)
+  assert.deepEqual(launches, [{ url: '/pages/login/index' }])
+})
+
+test('administrator initialization page restores an authenticated session', async () => {
+  const launches = []
+  const user = { _id: 'admin-1', role: 'super_admin' }
+  const app = { globalData: { loginChallenge: null, currentUser: null } }
+  global.getApp = () => app
+  global.wx = { reLaunch: options => launches.push(options) }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: true, user })
+  })
+
+  assert.ok(page)
+  await page.onLoad()
+
+  assert.equal(app.globalData.currentUser, user)
+  assert.deepEqual(launches, [{ url: '/pages/dashboard/index' }])
+})
+
+test('administrator initialization rejects incomplete and invalid temporary credentials before calling services', async () => {
+  let initializationCalls = 0
+  let loginCalls = 0
+  global.getApp = () => ({ globalData: { loginChallenge: null, currentUser: null } })
+  global.wx = { reLaunch: () => assert.fail('must not relaunch') }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: true }),
+    initializeSuperAdmin: async () => { initializationCalls += 1 },
+    login: async () => { loginCalls += 1 }
+  })
+  await page.onLoad()
+
+  await page.submit()
+  assert.match(page.data.errorMessage, /完整填写/)
+
+  page.setData({
+    username: 'first-admin',
+    displayName: '首位管理员',
+    temporaryPassword: 'onlyletters',
+    confirmPassword: 'onlyletters',
+    recoveryCode: 'paper-recovery-code'
+  })
+  await page.submit()
+  assert.match(page.data.errorMessage, /8-64/)
+  assert.equal(initializationCalls, 0)
+  assert.equal(loginCalls, 0)
+})
+
+test('administrator initialization rejects mismatched temporary passwords before calling services', async () => {
+  let initializationCalls = 0
+  global.getApp = () => ({ globalData: { loginChallenge: null, currentUser: null } })
+  global.wx = { reLaunch: () => assert.fail('must not relaunch') }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: true }),
+    initializeSuperAdmin: async () => { initializationCalls += 1 }
+  })
+  await page.onLoad()
+  page.setData({
+    username: 'first-admin',
+    displayName: '首位管理员',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'different-pass-9',
+    recoveryCode: 'paper-recovery-code'
+  })
+
+  await page.submit()
+
+  assert.match(page.data.errorMessage, /不一致/)
+  assert.equal(initializationCalls, 0)
+})
+
+test('administrator initialization consumes the form once and enters forced password change', async () => {
+  const calls = []
+  const navigations = []
+  const app = { globalData: { currentUser: null, loginChallenge: null } }
+  global.getApp = () => app
+  global.wx = {
+    navigateTo: options => navigations.push(options),
+    reLaunch: () => assert.fail('must not relaunch on success'),
+    setStorage: () => assert.fail('must not persist initialization material'),
+    setStorageSync: () => assert.fail('must not persist initialization material')
+  }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: true }),
+    initializeSuperAdmin: async (...args) => {
+      calls.push(['initialize', ...args])
+      return { user: { username: 'first-admin', mustChangePassword: true } }
+    },
+    login: async (...args) => {
+      calls.push(['login', ...args])
+      return { passwordChangeRequired: true, challengeToken: 'memory-only-challenge' }
+    }
+  })
+  await page.onLoad()
+  page.setData({
+    username: ' First-Admin ',
+    displayName: ' 首位管理员 ',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'paper-recovery-code'
+  })
+
+  await page.submit()
+
+  assert.deepEqual(calls, [
+    ['initialize', 'First-Admin', '首位管理员', 'temporary-pass-8', 'paper-recovery-code'],
+    ['login', 'First-Admin', 'temporary-pass-8']
+  ])
+  assert.equal(app.globalData.loginChallenge, 'memory-only-challenge')
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+  assert.deepEqual(navigations, [{ url: '/pages/change-password/index?mode=first' }])
+})
+
+test('administrator initialization clears secrets and reports an initialization failure', async () => {
+  let loginCalls = 0
+  const failure = new Error('恢复码无效')
+  failure.code = 'INVALID_RECOVERY_CODE'
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = { reLaunch: () => assert.fail('must not relaunch for retryable failure') }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: true }),
+    initializeSuperAdmin: async () => { throw failure },
+    login: async () => { loginCalls += 1 }
+  })
+  await page.onLoad()
+  page.setData({
+    username: 'first-admin',
+    displayName: '首位管理员',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'paper-recovery-code'
+  })
+
+  await page.submit()
+
+  assert.equal(loginCalls, 0)
+  assert.equal(page.data.username, 'first-admin')
+  assert.equal(page.data.displayName, '首位管理员')
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+  assert.equal(page.data.errorMessage, '恢复码无效')
+})
+
+test('administrator initialization never retries initialization after automatic login fails', async () => {
+  let initializationCalls = 0
+  const launches = []
+  const modals = []
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = {
+    showModal: async options => { modals.push(options) },
+    reLaunch: options => launches.push(options)
+  }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: true }),
+    initializeSuperAdmin: async () => { initializationCalls += 1 },
+    login: async () => { throw new Error('temporary login failed') }
+  })
+  await page.onLoad()
+  page.setData({
+    username: 'first-admin',
+    displayName: '首位管理员',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'paper-recovery-code'
+  })
+
+  await page.submit()
+
+  assert.equal(initializationCalls, 1)
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+  assert.deepEqual(modals, [{
+    title: '初始化已完成',
+    content: '管理员已创建，请返回登录页使用临时密码登录',
+    showCancel: false
+  }])
+  assert.deepEqual(launches, [{ url: '/pages/login/index' }])
+})
+
+test('administrator initialization returns to login when another initializer already completed', async () => {
+  let loginCalls = 0
+  const launches = []
+  const failure = new Error('already initialized')
+  failure.code = 'ALREADY_INITIALIZED'
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = { reLaunch: options => launches.push(options) }
+  const page = loadPage('pages/admin-initialize/index.js', {
+    getSession: async () => ({ authenticated: false, requiresInitialization: true }),
+    initializeSuperAdmin: async () => { throw failure },
+    login: async () => { loginCalls += 1 }
+  })
+  await page.onLoad()
+  page.setData({
+    username: 'first-admin',
+    displayName: '首位管理员',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'paper-recovery-code'
+  })
+
+  await page.submit()
+
+  assert.equal(loginCalls, 0)
+  assert.equal(page.data.username, '')
+  assert.equal(page.data.displayName, '')
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+  assert.deepEqual(launches, [{ url: '/pages/login/index' }])
+})
+
+test('administrator initialization clears every form field when unloaded', () => {
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = {}
+  const page = loadPage('pages/admin-initialize/index.js', {})
+  page.setData({
+    username: 'first-admin',
+    displayName: '首位管理员',
+    temporaryPassword: 'temporary-pass-8',
+    confirmPassword: 'temporary-pass-8',
+    recoveryCode: 'paper-recovery-code'
+  })
+
+  page.onUnload()
+
+  assert.equal(page.data.username, '')
+  assert.equal(page.data.displayName, '')
+  assert.equal(page.data.temporaryPassword, '')
+  assert.equal(page.data.confirmPassword, '')
+  assert.equal(page.data.recoveryCode, '')
+})
+
+test('administrator initialization input handlers update only their intended fields', () => {
+  global.getApp = () => ({ globalData: { currentUser: null, loginChallenge: null } })
+  global.wx = {}
+  const page = loadPage('pages/admin-initialize/index.js', {})
+
+  page.onUsernameInput({ detail: { value: 'first-admin' } })
+  page.onDisplayNameInput({ detail: { value: '首位管理员' } })
+  page.onTemporaryPasswordInput({ detail: { value: 'temporary-pass-8' } })
+  page.onConfirmPasswordInput({ detail: { value: 'temporary-pass-8' } })
+  page.onRecoveryCodeInput({ detail: { value: 'paper-recovery-code' } })
+
+  assert.equal(page.data.username, 'first-admin')
+  assert.equal(page.data.displayName, '首位管理员')
+  assert.equal(page.data.temporaryPassword, 'temporary-pass-8')
+  assert.equal(page.data.confirmPassword, 'temporary-pass-8')
+  assert.equal(page.data.recoveryCode, 'paper-recovery-code')
+})
+
+test('administrator initialization page keeps sensitive material out of persistence logs and datasets', () => {
+  const appConfig = JSON.parse(fs.readFileSync(path.join(miniProgramRoot, 'app.json'), 'utf8'))
+  const source = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-initialize/index.js'), 'utf8')
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-initialize/index.wxml'), 'utf8')
+
+  assert.equal(appConfig.pages.includes('pages/admin-initialize/index'), true)
+  assert.doesNotMatch(source, /setStorage|setStorageSync|console\.(?:log|info|debug|warn|error)/)
+  assert.doesNotMatch(wxml, /data-(?:password|recovery|challenge)/)
+  assert.equal((wxml.match(/password="true"/g) || []).length, 3)
 })
 
 test('login keeps only the first-login challenge in app memory and clears the password field', async () => {
