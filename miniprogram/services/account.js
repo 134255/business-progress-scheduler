@@ -16,4 +16,19 @@ function changePassword(currentPassword, newPassword) {
   return callBusinessApi('changePassword', { currentPassword, newPassword }, { silent: true })
 }
 
-module.exports = { getSession, login, completeFirstLogin, changePassword }
+function initializeSuperAdmin(username, displayName, temporaryPassword, recoveryCode) {
+  return callBusinessApi('initializeSuperAdmin', {
+    username,
+    displayName,
+    temporaryPassword,
+    recoveryCode
+  }, { silent: true })
+}
+
+module.exports = {
+  getSession,
+  login,
+  completeFirstLogin,
+  changePassword,
+  initializeSuperAdmin
+}

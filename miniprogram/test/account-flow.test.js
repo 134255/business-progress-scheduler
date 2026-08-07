@@ -94,7 +94,7 @@ test('callBusinessApi preserves backend error codes and silent calls do not toas
   assert.deepEqual(toasts, [])
 })
 
-test('account service sends the four account actions through silent cloud calls', async () => {
+test('account service sends the five account actions through silent cloud calls', async () => {
   const calls = []
   const cloudPath = path.join(miniProgramRoot, 'utils/cloud.js')
   const accountPath = path.join(miniProgramRoot, 'services/account.js')
@@ -127,12 +127,28 @@ test('account service sends the four account actions through silent cloud calls'
   await account.login('operator', 'secret-value')
   await account.completeFirstLogin('challenge-value', 'replacement-value')
   await account.changePassword('current-value', 'replacement-value')
+  await account.initializeSuperAdmin(
+    'first-admin',
+    '首位管理员',
+    'temporary-pass-8',
+    'paper-recovery-code'
+  )
 
   assert.deepEqual(calls, [
     ['getSession', {}, { silent: true }],
     ['login', { username: 'operator', password: 'secret-value' }, { silent: true }],
     ['completeFirstLogin', { challengeToken: 'challenge-value', newPassword: 'replacement-value' }, { silent: true }],
-    ['changePassword', { currentPassword: 'current-value', newPassword: 'replacement-value' }, { silent: true }]
+    ['changePassword', { currentPassword: 'current-value', newPassword: 'replacement-value' }, { silent: true }],
+    [
+      'initializeSuperAdmin',
+      {
+        username: 'first-admin',
+        displayName: '首位管理员',
+        temporaryPassword: 'temporary-pass-8',
+        recoveryCode: 'paper-recovery-code'
+      },
+      { silent: true }
+    ]
   ])
 })
 
