@@ -213,6 +213,14 @@ function createCloudFeedbackRepository({
         !membership(node.assigneeUserIds).includes(actor._id)) throw createError('FORBIDDEN')
   }
 
+  function assertContentionPollAuthorization(actor, line, node) {
+    if (!actor || actor.status !== 'active' || !line || line.status === 'creating' || !node ||
+        node.businessLineId !== line._id || !accountSchema(line, node) ||
+        !isAccountMember(line, actor._id) || !membership(node.assigneeUserIds).includes(actor._id)) {
+      throw createError('FORBIDDEN')
+    }
+  }
+
   function assertExactPublishedRetry(current, reservation, id, value) {
     assertPublishedRetry(current.actor, current.line, current.node, reservation)
     if (!reservation || reservation.publishState !== 'published' || reservation._id !== id.feedbackId ||
@@ -547,45 +555,44 @@ function createCloudFeedbackRepository({
     })
   }
 
-  async function waitForWinner(error, value) {
+  async function waitForWinner(error, { actorId, businessLineId, nodeId }) {
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      const winner = await readDocument(db, COLLECTIONS.feedback, error.winnerFeedbackId)
-      const node = await readDocument(db, COLLECTIONS.nodes, value.input.nodeId)
-      const line = await readDocument(db, COLLECTIONS.lines, value.input.businessLineId)
-      if (winner && winner.publishState === 'published') {
-        const completedFlow = winner.businessLineId === value.input.businessLineId &&
-          winner.nodeId === value.input.nodeId && winner.status === 'completed' && node && node.status === 'completed' &&
-          line && (line.status === 'completed' || !isCurrentNode(line, node))
-        if (completedFlow) throw createError('NODE_ALREADY_COMPLETED')
-        throw createError('VERSION_CONFLICT')
-      }
-      if (winner && winner.publishState === 'aborted') {
-        await db.runTransaction(async transaction => {
-          const currentNode = await readDocument(transaction, COLLECTIONS.nodes, value.input.nodeId)
-          if (currentNode && currentNode.feedbackClaimId === error.winnerFeedbackId) {
-            await transaction.collection(COLLECTIONS.nodes).doc(currentNode._id).update({ data: {
+      const outcome = await db.runTransaction(async transaction => {
+        const current = await readSubmissionDocuments(transaction, actorId, { businessLineId, nodeId })
+        assertContentionPollAuthorization(current.actor, current.line, current.node)
+        const winner = await readDocument(transaction, COLLECTIONS.feedback, error.winnerFeedbackId)
+        if (winner && winner.publishState === 'published') {
+          const completedFlow = winner.businessLineId === businessLineId && winner.nodeId === nodeId &&
+            winner.status === 'completed' && current.node.status === 'completed' &&
+            (current.line.status === 'completed' || !isCurrentNode(current.line, current.node))
+          return { type: 'error', code: completedFlow ? 'NODE_ALREADY_COMPLETED' : 'VERSION_CONFLICT' }
+        }
+        if (winner && winner.publishState === 'aborted') {
+          if (current.node.feedbackClaimId === error.winnerFeedbackId) {
+            await transaction.collection(COLLECTIONS.nodes).doc(current.node._id).update({ data: {
               feedbackClaimId: db.command.remove(), feedbackClaimHash: db.command.remove(),
               feedbackClaimExpiresAt: db.command.remove()
             } })
           }
-        })
-        return null
-      }
-      if (winner && winner.publishState === 'reserved') {
+          return { type: 'retry' }
+        }
+        if (winner && winner.publishState === 'reserved') return { type: 'reserved', winner }
+        if (current.node.status === 'completed') return { type: 'error', code: 'VERSION_CONFLICT' }
+        if (!current.node.feedbackClaimId) return { type: 'retry' }
+        return { type: 'wait' }
+      })
+      if (outcome.type === 'error') throw createError(outcome.code)
+      if (outcome.type === 'retry') return null
+      if (outcome.type === 'reserved') {
         let expiresAt
         try {
-          expiresAt = parseDeadline(winner.claimExpiresAt)
+          expiresAt = parseDeadline(outcome.winner.claimExpiresAt)
         } catch (parseError) {
           if (await releaseReservation(error.winnerFeedbackId, { reason: 'CLAIM_EXPIRED' })) return null
         }
         if ((!expiresAt || expiresAt.getTime() <= now().getTime()) &&
             await releaseReservation(error.winnerFeedbackId, { reason: 'CLAIM_EXPIRED' })) return null
       }
-      if (!node) throw createError('NOT_FOUND')
-      if (node.status === 'completed') {
-        throw createError('VERSION_CONFLICT')
-      }
-      if (!node.feedbackClaimId) return null
       await wait(5)
     }
     throw createError('FEEDBACK_COMMIT_IN_PROGRESS')
@@ -673,7 +680,11 @@ function createCloudFeedbackRepository({
             continue
           }
           if (error.code !== 'NODE_COMMIT_IN_PROGRESS') throw error
-          const result = await waitForWinner(error, value)
+          const result = await waitForWinner(error, {
+            actorId: value.actor._id,
+            businessLineId: value.input.businessLineId,
+            nodeId: value.input.nodeId
+          })
           if (result === null) continue
         }
       }

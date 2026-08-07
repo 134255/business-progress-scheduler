@@ -72,7 +72,8 @@ function createFeedbackHarness(overrides = {}) {
   const repository = createCloudFeedbackRepository({
     db: fake.db,
     clock: overrides.clock || (() => new Date(NOW)),
-    claimChunkSize: overrides.claimChunkSize || 40
+    claimChunkSize: overrides.claimChunkSize || 40,
+    wait: overrides.wait
   })
   return { fake, repository, now: new Date(NOW) }
 }

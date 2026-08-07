@@ -390,6 +390,106 @@ test('a published non-completion winner conflicts and a live reservation times o
   )
 })
 
+test('contention polling reauthorizes before revealing or acting on every winner state', async () => {
+  async function poll({ actorMutation, winnerState, winnerStatus = 'completed' }) {
+    const data = seed({ evidenceCount: 0 })
+    data.node_feedback = [{
+      _id: 'winner', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'reserved',
+      status: 'completed', submittedBy: 'account-a', claimExpiresAt: new Date(NOW.getTime() + 60_000)
+    }]
+    Object.assign(data.business_nodes[0], {
+      feedbackClaimId: 'winner', feedbackClaimHash: 'winner-hash',
+      feedbackClaimExpiresAt: new Date(NOW.getTime() + 60_000)
+    })
+    let fake
+    let crossedBarrier = false
+    const harness = createFeedbackHarness({
+      seed: data,
+      wait: async () => {
+        if (crossedBarrier) return
+        crossedBarrier = true
+        if (actorMutation) actorMutation(fake)
+        if (winnerState === 'missing') {
+          fake.state.node_feedback.delete('winner')
+        } else if (winnerState !== 'reserved') {
+          const winner = fake.documents('node_feedback').find(item => item._id === 'winner')
+          fake.replace('node_feedback', 'winner', { ...winner, publishState: winnerState, status: winnerStatus })
+        }
+        if (winnerState === 'published' && winnerStatus === 'completed') {
+          const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+          const line = fake.documents('business_lines').find(item => item._id === 'line-1')
+          fake.replace('business_nodes', 'node-1', { ...node, status: 'completed', latestFeedbackId: 'winner' })
+          fake.replace('business_lines', 'line-1', { ...line, currentNodeId: 'line-1-node-002' })
+        }
+      }
+    })
+    fake = harness.fake
+    try {
+      const result = await harness.repository.commitFeedback(submission({
+        actor: { _id: 'account-b', status: 'active' },
+        input: { requestKey: `contender-${winnerState}-${winnerStatus}` }
+      }))
+      return { code: 'FULFILLED', result, fake }
+    } catch (error) {
+      return { code: error.code, fake }
+    }
+  }
+
+  const actorMutations = {
+    disabled(fake) {
+      fake.replace('users', 'account-b', { _id: 'account-b', status: 'disabled' })
+    },
+    missing_user(fake) {
+      fake.state.users.delete('account-b')
+    },
+    removed_member(fake) {
+      const line = fake.documents('business_lines').find(item => item._id === 'line-1')
+      fake.replace('business_lines', 'line-1', { ...line, memberUserIds: ['account-a', 'manager'] })
+    },
+    removed_assignee(fake) {
+      const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+      fake.replace('business_nodes', 'node-1', { ...node, assigneeUserIds: ['account-a'] })
+    },
+    moved_node(fake) {
+      const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+      fake.replace('business_nodes', 'node-1', { ...node, businessLineId: 'other-line' })
+    },
+    changed_schema(fake) {
+      const line = fake.documents('business_lines').find(item => item._id === 'line-1')
+      const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+      delete line.managerUserIds
+      delete line.memberUserIds
+      delete node.assigneeUserIds
+      fake.replace('business_lines', 'line-1', { ...line, managerIds: ['legacy'], memberIds: ['legacy'] })
+      fake.replace('business_nodes', 'node-1', { ...node, assigneeIds: ['legacy'] })
+    }
+  }
+  const unauthorizedFailures = []
+  for (const [mutationName, actorMutation] of Object.entries(actorMutations)) {
+    for (const winnerState of ['published', 'aborted', 'missing']) {
+      const outcome = await poll({ actorMutation, winnerState })
+      const node = outcome.fake.documents('business_nodes').find(item => item._id === 'node-1')
+      if (outcome.code !== 'FORBIDDEN') unauthorizedFailures.push(`${mutationName}/${winnerState}:${outcome.code}`)
+      if (node.feedbackClaimId !== 'winner') unauthorizedFailures.push(`${mutationName}/${winnerState}:CLAIM_CHANGED`)
+    }
+  }
+  assert.deepEqual(unauthorizedFailures, [])
+
+  const activeCases = [
+    { winnerState: 'published', winnerStatus: 'completed', code: 'NODE_ALREADY_COMPLETED' },
+    { winnerState: 'published', winnerStatus: 'blocked', code: 'VERSION_CONFLICT' },
+    { winnerState: 'reserved', code: 'FEEDBACK_COMMIT_IN_PROGRESS' },
+    { winnerState: 'missing', code: 'FEEDBACK_COMMIT_IN_PROGRESS' },
+    { winnerState: 'aborted', code: 'FULFILLED' }
+  ]
+  const activeFailures = []
+  for (const item of activeCases) {
+    const outcome = await poll(item)
+    if (outcome.code !== item.code) activeFailures.push(`${item.winnerState}/${item.winnerStatus || ''}:${outcome.code}`)
+  }
+  assert.deepEqual(activeFailures, [])
+})
+
 test('only final completion starts line retention and history inherits one authoritative deadline', async () => {
   const data = seed({ evidenceCount: 2 })
   data.business_lines[0].nodeCount = 1
