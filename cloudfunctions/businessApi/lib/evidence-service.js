@@ -1,4 +1,5 @@
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
+const { MAX_SINGLE_FILE_SIZE } = require('./evidence-policy')
 
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const CLOUD_FILE_ID = /^cloud:\/\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9_./-]{1,768}$/
@@ -42,6 +43,7 @@ function createEvidenceService({ repository }) {
         input.declaredSize < 0) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
+    if (input.declaredSize > MAX_SINGLE_FILE_SIZE) throw createError('FILE_TOO_LARGE')
     return repository.registerUpload({
       actor,
       input: {

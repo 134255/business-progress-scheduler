@@ -234,6 +234,51 @@ test('legacy fallback requires wholly legacy membership and the current binding'
   assert.deepEqual(rebound.calls, [])
 })
 
+test('any node account relationship field disables legacy OpenID fallback before cloud egress', async () => {
+  for (const nodeRelationships of [
+    { assigneeUserIds: null, assigneeIds: ['wx-current'] },
+    { watcherUserIds: [], assigneeIds: ['wx-current'] },
+    { ownerUserIds: ['someone-else'], assigneeIds: ['wx-current'] }
+  ]) {
+    const documents = seed({
+      business_lines: [{
+        _id: 'business-1', status: 'active', currentNodeIndex: 0,
+        managerIds: [], memberIds: ['wx-current']
+      }],
+      business_nodes: [{
+        _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+        evidenceTypes: ['pdf'],
+        ...nodeRelationships
+      }]
+    })
+    const harness = createHarness({ documents })
+    await assert.rejects(harness.repository.registerUpload(registration()), assertCode('FORBIDDEN'))
+    assert.deepEqual(harness.calls, [])
+    assert.equal(harness.fake.documents('evidences').length, 0)
+  }
+})
+
+test('business owners follow the selected relationship schema explicitly', async () => {
+  const legacyDocuments = seed({
+    business_lines: [{
+      _id: 'business-1', status: 'active', currentNodeIndex: 0,
+      managerIds: ['wx-current'], memberIds: []
+    }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+      assigneeIds: ['someone-else'], evidenceTypes: ['pdf']
+    }]
+  })
+  const legacy = createHarness({ documents: legacyDocuments })
+  assert.equal((await legacy.repository.registerUpload(registration())).evidenceId, 'evidence-1')
+
+  legacyDocuments.business_nodes[0].assigneeUserIds = null
+  const mixed = createHarness({ documents: legacyDocuments })
+  await assert.rejects(mixed.repository.registerUpload(registration()), assertCode('FORBIDDEN'))
+  assert.deepEqual(mixed.calls, [])
+  assert.equal(mixed.fake.documents('evidences').length, 0)
+})
+
 test('rejects external or malformed file IDs without invoking the cloud adapter', async () => {
   for (const fileId of [
     'https://attacker.example/file.pdf', 'http://attacker.example/file.pdf',
@@ -247,6 +292,16 @@ test('rejects external or malformed file IDs without invoking the cloud adapter'
     )
     assert.deepEqual(harness.calls, [])
   }
+})
+
+test('rejects a declared size above 20 MB before authorization or cloud download', async () => {
+  const harness = createHarness()
+  await assert.rejects(harness.repository.registerUpload(registration({
+    declaredSize: 20 * 1024 * 1024 + 1
+  })), assertCode('FILE_TOO_LARGE'))
+  assert.deepEqual(harness.calls, [])
+  assert.equal(harness.fake.transactionRuns.length, 0)
+  assert.equal(harness.fake.documents('evidences').length, 0)
 })
 
 test('rejects spoofed, disallowed, mismatched, oversized, or malformed downloads without a record', async () => {
@@ -320,6 +375,25 @@ test('issues only a short-lived safe access projection to active business member
   assert.equal(Object.hasOwn(result, 'sha256'), false)
 })
 
+test('access also denies legacy membership fallback when the evidence node has account relationships', async () => {
+  const documents = seed({
+    business_lines: [{
+      _id: 'business-1', status: 'active', currentNodeIndex: 0,
+      managerIds: [], memberIds: ['wx-current']
+    }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'completed',
+      assigneeUserIds: null, assigneeIds: ['wx-current'], evidenceTypes: ['pdf']
+    }],
+    evidences: [accessibleEvidence()]
+  })
+  const harness = createHarness({ documents })
+  await assert.rejects(harness.repository.getAccessGrant({
+    actor: { _id: 'account-1', openid: 'wx-current' }, evidenceId: 'evidence-1'
+  }), assertCode('FORBIDDEN'))
+  assert.deepEqual(harness.calls, [])
+})
+
 test('denies unavailable, expired, purged, malformed, and unauthorized evidence before temp URL issuance', async () => {
   const cases = [
     { evidence: accessibleEvidence({ storageStatus: 'purged', purgedAt: NOW }), code: 'EVIDENCE_EXPIRED' },
@@ -345,6 +419,65 @@ test('denies unavailable, expired, purged, malformed, and unauthorized evidence 
     actor: { _id: 'account-1', openid: 'wx-current' }, evidenceId: 'evidence-1'
   }), assertCode('FORBIDDEN'))
   assert.deepEqual(forbidden.calls, [])
+})
+
+test('only null or undefined timestamps are absent and every malformed present timestamp fails closed', async () => {
+  const malformedValues = [
+    false,
+    0,
+    '',
+    {},
+    [],
+    new Date(Number.NaN),
+    'not-a-date'
+  ]
+  for (const field of ['orphanExpiresAt', 'purgeDueAt', 'purgedAt']) {
+    for (const value of malformedValues) {
+      const evidence = accessibleEvidence({
+        orphanExpiresAt: null,
+        purgeDueAt: null,
+        purgedAt: null,
+        [field]: value
+      })
+      const harness = createHarness({ documents: seed({ evidences: [evidence] }) })
+      await assert.rejects(harness.repository.getAccessGrant({
+        actor: { _id: 'account-1', openid: 'wx-current' }, evidenceId: 'evidence-1'
+      }), assertCode('EVIDENCE_EXPIRED'))
+      assert.deepEqual(harness.calls, [])
+    }
+  }
+})
+
+test('timestamp precedence accepts absent/future expiry and denies past expiry or any purged marker', async () => {
+  const cases = [
+    { overrides: { orphanExpiresAt: null, purgeDueAt: undefined, purgedAt: null }, allowed: true },
+    { overrides: { orphanExpiresAt: new Date('2026-08-07T00:00:00.001Z') }, allowed: true },
+    { overrides: { orphanExpiresAt: '2026-08-07T00:00:00.001Z' }, allowed: true },
+    { overrides: { orphanExpiresAt: new Date('2026-08-07T00:00:00.000Z') }, allowed: false },
+    { overrides: { orphanExpiresAt: '2026-08-06T23:59:59.999Z' }, allowed: false },
+    { overrides: { orphanExpiresAt: null, purgeDueAt: new Date('2026-08-07T00:00:00.001Z') }, allowed: true },
+    { overrides: { orphanExpiresAt: null, purgeDueAt: '2026-08-07T00:00:00.001Z' }, allowed: true },
+    { overrides: { orphanExpiresAt: null, purgeDueAt: new Date('2026-08-07T00:00:00.000Z') }, allowed: false },
+    { overrides: { orphanExpiresAt: null, purgeDueAt: '2026-08-06T23:59:59.999Z' }, allowed: false },
+    { overrides: { orphanExpiresAt: null, purgedAt: new Date('2026-08-07T00:00:00.001Z') }, allowed: false },
+    { overrides: { orphanExpiresAt: null, purgedAt: '2026-08-06T23:59:59.999Z' }, allowed: false },
+    { overrides: { storageStatus: 'purged', orphanExpiresAt: null, purgedAt: null }, allowed: false }
+  ]
+  for (const item of cases) {
+    const harness = createHarness({
+      documents: seed({ evidences: [accessibleEvidence(item.overrides)] })
+    })
+    const promise = harness.repository.getAccessGrant({
+      actor: { _id: 'account-1', openid: 'wx-current' }, evidenceId: 'evidence-1'
+    })
+    if (item.allowed) {
+      assert.equal((await promise).url, 'https://temporary.example/report.pdf')
+      assert.equal(harness.calls.length, 1)
+    } else {
+      await assert.rejects(promise, assertCode('EVIDENCE_EXPIRED'))
+      assert.deepEqual(harness.calls, [])
+    }
+  }
 })
 
 test('does not return a permanent URL when the temporary URL adapter fails or is malformed', async () => {

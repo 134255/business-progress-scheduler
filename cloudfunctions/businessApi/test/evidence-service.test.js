@@ -82,6 +82,19 @@ test('rejects malformed registration values before repository or cloud work', as
   }
 })
 
+test('rejects a declared size above the universal evidence limit before repository work', async () => {
+  const harness = createHarness()
+  await assert.rejects(harness.service.registerUpload({
+    actor: { _id: 'account-1' },
+    input: {
+      businessLineId: 'business-1', nodeId: 'node-1',
+      fileId: 'cloud://env/oversized.pdf', fileName: 'oversized.pdf',
+      declaredSize: 20 * 1024 * 1024 + 1
+    }
+  }), assertCode('FILE_TOO_LARGE'))
+  assert.deepEqual(harness.calls, [])
+})
+
 test('normalizes access IDs and rejects malformed values before delegation', async () => {
   const harness = createHarness()
   const actor = { _id: 'account-1' }

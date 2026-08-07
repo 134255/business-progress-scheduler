@@ -1,6 +1,6 @@
 const crypto = require('node:crypto')
 
-const { classifyAndValidateFile } = require('./evidence-policy')
+const { MAX_SINGLE_FILE_SIZE, classifyAndValidateFile } = require('./evidence-policy')
 const { normalizeCloudFileId } = require('./evidence-service')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 
@@ -53,22 +53,27 @@ function usesAccountMembership(line) {
     Object.prototype.hasOwnProperty.call(line, 'memberUserIds')
 }
 
-function isMember(line, actor) {
-  if (usesAccountMembership(line)) {
+function usesAccountAuthorization(line, node) {
+  return usesAccountMembership(line) || Boolean(node && Object.keys(node)
+    .some(key => /UserIds?$/.test(key)))
+}
+
+function isMember(line, actor, accountSchema) {
+  if (accountSchema) {
     return [...memberships(line.managerUserIds), ...memberships(line.memberUserIds)].includes(actor._id)
   }
   return Boolean(actor.openid) &&
     [...memberships(line.managerIds), ...memberships(line.memberIds)].includes(actor.openid)
 }
 
-function isOwner(line, actor) {
-  return usesAccountMembership(line)
+function isOwner(line, actor, accountSchema) {
+  return accountSchema
     ? memberships(line.managerUserIds).includes(actor._id)
     : Boolean(actor.openid) && memberships(line.managerIds).includes(actor.openid)
 }
 
-function isAssignee(line, node, actor) {
-  return usesAccountMembership(line)
+function isAssignee(node, actor, accountSchema) {
+  return accountSchema
     ? memberships(node.assigneeUserIds).includes(actor._id)
     : Boolean(actor.openid) && memberships(node.assigneeIds).includes(actor.openid)
 }
@@ -79,23 +84,43 @@ function isCurrentNode(line, node) {
     Number(node.sequence) === line.currentNodeIndex
 }
 
-function allowedTypes(line, node) {
-  const source = usesAccountMembership(line) || Object.prototype.hasOwnProperty.call(node, 'allowedEvidenceTypes')
+function allowedTypes(node, accountSchema) {
+  const source = accountSchema || Object.prototype.hasOwnProperty.call(node, 'allowedEvidenceTypes')
     ? node.allowedEvidenceTypes
     : node.evidenceTypes
   return Array.isArray(source) ? source.filter(value => typeof value === 'string') : []
 }
 
-function atOrBefore(value, now) {
-  if (!value) return false
-  const date = value instanceof Date ? value : new Date(value)
-  return !Number.isNaN(date.getTime()) && date.getTime() <= now.getTime()
-}
-
-function isMalformedDate(value) {
-  if (value === null || value === undefined) return false
-  const date = value instanceof Date ? value : new Date(value)
-  return Number.isNaN(date.getTime())
+function parseOptionalTimestamp(value) {
+  if (value === null || value === undefined) return null
+  if (value instanceof Date) {
+    if (!Number.isNaN(value.getTime())) return value
+    throw createError('EVIDENCE_EXPIRED')
+  }
+  if (typeof value !== 'string') throw createError('EVIDENCE_EXPIRED')
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?(Z|[+-]\d{2}:\d{2})$/.exec(value)
+  if (!match) throw createError('EVIDENCE_EXPIRED')
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , zone] = match
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  const second = Number(secondText)
+  const maximumDay = month >= 1 && month <= 12 ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0
+  if (year < 1 || day < 1 || day > maximumDay || hour > 23 || minute > 59 || second > 59) {
+    throw createError('EVIDENCE_EXPIRED')
+  }
+  if (zone !== 'Z') {
+    const zoneHour = Number(zone.slice(1, 3))
+    const zoneMinute = Number(zone.slice(4, 6))
+    if (zoneHour > 14 || zoneMinute > 59 || (zoneHour === 14 && zoneMinute !== 0)) {
+      throw createError('EVIDENCE_EXPIRED')
+    }
+  }
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) throw createError('EVIDENCE_EXPIRED')
+  return parsed
 }
 
 function createCloudEvidenceRepository({
@@ -131,14 +156,17 @@ function createCloudEvidenceRepository({
     if (!line || line.status === 'creating') throw createError('NOT_FOUND')
     if (FROZEN_BUSINESS_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
     if (line.status !== 'active') throw createError('NODE_NOT_ACTIVE')
-    if (!isMember(line, actor)) throw createError('FORBIDDEN')
     const node = await readDocument(database, COLLECTIONS.nodes, nodeId)
+    const accountSchema = usesAccountAuthorization(line, node)
+    if (!isMember(line, actor, accountSchema)) throw createError('FORBIDDEN')
     if (!node || node.businessLineId !== line._id) throw createError('NOT_FOUND')
     if (!isCurrentNode(line, node) || !ACTIVE_NODE_STATUSES.has(node.status)) {
       throw createError('NODE_NOT_ACTIVE')
     }
-    if (!isOwner(line, actor) && !isAssignee(line, node, actor)) throw createError('FORBIDDEN')
-    return { actor, line, node, allowedTypes: allowedTypes(line, node) }
+    if (!isOwner(line, actor, accountSchema) && !isAssignee(node, actor, accountSchema)) {
+      throw createError('FORBIDDEN')
+    }
+    return { actor, line, node, allowedTypes: allowedTypes(node, accountSchema) }
   }
 
   function validateRegistrationInput(actor, input) {
@@ -155,6 +183,7 @@ function createCloudEvidenceRepository({
         !Number.isSafeInteger(input.declaredSize) || input.declaredSize < 0) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
+    if (input.declaredSize > MAX_SINGLE_FILE_SIZE) throw createError('FILE_TOO_LARGE')
     return { actorId, businessLineId, nodeId, fileId }
   }
 
@@ -243,10 +272,16 @@ function createCloudEvidenceRepository({
       if (!currentEvidence) throw createError('NOT_FOUND')
       const line = await readDocument(transaction, COLLECTIONS.lines, currentEvidence.businessLineId)
       if (!line || line.status === 'creating') throw createError('NOT_FOUND')
-      if (!isMember(line, currentActor)) throw createError('FORBIDDEN')
-      if (currentEvidence.storageStatus !== 'available' || currentEvidence.purgedAt ||
-          isMalformedDate(currentEvidence.orphanExpiresAt) || isMalformedDate(currentEvidence.purgeDueAt) ||
-          atOrBefore(currentEvidence.orphanExpiresAt, now) || atOrBefore(currentEvidence.purgeDueAt, now)) {
+      const node = await readDocument(transaction, COLLECTIONS.nodes, currentEvidence.nodeId)
+      if (!node || node.businessLineId !== line._id) throw createError('EVIDENCE_EXPIRED')
+      const accountSchema = usesAccountAuthorization(line, node)
+      if (!isMember(line, currentActor, accountSchema)) throw createError('FORBIDDEN')
+      const orphanExpiresAt = parseOptionalTimestamp(currentEvidence.orphanExpiresAt)
+      const purgeDueAt = parseOptionalTimestamp(currentEvidence.purgeDueAt)
+      const purgedAt = parseOptionalTimestamp(currentEvidence.purgedAt)
+      if (currentEvidence.storageStatus !== 'available' || purgedAt ||
+          (orphanExpiresAt && orphanExpiresAt.getTime() <= now.getTime()) ||
+          (purgeDueAt && purgeDueAt.getTime() <= now.getTime())) {
         throw createError('EVIDENCE_EXPIRED')
       }
       if (typeof currentEvidence.fileName !== 'string' || !currentEvidence.fileName ||

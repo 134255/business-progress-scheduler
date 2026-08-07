@@ -3,16 +3,17 @@ const crypto = require('node:crypto')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 
 const MB = 1024 * 1024
+const MAX_SINGLE_FILE_SIZE = 20 * MB
 const FEEDBACK_TOTAL_LIMIT = 20 * MB
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const TYPE_POLICY = Object.freeze({
   jpg: { category: 'image', maximum: 5 * MB, signature: 'jpeg' },
   jpeg: { category: 'image', maximum: 5 * MB, signature: 'jpeg' },
   png: { category: 'image', maximum: 5 * MB, signature: 'png' },
-  pdf: { category: 'pdf', maximum: 20 * MB, signature: 'pdf' },
-  mp4: { category: 'video', maximum: 20 * MB, signature: 'video' },
-  mov: { category: 'video', maximum: 20 * MB, signature: 'video' },
-  m4v: { category: 'video', maximum: 20 * MB, signature: 'video' }
+  pdf: { category: 'pdf', maximum: MAX_SINGLE_FILE_SIZE, signature: 'pdf' },
+  mp4: { category: 'video', maximum: MAX_SINGLE_FILE_SIZE, signature: 'video' },
+  mov: { category: 'video', maximum: MAX_SINGLE_FILE_SIZE, signature: 'video' },
+  m4v: { category: 'video', maximum: MAX_SINGLE_FILE_SIZE, signature: 'video' }
 })
 
 function createError(code) {
@@ -80,6 +81,7 @@ function validateFeedbackTotalSize(sizes) {
 
 module.exports = {
   FEEDBACK_TOTAL_LIMIT,
+  MAX_SINGLE_FILE_SIZE,
   classifyAndValidateFile,
   validateFeedbackTotalSize
 }
