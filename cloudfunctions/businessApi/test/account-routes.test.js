@@ -19,7 +19,7 @@ Module._load = function loadWithCloudStub(request, parent, isMain) {
   }
   return originalLoad.call(this, request, parent, isMain)
 }
-const { createBusinessApi, isPublicAction, main } = require('../index')
+const { createBusinessApi, createDefaultLegacyRoutes, isPublicAction, main } = require('../index')
 Module._load = originalLoad
 
 test('only session and credential-establishment actions are public', () => {
@@ -40,7 +40,15 @@ test('deployed getSession wiring returns an unauthenticated session without auto
   assert.equal(defaultFake.documents('users').length, 0)
 })
 
-function createRouteHarness({ user, credential, protectedRoutes, templateService, businessService, contextOpenid = 'wx-context' } = {}) {
+function createRouteHarness({
+  user,
+  credential,
+  protectedRoutes,
+  templateService,
+  businessService,
+  legacyRoutes,
+  contextOpenid = 'wx-context'
+} = {}) {
   const calls = []
   const errors = []
   const repository = {
@@ -80,7 +88,7 @@ function createRouteHarness({ user, credential, protectedRoutes, templateService
       unlockUser: method('unlockUser'),
       unbindWechat: method('unbindWechat')
     },
-    legacyRoutes: {
+    legacyRoutes: legacyRoutes || {
       dashboard: (openid, payload) => method('dashboard')({ openid, payload })
     },
     templateService,
@@ -245,6 +253,50 @@ test('the template-backed business route delegates generated creation to the tru
     },
     input: payload
   }])
+})
+
+test('business list and detail routes pass the trusted actor to the dual-schema read service', async () => {
+  const calls = []
+  const businessService = {
+    async listBusinessLines(input) {
+      calls.push(['listBusinessLines', input])
+      return { items: [] }
+    },
+    async getBusinessLine(input) {
+      calls.push(['getBusinessLine', input])
+      return { line: { _id: input.lineId }, nodes: [] }
+    },
+    async createFromTemplate() {
+      throw new Error('not called')
+    }
+  }
+  const harness = createRouteHarness({ businessService })
+  await harness.api.main({ action: 'listBusinessLines', payload: { page: 2 } })
+  await harness.api.main({ action: 'getBusinessLine', payload: { id: 'business-1' } })
+
+  const actor = {
+    _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+  }
+  assert.deepEqual(calls, [
+    ['listBusinessLines', { actor, query: { page: 2 } }],
+    ['getBusinessLine', { actor, lineId: 'business-1' }]
+  ])
+})
+
+test('the deployed legacy route map rejects caller-authored business codes and nodes', async () => {
+  const harness = createRouteHarness({ legacyRoutes: createDefaultLegacyRoutes() })
+  const result = await harness.api.main({
+    action: 'createBusinessLine',
+    payload: {
+      name: '不应创建',
+      code: 'CLIENT-CODE',
+      nodes: [{ name: '客户端节点' }]
+    }
+  })
+
+  assert.deepEqual(result, { ok: false, code: 'UNKNOWN_ACTION', message: 'Unsupported action' })
+  assert.equal(defaultFake.documents('business_lines').length, 0)
+  assert.equal(defaultFake.documents('business_nodes').length, 0)
 })
 
 test('template application errors retain safe codes without logging payload values', async () => {

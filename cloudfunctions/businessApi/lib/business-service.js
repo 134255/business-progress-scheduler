@@ -91,7 +91,17 @@ function createBusinessService({ repository }) {
     return repository.createBusinessSnapshot({ actor, input: normalized, definition })
   }
 
-  return { createFromTemplate }
+  async function listBusinessLines({ actor, query = {} }) {
+    requireActiveActor(actor)
+    return repository.listBusinessLines({ actor, query })
+  }
+
+  async function getBusinessLine({ actor, lineId }) {
+    requireActiveActor(actor)
+    return repository.getBusinessLine({ actor, lineId: requireText(lineId) })
+  }
+
+  return { createFromTemplate, listBusinessLines, getBusinessLine }
 }
 
 module.exports = { createBusinessService }

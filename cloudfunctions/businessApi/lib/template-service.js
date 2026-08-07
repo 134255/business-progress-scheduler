@@ -8,6 +8,10 @@ const {
   MAX_TEMPLATE_NODES,
   TEMPLATE_LIMIT_MESSAGE
 } = require('./cloud-template-repository')
+const {
+  SNAPSHOT_LIMIT_MESSAGE,
+  canCreateBusinessSnapshot
+} = require('./cloud-business-repository')
 
 const TEMPLATE_STATUSES = new Set(['draft', 'enabled', 'disabled', 'deleted'])
 
@@ -63,6 +67,12 @@ function requireNodeBudget(nodes) {
     throw createError('TEMPLATE_LIMIT_EXCEEDED', TEMPLATE_LIMIT_MESSAGE)
   }
   return nodes
+}
+
+function requireSnapshotBudget(nodes) {
+  if (!canCreateBusinessSnapshot(nodes)) {
+    throw createError('TEMPLATE_LIMIT_EXCEEDED', SNAPSHOT_LIMIT_MESSAGE)
+  }
 }
 
 function normalizeNodeInput(node, sequence, nodeKey) {
@@ -164,15 +174,15 @@ function projectAdminTemplate(definition) {
   return { ...definition.template }
 }
 
-function projectEnabledTemplate(definition, available) {
+function projectEnabledTemplate(definition, unavailableReason) {
   const { template } = definition
   return {
     _id: template._id,
     name: template.name,
     description: template.description || '',
     nodeCount: template.nodeCount,
-    available,
-    unavailableReason: available ? '' : 'ASSIGNEE_INACTIVE'
+    available: !unavailableReason,
+    unavailableReason
   }
 }
 
@@ -264,6 +274,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       requireNodeBudget(current.nodes)
       const active = await assertActiveAssignees(repository, current.nodes, { requireNodes: true })
       callTemplateDomain(() => validateTemplateForEnable(current.template, current.nodes, active))
+      requireSnapshotBudget(current.nodes)
     }
     const timestampField = status === 'enabled' ? 'enabledAt' : 'disabledAt'
     return repository.mutateTemplateDefinition({
@@ -309,11 +320,16 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     const requested = [...new Set(definitions.flatMap(definition => allAssigneeIds(definition.nodes)))]
     const active = new Set(await repository.listActiveUserIds(requested))
     return {
-      items: definitions.map(definition => projectEnabledTemplate(
-        definition,
-        definition.nodes.length > 0 && definition.nodes.every(node =>
+      items: definitions.map(definition => {
+        const activeAssignees = definition.nodes.length > 0 && definition.nodes.every(node =>
           node.assigneeUserIds.length > 0 && node.assigneeUserIds.every(id => active.has(id)))
-      ))
+        const unavailableReason = !activeAssignees
+          ? 'ASSIGNEE_INACTIVE'
+          : canCreateBusinessSnapshot(definition.nodes)
+            ? ''
+            : 'TEMPLATE_LIMIT_EXCEEDED'
+        return projectEnabledTemplate(definition, unavailableReason)
+      })
     }
   }
 

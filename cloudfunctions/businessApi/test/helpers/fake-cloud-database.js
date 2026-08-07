@@ -116,7 +116,9 @@ function createFakeCloudDatabase(seed = {}) {
   }
 
   function matches(document, criteria) {
-    return Object.entries(criteria || {}).every(([key, value]) => document[key] === value)
+    return Object.entries(criteria || {}).every(([key, value]) => Array.isArray(document[key])
+      ? document[key].includes(value)
+      : document[key] === value)
   }
 
   function createQuery(name, transaction, criteria = null, order = [], offset = 0, maximum = 100) {

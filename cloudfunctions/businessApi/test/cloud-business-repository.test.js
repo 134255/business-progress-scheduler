@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 
 const { createCloudBusinessRepository } = require('../lib/cloud-business-repository')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
+const { createOptimisticBusinessDatabase } = require('./helpers/business-harness')
 
 function sourceNode(overrides = {}) {
   return {
@@ -152,28 +153,61 @@ test('snapshot transaction revalidates enabled template and active assignees and
     assert.equal(fake.documents('business_lines').length, 0)
     assert.equal(fake.documents('sequence_counters').length, 0)
   })
+
+  await t.test('creator disabled after route resolution', async () => {
+    const { fake, repository } = createRepositoryHarness()
+    const source = await definition(repository)
+    fake.beforeNextTransaction(() => fake.replace('users', 'user-1', { status: 'disabled' }))
+    await assert.rejects(repository.createBusinessSnapshot({
+      actor: { _id: 'user-1' }, input: input(), definition: source
+    }), error => error.code === 'FORBIDDEN')
+    assert.equal(fake.documents('business_lines').length, 0)
+    assert.equal(fake.documents('business_nodes').length, 0)
+    assert.equal(fake.documents('sequence_counters').length, 0)
+  })
 })
 
-test('same-key retries and concurrency return one business while distinct requests allocate unique sequences', async () => {
+test('same-key retries return the existing deterministic reservation', async () => {
   const { fake, repository } = createRepositoryHarness()
   const source = await definition(repository)
   const request = { actor: { _id: 'user-1' }, input: input(), definition: source }
-  const same = await Promise.all([
-    repository.createBusinessSnapshot(request),
-    repository.createBusinessSnapshot(request)
-  ])
-  assert.deepEqual(same[0], same[1])
+  const first = await repository.createBusinessSnapshot(request)
+  const retry = await repository.createBusinessSnapshot(request)
+  assert.deepEqual(first, retry)
+  assert.equal(fake.documents('business_lines').length, 1)
+  assert.equal(fake.documents('audit_logs').length, 1)
+  assert.equal(fake.documents('sequence_counters')[0].sequence, 1)
+})
+
+test('overlapping snapshot transactions conflict and retry to unique or idempotent results', async () => {
+  const optimistic = createOptimisticBusinessDatabase(seedDefinition())
+  const repository = createCloudBusinessRepository({
+    db: optimistic.db,
+    clock: () => new Date('2026-08-07T02:30:00.000Z')
+  })
+  const source = await definition(repository)
+  const actor = { _id: 'user-1' }
 
   const distinct = await Promise.all([
-    repository.createBusinessSnapshot({ ...request, input: input({ requestKey: 'request-002' }) }),
-    repository.createBusinessSnapshot({ ...request, input: input({ requestKey: 'request-003' }) })
+    repository.createBusinessSnapshot({ actor, input: input({ requestKey: 'request-a' }), definition: source }),
+    repository.createBusinessSnapshot({ actor, input: input({ requestKey: 'request-b' }), definition: source })
   ])
   assert.deepEqual(distinct.map(item => item.code).sort(), [
-    'BL-20260807-0002', 'BL-20260807-0003'
+    'BL-20260807-0001', 'BL-20260807-0002'
   ])
-  assert.equal(fake.documents('business_lines').length, 3)
-  assert.equal(fake.documents('audit_logs').length, 3)
-  assert.equal(fake.documents('sequence_counters')[0].sequence, 3)
+
+  const sameRequest = { actor, input: input({ requestKey: 'request-c' }), definition: source }
+  const same = await Promise.all([
+    repository.createBusinessSnapshot(sameRequest),
+    repository.createBusinessSnapshot(sameRequest)
+  ])
+  assert.deepEqual(same[0], same[1])
+  assert.ok(optimistic.metrics.maxActiveCallbacks >= 2)
+  assert.ok(optimistic.metrics.conflicts >= 1)
+  assert.ok(optimistic.metrics.retries >= 1)
+  assert.equal(optimistic.documents('business_lines').length, 3)
+  assert.equal(optimistic.documents('audit_logs').length, 3)
+  assert.equal(optimistic.documents('sequence_counters')[0].sequence, 3)
 })
 
 test('numbering expands past four digits and retries a stale counter collision without wrapping', async () => {
@@ -195,12 +229,12 @@ test('numbering expands past four digits and retries a stale counter collision w
   assert.equal(fake.documents('sequence_counters')[0].sequence, 10000)
 })
 
-test('snapshot creation rejects an operation budget overflow before starting a transaction', async () => {
+test('snapshot creation rejects creator-aware operation budget overflow before starting a transaction', async () => {
   const nodes = Array.from({ length: 48 }, (_, index) => sourceNode({
     _id: `template-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
-    assigneeUserIds: [`assignee-${index}`]
+    assigneeUserIds: [`assignee-${index % 47}`]
   }))
   const users = [{ _id: 'user-1', status: 'active' }].concat(nodes.map((node, index) => ({
     _id: `assignee-${index}`, status: 'active'
@@ -209,7 +243,9 @@ test('snapshot creation rejects an operation budget overflow before starting a t
 
   await assert.rejects(repository.createBusinessSnapshot({
     actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
-  }), error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' && /at most 48 nodes/.test(error.message))
+  }), error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' &&
+    /snapshot transaction operation budget/i.test(error.message) &&
+    !/at most 48 nodes/i.test(error.message))
   assert.equal(fake.transactionRuns.length, 0)
 })
 
@@ -235,4 +271,84 @@ test('reusing a request key with different validated input fails closed', async 
     repository.findCreationResult({ actorId: 'user-1', input: input({ name: '另一个业务' }) }),
     error => error.code === 'VERSION_CONFLICT'
   )
+})
+
+test('business list and detail reads support account-id snapshots and legacy OpenID records', async () => {
+  const seed = seedDefinition({
+    extra: {
+      business_lines: [
+        {
+          _id: 'new-active', code: 'BL-20260807-0001', name: '新业务', status: 'active',
+          managerUserIds: ['user-1'], memberUserIds: ['user-1', 'user-2'], updatedAt: 4
+        },
+        {
+          _id: 'new-creating', code: 'BL-20260807-0002', name: '半成品', status: 'creating',
+          managerUserIds: ['user-1'], memberUserIds: ['user-1'], updatedAt: 5
+        },
+        {
+          _id: 'legacy-active', code: 'LEGACY-1', name: '旧业务', status: 'active',
+          managerIds: ['wx-user-1'], memberIds: ['wx-user-1'], updatedAt: 3
+        },
+        {
+          _id: 'foreign', code: 'BL-20260807-0003', name: '无权业务', status: 'active',
+          managerUserIds: ['user-3'], memberUserIds: ['user-3'], updatedAt: 2
+        },
+        {
+          _id: 'hybrid-foreign', code: 'BL-20260807-0004', name: '混合字段无权业务', status: 'active',
+          managerUserIds: ['user-3'], memberUserIds: ['user-3'], memberIds: ['wx-user-1'], updatedAt: 1
+        }
+      ],
+      business_nodes: [
+        {
+          _id: 'new-node', businessLineId: 'new-active', sequence: 0, name: '新节点',
+          status: 'ready', assigneeUserIds: ['user-2']
+        },
+        {
+          _id: 'legacy-node', businessLineId: 'legacy-active', sequence: 0, name: '旧节点',
+          status: 'ready', assigneeIds: ['wx-user-1'], assigneeNames: ['旧用户']
+        }
+      ]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+  const actor = { _id: 'user-1', openid: 'wx-user-1', status: 'active' }
+
+  const listed = await repository.listBusinessLines({ actor, query: { page: 1, pageSize: 20 } })
+  assert.deepEqual(listed.items.map(line => line._id), ['new-active', 'legacy-active'])
+
+  const current = await repository.getBusinessLine({ actor, lineId: 'new-active' })
+  assert.equal(current.line._id, 'new-active')
+  assert.equal(current.nodes[0]._id, 'new-node')
+  assert.equal(current.canManage, true)
+  assert.equal(current.canEditNodes, false)
+
+  const legacy = await repository.getBusinessLine({ actor, lineId: 'legacy-active' })
+  assert.equal(legacy.line._id, 'legacy-active')
+  assert.equal(legacy.nodes[0].canFeedback, true)
+  assert.equal(legacy.nodes[0].assigneeNamesText, '旧用户')
+})
+
+test('business detail reads hide creating reservations and deny non-members in both schemas', async () => {
+  const seed = seedDefinition({
+    extra: {
+      business_lines: [
+        { _id: 'new-creating', status: 'creating', memberUserIds: ['user-1'] },
+        { _id: 'new-foreign', status: 'active', memberUserIds: ['user-2'] },
+        { _id: 'legacy-foreign', status: 'active', memberIds: ['wx-user-2'] }
+      ]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+  const actor = { _id: 'user-1', openid: 'wx-user-1', status: 'active' }
+
+  await assert.rejects(
+    repository.getBusinessLine({ actor, lineId: 'new-creating' }),
+    error => error.code === 'NOT_FOUND'
+  )
+  for (const lineId of ['new-foreign', 'legacy-foreign']) {
+    await assert.rejects(
+      repository.getBusinessLine({ actor, lineId }),
+      error => error.code === 'FORBIDDEN'
+    )
+  }
 })

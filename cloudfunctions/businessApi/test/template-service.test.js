@@ -172,6 +172,30 @@ test('enablement rejects legacy definitions above the documented node maximum', 
   assert.equal(harness.audits.length, 0)
 })
 
+test('enablement rejects definitions that cannot fit the business snapshot transaction budget', async () => {
+  const nodes = Array.from({ length: 48 }, (_, index) => storedNode('t1', {
+    _id: `t1-node-${index}`,
+    nodeKey: `node-${index}`,
+    sequence: index,
+    assigneeUserIds: [`account-${index}`]
+  }))
+  const harness = createTemplateHarness({
+    templates: [{ _id: 't1', name: '模板', status: 'disabled', version: 1, nodeCount: 48 }],
+    nodes,
+    users: nodes.map((node, index) => ({ _id: `account-${index}`, status: 'active' }))
+  })
+
+  await assert.rejects(harness.service.changeTemplateStatus({
+    actor: harness.admin,
+    templateId: 't1',
+    expectedVersion: 1,
+    status: 'enabled'
+  }), error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' &&
+    /snapshot transaction operation budget/i.test(error.message) &&
+    !/at most 48 nodes/i.test(error.message))
+  assert.equal(harness.audits.length, 0)
+})
+
 test('logical deletion requires a disabled definition and hides it from administrators', async () => {
   const harness = createTemplateHarness({
     templates: [{ _id: 't1', name: '模板', status: 'disabled', version: 2 }],
@@ -222,6 +246,27 @@ test('ordinary template listings expose safe availability projections only', asy
       available: false, unavailableReason: 'ASSIGNEE_INACTIVE'
     }]
   })
+})
+
+test('ordinary listings do not advertise enabled templates that exceed the snapshot operation budget', async () => {
+  const nodes = Array.from({ length: 48 }, (_, index) => storedNode('t1', {
+    _id: `t1-node-${index}`,
+    nodeKey: `node-${index}`,
+    sequence: index,
+    assigneeUserIds: [`account-${index}`]
+  }))
+  const harness = createTemplateHarness({
+    templates: [{
+      _id: 't1', name: '旧版超预算模板', description: '', status: 'enabled', version: 3,
+      nodeCount: 48
+    }],
+    nodes,
+    users: nodes.map((node, index) => ({ _id: `account-${index}`, status: 'active' }))
+  })
+
+  const result = await harness.service.listEnabledTemplates({ actor: harness.user })
+  assert.equal(result.items[0].available, false)
+  assert.equal(result.items[0].unavailableReason, 'TEMPLATE_LIMIT_EXCEEDED')
 })
 
 test('definition updates reject duplicate supplied stable keys', async () => {

@@ -167,6 +167,8 @@ function createTemplateRoutes(templateService) {
 
 function createBusinessRoutes(businessService) {
   return {
+    listBusinessLines: ({ actor, payload }) => businessService.listBusinessLines({ actor, query: payload }),
+    getBusinessLine: ({ actor, payload }) => businessService.getBusinessLine({ actor, lineId: payload.id }),
     createBusinessFromTemplate: ({ actor, payload }) => businessService.createFromTemplate({
       actor,
       input: payload
@@ -332,56 +334,6 @@ async function dashboard(openid) {
   }
 }
 
-async function listBusinessLines(openid, payload) {
-  const query = payload || {}
-  const page = Math.max(1, Number(query.page || 1))
-  const pageSize = Math.min(50, Math.max(5, Number(query.pageSize || 20)))
-  const result = await db.collection(COLLECTIONS.lines)
-    .where({ memberIds: openid, status: _.neq('deleted') })
-    .orderBy('updatedAt', 'desc')
-    .limit(100)
-    .get()
-
-  const keyword = String(query.keyword || '').trim().toLowerCase()
-  const start = query.startDate ? new Date(`${query.startDate}T00:00:00+08:00`) : null
-  const end = query.endDate ? new Date(`${query.endDate}T23:59:59+08:00`) : null
-
-  const items = result.data.filter(item => {
-    const keywordMatch = !keyword || String(item.name || '').toLowerCase().includes(keyword) || String(item.code || '').toLowerCase().includes(keyword)
-    const itemDate = item.plannedStartDate ? new Date(item.plannedStartDate) : null
-    const dateMatch = (!start || (itemDate && itemDate >= start)) && (!end || (itemDate && itemDate <= end))
-    return keywordMatch && dateMatch
-  })
-
-  const offset = (page - 1) * pageSize
-  return {
-    items: items.slice(offset, offset + pageSize),
-    page,
-    pageSize,
-    total: items.length,
-    hasMore: offset + pageSize < items.length
-  }
-}
-
-async function getBusinessLine(openid, payload) {
-  const line = await getLine(payload.id)
-  assert(isMember(line, openid), '你不是该业务线的关联成员', 'FORBIDDEN')
-
-  const nodesResult = await db.collection(COLLECTIONS.nodes)
-    .where({ businessLineId: line._id })
-    .orderBy('sequence', 'asc')
-    .get()
-
-  const nodes = nodesResult.data.map(node => Object.assign({}, node, {
-    canFeedback: canFeedback(line, node, openid),
-    assigneeNamesText: (node.assigneeNames || []).join('、')
-  }))
-
-  const canManage = isManager(line, openid)
-  const canEditNodes = canManage && Number(line.progress || 0) === 0 && nodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
-  return { line, nodes, canManage, canEditNodes }
-}
-
 function dateText(value) {
   if (!value) return ''
   const date = value instanceof Date ? value : new Date(value)
@@ -407,64 +359,6 @@ async function getNodeHistory(openid, payload) {
     history: feedbackResult.data.map(item => Object.assign({}, item, { statusLabel: labels[item.status] || item.status, createdAtText: dateText(item.createdAt) })),
     evidences: evidenceResult.data.map(item => Object.assign({}, item, { createdAtText: dateText(item.createdAt) }))
   }
-}
-
-async function createBusinessLine(openid, payload) {
-  const normalized = normalizeLineInput(payload)
-  const { name, code, description, plannedStartDate, plannedEndDate } = normalized
-  const nodes = Array.isArray(payload.nodes) ? payload.nodes : []
-  assert(name, '业务线名称不能为空')
-  assert(code, '业务线编号不能为空')
-  assert(nodes.length > 0, '至少需要一个业务节点')
-  assert(nodes.every(node => String(node.name || '').trim()), '节点名称不能为空')
-
-  const duplicate = await db.collection(COLLECTIONS.lines).where({ code, status: _.neq('deleted') }).limit(1).get()
-  assert(!duplicate.data.length, '业务线编号已存在', 'DUPLICATE_CODE')
-
-  const createdAt = now()
-  const lineData = {
-    name,
-    code,
-    description,
-    status: 'active',
-    managerIds: [openid],
-    memberIds: [openid],
-    currentNodeIndex: 0,
-    currentNodeName: String(nodes[0].name).trim(),
-    nodeCount: nodes.length,
-    progress: 0,
-    plannedStartDate,
-    plannedEndDate,
-    templateId: payload.templateId || '',
-    createdBy: openid,
-    version: 1,
-    createdAt,
-    updatedAt: createdAt
-  }
-  const lineResult = await db.collection(COLLECTIONS.lines).add({ data: lineData })
-
-  for (let index = 0; index < nodes.length; index += 1) {
-    const node = nodes[index]
-    await db.collection(COLLECTIONS.nodes).add({
-      data: {
-        businessLineId: lineResult._id,
-        sequence: index,
-        name: String(node.name).trim(),
-        status: index === 0 ? 'ready' : 'pending',
-        assigneeIds: unique(node.assigneeIds),
-        assigneeNames: unique(node.assigneeNames),
-        watcherIds: unique(node.watcherIds),
-        requiresEvidence: Boolean(node.requiresEvidence),
-        evidenceTypes: node.evidenceTypes || ['pdf', 'png', 'jpg', 'jpeg'],
-        dueDate: node.dueDate || '',
-        createdAt,
-        updatedAt: createdAt
-      }
-    })
-  }
-
-  await writeAudit(openid, 'create', 'business_line', lineResult._id, { name, code, nodeCount: nodes.length })
-  return { id: lineResult._id }
 }
 
 async function updateBusinessLine(openid, payload) {
@@ -631,6 +525,17 @@ async function submitNodeFeedback(openid, payload) {
   return { id: node._id, status: payload.status }
 }
 
+function createDefaultLegacyRoutes() {
+  return {
+    updateUserProfile,
+    dashboard,
+    getNodeHistory,
+    updateBusinessLine,
+    deleteBusinessLine,
+    submitNodeFeedback
+  }
+}
+
 function createDefaultBusinessApi() {
   const repository = createCloudAccountRepository({ db, clock: () => new Date() })
   const templateRepository = createCloudTemplateRepository({ db })
@@ -658,17 +563,7 @@ function createDefaultBusinessApi() {
     businessService,
     getContext: () => cloud.getWXContext(),
     clock,
-    legacyRoutes: {
-      updateUserProfile,
-      dashboard,
-      listBusinessLines,
-      getBusinessLine,
-      getNodeHistory,
-      createBusinessLine,
-      updateBusinessLine,
-      deleteBusinessLine,
-      submitNodeFeedback
-    }
+    legacyRoutes: createDefaultLegacyRoutes()
   })
 }
 
@@ -680,3 +575,4 @@ exports.main = event => {
 
 exports.isPublicAction = isPublicAction
 exports.createBusinessApi = createBusinessApi
+exports.createDefaultLegacyRoutes = createDefaultLegacyRoutes

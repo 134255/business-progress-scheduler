@@ -85,3 +85,18 @@ test('repository assignee revalidation failures remain closed application errors
     error => error.code === 'ASSIGNEE_INACTIVE'
   )
 })
+
+test('business reads use the trusted account actor and validated identifiers', async () => {
+  const harness = createBusinessHarness()
+  await harness.service.listBusinessLines({ actor: harness.actor, query: { page: 2, pageSize: 10 } })
+  await harness.service.getBusinessLine({ actor: harness.actor, lineId: 'business-1' })
+
+  assert.deepEqual(harness.calls, [
+    ['listBusinessLines', { actor: harness.actor, query: { page: 2, pageSize: 10 } }],
+    ['getBusinessLine', { actor: harness.actor, lineId: 'business-1' }]
+  ])
+  await assert.rejects(
+    harness.service.getBusinessLine({ actor: harness.actor, lineId: ' ' }),
+    error => error.code === 'VALIDATION_ERROR'
+  )
+})
