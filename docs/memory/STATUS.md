@@ -169,7 +169,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Blockers
 
-- Cleanup of the linked `codex/account-admin` worktree and branch is deferred because that worktree still contains a pre-existing, unstaged user edit in `docs/deployment/account-admin-setup.md`. It must not be removed or overwritten without an explicit preservation decision.
+- The accidental linked-worktree deployment-manual edit was explicitly discarded, Git removed the worktree registration and its contents, and the fully merged local `codex/account-admin` branch was deleted through the non-force merged-branch path. An empty `.worktrees/account-admin` directory remains because WeChat DevTools currently holds it open; close that project before deleting the empty directory.
 - `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
 - Task 5 simulator acceptance in WeChat DevTools is unverified.
 - Task 6 WeChat DevTools compilation, navigation, rendering, and ordinary-user manual-route smoke acceptance are unverified.
@@ -177,7 +177,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Decide whether to preserve the linked-worktree deployment-manual edit by moving it to `main`, committing it separately, or keeping the worktree; only then clean up the worktree and feature branch.
+1. Close the obsolete `account-admin` project in WeChat DevTools, then delete the empty `.worktrees/account-admin` directory.
 2. Push local `main` to `origin/main` when remote publication is approved.
 3. Run the remaining Task 5 and Task 6 WeChat DevTools page/navigation smoke acceptance if it is required before release.
 4. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
