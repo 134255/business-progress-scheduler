@@ -48,14 +48,13 @@ function memberships(value) {
   return Array.isArray(value) ? value : []
 }
 
-function usesAccountMembership(line) {
-  return Object.prototype.hasOwnProperty.call(line, 'managerUserIds') ||
-    Object.prototype.hasOwnProperty.call(line, 'memberUserIds')
+function hasOwnAccountRelationship(value) {
+  return Boolean(value && typeof value === 'object' && Object.getOwnPropertyNames(value)
+    .some(key => /UserIds?$/.test(key)))
 }
 
 function usesAccountAuthorization(line, node) {
-  return usesAccountMembership(line) || Boolean(node && Object.keys(node)
-    .some(key => /UserIds?$/.test(key)))
+  return hasOwnAccountRelationship(line) || hasOwnAccountRelationship(node)
 }
 
 function isMember(line, actor, accountSchema) {
@@ -318,5 +317,6 @@ function createCloudEvidenceRepository({
 module.exports = {
   COLLECTIONS,
   ORPHAN_LIFETIME_MS,
+  hasOwnAccountRelationship,
   createCloudEvidenceRepository
 }

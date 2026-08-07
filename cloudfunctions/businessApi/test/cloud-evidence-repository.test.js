@@ -1,7 +1,10 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-const { createCloudEvidenceRepository } = require('../lib/cloud-evidence-repository')
+const {
+  createCloudEvidenceRepository,
+  hasOwnAccountRelationship
+} = require('../lib/cloud-evidence-repository')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 
 const NOW = new Date('2026-08-07T00:00:00.000Z')
@@ -212,6 +215,55 @@ test('new-schema records never fall back to legacy OpenID memberships or assigne
   const harness = createHarness({ documents })
   await assert.rejects(harness.repository.registerUpload(registration()), assertCode('FORBIDDEN'))
   assert.deepEqual(harness.calls, [])
+})
+
+test('own account relationship keys are detected on any record without prototype inheritance', () => {
+  for (const value of [
+    { managerUserIds: [] },
+    { watcherUserIds: null },
+    { ownerUserId: 'account-1' }
+  ]) {
+    assert.equal(hasOwnAccountRelationship(value), true)
+  }
+
+  const inherited = Object.create({ watcherUserIds: ['stale-account'] })
+  inherited.memberIds = ['wx-current']
+  assert.equal(hasOwnAccountRelationship(inherited), false)
+  assert.equal(hasOwnAccountRelationship(null), false)
+})
+
+test('line-level account relationship presence disables legacy fallback for registration and access', async () => {
+  for (const lineRelationship of [
+    { watcherUserIds: null },
+    { ownerUserId: 'account-1' }
+  ]) {
+    const documents = seed({
+      business_lines: [{
+        _id: 'business-1', status: 'active', currentNodeIndex: 0,
+        managerIds: ['wx-current'], memberIds: ['wx-current'],
+        ...lineRelationship
+      }],
+      business_nodes: [{
+        _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+        assigneeIds: ['wx-current'], evidenceTypes: ['pdf']
+      }],
+      evidences: [accessibleEvidence()]
+    })
+
+    const registrationHarness = createHarness({ documents })
+    await assert.rejects(
+      registrationHarness.repository.registerUpload(registration()),
+      assertCode('FORBIDDEN')
+    )
+    assert.deepEqual(registrationHarness.calls, [])
+    assert.equal(registrationHarness.fake.documents('evidences').length, 1)
+
+    const accessHarness = createHarness({ documents })
+    await assert.rejects(accessHarness.repository.getAccessGrant({
+      actor: { _id: 'account-1', openid: 'wx-current' }, evidenceId: 'evidence-1'
+    }), assertCode('FORBIDDEN'))
+    assert.deepEqual(accessHarness.calls, [])
+  }
 })
 
 test('legacy fallback requires wholly legacy membership and the current binding', async () => {
