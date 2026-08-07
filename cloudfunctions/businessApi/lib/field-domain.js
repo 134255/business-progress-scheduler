@@ -28,6 +28,65 @@ function normalizeNonnegativeInteger(value) {
   return value
 }
 
+function readCharacterClass(pattern, start) {
+  let index = start + 1
+  if (index === pattern.length) return -1
+  while (index < pattern.length) {
+    if (pattern[index] === '\\') {
+      index += 2
+      continue
+    }
+    if (pattern[index] === '[') return -1
+    if (pattern[index] === ']') return index + 1
+    index += 1
+  }
+  return -1
+}
+
+function readQuantifier(pattern, start) {
+  if ('*+?'.includes(pattern[start])) return start + 1
+  if (pattern[start] !== '{') return start
+  const match = /^\{(\d+)(?:,(\d*)?)?\}/.exec(pattern.slice(start))
+  if (!match) return -1
+  if (match[2] && Number(match[2]) < Number(match[1])) return -1
+  return start + match[0].length
+}
+
+// The supported regex subset is deliberately small: literal and character-class
+// atoms, optional anchors, and at most one final simple quantifier. It excludes
+// grouping, alternation, backreferences, and overlapping repetitions so a stored
+// pattern cannot trigger catastrophic backtracking during feedback validation.
+function isSafeRegularExpression(pattern) {
+  let start = pattern.startsWith('^') ? 1 : 0
+  const end = pattern.endsWith('$') ? pattern.length - 1 : pattern.length
+  if (start > end) return false
+  let quantified = false
+  while (start < end) {
+    let next
+    const character = pattern[start]
+    if (character === '[') {
+      next = readCharacterClass(pattern, start)
+    } else if (character === '\\') {
+      if (start + 1 >= end || /\d/.test(pattern[start + 1])) return false
+      next = start + 2
+    } else if ('^$()[]{}|*+?.'.includes(character)) {
+      return false
+    } else {
+      next = start + 1
+    }
+    if (next < 0 || next > end) return false
+    const quantifierEnd = readQuantifier(pattern, next)
+    if (quantifierEnd < 0) return false
+    if (quantifierEnd !== next) {
+      if (quantified || quantifierEnd !== end) return false
+      quantified = true
+      next = quantifierEnd
+    }
+    start = next
+  }
+  return true
+}
+
 function normalizeConstraints(type, input) {
   if (!isPlainObject(input)) throw createError('INVALID_FIELD_VALUE')
   const constraints = {}
@@ -48,6 +107,7 @@ function normalizeConstraints(type, input) {
   }
   if (hasOwn(input, 'pattern')) {
     if (typeof input.pattern !== 'string' || input.pattern.length > MAX_REGEX_LENGTH) throw createError('INVALID_FIELD_VALUE')
+    if (!isSafeRegularExpression(input.pattern)) throw createError('INVALID_FIELD_VALUE')
     try {
       new RegExp(input.pattern)
     } catch (error) {

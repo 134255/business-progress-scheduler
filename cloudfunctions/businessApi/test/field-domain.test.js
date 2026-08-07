@@ -61,6 +61,15 @@ test('rejects malformed definitions before they can be persisted', () => {
   assertInvalid(() => normalizeFieldDefinition({ fieldKey: 'f', name: '名称', type: 'single_select', constraints: { options: ['甲', '甲'] } }))
 })
 
+test('rejects nested quantified regular expressions before value validation', () => {
+  assertInvalid(() => normalizeFieldDefinition({
+    fieldKey: 'f',
+    name: '名称',
+    type: 'short_text',
+    constraints: { pattern: '(a+)+$' }
+  }))
+})
+
 test('enforces all type-specific values and required values', () => {
   const definitions = [
     { fieldKey: 'short', sequence: 0, name: '短文本', type: 'short_text', required: true, constraints: { minLength: 2, maxLength: 3, pattern: '^[A-Z]+$' } },

@@ -4,7 +4,7 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
-- Task 2 of the template/node/field plan is implemented on its isolated worktree: pure CommonJS `field-domain` and `template-domain` modules normalize the seven supported field types, validate denormalized submitted-value snapshots, enforce stable node/field keys and contiguous sequences, apply the 22-work-hour SLA default, restrict evidence types, require active assignee account document IDs for enablement, and reject definition edits while a template is enabled. Task 3 (template persistence, service, and API routes) is next.
+- Task 2 of the template/node/field plan is implemented on its isolated worktree: pure CommonJS `field-domain` and `template-domain` modules normalize the seven supported field types, validate denormalized submitted-value snapshots, enforce stable node/field keys and contiguous sequences, apply the 22-work-hour SLA default, restrict evidence types, require active assignee account document IDs for enablement, and reject definition edits while a template is enabled. Text regular-expression definitions use a conservative non-grouped grammar so stored patterns cannot trigger catastrophic backtracking during feedback validation. Task 3 (template persistence, service, and API routes) is next.
 - Task 1 of the template/node/field plan is implemented on its isolated worktree: `createBusinessApi` accepts injected `protectedRoutes`; recognized protected actions receive the trusted resolved actor and payload separately, are rejected before handler invocation when authentication fails, and retain the existing account and legacy-route behavior.
 - The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Tasks 1 and 2 are complete; Task 3 is next.
 - WeChat DevTools account-administration smoke acceptance now covers automatic dashboard restoration, the authoritative super-administrator list state, creation of two ordinary test accounts and a second super administrator, case-insensitive duplicate-username rejection, safe disable/re-enable of the second administrator, rejection of disabling or demoting the final active super administrator, five-failure account lockout, administrator unlock, and read-only compatibility navigation through dashboard, business list, business detail, node feedback/history, and profile pages. No credential or identity value was recorded.
@@ -28,6 +28,15 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+Executed on 2026-08-07 for template/node/field Task 2 fix round 1 safe regular-expression policy:
+
+| Command or boundary | Result |
+|---|---|
+| Regression TDD RED: `node --test cloudfunctions/businessApi/test/field-domain.test.js` | Failed as expected: nested quantified pattern `(a+)+$` was accepted, so the regression assertion reported a missing expected exception. |
+| Focused field GREEN: `node --test cloudfunctions/businessApi/test/field-domain.test.js` | Passed: 6 tests, 0 failures. |
+| Focused field and template suites: `node --test cloudfunctions/businessApi/test/field-domain.test.js cloudfunctions/businessApi/test/template-domain.test.js` | Passed: 10 tests, 0 failures. |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 133 tests, 0 failures; npm emitted two pre-existing malformed user-config warnings. |
 
 Executed on 2026-08-07 for template/node/field Task 2 domain policies:
 
