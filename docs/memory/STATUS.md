@@ -4,8 +4,9 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 
 ## Verified state
 
+- Persistent explicit logout is implemented at `c4c5fea` and `b0e9cbf`. A focused utility persists only a boolean manual-login requirement, `app.js` exposes it through the authentication owner, profile logout sets it before clearing memory, the login page still checks initialization but suppresses binding-based restoration while it is active, and successful password authentication clears it. No backend or database interface changed.
 - Manual CloudBase acceptance completed the guarded first-super-administrator initialization, forced first-login password change, dashboard entry, and redacted post-initialization checks. The singleton guard reports one active super administrator with consumed recovery state; the user, credential, binding, and initialization/password-change audit outcomes were confirmed without recording sensitive values.
-- Manual acceptance exposed a persistent-logout defect: profile logout clears only in-memory state, after which the login page calls `getSession` and immediately restores the permanently bound account. The approved correction is specified in `docs/superpowers/specs/2026-08-07-persistent-logout-design.md`; implementation and simulator re-acceptance remain pending.
+- Manual acceptance exposed the original persistent-logout defect: profile logout cleared only in-memory state, after which the login page called `getSession` and immediately restored the permanently bound account. The approved correction is now implemented; simulator restart re-acceptance remains pending.
 - Feature branch `codex/account-admin` implements the locally verifiable account-administration milestone through Task 7, including reviewed UI fixes at `cdf2977` and the reviewed deployment/runbook closeout at `7feac41`.
 - The guarded first-super-administrator Mini Program flow is implemented through `a1db212`, `62b8cdf`, and `9b8b034`: the account service exposes initialization, the login page gates the entry, and the dedicated page rechecks server state, submits credentials from the trusted Mini Program runtime, clears sensitive fields, and hands successful initialization to forced password change.
 - CloudBase fixed-document reads now normalize only explicit missing-document failures to `null` through `0f16140` and the reviewed boundary correction at `5fc1957`; collection, permission, network, timeout, and other database failures still propagate. The test database now reproduces the real SDK behavior instead of returning a synthetic null record.
@@ -19,6 +20,21 @@ Status captured: 2026-08-07 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+Executed on 2026-08-07 for persistent logout at `c4c5fea` and `b0e9cbf`:
+
+| Command or boundary | Result |
+|---|---|
+| Preference TDD RED | Failed as expected because the utility and application methods did not exist. |
+| Account-page TDD RED | Four expected failures reproduced automatic restoration and the three missing page-side effects. |
+| JavaScript syntax checks for the utility, app, profile, login, and password-change pages | Passed: 5 files, 0 syntax errors. |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 121 tests, 0 failures. npm also emitted two pre-existing malformed user-config warnings. |
+| `node --test miniprogram/test/account-flow.test.js miniprogram/test/admin-users-flow.test.js` | Passed: 47 tests, 0 failures. |
+| `node tools/test-wxml-structure.mjs` | Passed: 1 test, 0 failures. |
+| `git diff --check` and project-memory validation | Passed; line-ending warnings only. |
+| Storage-boundary scan | Production synchronous storage calls exist only in `miniprogram/utils/manual-login.js`; the sole written value is boolean `true`. |
+
+WeChat DevTools restart acceptance for the exact persistent-logout commits remains unverified.
 
 Manual operator acceptance on 2026-08-07:
 
@@ -116,7 +132,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Blockers
 
-- Explicit logout does not currently persist: the login page immediately restores the bound account. The approved client-only manual-login preference design is not yet implemented or verified.
+- Persistent logout is locally verified but still requires WeChat DevTools restart acceptance: logout, remain on login, restart and remain on login, password login, then restart and confirm ordinary automatic restoration.
 - `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
 - Task 5 simulator acceptance in WeChat DevTools is unverified.
 - Task 6 WeChat DevTools compilation, navigation, rendering, and ordinary-user manual-route smoke acceptance are unverified.
@@ -124,7 +140,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Execute `docs/superpowers/plans/2026-08-07-persistent-logout.md` with client tests first, then rerun the full local verification suite.
-2. Upload the corrected Mini Program build and manually verify persistent logout, password re-entry, and restored ordinary auto-login after successful authentication.
+1. Pull or reopen the corrected branch in WeChat DevTools and manually verify persistent logout, password re-entry, and restored ordinary auto-login after successful authentication.
+2. Record the redacted manual acceptance outcome without credentials, OpenID values, or raw account records.
 3. After account-administration acceptance passes, complete the branch integration decision.
 4. Continue the approved templates, SLA/calendar, evidence/video, reminder, and Enterprise WeChat adapter phases.
