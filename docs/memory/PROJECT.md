@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact review: 2026-08-06 (Asia/Shanghai)
+Last stable-fact review: 2026-08-07 (Asia/Shanghai)
 
 ## Product
 
@@ -19,7 +19,7 @@ The complete approved requirements are in `docs/superpowers/specs/2026-08-05-bus
 ## Architecture
 
 - Client: native WeChat Mini Program using JavaScript, WXML, and WXSS under `miniprogram/`.
-- Client authentication starts at `pages/login/index`; `miniprogram/app.js` owns the in-memory current-user state and the reset helper. First-login challenges remain memory-only until password change completes.
+- Client authentication starts at `pages/login/index`; an uninitialized system navigates to the guarded `pages/admin-initialize/index` page, which calls the cloud function from the Mini Program runtime and automatically hands successful initialization to forced password change. `miniprogram/app.js` owns the in-memory current-user state and the reset helper. First-login challenges remain memory-only until password change completes.
 - Backend: Tencent CloudBase Node.js cloud functions, cloud database, and cloud storage.
 - Current entry point: `cloudfunctions/businessApi/index.js`, with pure domain helpers under `cloudfunctions/businessApi/lib/`.
 - Target modular shape: retain a unified API entry for ordinary domain calls, extract account/template/business/evidence/notification modules, and use separate scheduled functions for calendar synchronization, hourly reminders, and orphan-file cleanup.

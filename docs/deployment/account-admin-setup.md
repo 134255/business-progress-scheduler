@@ -87,23 +87,17 @@ recoveryConsumedAt: null
 
 ## 初始化首位超级管理员
 
-在微信开发者工具的云函数测试面板调用公开路由 `initializeSuperAdmin`。云函数从可信微信上下文取得当前 OpenID；不要在 payload 中提供 OpenID。
+部署 `businessApi` 并确认两处恢复哈希一致后，在微信开发者工具中重新编译小程序。登录页检测到系统尚未初始化时会显示“初始化首位管理员”入口。
 
-```json
-{
-  "action": "initializeSuperAdmin",
-  "payload": {
-    "username": "example_admin_01_DO_NOT_USE",
-    "displayName": "示例管理员（仅示例，禁止复用）",
-    "temporaryPassword": "ExampleOnlyPass8-DoNotUse",
-    "recoveryCode": "ExampleOnlyRecovery9-DoNotUse"
-  }
-}
-```
+1. 点击“初始化首位管理员”，等待页面再次核对云端初始化状态。
+2. 在小程序页面本地输入获授权的用户名、显示名称、临时密码和纸质恢复码。不要截图、录屏或保存表单内容。
+3. 点击“创建并设置正式密码”。小程序从可信微信运行时调用 `initializeSuperAdmin`；不要在任何请求中提供 OpenID。
+4. 初始化成功后，小程序会使用内存中的临时密码自动取得十分钟有效的改密挑战，并立即清空临时密码和恢复码字段。
+5. 在强制改密页面设置正式密码。若初始化已完成但自动登录失败，返回登录页使用临时密码登录；**不要再次调用初始化**。
 
-以上全部值是非生产示例，**严禁复用**。实际操作时输入由本地获授权流程产生的用户名、显示名、临时密码和一次性恢复码，不要保存测试面板的原始请求或响应。
+不要使用“开启云函数本地调试”或 CloudBase 控制台模拟测试替代上述小程序调用。它们不提供本流程要求的可信小程序身份上下文，也不得把真实密码或恢复码放入测试事件、控制台、日志或调用历史。
 
-预期的脱敏状态是：恰有一个活动 `super_admin`，其凭据 `mustChangePassword: true`；当前可信 OpenID 有一条绑定保留记录；守卫计数为 `1` 且恢复状态已消费；并写入 `INITIALIZE_SUPER_ADMIN` 审计记录。操作员随后用临时密码登录，并在十分钟挑战有效期内完成强制密码修改；完成后才会绑定普通登录会话。
+预期的脱敏状态是：恰有一个活动 `super_admin`；当前可信 OpenID 有一条绑定保留记录；守卫计数为 `1` 且恢复状态已消费；写入 `INITIALIZE_SUPER_ADMIN` 审计记录。完成强制改密后，凭据 `mustChangePassword` 为 `false`，普通登录会话可用。
 
 若返回 `ALREADY_INITIALIZED`，不要删除任何管理员或守卫记录；先核对守卫计数、用户状态和绑定一致性。若返回 `INVALID_RECOVERY_CODE`，核对环境变量、守卫哈希和 `recoveryConsumedAt`，但不得把这些值写入日志或工单。
 
