@@ -216,17 +216,14 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
         const saved = snapshot()
         const record = { callbacks: 0, operations: 0 }
         transactionRuns.push(record)
+        let result
         try {
           record.callbacks += 1
-          const result = await callback({
+          result = await callback({
             collection(name) {
               return createQuery(name, record)
             }
           })
-          if (options.afterTransaction) {
-            await options.afterTransaction({ result: clone(result), record: clone(record) })
-          }
-          return result
         } catch (error) {
           restore(saved)
           if (options.afterTransactionError) {
@@ -234,6 +231,10 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
           }
           throw error
         }
+        if (options.afterTransaction) {
+          await options.afterTransaction({ result: clone(result), record: clone(record) })
+        }
+        return result
       } finally {
         release()
       }

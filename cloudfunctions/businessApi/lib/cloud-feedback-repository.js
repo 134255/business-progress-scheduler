@@ -221,6 +221,13 @@ function createCloudFeedbackRepository({
     }
   }
 
+  function assertExactReservationRelationship(reservation, { feedbackId, businessLineId, nodeId }) {
+    if (!reservation || reservation._id !== feedbackId ||
+        reservation.businessLineId !== businessLineId || reservation.nodeId !== nodeId) {
+      throw createError('VERSION_CONFLICT')
+    }
+  }
+
   function assertExactPublishedRetry(current, reservation, id, value) {
     assertPublishedRetry(current.actor, current.line, current.node, reservation)
     if (!reservation || reservation.publishState !== 'published' || reservation._id !== id.feedbackId ||
@@ -310,6 +317,11 @@ function createCloudFeedbackRepository({
       assertCurrentActorAuthorization(current.actor, current.line, current.node)
       const existing = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       if (existing) {
+        assertExactReservationRelationship(existing, {
+          feedbackId: id.feedbackId,
+          businessLineId: value.input.businessLineId,
+          nodeId: value.input.nodeId
+        })
         if (existing.publishState === 'published') {
           assertPublishedRetry(current.actor, current.line, current.node, existing)
         }
@@ -595,6 +607,13 @@ function createCloudFeedbackRepository({
         assertContentionPollAuthorization(current.actor, current.line, current.node)
         const winner = await readDocument(transaction, COLLECTIONS.feedback, error.winnerFeedbackId)
         if (current.node.feedbackClaimId !== error.winnerFeedbackId) return { type: 'retry' }
+        if (winner) {
+          assertExactReservationRelationship(winner, {
+            feedbackId: error.winnerFeedbackId,
+            businessLineId,
+            nodeId
+          })
+        }
         if (winner && winner.publishState === 'published') {
           const completedFlow = winner.businessLineId === businessLineId && winner.nodeId === nodeId &&
             winner.status === 'completed' && current.node.status === 'completed' &&
@@ -716,7 +735,7 @@ function createCloudFeedbackRepository({
       const node = await readDocument(transaction, COLLECTIONS.nodes, reservation.nodeId)
       return markReservationAborting(transaction, {
         reservation,
-        node,
+        node: node && node.businessLineId === reservation.businessLineId ? node : null,
         reason: 'CLAIM_EXPIRED',
         at
       })

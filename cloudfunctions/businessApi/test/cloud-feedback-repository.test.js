@@ -5,6 +5,14 @@ const {
   createFeedbackHarness, createOptimisticFeedbackHarness, seed, submission, NOW
 } = require('./helpers/feedback-harness')
 
+const STATE_COLLECTIONS = [
+  'users', 'business_lines', 'business_nodes', 'node_feedback', 'evidences', 'audit_logs'
+]
+
+function stateSnapshot(fake) {
+  return Object.fromEntries(STATE_COLLECTIONS.map(name => [name, fake.documents(name)]))
+}
+
 test('completion claims more than one transaction of tiny evidence without a count cap', async () => {
   const evidenceIds = Array.from({ length: 105 }, (_, index) => `evidence-${index + 1}`)
   const { fake, repository } = createFeedbackHarness({ evidenceCount: 105 })
@@ -151,6 +159,134 @@ test('expired hidden reservations can be recovered without racing orphan cleanup
   assert.equal(fake.documents('node_feedback')[0].publishState, 'aborted')
   assert.equal(fake.documents('evidences').every(item => item.feedbackId === null && item.orphanExpiresAt), true)
   assert.equal(Object.hasOwn(fake.documents('business_nodes')[0], 'feedbackClaimId'), false)
+})
+
+test('maintenance recovery is fail-closed for live leases, handles malformed leases, and continues idempotently', async () => {
+  const liveHarness = createFeedbackHarness({ evidenceCount: 1 })
+  const liveValue = submission({ evidenceIds: ['evidence-1'] })
+  const liveReservation = await liveHarness.repository.beginFeedback(liveValue)
+  await liveHarness.repository.claimEvidenceChunk(liveValue, liveReservation)
+  const liveBefore = stateSnapshot(liveHarness.fake)
+  assert.equal(await liveHarness.repository.recoverExpiredReservation(liveReservation.feedbackId), false)
+  assert.deepEqual(stateSnapshot(liveHarness.fake), liveBefore)
+
+  const malformedHarness = createFeedbackHarness({ evidenceCount: 1 })
+  const malformedValue = submission({ evidenceIds: ['evidence-1'] })
+  const malformedReservation = await malformedHarness.repository.beginFeedback(malformedValue)
+  await malformedHarness.repository.claimEvidenceChunk(malformedValue, malformedReservation)
+  const malformedStored = malformedHarness.fake.documents('node_feedback')
+    .find(item => item._id === malformedReservation.feedbackId)
+  malformedHarness.fake.replace('node_feedback', malformedReservation.feedbackId, {
+    ...malformedStored,
+    claimExpiresAt: false
+  })
+  assert.equal(await malformedHarness.repository.recoverExpiredReservation(malformedReservation.feedbackId), true)
+  assert.equal(malformedHarness.fake.documents('node_feedback')[0].publishState, 'aborted')
+  assert.equal(malformedHarness.fake.documents('evidences')[0].feedbackId, null)
+  assert.equal(Object.hasOwn(malformedHarness.fake.documents('business_nodes')[0], 'feedbackClaimId'), false)
+  const continued = stateSnapshot(malformedHarness.fake)
+  assert.equal(await malformedHarness.repository.recoverExpiredReservation(malformedReservation.feedbackId), false)
+  assert.deepEqual(stateSnapshot(malformedHarness.fake), continued)
+})
+
+test('maintenance recovery never clears a replacement node claim', async () => {
+  const { fake, repository } = createFeedbackHarness({ evidenceCount: 1 })
+  const value = submission({ evidenceIds: ['evidence-1'] })
+  const reservation = await repository.beginFeedback(value)
+  await repository.claimEvidenceChunk(value, reservation)
+  const stored = fake.documents('node_feedback').find(item => item._id === reservation.feedbackId)
+  fake.replace('node_feedback', reservation.feedbackId, {
+    ...stored,
+    claimExpiresAt: new Date(NOW.getTime() - 1)
+  })
+  fake.replace('business_nodes', 'node-1', {
+    ...fake.documents('business_nodes').find(item => item._id === 'node-1'),
+    feedbackClaimId: 'replacement-winner',
+    feedbackClaimHash: 'replacement',
+    feedbackClaimExpiresAt: new Date(NOW.getTime() + 60_000)
+  })
+
+  assert.equal(await repository.recoverExpiredReservation(reservation.feedbackId), true)
+  assert.equal(fake.documents('node_feedback').find(item => item._id === reservation.feedbackId).publishState, 'aborted')
+  assert.equal(fake.documents('business_nodes').find(item => item._id === 'node-1').feedbackClaimId, 'replacement-winner')
+  assert.equal(fake.documents('evidences')[0].feedbackId, null)
+})
+
+test('maintenance recovery never clears a claimed node outside the reservation line', async () => {
+  const { fake, repository } = createFeedbackHarness({ evidenceCount: 1 })
+  const value = submission({ evidenceIds: ['evidence-1'] })
+  const reservation = await repository.beginFeedback(value)
+  await repository.claimEvidenceChunk(value, reservation)
+  const stored = fake.documents('node_feedback').find(item => item._id === reservation.feedbackId)
+  fake.replace('node_feedback', reservation.feedbackId, {
+    ...stored,
+    businessLineId: 'foreign-line',
+    claimExpiresAt: new Date(NOW.getTime() - 1)
+  })
+
+  assert.equal(await repository.recoverExpiredReservation(reservation.feedbackId), true)
+  assert.equal(fake.documents('node_feedback').find(item => item._id === reservation.feedbackId).publishState, 'aborted')
+  assert.equal(fake.documents('business_nodes').find(item => item._id === 'node-1').feedbackClaimId, reservation.feedbackId)
+  assert.equal(fake.documents('evidences')[0].feedbackId, null)
+})
+
+test('contention recovery rejects an expired claimed reservation from another line or node without writes', async () => {
+  for (const mismatch of [
+    { businessLineId: 'foreign-line', nodeId: 'node-1' },
+    { businessLineId: 'line-1', nodeId: 'foreign-node' }
+  ]) {
+    const data = seed({ evidenceCount: 1 })
+    data.node_feedback = [{
+      _id: 'foreign-winner', businessLineId: mismatch.businessLineId, nodeId: mismatch.nodeId,
+      publishState: 'reserved', status: 'completed', submittedBy: 'account-a',
+      requestHash: 'foreign', inputHash: 'foreign', requestFingerprint: 'f'.repeat(64),
+      claimExpiresAt: new Date(NOW.getTime() - 1)
+    }]
+    Object.assign(data.business_nodes[0], {
+      feedbackClaimId: 'foreign-winner', feedbackClaimHash: 'foreign',
+      feedbackClaimExpiresAt: new Date(NOW.getTime() - 1)
+    })
+    Object.assign(data.evidences[0], {
+      feedbackId: 'foreign-winner', feedbackRevision: null, attachmentState: 'claiming',
+      attachmentClaimExpiresAt: new Date(NOW.getTime() - 1),
+      attachmentPreviousOrphanExpiresAt: data.evidences[0].orphanExpiresAt,
+      orphanExpiresAt: null
+    })
+    const { fake, repository } = createFeedbackHarness({ seed: data })
+    const before = stateSnapshot(fake)
+
+    await assert.rejects(
+      repository.commitFeedback(submission({
+        actor: { _id: 'account-b', status: 'active' },
+        input: { requestKey: `foreign-${mismatch.businessLineId}-${mismatch.nodeId}` }
+      })),
+      error => error.code === 'VERSION_CONFLICT'
+    )
+    assert.deepEqual(stateSnapshot(fake), before)
+  }
+})
+
+test('same-request recovery rejects a reservation whose stored line or node changed without writes', async () => {
+  for (const mismatch of [
+    { businessLineId: 'foreign-line', nodeId: 'node-1' },
+    { businessLineId: 'line-1', nodeId: 'foreign-node' }
+  ]) {
+    const { fake, repository } = createFeedbackHarness({ evidenceCount: 1 })
+    const value = submission({ evidenceIds: ['evidence-1'] })
+    const reservation = await repository.beginFeedback(value)
+    await repository.claimEvidenceChunk(value, reservation)
+    const stored = fake.documents('node_feedback').find(item => item._id === reservation.feedbackId)
+    fake.replace('node_feedback', reservation.feedbackId, {
+      ...stored,
+      businessLineId: mismatch.businessLineId,
+      nodeId: mismatch.nodeId,
+      claimExpiresAt: new Date(NOW.getTime() - 1)
+    })
+    const before = stateSnapshot(fake)
+
+    await assert.rejects(repository.commitFeedback(value), error => error.code === 'VERSION_CONFLICT')
+    assert.deepEqual(stateSnapshot(fake), before)
+  }
 })
 
 test('a new OR signer recovers an expired interrupted winner instead of receiving a false completion', async () => {
@@ -477,12 +613,14 @@ test('every account and relationship revocation has no post-authorization recove
     })
     let fake
     let injected = false
+    let stateAfterRevocation
     const harness = createFeedbackHarness({
       seed: data,
       afterTransaction: async ({ result }) => {
         if (injected || !result || result.type !== 'reserved' || !result.winner) return
         injected = true
         mutate(fake)
+        stateAfterRevocation = stateSnapshot(fake)
       }
     })
     fake = harness.fake
@@ -490,7 +628,14 @@ test('every account and relationship revocation has no post-authorization recove
       actor: { _id: 'account-b', status: 'active' },
       input: { requestKey: `matrix-${name}` }
     })).then(() => 'FULFILLED', error => error.code)
-    if (injected) failures.push(`${name}:post-authorization-window:${outcome}`)
+    if (injected) {
+      failures.push(`${name}:post-authorization-window:${outcome}`)
+      try {
+        assert.deepEqual(stateSnapshot(fake), stateAfterRevocation)
+      } catch (error) {
+        failures.push(`${name}:state-mutated-after-revocation`)
+      }
+    }
     if (!injected && outcome !== 'FULFILLED') failures.push(`${name}:atomic-recovery:${outcome}`)
   }
   assert.deepEqual(failures, [])
