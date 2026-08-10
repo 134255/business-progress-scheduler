@@ -5,21 +5,22 @@
     <button class="secondary-button retry" bindtap="retry">重新加载</button>
   </view>
   <view class="empty" wx:elif="{{!loading && !errorMessage && !items.length}}">暂无已启用模板，请联系管理员</view>
-  <view
-    wx:else
-    class="card template-card {{item.available ? '' : 'template-unavailable'}}"
-    wx:for="{{items}}"
-    wx:key="_id"
-    data-id="{{item._id}}"
-    data-available="{{item.available}}"
-    bindtap="selectTemplate"
-  >
-    <view class="row-between">
-      <text class="name">{{item.name}}</text>
-      <text class="node-count">{{item.nodeCount}} 个节点</text>
+  <block wx:else>
+    <view
+      class="card template-card {{item.available ? '' : 'template-unavailable'}}"
+      wx:for="{{items}}"
+      wx:key="_id"
+      data-id="{{item._id}}"
+      data-available="{{item.available}}"
+      bindtap="selectTemplate"
+    >
+      <view class="row-between">
+        <text class="name">{{item.name}}</text>
+        <text class="node-count">{{item.nodeCount}} 个节点</text>
+      </view>
+      <text class="muted block">{{item.description || '暂无说明'}}</text>
+      <text wx:if="{{!item.available}}" class="unavailable-reason">{{item.unavailableMessage}}</text>
+      <text wx:else class="available-action">选择此模板 →</text>
     </view>
-    <text class="muted block">{{item.description || '暂无说明'}}</text>
-    <text wx:if="{{!item.available}}" class="unavailable-reason">{{item.unavailableMessage}}</text>
-    <text wx:else class="available-action">选择此模板 →</text>
-  </view>
+  </block>
 </view>

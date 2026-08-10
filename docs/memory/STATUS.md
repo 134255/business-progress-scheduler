@@ -4,6 +4,8 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 
 ## Verified state
 
+- 2026-08-10 真实 CloudBase 部署验收已推进到小程序编译门禁。操作员已脱敏确认相关集合备份、隔离旧测试业务清理、新版集合、客户端不可直读写权限、两个唯一索引及全部必需组合索引已完成；保留审计记录，未记录任何业务编号、身份值或凭证内容。操作期间曾从 `main` 根目录上传旧版 `businessApi`，在发现正确隔离工作区前未继续验收，随后已由 `codex/template-node-fields` 待发布工作区重新覆盖部署并确认原环境变量仍有效。`evidenceRetention` 已上传，入口为 `index.main`、内存 256 MB；目标免费开发环境实际只允许 1—60 秒超时，已按 60 秒保存。当前控制台以内联 JSON 管理触发器且无独立停用开关，已保持 `triggers` 空数组，因此定时清理尚未启用。
+- 正确隔离工作区首次微信开发者工具编译暴露了模板列表的 WXML 组合指令缺陷：循环卡片在同一元素上同时使用 `wx:else` 和 `wx:for`，微信编译器报“`wx:if not found`”。新回归检查先在原页面上精确失败，最小修复改为外层 `<block wx:else>` 与内层卡片 `wx:for`；专项 WXML 检查 2/2 和模板业务客户端测试 12/12 通过。微信开发者工具重新编译仍待操作员验收，不得标记为通过。
 - Task 12 的本地发布资料已完成。新增中文 `docs/deployment/template-node-fields-setup.md`，以备份可读性为起点，固定集合、唯一值核对、索引、`businessApi`、`evidenceRetention`、停用状态每日触发器、分阶段脱敏验收和先停触发器再回滚的安全顺序；README 已提供统一入口。手册同时覆盖新账号与旧业务兼容查询索引、七段 Cron 与时区反向核对、图片/PDF/多视频、或签、驳回返工、冻结修订和隔离清理测试。真实 CloudBase 备份、索引、函数上传、触发器、真实云文件删除、多账号并发和微信开发者工具验收仍未执行，不能标记为发布完成。
 - Task 11 已完成本地实现与自审。独立 `evidenceRetention` 定时云函数按固定顺序回收过期反馈预约、回收过期审计修订预约、清理 24 小时孤立凭证、创建提前 15/7/1 天站内提醒并处理 60 天到期凭证。反馈与修订附件均按最多 40 个文件分块恢复，41 个修订附件测试证明事务不超过 100 次文档操作；缺失反馈预约只会清除到期且仍指向该编号的节点锁。文件删除前必须取得带随机令牌的 10 分钟事务租约，只有持有同一令牌的工作器可以确认成功或写入安全失败分类；中断后仅过期租约可重新认领。云对象已不存在视为幂等成功，元数据保留但永久文件编号被移除。提醒使用确定性编号并可跨批次跳过已存在记录。`wx-server-sdk` 已通过独立锁文件固定为 `4.0.2`。Task 11 定向测试 19 个全部通过；真实 CloudBase 定时触发器、目标环境索引、真实云文件删除和独立代码审查仍未验证。
 - Task 10 已完成本地实现与自审。节点反馈页只接收业务线和节点标识，并重新读取服务端业务、节点版本、字段快照、提交权限和不可变历史；客户端支持短文本、长文本、数字、布尔、日期、单选、多选 7 类字段及字段级快速校验，服务端仍是最终可信校验边界。图片、PDF、视频支持分批选择和多个视频，客户端执行图片 5 MB、PDF/视频 20 MB、单次合计 20 MB 的上传前校验；文件按顺序上传并立即登记，失败重试保留已登记凭证且最终只提交 `evidenceId`。图片、PDF、视频和批量下载均先获取 5 分钟临时访问地址，已清理凭证不再提供查看入口。业务详情新增相邻节点驳回、进行中业务关闭/取消/逻辑删除和冻结提示；超级管理员新增独立的冻结业务全局检索、脱敏详情、修订前后值、专用附件和审计式修订页面，普通成员读取规则未放宽。所有异步加载和写入在结果写回前复核当前账号。真实 CloudBase 部署、微信开发者工具交互和独立代码审查仍未验证。
@@ -39,6 +41,18 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-10 执行真实部署验收暴露的模板列表 WXML 编译修复：
+
+| 命令或边界 | 结果 |
+|---|---|
+| WXML 组合指令 TDD RED | 按预期失败：新检查精确报告 `template-list/index.wxml` 在同一元素上混用 `wx:else` 和 `wx:for`。 |
+| `node tools/test-wxml-structure.mjs` | 通过：2 个测试，0 失败。 |
+| `node --test miniprogram/test/business-template-flow.test.js` | 通过：12 个测试，0 失败。 |
+| `node --test miniprogram/test/*.test.js` | 通过：102 个测试，0 失败。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：364 个测试，0 失败；仅保留两条既有 npm 用户配置警告。 |
+| `npm.cmd test --prefix cloudfunctions/evidenceRetention` | 通过：19 个测试，0 失败；仅保留两条既有 npm 用户配置警告。 |
+| 真实微信开发者工具复验 | 未验证：待修复提交后由操作员重新编译。 |
 
 2026-08-10 执行 Task 12 中文部署手册与发布前全量验证：
 
