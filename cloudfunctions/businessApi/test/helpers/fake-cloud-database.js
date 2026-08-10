@@ -2,7 +2,7 @@ function clone(value) {
   return value === undefined ? undefined : structuredClone(value)
 }
 
-function createFakeCloudDatabase(seed = {}) {
+function createFakeCloudDatabase(seed = {}, options = {}) {
   const removeValue = { __remove: true }
   const state = {}
   const transactionQueries = []
@@ -218,13 +218,20 @@ function createFakeCloudDatabase(seed = {}) {
         transactionRuns.push(record)
         try {
           record.callbacks += 1
-          return await callback({
+          const result = await callback({
             collection(name) {
               return createQuery(name, record)
             }
           })
+          if (options.afterTransaction) {
+            await options.afterTransaction({ result: clone(result), record: clone(record) })
+          }
+          return result
         } catch (error) {
           restore(saved)
+          if (options.afterTransactionError) {
+            await options.afterTransactionError({ error, record: clone(record) })
+          }
           throw error
         }
       } finally {

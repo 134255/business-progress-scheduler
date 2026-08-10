@@ -390,6 +390,160 @@ test('a published non-completion winner conflicts and a live reservation times o
   )
 })
 
+test('revocation between contention authorization and recovery start cannot mutate the winner claim', async () => {
+  const data = seed({ evidenceCount: 0 })
+  data.node_feedback = [{
+    _id: 'expired-winner', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'reserved',
+    status: 'completed', submittedBy: 'account-a', requestHash: 'old', inputHash: 'old',
+    claimExpiresAt: new Date(NOW.getTime() - 1)
+  }]
+  Object.assign(data.business_nodes[0], {
+    feedbackClaimId: 'expired-winner', feedbackClaimHash: 'old',
+    feedbackClaimExpiresAt: new Date(NOW.getTime() - 1)
+  })
+
+  let fake
+  let revocationInjected = false
+  const harness = createFeedbackHarness({
+    seed: data,
+    afterTransaction: async ({ result }) => {
+      if (revocationInjected || !result || result.type !== 'reserved' || !result.winner) return
+      revocationInjected = true
+      fake.replace('users', 'account-b', { _id: 'account-b', status: 'disabled' })
+    }
+  })
+  fake = harness.fake
+
+  const outcome = await harness.repository.commitFeedback(submission({
+    actor: { _id: 'account-b', status: 'active' },
+    input: { requestKey: 'contender-expired-window' }
+  })).then(result => ({ code: 'FULFILLED', result }), error => ({ code: error.code }))
+
+  const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+  const winner = fake.documents('node_feedback').find(item => item._id === 'expired-winner')
+  const failures = []
+  if (revocationInjected) {
+    failures.push('expired winner escaped the authorization transaction before recovery start')
+    if (outcome.code !== 'FORBIDDEN') failures.push(`unexpected result after revocation: ${outcome.code}`)
+    if (node.feedbackClaimId !== 'expired-winner') failures.push('claim changed after revocation')
+    if (!winner || winner.publishState !== 'reserved') failures.push(`winner changed after revocation: ${winner && winner.publishState}`)
+  } else if (outcome.code !== 'FULFILLED') {
+    failures.push(`atomic authorized recovery did not retry successfully: ${outcome.code}`)
+  }
+  assert.deepEqual(failures, [])
+})
+
+test('same-request recovery cannot start after authorization is revoked', async () => {
+  let fake
+  let revocationInjected = false
+  const harness = createFeedbackHarness({
+    evidenceCount: 0,
+    afterTransactionError: async ({ error }) => {
+      if (revocationInjected || error.code !== 'RESERVATION_RECOVERY_REQUIRED') return
+      revocationInjected = true
+      fake.replace('users', 'account-a', { _id: 'account-a', status: 'disabled' })
+    }
+  })
+  fake = harness.fake
+  const value = submission()
+  const reservation = await harness.repository.beginFeedback(value)
+  fake.replace('node_feedback', reservation.feedbackId, {
+    ...fake.documents('node_feedback')[0], claimExpiresAt: new Date(NOW.getTime() - 1)
+  })
+
+  const outcome = await harness.repository.commitFeedback(value)
+    .then(result => ({ code: 'FULFILLED', result }), error => ({ code: error.code }))
+  const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+  const stored = fake.documents('node_feedback').find(item => item._id === reservation.feedbackId)
+  const failures = []
+  if (revocationInjected) {
+    failures.push('same-request expiry escaped the authorization transaction before recovery start')
+    if (outcome.code !== 'FORBIDDEN') failures.push(`unexpected result after revocation: ${outcome.code}`)
+    if (node.feedbackClaimId !== reservation.feedbackId) failures.push('same-request claim changed after revocation')
+    if (!stored || stored.publishState !== 'reserved') failures.push(`same-request winner changed: ${stored && stored.publishState}`)
+  } else if (outcome.code !== 'FULFILLED') {
+    failures.push(`atomic same-request recovery did not retry successfully: ${outcome.code}`)
+  }
+  assert.deepEqual(failures, [])
+})
+
+test('submission failure compensation reauthorizes before starting rollback', async () => {
+  const data = seed({ evidenceCount: 1 })
+  data.evidences[0].uploadedBy = 'account-b'
+  let fake
+  let reservationId
+  let revocationInjected = false
+  const harness = createFeedbackHarness({
+    seed: data,
+    afterTransaction: async ({ result }) => {
+      if (result && result.feedbackId && result.cursor === 0) reservationId = result.feedbackId
+    },
+    afterTransactionError: async ({ error }) => {
+      if (revocationInjected || error.code !== 'EVIDENCE_NOT_ATTACHABLE') return
+      revocationInjected = true
+      fake.replace('users', 'account-a', { _id: 'account-a', status: 'disabled' })
+    }
+  })
+  fake = harness.fake
+
+  const outcome = await harness.repository.commitFeedback(submission({ evidenceIds: ['evidence-1'] }))
+    .then(result => ({ code: 'FULFILLED', result }), error => ({ code: error.code }))
+  const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+  const stored = fake.documents('node_feedback').find(item => item._id === reservationId)
+  assert.equal(revocationInjected, true)
+  assert.equal(outcome.code, 'EVIDENCE_NOT_ATTACHABLE')
+  assert.equal(node.feedbackClaimId, reservationId)
+  assert.equal(stored.publishState, 'reserved')
+  assert.equal(fake.documents('evidences')[0].feedbackId, null)
+  assert.equal(fake.documents('audit_logs').length, 0)
+})
+
+test('contention recovery never aborts a winner after the node claim changes', async () => {
+  const data = seed({ evidenceCount: 0 })
+  data.node_feedback = [{
+    _id: 'old-winner', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'reserved',
+    status: 'completed', submittedBy: 'account-a', requestHash: 'old', inputHash: 'old',
+    claimExpiresAt: new Date(NOW.getTime() - 1)
+  }]
+  Object.assign(data.business_nodes[0], {
+    feedbackClaimId: 'old-winner', feedbackClaimHash: 'old',
+    feedbackClaimExpiresAt: new Date(NOW.getTime() - 1)
+  })
+  let fake
+  let claimChanged = false
+  const harness = createFeedbackHarness({
+    seed: data,
+    wait: async () => {},
+    afterTransactionError: async ({ error }) => {
+      if (claimChanged || error.code !== 'NODE_COMMIT_IN_PROGRESS') return
+      claimChanged = true
+      fake.replace('node_feedback', 'replacement-winner', {
+        _id: 'replacement-winner', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'reserved',
+        status: 'completed', submittedBy: 'account-a', requestHash: 'replacement', inputHash: 'replacement',
+        claimExpiresAt: new Date(NOW.getTime() + 60_000)
+      })
+      fake.replace('business_nodes', 'node-1', {
+        ...fake.documents('business_nodes').find(item => item._id === 'node-1'),
+        feedbackClaimId: 'replacement-winner', feedbackClaimHash: 'replacement',
+        feedbackClaimExpiresAt: new Date(NOW.getTime() + 60_000)
+      })
+    }
+  })
+  fake = harness.fake
+
+  await assert.rejects(
+    harness.repository.commitFeedback(submission({
+      actor: { _id: 'account-b', status: 'active' },
+      input: { requestKey: 'changed-claim-contender' }
+    })),
+    error => error.code === 'FEEDBACK_COMMIT_IN_PROGRESS'
+  )
+  const oldWinner = fake.documents('node_feedback').find(item => item._id === 'old-winner')
+  const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+  assert.equal(oldWinner.publishState, 'reserved')
+  assert.equal(node.feedbackClaimId, 'replacement-winner')
+})
+
 test('contention polling reauthorizes before revealing or acting on every winner state', async () => {
   async function poll({ actorMutation, winnerState, winnerStatus = 'completed' }) {
     const data = seed({ evidenceCount: 0 })

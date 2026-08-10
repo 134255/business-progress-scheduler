@@ -237,6 +237,34 @@ function createCloudFeedbackRepository({
     return { actor, line, node }
   }
 
+  function leaseExpiredOrMalformed(value, at) {
+    try {
+      const expiresAt = parseDeadline(value)
+      return !expiresAt || expiresAt.getTime() <= at.getTime()
+    } catch (error) {
+      return true
+    }
+  }
+
+  async function markReservationAborting(transaction, { reservation, node, reason, at }) {
+    if (!reservation || reservation.publishState !== 'reserved') return false
+    await transaction.collection(COLLECTIONS.feedback).doc(reservation._id).update({ data: {
+      publishState: 'aborting',
+      recoveryCount: increment(reservation.recoveryCount === undefined ? 0 : reservation.recoveryCount),
+      recoveryReason: reason,
+      recoveryStartedAt: at,
+      updatedAt: db.serverDate()
+    } })
+    if (node && node.feedbackClaimId === reservation._id) {
+      await transaction.collection(COLLECTIONS.nodes).doc(node._id).update({ data: {
+        feedbackClaimId: db.command.remove(),
+        feedbackClaimHash: db.command.remove(),
+        feedbackClaimExpiresAt: db.command.remove()
+      } })
+    }
+    return true
+  }
+
   async function getSubmissionContext({ actor, businessLineId, nodeId, evidenceIds }) {
     const input = { businessLineId, nodeId, status: 'in_progress' }
     const context = await db.runTransaction(async transaction => {
@@ -295,16 +323,20 @@ function createCloudFeedbackRepository({
       if (existing && existing.publishState === 'reserved' && current.node &&
           current.node.feedbackClaimId === id.feedbackId) {
         assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
-        let expiresAt
-        try {
-          expiresAt = parseDeadline(existing.claimExpiresAt)
-        } catch (error) {
-          throw createError('RESERVATION_RECOVERY_REQUIRED', { feedbackId: id.feedbackId })
-        }
-        if (!expiresAt || expiresAt.getTime() <= at.getTime()) {
-          throw createError('RESERVATION_RECOVERY_REQUIRED', { feedbackId: id.feedbackId })
+        if (leaseExpiredOrMalformed(existing.claimExpiresAt, at)) {
+          const recoveryRequired = await markReservationAborting(transaction, {
+            reservation: existing,
+            node: current.node,
+            reason: 'CLAIM_EXPIRED',
+            at
+          })
+          return { ...id, recoveryRequired, recoveryAt: at }
         }
         return { ...id, cursor: existing.claimedCount }
+      }
+      if (existing && existing.publishState === 'aborting') {
+        assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
+        return { ...id, recoveryRequired: true, recoveryAt: existing.recoveryStartedAt || at }
       }
       if (value.input.status === 'completed' && current.node && current.node.status === 'completed') {
         const winnerId = current.node.latestFeedbackId || current.node.feedbackClaimId
@@ -557,10 +589,12 @@ function createCloudFeedbackRepository({
 
   async function waitForWinner(error, { actorId, businessLineId, nodeId }) {
     for (let attempt = 0; attempt < 100; attempt += 1) {
+      const at = now()
       const outcome = await db.runTransaction(async transaction => {
         const current = await readSubmissionDocuments(transaction, actorId, { businessLineId, nodeId })
         assertContentionPollAuthorization(current.actor, current.line, current.node)
         const winner = await readDocument(transaction, COLLECTIONS.feedback, error.winnerFeedbackId)
+        if (current.node.feedbackClaimId !== error.winnerFeedbackId) return { type: 'retry' }
         if (winner && winner.publishState === 'published') {
           const completedFlow = winner.businessLineId === businessLineId && winner.nodeId === nodeId &&
             winner.status === 'completed' && current.node.status === 'completed' &&
@@ -576,58 +610,41 @@ function createCloudFeedbackRepository({
           }
           return { type: 'retry' }
         }
-        if (winner && winner.publishState === 'reserved') return { type: 'reserved', winner }
+        if (winner && winner.publishState === 'reserved') {
+          if (leaseExpiredOrMalformed(winner.claimExpiresAt, at)) {
+            const recoveryRequired = await markReservationAborting(transaction, {
+              reservation: winner,
+              node: current.node,
+              reason: 'CLAIM_EXPIRED',
+              at
+            })
+            return recoveryRequired
+              ? { type: 'recover', feedbackId: winner._id }
+              : { type: 'wait' }
+          }
+          return { type: 'reserved' }
+        }
+        if (winner && winner.publishState === 'aborting') {
+          return { type: 'recover', feedbackId: winner._id }
+        }
         if (current.node.status === 'completed') return { type: 'error', code: 'VERSION_CONFLICT' }
         if (!current.node.feedbackClaimId) return { type: 'retry' }
         return { type: 'wait' }
       })
       if (outcome.type === 'error') throw createError(outcome.code)
       if (outcome.type === 'retry') return null
-      if (outcome.type === 'reserved') {
-        let expiresAt
-        try {
-          expiresAt = parseDeadline(outcome.winner.claimExpiresAt)
-        } catch (parseError) {
-          if (await releaseReservation(error.winnerFeedbackId, { reason: 'CLAIM_EXPIRED' })) return null
-        }
-        if ((!expiresAt || expiresAt.getTime() <= now().getTime()) &&
-            await releaseReservation(error.winnerFeedbackId, { reason: 'CLAIM_EXPIRED' })) return null
+      if (outcome.type === 'recover') {
+        await continueReservationRollback(outcome.feedbackId, at)
+        return null
       }
       await wait(5)
     }
     throw createError('FEEDBACK_COMMIT_IN_PROGRESS')
   }
 
-  async function releaseReservation(feedbackId, { onlyExpired = false, reason = 'INTERRUPTED' } = {}) {
-    const at = now()
-    const marked = await db.runTransaction(async transaction => {
-      const reservation = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
-      if (!reservation || reservation.publishState === 'published' || reservation.publishState === 'aborted') return false
-      if (onlyExpired) {
-        let expiresAt
-        try {
-          expiresAt = parseDeadline(reservation.claimExpiresAt)
-        } catch (error) {
-          expiresAt = null
-        }
-        if (expiresAt && expiresAt.getTime() > at.getTime()) return false
-      }
-      const node = await readDocument(transaction, COLLECTIONS.nodes, reservation.nodeId)
-      await transaction.collection(COLLECTIONS.feedback).doc(feedbackId).update({ data: {
-        publishState: 'aborting', recoveryCount: increment(reservation.recoveryCount === undefined ? 0 : reservation.recoveryCount),
-        recoveryReason: reason, recoveryStartedAt: at, updatedAt: db.serverDate()
-      } })
-      if (node && node.feedbackClaimId === feedbackId) {
-        await transaction.collection(COLLECTIONS.nodes).doc(node._id).update({ data: {
-          feedbackClaimId: db.command.remove(),
-          feedbackClaimHash: db.command.remove(),
-          feedbackClaimExpiresAt: db.command.remove()
-        } })
-      }
-      return true
-    })
-    if (!marked) return false
-
+  async function continueReservationRollback(feedbackId, at = now()) {
+    const current = await readDocument(db, COLLECTIONS.feedback, feedbackId)
+    if (!current || current.publishState !== 'aborting') return false
     const claimed = await readAll(() => db.collection(COLLECTIONS.evidences)
       .where({ feedbackId }).orderBy('uploadedAt', 'asc'))
     for (let offset = 0; offset < claimed.length; offset += claimChunkSize) {
@@ -653,18 +670,59 @@ function createCloudFeedbackRepository({
         }
       })
     }
-    await db.runTransaction(async transaction => {
+    return db.runTransaction(async transaction => {
       const reservation = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
-      if (!reservation || reservation.publishState !== 'aborting') return
+      if (!reservation || reservation.publishState !== 'aborting') {
+        return Boolean(reservation && reservation.publishState === 'aborted')
+      }
       await transaction.collection(COLLECTIONS.feedback).doc(feedbackId).update({ data: {
         publishState: 'aborted', abortedAt: at, claimExpiresAt: db.command.remove(), updatedAt: db.serverDate()
       } })
+      return true
     })
-    return true
+  }
+
+  async function startAuthorizedReservationRecovery(value, feedbackId, reason) {
+    const id = identity(value)
+    if (id.feedbackId !== feedbackId) throw createError('VERSION_CONFLICT')
+    const at = now()
+    const recoveryRequired = await db.runTransaction(async transaction => {
+      const current = await readSubmissionDocuments(transaction, value.actor._id, value.input)
+      assertCurrentActorAuthorization(current.actor, current.line, current.node)
+      const reservation = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
+      if (!reservation || reservation.publishState === 'published' || reservation.publishState === 'aborted') return false
+      if (reservation.businessLineId !== value.input.businessLineId || reservation.nodeId !== value.input.nodeId ||
+          reservation.submittedBy !== value.actor._id || reservation.requestHash !== id.requestHash ||
+          reservation.inputHash !== id.inputHash) throw createError('VERSION_CONFLICT')
+      if (reservation.publishState === 'aborting') return true
+      return markReservationAborting(transaction, {
+        reservation,
+        node: current.node,
+        reason,
+        at
+      })
+    })
+    if (!recoveryRequired) return false
+    return continueReservationRollback(feedbackId, at)
   }
 
   async function recoverExpiredReservation(feedbackId) {
-    return releaseReservation(feedbackId, { onlyExpired: true, reason: 'CLAIM_EXPIRED' })
+    const at = now()
+    const recoveryRequired = await db.runTransaction(async transaction => {
+      const reservation = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
+      if (!reservation || reservation.publishState === 'published' || reservation.publishState === 'aborted') return false
+      if (reservation.publishState === 'aborting') return true
+      if (!leaseExpiredOrMalformed(reservation.claimExpiresAt, at)) return false
+      const node = await readDocument(transaction, COLLECTIONS.nodes, reservation.nodeId)
+      return markReservationAborting(transaction, {
+        reservation,
+        node,
+        reason: 'CLAIM_EXPIRED',
+        at
+      })
+    })
+    if (!recoveryRequired) return false
+    return continueReservationRollback(feedbackId, at)
   }
 
   async function commitFeedback(value) {
@@ -673,12 +731,13 @@ function createCloudFeedbackRepository({
       for (;;) {
         try {
           reservation = await beginFeedback(value)
-          break
-        } catch (error) {
-          if (error.code === 'RESERVATION_RECOVERY_REQUIRED') {
-            await releaseReservation(error.feedbackId, { reason: 'CLAIM_EXPIRED' })
+          if (reservation.recoveryRequired) {
+            await continueReservationRollback(reservation.feedbackId, reservation.recoveryAt || now())
+            reservation = undefined
             continue
           }
+          break
+        } catch (error) {
           if (error.code !== 'NODE_COMMIT_IN_PROGRESS') throw error
           const result = await waitForWinner(error, {
             actorId: value.actor._id,
@@ -700,7 +759,7 @@ function createCloudFeedbackRepository({
     } catch (error) {
       if (reservation && !reservation.published) {
         try {
-          await releaseReservation(reservation.feedbackId, { reason: 'SUBMISSION_FAILED' })
+          await startAuthorizedReservationRecovery(value, reservation.feedbackId, 'SUBMISSION_FAILED')
         } catch (cleanupError) {
           // The hidden reservation remains lease-protected and Task 11 recovery can finish cleanup.
         }

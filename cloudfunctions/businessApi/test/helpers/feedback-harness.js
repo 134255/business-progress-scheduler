@@ -68,7 +68,10 @@ function submission(overrides = {}) {
 }
 
 function createFeedbackHarness(overrides = {}) {
-  const fake = createFakeCloudDatabase(overrides.seed || seed(overrides))
+  const fake = createFakeCloudDatabase(overrides.seed || seed(overrides), {
+    afterTransaction: overrides.afterTransaction,
+    afterTransactionError: overrides.afterTransactionError
+  })
   const repository = createCloudFeedbackRepository({
     db: fake.db,
     clock: overrides.clock || (() => new Date(NOW)),
