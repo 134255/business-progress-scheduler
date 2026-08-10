@@ -1,0 +1,51 @@
+<view class="page">
+  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view class="card">
+    <view class="section-title compact-title">检索冻结业务</view>
+    <input class="input" value="{{keyword}}" bindinput="onKeyword" placeholder="业务名称或业务线编号" />
+    <button class="primary-button" bindtap="search" loading="{{searching}}" disabled="{{searching}}">搜索</button>
+  </view>
+
+  <view wx:if="{{items.length}}" class="section-title">冻结业务（{{total}}）</view>
+  <view class="card result-item" wx:for="{{items}}" wx:key="_id" data-id="{{item._id}}" bindtap="selectBusiness">
+    <view class="row-between"><text class="item-name">{{item.name}}</text><status-pill status="{{item.status}}" /></view>
+    <text class="muted block">{{item.code}} · 版本 {{item.version}}</text>
+  </view>
+  <view wx:if="{{!searching && !items.length && !selectedId}}" class="empty">暂无符合条件的冻结业务</view>
+
+  <block wx:if="{{line}}">
+    <view class="section-title">审计式修订</view>
+    <view class="card frozen-summary">
+      <view class="row-between"><text class="item-name">{{line.name}}</text><status-pill status="{{line.status}}" /></view>
+      <text class="muted block">{{line.code}} · 当前版本 {{line.version}}</text>
+      <text class="warning block">修订会追加审计版本，不会覆盖节点反馈历史。</text>
+    </view>
+    <view class="card">
+      <view class="field"><text class="field-label">业务名称</text><input class="input" value="{{form.name}}" data-field="name" bindinput="onFormInput" /></view>
+      <view class="field"><text class="field-label">业务说明</text><textarea class="textarea" value="{{form.description}}" data-field="description" bindinput="onFormInput" /></view>
+      <view class="date-grid">
+        <view class="field"><text class="field-label">计划开始日期</text><picker mode="date" value="{{form.plannedStartDate}}" data-field="plannedStartDate" bindchange="onFormInput"><view class="input">{{form.plannedStartDate || '请选择'}}</view></picker></view>
+        <view class="field"><text class="field-label">计划完成日期</text><picker mode="date" value="{{form.plannedEndDate}}" data-field="plannedEndDate" bindchange="onFormInput"><view class="input">{{form.plannedEndDate || '请选择'}}</view></picker></view>
+      </view>
+      <view class="field"><text class="field-label">冻结状态</text><picker mode="selector" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatus"><view class="input">{{statusOptions[statusIndex].label}}</view></picker></view>
+      <view class="field"><text class="field-label">修订原因 *</text><textarea class="textarea" value="{{reason}}" maxlength="500" bindinput="onReason" placeholder="说明依据、原因和影响" /></view>
+      <view class="field">
+        <view class="row-between"><text class="field-label">修订附件</text><text class="muted">{{totalBytesText}} / 20 MB</text></view>
+        <view class="evidence-actions"><button size="mini" bindtap="chooseMedia">图片或视频</button><button size="mini" bindtap="choosePdf">PDF</button></view>
+        <view class="file-row" wx:for="{{files}}" wx:key="localKey"><text>{{item.name}} · {{item.sizeText}}</text><text class="remove" data-index="{{index}}" bindtap="removeFile">移除</text></view>
+      </view>
+      <button class="primary-button" bindtap="submit" loading="{{submitting}}" disabled="{{submitting}}">保存审计式修订</button>
+    </view>
+
+    <view class="section-title">修订历史</view>
+    <view class="card amendment" wx:for="{{amendments}}" wx:key="amendmentId">
+      <view class="row-between"><text>版本 {{item.beforeVersion}} → {{item.afterVersion}}</text><text class="muted">{{item.reason}}</text></view>
+      <text class="history-label">修订前</text><text class="json-text">{{item.beforeText}}</text>
+      <text class="history-label">修订后</text><text class="json-text">{{item.afterText}}</text>
+      <view class="file-row" wx:for="{{item.evidences}}" wx:for-item="evidence" wx:key="evidenceId" data-evidenceid="{{evidence.evidenceId}}" data-status="{{evidence.storageStatus}}" bindtap="previewEvidence">
+        <text>{{evidence.fileName}}</text><text class="muted">{{evidence.storageStatus === 'available' ? '查看' : '已清理'}}</text>
+      </view>
+    </view>
+    <view wx:if="{{!amendments.length}}" class="empty">暂无历史修订</view>
+  </block>
+</view>

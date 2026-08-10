@@ -1053,3 +1053,60 @@ test('审计修订在权限、冻结状态、版本和附件归属变化时失�
     assert.equal(fake.documents('business_lines')[0].version, 9)
   })
 })
+
+test('超级管理员可全局检索冻结业务并读取脱敏修订历史，普通账号失败关闭', async () => {
+  const seed = seedDefinition({
+    users: [
+      { _id: 'root', status: 'active', role: 'super_admin' },
+      { _id: 'member', status: 'active', role: 'user' }
+    ],
+    extra: {
+      business_lines: [
+        { _id: 'line-completed', code: 'YW-20260810-0001', name: '冻结开户业务', description: '说明', status: 'completed', version: 4, progress: 100, currentNodeId: 'node-completed', nodeCount: 1, updatedAt: new Date('2026-08-10T02:00:00.000Z') },
+        { _id: 'line-deleted', code: 'YW-20260809-0001', name: '已删除归档', description: '', status: 'deleted', version: 3, progress: 20, currentNodeId: 'node-deleted', nodeCount: 1, updatedAt: new Date('2026-08-09T02:00:00.000Z') },
+        { _id: 'line-active', code: 'YW-20260808-0001', name: '进行中业务', status: 'active', version: 2, updatedAt: new Date('2026-08-08T02:00:00.000Z') }
+      ],
+      business_nodes: [
+        { _id: 'node-completed', businessLineId: 'line-completed', nodeCode: 'YW-20260810-0001-N001', sequence: 0, name: '完成', status: 'completed', version: 2, assigneeUserIds: ['secret-assignee'] },
+        { _id: 'node-deleted', businessLineId: 'line-deleted', nodeCode: 'YW-20260809-0001-N001', sequence: 0, name: '归档', status: 'in_progress', version: 2 }
+      ],
+      audit_logs: [{
+        _id: 'business-amend-line-completed-4', actorId: 'root-secret', action: 'AMEND_FROZEN_BUSINESS',
+        targetType: 'business_line', targetId: 'line-completed', reason: '审计修订',
+        before: { description: '旧说明' }, after: { description: '说明' },
+        beforeVersion: 3, afterVersion: 4, publishState: 'published',
+        inputHash: 'secret-hash', publishedAt: new Date('2026-08-10T01:00:00.000Z')
+      }],
+      evidences: [{
+        _id: 'evidence-amend', businessLineId: 'line-completed', nodeId: null,
+        amendmentId: 'business-amend-line-completed-4', fileId: 'cloud://secret-file',
+        fileName: '更正材料.pdf', category: 'pdf', size: 123,
+        storageStatus: 'available', retentionScope: 'evidence', retentionSource: 'audit_amendment'
+      }]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+  const actor = { _id: 'root', status: 'active', role: 'super_admin' }
+  const list = await repository.listFrozenBusinessesForAdmin({ actor, query: { keyword: '冻结', page: 1, pageSize: 10 } })
+  assert.equal(list.total, 1)
+  assert.deepEqual(list.items.map(item => item._id), ['line-completed'])
+  assert.equal(Object.hasOwn(list.items[0], 'managerUserIds'), false)
+
+  const detail = await repository.getFrozenBusinessForAdmin({ actor, lineId: 'line-completed' })
+  assert.equal(detail.line._id, 'line-completed')
+  assert.equal(detail.nodes[0].nodeCode, 'YW-20260810-0001-N001')
+  assert.equal(Object.hasOwn(detail.nodes[0], 'assigneeUserIds'), false)
+  assert.deepEqual(detail.amendments[0].before, { description: '旧说明' })
+  assert.deepEqual(detail.amendments[0].evidences, [{
+    evidenceId: 'evidence-amend', fileName: '更正材料.pdf', category: 'pdf', size: 123,
+    storageStatus: 'available'
+  }])
+  assert.equal(Object.hasOwn(detail.amendments[0], 'actorId'), false)
+  assert.equal(JSON.stringify(detail).includes('secret-hash'), false)
+  assert.equal(JSON.stringify(detail).includes('secret-file'), false)
+
+  await assert.rejects(
+    repository.listFrozenBusinessesForAdmin({ actor: { _id: 'member', status: 'active', role: 'user' }, query: { keyword: '', page: 1, pageSize: 10 } }),
+    error => error.code === 'FORBIDDEN'
+  )
+})

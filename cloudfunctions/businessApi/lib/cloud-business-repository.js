@@ -284,6 +284,125 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     }
   }
 
+  function frozenLineProjection(line) {
+    return {
+      _id: line._id,
+      code: line.code || '',
+      name: line.name || '',
+      description: line.description || '',
+      plannedStartDate: line.plannedStartDate || '',
+      plannedEndDate: line.plannedEndDate || '',
+      status: line.status,
+      version: line.version,
+      progress: Number(line.progress || 0),
+      nodeCount: Number(line.nodeCount || 0),
+      currentNodeId: line.currentNodeId || '',
+      currentNodeName: line.currentNodeName || '',
+      frozenAt: clone(line.frozenAt || null),
+      retentionStartedAt: clone(line.retentionStartedAt || null),
+      purgeDueAt: clone(line.purgeDueAt || null),
+      updatedAt: clone(line.updatedAt || null)
+    }
+  }
+
+  function frozenNodeProjection(node) {
+    return {
+      _id: node._id,
+      nodeCode: node.nodeCode || '',
+      sequence: Number(node.sequence || 0),
+      name: node.name || '',
+      description: node.description || '',
+      status: node.status,
+      version: node.version,
+      activatedAt: clone(node.activatedAt || null),
+      dueAt: clone(node.dueAt || null),
+      completedAt: clone(node.completedAt || null),
+      overdueWorkMinutes: Number(node.overdueWorkMinutes || 0),
+      rejectionCount: Number(node.rejectionCount || 0)
+    }
+  }
+
+  function amendmentEvidenceProjection(evidence) {
+    return {
+      evidenceId: evidence._id,
+      fileName: evidence.fileName || '',
+      category: evidence.category || '',
+      size: Number(evidence.size || 0),
+      storageStatus: evidence.storageStatus || ''
+    }
+  }
+
+  function amendmentProjection(amendment, evidences) {
+    return {
+      amendmentId: amendment._id,
+      reason: amendment.reason || '',
+      before: clone(amendment.before || {}),
+      after: clone(amendment.after || {}),
+      beforeVersion: amendment.beforeVersion,
+      afterVersion: amendment.afterVersion,
+      publishedAt: clone(amendment.publishedAt || amendment.transitionAt || amendment.createdAt || null),
+      evidences: evidences.map(amendmentEvidenceProjection)
+    }
+  }
+
+  async function requireCurrentSuperAdmin(actorId) {
+    const actor = await readDocument(db, COLLECTIONS.users, actorId)
+    if (!actor || actor.status !== 'active' || actor.role !== 'super_admin') throw createError('FORBIDDEN')
+    return actor
+  }
+
+  async function listFrozenBusinessesForAdmin({ actor, query }) {
+    await requireCurrentSuperAdmin(actor && actor._id)
+    const groups = await Promise.all([...FROZEN_BUSINESS_STATUSES].map(status =>
+      readAll(() => db.collection(COLLECTIONS.lines).where({ status }))))
+    await requireCurrentSuperAdmin(actor && actor._id)
+    const keyword = query.keyword.toLowerCase()
+    const items = groups.flat()
+      .filter(line => !keyword || [line.code, line.name]
+        .some(value => String(value || '').toLowerCase().includes(keyword)))
+      .sort(compareUpdatedDesc)
+      .map(frozenLineProjection)
+    const offset = (query.page - 1) * query.pageSize
+    return {
+      items: items.slice(offset, offset + query.pageSize),
+      page: query.page,
+      pageSize: query.pageSize,
+      total: items.length,
+      hasMore: offset + query.pageSize < items.length
+    }
+  }
+
+  async function getFrozenBusinessForAdmin({ actor, lineId }) {
+    const line = await db.runTransaction(async transaction => {
+      const currentActor = await readDocument(transaction, COLLECTIONS.users, actor && actor._id)
+      if (!currentActor || currentActor.status !== 'active' || currentActor.role !== 'super_admin') {
+        throw createError('FORBIDDEN')
+      }
+      const currentLine = await readDocument(transaction, COLLECTIONS.lines, lineId)
+      if (!currentLine || currentLine.status === 'creating' || !FROZEN_BUSINESS_STATUSES.has(currentLine.status)) {
+        throw createError('NOT_FOUND')
+      }
+      return currentLine
+    })
+    const [nodes, auditRows, evidences] = await Promise.all([
+      readAll(() => db.collection(COLLECTIONS.nodes).where({ businessLineId: line._id })),
+      readAll(() => db.collection(COLLECTIONS.audit).where({ targetId: line._id })),
+      readAll(() => db.collection('evidences').where({ businessLineId: line._id }))
+    ])
+    await requireCurrentSuperAdmin(actor && actor._id)
+    const amendments = auditRows
+      .filter(item => item.action === 'AMEND_FROZEN_BUSINESS' && item.targetType === 'business_line' &&
+        item.targetId === line._id && item.publishState === 'published')
+      .sort(compareUpdatedDesc)
+      .map(item => amendmentProjection(item, evidences.filter(evidence =>
+        evidence.amendmentId === item._id && evidence.businessLineId === line._id && evidence.nodeId === null)))
+    return {
+      line: frozenLineProjection(line),
+      nodes: nodes.sort(compareNodes).map(frozenNodeProjection),
+      amendments
+    }
+  }
+
   async function getBusinessLine({ actor, lineId }) {
     const line = await readDocument(db, COLLECTIONS.lines, lineId)
     if (!line || line.status === 'creating' || line.status === 'deleted') throw createError('NOT_FOUND')
@@ -901,6 +1020,8 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     listBusinessLines,
     getBusinessLine,
     updateBusinessMetadata,
+    listFrozenBusinessesForAdmin,
+    getFrozenBusinessForAdmin,
     rejectPreviousNode,
     closeBusinessLine,
     amendFrozenBusiness

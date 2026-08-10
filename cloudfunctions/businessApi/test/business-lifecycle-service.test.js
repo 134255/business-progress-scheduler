@@ -31,6 +31,14 @@ function createHarness() {
         amendmentId: 'business-amend-line-1-10',
         version: input.expectedVersion + 1
       }
+    },
+    async listFrozenBusinessesForAdmin(input) {
+      calls.push(input)
+      return { items: [], page: input.query.page, pageSize: input.query.pageSize, total: 0, hasMore: false }
+    },
+    async getFrozenBusinessForAdmin(input) {
+      calls.push(input)
+      return { line: { _id: input.lineId }, nodes: [], amendments: [] }
     }
   }
   return {
@@ -227,5 +235,34 @@ test('修订服务拒绝非超级管理员、可变结构字段和非法附件',
       error => ['FORBIDDEN', 'VALIDATION_ERROR', 'EVIDENCE_NOT_ATTACHABLE'].includes(error.code)
     )
     assert.deepEqual(harness.calls, [])
+  }
+})
+
+test('超级管理员冻结业务查询规范化关键词和分页并拒绝普通账号', async () => {
+  const harness = createHarness()
+  const actor = { _id: 'root', status: 'active', role: 'super_admin' }
+  const list = await harness.service.listFrozenBusinessesForAdmin({
+    actor,
+    query: { keyword: ' 冻结业务 ', page: 2, pageSize: 10 }
+  })
+  const detail = await harness.service.getFrozenBusinessForAdmin({ actor, businessLineId: 'line-1' })
+
+  assert.equal(list.page, 2)
+  assert.equal(detail.line._id, 'line-1')
+  assert.deepEqual(harness.calls, [
+    { actor, query: { keyword: '冻结业务', page: 2, pageSize: 10 } },
+    { actor, lineId: 'line-1' }
+  ])
+
+  for (const value of [
+    { actor: harness.actor, query: {} },
+    { actor, query: { keyword: 'x', page: 0, pageSize: 10 } },
+    { actor, query: { keyword: 'x', page: 1, pageSize: 51 } },
+    { actor, query: { keyword: 'x'.repeat(101), page: 1, pageSize: 10 } }
+  ]) {
+    await assert.rejects(
+      harness.service.listFrozenBusinessesForAdmin(value),
+      error => ['FORBIDDEN', 'VALIDATION_ERROR'].includes(error.code)
+    )
   }
 })

@@ -166,6 +166,22 @@ function normalizeAmendmentInput(input) {
   }
 }
 
+function normalizeFrozenQuery(query) {
+  if (!isPlainOwnObject(query) || Reflect.ownKeys(query).some(key =>
+    typeof key !== 'string' || !['keyword', 'page', 'pageSize'].includes(key))) {
+    throw createError('VALIDATION_ERROR')
+  }
+  const keyword = query.keyword === undefined ? '' : query.keyword
+  const page = query.page === undefined ? 1 : query.page
+  const pageSize = query.pageSize === undefined ? 20 : query.pageSize
+  if (typeof keyword !== 'string' || keyword.trim().length > 100 ||
+      !Number.isSafeInteger(page) || page < 1 ||
+      !Number.isSafeInteger(pageSize) || pageSize < 5 || pageSize > 50) {
+    throw createError('VALIDATION_ERROR')
+  }
+  return { keyword: keyword.trim(), page, pageSize }
+}
+
 function createBusinessLifecycleService({ repository }) {
   if (!repository) throw new TypeError('repository is required')
 
@@ -188,7 +204,25 @@ function createBusinessLifecycleService({ repository }) {
     return repository.amendFrozenBusiness({ actor, ...normalizeAmendmentInput(input) })
   }
 
-  return { rejectPreviousNode, closeBusinessLine, amendFrozenBusiness }
+  async function listFrozenBusinessesForAdmin({ actor, query = {} }) {
+    requireActiveActor(actor)
+    if (actor.role !== 'super_admin') throw createError('FORBIDDEN')
+    return repository.listFrozenBusinessesForAdmin({ actor, query: normalizeFrozenQuery(query) })
+  }
+
+  async function getFrozenBusinessForAdmin({ actor, businessLineId }) {
+    requireActiveActor(actor)
+    if (actor.role !== 'super_admin') throw createError('FORBIDDEN')
+    return repository.getFrozenBusinessForAdmin({ actor, lineId: requireId(businessLineId) })
+  }
+
+  return {
+    rejectPreviousNode,
+    closeBusinessLine,
+    amendFrozenBusiness,
+    listFrozenBusinessesForAdmin,
+    getFrozenBusinessForAdmin
+  }
 }
 
 module.exports = { createBusinessLifecycleService }

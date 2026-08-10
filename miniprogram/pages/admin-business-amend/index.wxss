@@ -1,0 +1,12 @@
+.compact-title { margin: 0 0 16rpx; }
+.result-item { cursor: pointer; }
+.item-name { font-weight: 650; }
+.block { display: block; margin-top: 12rpx; }
+.warning { color: #92400e; }
+.frozen-summary { border: 1rpx solid #fde68a; }
+.date-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16rpx; }
+.evidence-actions { display: flex; gap: 16rpx; margin: 14rpx 0; }
+.file-row { display: flex; justify-content: space-between; gap: 20rpx; padding: 14rpx 0; border-bottom: 1rpx solid #e5e7eb; }
+.remove { color: #be123c; }
+.history-label { display: block; margin-top: 18rpx; color: #0f766e; font-weight: 650; }
+.json-text { display: block; margin-top: 8rpx; padding: 14rpx; white-space: pre-wrap; word-break: break-all; border-radius: 12rpx; background: #f8fafc; }

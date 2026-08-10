@@ -188,6 +188,14 @@ function createBusinessRoutes(businessService) {
 
 function createBusinessLifecycleRoutes(businessLifecycleService) {
   return {
+    listFrozenBusinessesForAdmin: ({ actor, payload }) => businessLifecycleService.listFrozenBusinessesForAdmin({
+      actor,
+      query: payload
+    }),
+    getFrozenBusinessForAdmin: ({ actor, payload }) => businessLifecycleService.getFrozenBusinessForAdmin({
+      actor,
+      businessLineId: payload.businessLineId
+    }),
     rejectPreviousNode: ({ actor, payload }) => businessLifecycleService.rejectPreviousNode({
       actor,
       input: payload

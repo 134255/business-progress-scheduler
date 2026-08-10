@@ -4,6 +4,7 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 
 ## Verified state
 
+- Task 10 已完成本地实现与自审。节点反馈页只接收业务线和节点标识，并重新读取服务端业务、节点版本、字段快照、提交权限和不可变历史；客户端支持短文本、长文本、数字、布尔、日期、单选、多选 7 类字段及字段级快速校验，服务端仍是最终可信校验边界。图片、PDF、视频支持分批选择和多个视频，客户端执行图片 5 MB、PDF/视频 20 MB、单次合计 20 MB 的上传前校验；文件按顺序上传并立即登记，失败重试保留已登记凭证且最终只提交 `evidenceId`。图片、PDF、视频和批量下载均先获取 5 分钟临时访问地址，已清理凭证不再提供查看入口。业务详情新增相邻节点驳回、进行中业务关闭/取消/逻辑删除和冻结提示；超级管理员新增独立的冻结业务全局检索、脱敏详情、修订前后值、专用附件和审计式修订页面，普通成员读取规则未放宽。所有异步加载和写入在结果写回前复核当前账号。真实 CloudBase 部署、微信开发者工具交互和独立代码审查仍未验证。
 - Task 9 已完成本地实现与自审。当前活动节点负责人可原子驳回紧邻的上一已完成节点，业务指针与进度同步回退，但原反馈、凭证、到期时间、激活时间和完成时间均不重置；同一请求键幂等重试只产生一次状态变化和审计记录。业务线管理员或超级管理员可将进行中业务关闭、取消或逻辑删除，并在业务线上设置统一的 60 个自然日普通凭证清理期限；旧版业务更新、删除和反馈写入入口已从部署路由移除。冻结业务只允许超级管理员通过专用审计修订接口修改白名单字段，并保存原因、版本及精确前后值。修订附件通过确定性 `audit_logs` 预约按每块最多 40 个文件认领，单次总量不超过 20 MB、文件数量不设业务上限；每个附件从自身上传时间起独立保留 60 个自然日，只有预约发布后才允许访问。41 个附件的真实并发重试测试证明两个相同请求返回同一结果且只发布一次，105 个附件测试证明所有事务均不超过 100 次文档操作。中断预约回收义务已记录在 `ADR-0004`，由 Task 11 实现；独立代码审查、真实 CloudBase 部署和微信开发者工具验收仍未验证。
 - Task 8-R is implemented, fully verified locally, and formally review-accepted after one fix round as the explicitly approved follow-up to Task 8's exhausted review ledger. Every actor-facing `reserved -> aborting` transition now commits in a transaction that reloads and authorizes the current actor, line, node, and exact reservation. Same-request expiry, OR-winner expiry, and submission-failure compensation cannot carry an authorization result into a later actorless recovery-start transaction. Before any reservation status or lease decision, same-request and OR paths verify the stored reservation ID, business-line ID, and node ID against the trusted request/node claim; a mismatched external reservation returns `VERSION_CONFLICT` without changing user, line, node, reservation, evidence, or audit state. OR recovery also rechecks that the node still claims the exact winner before mutation. Shared actorless rollback restores evidence and finalizes only an already-`aborting` reservation, while the repository-only Task 11 maintenance entry may independently start genuinely expired recovery, clears a claim only when the loaded node also belongs to the reservation line, and remains absent from public services and routes.
 - Task 8 of the template/node/field plan is implemented on its isolated worktree; formal-review round five fixes are locally verified but remain pending reviewer acceptance. Every actor-facing feedback reservation path transactionally revalidates the current active actor and account relationships before deciding reservation absence/status or comparing stored request fingerprints and input hashes. This includes every OR-contention poll: each iteration uses only the trusted actor/account ID plus line/node IDs, atomically rereads current user/line/node state, fails `FORBIDDEN` on account or relationship changes before reading the winner, and only then reads and interprets the missing/reserved/published/aborted winner state; an authorized aborted cleanup clears the stale claim in that same transaction. Public lookup, begin, claim, finalization, and history retain the same fail-closed ordering, while expired-reservation recovery remains an actorless internal maintenance hook outside the feedback service and routes. Active account-ID assignees append immutable typed revisions, while history binds new evidence to the exact safe feedback revision and admits new records only for the exact `business_line/node_feedback` or `evidence/audit_amendment` scope/source pair; missing scope is confined to the explicit legacy `evidenceIds` adapter. Evidence attachment has no business count cap: 40-document claims stay below 100 operations and a digest binds cursor count, bytes, and ordered IDs. OR contention distinguishes completed winners, non-completion conflicts, live retryable leases, and recoverable expired/aborted claims. Only final-node completion starts retention. A shared strict classifier governs access and history: ordinary evidence on `completed`, `cancelled`, `closed`, or `deleted` lines requires a valid non-null line `purgeDueAt`; amendment evidence requires its own valid deadline; unknown, mismatched, missing, or malformed new-record metadata fails closed before temporary-URL issuance or history projection; and unattached uploads retain their 24-hour orphan lease. Task 11 must recover expired reservations, clear node claims whose reservation is missing, then scan due terminal lines and process all evidence by `businessLineId` in bounded chunks. Physical CloudBase request/document byte limits remain platform constraints. The durable protocol is recorded in `ADR-0003`.
@@ -14,7 +15,7 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 - Task 3 of the template/node/field plan is implemented on its isolated worktree: protected template routes now expose administrator lifecycle operations and an ordinary-user enabled-template projection; the template service enforces super-administrator writes, disabled-before-edit, active account-document assignees, stable keys, optimistic versions, logical deletion, and a formally supported maximum of 48 nodes. The CloudBase repository paginates beyond the SDK's 100-document query window and atomically writes template metadata, fixed-ID node replacements, and one secret-free audit record using server dates after fixed-document template and active-assignee revalidation. Distinct assignee reads count against the 100-operation transaction budget; definitions that exceed the node or operation boundary return the safe `TEMPLATE_LIMIT_EXCEEDED` code and maximum-bearing message. Only template application errors carrying the shared private server-side `Symbol` may retain an allowlisted response; unmarked infrastructure failures return generic `INTERNAL_ERROR`.
 - Task 2 of the template/node/field plan is implemented on its isolated worktree: pure CommonJS `field-domain` and `template-domain` modules normalize the seven supported field types, validate denormalized submitted-value snapshots, enforce stable node/field keys and contiguous sequences, apply the 22-work-hour SLA default, restrict evidence types, require active assignee account document IDs for enablement, and reject definition edits while a template is enabled. Text regular-expression definitions use a conservative non-grouped grammar so stored patterns cannot trigger catastrophic backtracking during feedback validation.
 - Task 1 of the template/node/field plan is implemented on its isolated worktree: `createBusinessApi` accepts injected `protectedRoutes`; recognized protected actions receive the trusted resolved actor and payload separately, are rejected before handler invocation when authentication fails, and retain the existing account and legacy-route behavior.
-- The project owner approved the complete template/node/field refinement covering stable identifiers, disabled-before-edit template rules, generated business and node codes, immutable feedback revisions, previous-node rejection without SLA reset, completed-business freezing, audited super-administrator corrections, video evidence, and 60-calendar-day cloud-object retention. The confirmed specification is `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`, and the executable task plan is `docs/superpowers/plans/2026-08-07-template-node-fields.md`. Tasks 1 through 9 are implemented; Task 10 is next.
+- 项目所有者已批准完整的模板、节点、字段、驳回、冻结修订、视频凭证和 60 个自然日清理方案。确认后的设计为 `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`，执行计划为 `docs/superpowers/plans/2026-08-07-template-node-fields.md`。Task 1 至 Task 10 已完成本地实现；下一步为 Task 11 定时提醒与清理工作器。
 - WeChat DevTools account-administration smoke acceptance now covers automatic dashboard restoration, the authoritative super-administrator list state, creation of two ordinary test accounts and a second super administrator, case-insensitive duplicate-username rejection, safe disable/re-enable of the second administrator, rejection of disabling or demoting the final active super administrator, five-failure account lockout, administrator unlock, and read-only compatibility navigation through dashboard, business list, business detail, node feedback/history, and profile pages. No credential or identity value was recorded.
 - The obsolete `account-admin` linked worktree is fully cleaned up: its accidental deployment-manual edit was explicitly discarded, Git worktree registration and contents were removed, the merged local `codex/account-admin` branch was deleted through the non-force path, and the final empty `.worktrees/account-admin` directory was removed after WeChat DevTools released it.
 - Local `main` was fast-forwarded from `22a78f3` to the accepted account-administration head `f39c89e`. The merged result passed the full backend, client, WXML, syntax, diff, and project-memory checks. `origin/main` was then fast-forwarded through the integrated milestone and cleanup record at `b314785`.
@@ -37,6 +38,20 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 
 ## Verification
 
+2026-08-10 执行 Task 10 动态反馈、凭证和冻结修订客户端验证：
+
+| 命令或边界 | 结果 |
+|---|---|
+| 动态字段 RED/GREEN | 预期失败先复现未读取服务端字段快照、缺少 7 类控件、类型丢失和历史版本缺失；实现后覆盖必填、长度、正则、数值范围与小数位、严格布尔、日期和选项约束。 |
+| 凭证 RED/GREEN | 预期失败先复现缺少图片/视频选择、旧永久文件标识预览和直接提交原始文件信息；实现后覆盖多视频、单文件与合计大小、顺序上传、即时登记、失败续传、临时授权预览和顺序下载。 |
+| 驳回、关闭与修订 RED/GREEN | 预期失败先复现 URL 携带可伪造业务数据、缺少原因表单和超级管理员页面；实现后覆盖双节点版本、冲突刷新、关闭终态、冻结提示、全局冻结业务检索、脱敏修订历史、专用附件和异步账号切换失败关闭。 |
+| `node --test miniprogram/test/node-feedback-v2.test.js miniprogram/test/admin-business-amend-flow.test.js miniprogram/test/business-template-flow.test.js miniprogram/test/template-flow.test.js miniprogram/test/account-flow.test.js miniprogram/test/admin-users-flow.test.js` | 通过：102 个测试，0 个失败。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：364 个测试，0 个失败；仅出现两条既有 npm 用户配置警告。 |
+| `node tools/test-wxml-structure.mjs` | 通过：1 个测试，0 个失败。 |
+| JavaScript 语法、`git diff --check` 与项目记忆校验 | 通过；Git 仅提示预期的 LF/CRLF 工作区换行转换。 |
+
+真实 CloudBase 部署、临时地址与云存储真机行为、微信开发者工具交互及独立代码审查仍未验证。Task 11 下一步负责预约回收、孤立文件清理、到期提醒和定时清理。
+
 2026-08-10 执行 Task 9 业务生命周期控制验证：
 
 | 命令或边界 | 结果 |
@@ -49,7 +64,7 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 | `node tools/test-wxml-structure.mjs` | 通过：1 个测试，0 个失败。 |
 | JavaScript 语法与 `git diff --check` | 通过；Git 仅提示预期的 LF/CRLF 工作区换行转换。 |
 
-独立代码审查、真实 CloudBase 事务竞争、云函数部署和微信开发者工具验收仍未验证。Task 10 下一步负责动态反馈、凭证、驳回与超级管理员修订页面。
+独立代码审查、真实 CloudBase 事务竞争、云函数部署和微信开发者工具验收仍未验证。上述 Task 9 能力已由 Task 10 接入客户端；下一步进入 Task 11 定时提醒与清理工作器。
 
 Executed on 2026-08-10 for Task 8-R atomic actor-facing feedback recovery:
 
@@ -575,8 +590,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. Integrate the formally accepted Task 8-R branch, then preserve the real-CloudBase and Task 11 acceptance boundaries for their deployment phases.
-2. Execute Task 9 from `docs/superpowers/plans/2026-08-07-template-node-fields.md`: add previous-node rejection, frozen-state enforcement, and audited amendments.
-3. Continue the remaining client and evidence-retention tasks in plan order from the isolated `codex/` worktree.
-4. Continue SLA/calendar, hourly reminder, and Enterprise WeChat adapter phases.
-5. Replace the administrator reset-password editable modal with masked inputs, then complete the remaining second-identity binding/unbinding acceptance.
+1. 按 `docs/superpowers/plans/2026-08-07-template-node-fields.md` 执行 Task 11：预约回收、孤立文件清理、到期提醒和幂等云文件清理工作器。
+2. 在 Task 11 后执行部署手册、索引核对、真实 CloudBase 与微信开发者工具验收。
+3. 继续 SLA/日历、每工作小时提醒和企业微信适配器阶段。
+4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。

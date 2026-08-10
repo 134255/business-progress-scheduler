@@ -400,6 +400,28 @@ test('冻结业务修订路由只使用受信账号并交由专用审计服务�
   }])
 })
 
+test('冻结业务管理查询路由只传递受信超级管理员和显式查询参数', async () => {
+  const calls = []
+  const businessLifecycleService = {
+    async listFrozenBusinessesForAdmin(input) {
+      calls.push(['list', input])
+      return { items: [], total: 0 }
+    },
+    async getFrozenBusinessForAdmin(input) {
+      calls.push(['detail', input])
+      return { line: { _id: input.businessLineId }, nodes: [], amendments: [] }
+    }
+  }
+  const harness = createRouteHarness({ businessLifecycleService })
+  await harness.api.main({ action: 'listFrozenBusinessesForAdmin', payload: { keyword: '冻结', page: 1, pageSize: 10, actorId: 'forged' } })
+  await harness.api.main({ action: 'getFrozenBusinessForAdmin', payload: { businessLineId: 'line-1', actorId: 'forged' } })
+  const actor = { _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound' }
+  assert.deepEqual(calls, [
+    ['list', { actor, query: { keyword: '冻结', page: 1, pageSize: 10, actorId: 'forged' } }],
+    ['detail', { actor, businessLineId: 'line-1' }]
+  ])
+})
+
 test('default evidence routes delegate trusted actors and exact registration/access contracts', async () => {
   const calls = []
   const evidenceService = {

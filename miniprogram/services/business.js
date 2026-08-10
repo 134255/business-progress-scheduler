@@ -54,6 +54,38 @@ function getNodeHistory(businessLineId, nodeId) {
   return callBusinessApi('getNodeHistory', { businessLineId, nodeId })
 }
 
+function registerEvidenceUpload(input) {
+  return callBusinessApi('registerEvidenceUpload', input)
+}
+
+function getEvidenceAccess(evidenceId) {
+  return callBusinessApi('getEvidenceAccess', { evidenceId })
+}
+
+function submitFeedback(input) {
+  return callBusinessApi('submitFeedback', input)
+}
+
+function rejectPreviousNode(input) {
+  return callBusinessApi('rejectPreviousNode', input)
+}
+
+function closeBusinessLine(input) {
+  return callBusinessApi('closeBusinessLine', input)
+}
+
+function listFrozenBusinessesForAdmin(query) {
+  return callBusinessApi('listFrozenBusinessesForAdmin', query)
+}
+
+function getFrozenBusinessForAdmin(businessLineId) {
+  return callBusinessApi('getFrozenBusinessForAdmin', { businessLineId })
+}
+
+function amendFrozenBusiness(input) {
+  return callBusinessApi('amendFrozenBusiness', input)
+}
+
 module.exports = {
   bootstrap,
   updateUserProfile,
@@ -65,5 +97,13 @@ module.exports = {
   updateBusinessMetadata,
   deleteBusinessLine,
   submitNodeFeedback,
-  getNodeHistory
+  getNodeHistory,
+  registerEvidenceUpload,
+  getEvidenceAccess,
+  submitFeedback,
+  rejectPreviousNode,
+  closeBusinessLine,
+  listFrozenBusinessesForAdmin,
+  getFrozenBusinessForAdmin,
+  amendFrozenBusiness
 }
