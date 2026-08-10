@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact review: 2026-08-08 (Asia/Shanghai)
+Last stable-fact review: 2026-08-10 (Asia/Shanghai)
 
 ## Product
 
@@ -35,6 +35,7 @@ Primary collections include `users`, `user_credentials`, `auth_challenges`, `wec
 Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 Unbounded-count feedback evidence attachment uses hidden, deterministic, chunked reservations under the existing `node_feedback` and `evidences` collections; the invariant and Task 11 recovery obligation are recorded in `docs/memory/decisions/ADR-0003-feedback-evidence-reservations.md`.
 For ordinary feedback evidence, a strict non-null completed-line `purgeDueAt` is authoritative for the whole business line; every terminal line state (`completed`, `cancelled`, `closed`, or `deleted`) must carry that valid deadline or evidence access/history fails closed. Attached evidence records declare `retentionScope: business_line` with `retentionSource: node_feedback`; future Task 9 amendment evidence may explicitly use `retentionScope: evidence` with `retentionSource: audit_amendment` and its own required strict deadline. One shared classifier enforces these exact scope/source pairs for access and history, while missing scope is accepted only by the explicit legacy `evidenceIds` adapter. Unknown or inconsistent scope/source metadata fails closed. Task 11 must scan due terminal lines and purge every associated evidence object by `businessLineId` in bounded chunks; earlier revisions therefore inherit the same deadline as the final revision.
+Task 9 已落地业务驳回、关闭冻结和超级管理员审计修订。普通凭证继续继承业务线统一清理期限；审计修订附件从各自上传时间起独立保留 60 个自然日，并通过确定性、分块、可重试的 `audit_logs` 预约完成认领与发布。中断预约的 Task 11 回收义务记录在 `docs/memory/decisions/ADR-0004-business-lifecycle-amendment-reservations.md`。
 
 Account deployment requires the `system_settings/account_admin_state` guard, deterministic `wechat_bindings/<sha256(openid)>` backfill, and removal of the legacy `users.openid` unique index only after a verified migration. The security-redacted operator procedure is `docs/deployment/account-admin-setup.md`.
 

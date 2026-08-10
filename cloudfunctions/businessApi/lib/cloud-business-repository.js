@@ -1,6 +1,8 @@
 const crypto = require('node:crypto')
 
 const { formatBusinessCode, formatNodeCode } = require('./business-numbering')
+const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
+const { parseStrictTimestamp } = require('./evidence-retention')
 const {
   APPLICATION_ERROR_MARKER,
   MAX_TEMPLATE_NODES,
@@ -21,6 +23,10 @@ const MAX_TRANSACTION_OPERATIONS = 100
 const MAX_DUPLICATE_RETRIES = 3
 const SNAPSHOT_LIMIT_MESSAGE = 'Template snapshot transaction operation budget exceeded; reduce distinct assignees'
 const FROZEN_BUSINESS_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
+const CLOSURE_OUTCOMES = new Set(['cancelled', 'closed', 'deleted'])
+const RETENTION_MS = 60 * 24 * 60 * 60 * 1000
+const AMENDMENT_EVIDENCE_CHUNK_SIZE = 40
+const AMENDMENT_CLAIM_LIFETIME_MS = 15 * 60 * 1000
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -169,6 +175,53 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
       : Boolean(actor.openid) && membershipArray(line.managerIds).includes(actor.openid)
   }
 
+  function usesAccountAssignees(node) {
+    return Object.prototype.hasOwnProperty.call(node, 'assigneeUserIds')
+  }
+
+  function assertCurrentAssignee(line, node, actor) {
+    const accountSchema = usesAccountMembership(line) || usesAccountAssignees(node)
+    const memberAllowed = accountSchema
+      ? isNewLineMember(line, actor._id)
+      : isLegacyLineMember(line, actor.openid)
+    const assigneeAllowed = accountSchema
+      ? membershipArray(node.assigneeUserIds).includes(actor._id)
+      : Boolean(actor.openid) && membershipArray(node.assigneeIds).includes(actor.openid)
+    if (!memberAllowed || !assigneeAllowed) throw createError('FORBIDDEN')
+  }
+
+  function increment(value) {
+    if (!Number.isSafeInteger(value) || value < 1 || value === Number.MAX_SAFE_INTEGER) {
+      throw createError('VERSION_CONFLICT')
+    }
+    return value + 1
+  }
+
+  function incrementCounter(value) {
+    const normalized = value === undefined ? 0 : value
+    if (!Number.isSafeInteger(normalized) || normalized < 0 || normalized === Number.MAX_SAFE_INTEGER) {
+      throw createError('VERSION_CONFLICT')
+    }
+    return normalized + 1
+  }
+
+  function rejectionIdentity(actorId, input) {
+    const requestHash = hash(`${actorId}\0${input.requestKey}`)
+    const inputHash = hash(JSON.stringify([
+      actorId,
+      input.lineId,
+      input.currentNodeId,
+      input.expectedCurrentVersion,
+      input.expectedPreviousVersion,
+      input.reason
+    ]))
+    return {
+      auditId: `business-rejection-${requestHash}`,
+      requestHash,
+      inputHash
+    }
+  }
+
   function compareUpdatedDesc(left, right) {
     const leftValue = left.updatedAt instanceof Date ? left.updatedAt.getTime() : Number(left.updatedAt)
     const rightValue = right.updatedAt instanceof Date ? right.updatedAt.getTime() : Number(right.updatedAt)
@@ -290,6 +343,374 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
       })
       return { id: lineId, version: nextVersion }
     })
+  }
+
+  async function rejectPreviousNode(input) {
+    const identity = rejectionIdentity(input.actor && input.actor._id, input)
+    const currentSequence = await db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, COLLECTIONS.users, input.actor && input.actor._id)
+      if (!actor || actor.status !== 'active') throw createError('FORBIDDEN')
+      const line = await readDocument(transaction, COLLECTIONS.lines, input.lineId)
+      if (!line || line.status === 'creating') throw createError('NOT_FOUND')
+      const current = await readDocument(transaction, COLLECTIONS.nodes, input.currentNodeId)
+      if (!current || current.businessLineId !== line._id) throw createError('NOT_FOUND')
+      assertCurrentAssignee(line, current, actor)
+      return Number(current.sequence)
+    })
+    if (!Number.isSafeInteger(currentSequence) || currentSequence < 1) {
+      throw createError('REJECTION_NOT_ALLOWED')
+    }
+    const candidates = await readAll(() => db.collection(COLLECTIONS.nodes)
+      .where({ businessLineId: input.lineId }))
+    const previousCandidates = candidates.filter(node => Number(node.sequence) === currentSequence - 1)
+    if (previousCandidates.length !== 1) throw createError('REJECTION_NOT_ALLOWED')
+    const previousNodeId = previousCandidates[0]._id
+    const at = clock()
+
+    return db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, COLLECTIONS.users, input.actor && input.actor._id)
+      if (!actor || actor.status !== 'active') throw createError('FORBIDDEN')
+      const line = await readDocument(transaction, COLLECTIONS.lines, input.lineId)
+      if (!line || line.status === 'creating') throw createError('NOT_FOUND')
+      const current = await readDocument(transaction, COLLECTIONS.nodes, input.currentNodeId)
+      if (!current || current.businessLineId !== line._id) throw createError('NOT_FOUND')
+      assertCurrentAssignee(line, current, actor)
+
+      const existing = await readDocument(transaction, COLLECTIONS.audit, identity.auditId)
+      if (existing) {
+        if (existing.action !== 'REJECT_PREVIOUS_NODE' || existing.actorId !== actor._id ||
+            existing.targetId !== line._id || existing.currentNodeId !== current._id ||
+            existing.previousNodeId !== previousNodeId || existing.requestHash !== identity.requestHash ||
+            existing.inputHash !== identity.inputHash || !existing.result) {
+          throw createError('VERSION_CONFLICT')
+        }
+        return clone(existing.result)
+      }
+
+      if (line.status !== 'active' || line.currentNodeId !== current._id ||
+          !['ready', 'in_progress', 'blocked'].includes(current.status) || current.feedbackClaimId) {
+        throw createError('REJECTION_NOT_ALLOWED')
+      }
+      const previous = await readDocument(transaction, COLLECTIONS.nodes, previousNodeId)
+      if (!previous || previous.businessLineId !== line._id || previous.status !== 'completed' ||
+          Number(previous.sequence) + 1 !== Number(current.sequence)) {
+        throw createError('REJECTION_NOT_ALLOWED')
+      }
+      if (current.version !== input.expectedCurrentVersion ||
+          previous.version !== input.expectedPreviousVersion) {
+        throw createError('VERSION_CONFLICT')
+      }
+
+      const currentVersion = increment(current.version)
+      const previousVersion = increment(previous.version)
+      const lineVersion = increment(line.version)
+      const rejectionCount = incrementCounter(previous.rejectionCount)
+      const nodeCount = Number(line.nodeCount)
+      if (!Number.isSafeInteger(nodeCount) || nodeCount < 1) throw createError('VERSION_CONFLICT')
+      const progress = Math.floor((Number(previous.sequence) / nodeCount) * 100)
+      const result = {
+        businessLineId: line._id,
+        previousNodeId: previous._id,
+        currentNodeId: current._id,
+        previousVersion,
+        currentVersion,
+        lineVersion
+      }
+
+      await transaction.collection(COLLECTIONS.nodes).doc(previous._id).update({ data: {
+        status: 'in_progress',
+        version: previousVersion,
+        rejectionCount,
+        lastRejectedAt: at,
+        lastReactivatedAt: at,
+        updatedAt: db.serverDate()
+      } })
+      await transaction.collection(COLLECTIONS.nodes).doc(current._id).update({ data: {
+        status: 'waiting',
+        version: currentVersion,
+        lastReturnedToWaitingAt: at,
+        updatedAt: db.serverDate()
+      } })
+      await transaction.collection(COLLECTIONS.lines).doc(line._id).update({ data: {
+        currentNodeId: previous._id,
+        currentNodeIndex: previous.sequence,
+        currentNodeName: previous.name,
+        progress,
+        version: lineVersion,
+        updatedAt: db.serverDate()
+      } })
+      await transaction.collection(COLLECTIONS.audit).doc(identity.auditId).set({ data: {
+        actorId: actor._id,
+        action: 'REJECT_PREVIOUS_NODE',
+        targetType: 'business_line',
+        targetId: line._id,
+        previousNodeId: previous._id,
+        currentNodeId: current._id,
+        reason: input.reason,
+        requestHash: identity.requestHash,
+        inputHash: identity.inputHash,
+        result,
+        createdAt: db.serverDate()
+      } })
+      return result
+    })
+  }
+
+  async function closeBusinessLine({ actor, lineId, expectedVersion, outcome, reason }) {
+    if (!CLOSURE_OUTCOMES.has(outcome)) throw createError('VALIDATION_ERROR')
+    const at = clock()
+    if (!(at instanceof Date) || Number.isNaN(at.getTime())) throw new TypeError('clock must return a Date')
+    const purgeDueAt = new Date(at.getTime() + RETENTION_MS)
+    return db.runTransaction(async transaction => {
+      const currentActor = await readDocument(transaction, COLLECTIONS.users, actor && actor._id)
+      if (!currentActor || currentActor.status !== 'active') throw createError('FORBIDDEN')
+      const line = await readDocument(transaction, COLLECTIONS.lines, lineId)
+      if (!line || line.status === 'creating') throw createError('NOT_FOUND')
+      if (currentActor.role !== 'super_admin' && !isLineManager(line, currentActor)) {
+        throw createError('FORBIDDEN')
+      }
+      if (FROZEN_BUSINESS_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
+      if (line.status !== 'active') throw createError('BUSINESS_FROZEN')
+      if (line.version !== expectedVersion) throw createError('VERSION_CONFLICT')
+      const version = increment(line.version)
+      const changes = {
+        status: outcome,
+        version,
+        frozenAt: at,
+        retentionStartedAt: at,
+        purgeDueAt,
+        [`${outcome}At`]: at,
+        updatedAt: db.serverDate()
+      }
+      if (outcome === 'deleted') changes.closedAt = at
+      await transaction.collection(COLLECTIONS.lines).doc(line._id).update({ data: changes })
+      await transaction.collection(COLLECTIONS.audit).doc(`business-close-${line._id}-${version}`).set({ data: {
+        actorId: currentActor._id,
+        action: 'CLOSE_BUSINESS',
+        targetType: 'business_line',
+        targetId: line._id,
+        beforeStatus: line.status,
+        afterStatus: outcome,
+        beforeVersion: line.version,
+        afterVersion: version,
+        reason,
+        createdAt: db.serverDate()
+      } })
+      return { businessLineId: line._id, status: outcome, version }
+    })
+  }
+
+  function amendmentIdentity(input) {
+    const nextVersion = increment(input.expectedVersion)
+    const amendmentId = `business-amend-${input.lineId}-${nextVersion}`
+    const evidenceDigest = hash(JSON.stringify(input.evidenceIds))
+    const inputHash = hash(JSON.stringify([
+      input.actor && input.actor._id,
+      input.lineId,
+      input.expectedVersion,
+      input.reason,
+      input.changes,
+      evidenceDigest,
+      input.evidenceIds.length
+    ]))
+    return { amendmentId, nextVersion, evidenceDigest, inputHash }
+  }
+
+  function assertAmendmentActor(actor) {
+    if (!actor || actor.status !== 'active' || actor.role !== 'super_admin') throw createError('FORBIDDEN')
+  }
+
+  function assertAmendmentReservation(reservation, input, identity) {
+    if (!reservation || reservation.action !== 'AMEND_FROZEN_BUSINESS' ||
+        reservation.actorId !== input.actor._id || reservation.targetId !== input.lineId ||
+        reservation.beforeVersion !== input.expectedVersion ||
+        reservation.afterVersion !== identity.nextVersion ||
+        reservation.inputHash !== identity.inputHash ||
+        reservation.evidenceDigest !== identity.evidenceDigest ||
+        reservation.evidenceCount !== input.evidenceIds.length) {
+      throw createError('VERSION_CONFLICT')
+    }
+  }
+
+  function strictFuture(value, now) {
+    return value instanceof Date && !Number.isNaN(value.getTime()) && value.getTime() > now.getTime()
+  }
+
+  async function beginAmendment(input, identity, at) {
+    return db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, COLLECTIONS.users, input.actor && input.actor._id)
+      assertAmendmentActor(actor)
+      const line = await readDocument(transaction, COLLECTIONS.lines, input.lineId)
+      if (!line || line.status === 'creating') throw createError('NOT_FOUND')
+      const existing = await readDocument(transaction, COLLECTIONS.audit, identity.amendmentId)
+      if (existing) {
+        assertAmendmentReservation(existing, input, identity)
+        if (existing.publishState === 'published') return { published: true, result: clone(existing.result) }
+        if (existing.publishState !== 'reserved') throw createError('VERSION_CONFLICT')
+        if (line.version !== input.expectedVersion || !FROZEN_BUSINESS_STATUSES.has(line.status)) {
+          throw createError('VERSION_CONFLICT')
+        }
+        return { published: false, reservation: existing }
+      }
+      if (!FROZEN_BUSINESS_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
+      if (line.version !== input.expectedVersion) throw createError('VERSION_CONFLICT')
+      const mergedStart = Object.prototype.hasOwnProperty.call(input.changes, 'plannedStartDate')
+        ? input.changes.plannedStartDate
+        : line.plannedStartDate || ''
+      const mergedEnd = Object.prototype.hasOwnProperty.call(input.changes, 'plannedEndDate')
+        ? input.changes.plannedEndDate
+        : line.plannedEndDate || ''
+      if (mergedStart && mergedEnd && mergedStart > mergedEnd) throw createError('VALIDATION_ERROR')
+      const before = {}
+      const after = {}
+      for (const [key, value] of Object.entries(input.changes)) {
+        before[key] = clone(line[key])
+        after[key] = clone(value)
+      }
+      const reservation = {
+        actorId: actor._id,
+        action: 'AMEND_FROZEN_BUSINESS',
+        targetType: 'business_line',
+        targetId: line._id,
+        reason: input.reason,
+        before,
+        after,
+        beforeVersion: line.version,
+        afterVersion: identity.nextVersion,
+        inputHash: identity.inputHash,
+        evidenceDigest: identity.evidenceDigest,
+        evidenceCount: input.evidenceIds.length,
+        claimedCount: 0,
+        claimedBytes: 0,
+        claimedDigest: hash(JSON.stringify([])),
+        publishState: 'reserved',
+        transitionAt: at,
+        claimExpiresAt: new Date(at.getTime() + AMENDMENT_CLAIM_LIFETIME_MS),
+        createdAt: db.serverDate(),
+        updatedAt: db.serverDate()
+      }
+      await transaction.collection(COLLECTIONS.audit).doc(identity.amendmentId).set({ data: reservation })
+      return { published: false, reservation: { _id: identity.amendmentId, ...reservation } }
+    })
+  }
+
+  async function claimAmendmentEvidence(input, identity, at) {
+    for (;;) {
+      const outcome = await db.runTransaction(async transaction => {
+        const actor = await readDocument(transaction, COLLECTIONS.users, input.actor && input.actor._id)
+        assertAmendmentActor(actor)
+        const line = await readDocument(transaction, COLLECTIONS.lines, input.lineId)
+        if (!line || line.status === 'creating') throw createError('NOT_FOUND')
+        const reservation = await readDocument(transaction, COLLECTIONS.audit, identity.amendmentId)
+        assertAmendmentReservation(reservation, input, identity)
+        if (reservation.publishState === 'published') return { done: true, result: clone(reservation.result) }
+        if (!FROZEN_BUSINESS_STATUSES.has(line.status) || line.version !== input.expectedVersion) {
+          throw createError('VERSION_CONFLICT')
+        }
+        if (reservation.publishState !== 'reserved' || !Number.isSafeInteger(reservation.claimedCount) ||
+            reservation.claimedCount < 0 || reservation.claimedCount > input.evidenceIds.length ||
+            !Number.isSafeInteger(reservation.claimedBytes) || reservation.claimedBytes < 0 ||
+            reservation.claimedDigest !== hash(JSON.stringify(input.evidenceIds.slice(0, reservation.claimedCount)))) {
+          throw createError('VERSION_CONFLICT')
+        }
+        if (reservation.claimedCount === input.evidenceIds.length) return { done: true }
+        const nextCount = Math.min(
+          reservation.claimedCount + AMENDMENT_EVIDENCE_CHUNK_SIZE,
+          input.evidenceIds.length
+        )
+        let claimedBytes = reservation.claimedBytes
+        for (const evidenceId of input.evidenceIds.slice(reservation.claimedCount, nextCount)) {
+          const evidence = await readDocument(transaction, 'evidences', evidenceId)
+          if (!evidence || evidence.businessLineId !== line._id || evidence.nodeId !== null ||
+              evidence.feedbackId !== null || evidence.uploadedBy !== actor._id ||
+              evidence.uploadPurpose !== 'audit_amendment' || evidence.storageStatus !== 'available' ||
+              !['unattached', undefined].includes(evidence.attachmentState) ||
+              !strictFuture(evidence.orphanExpiresAt, at) || !Number.isSafeInteger(evidence.size) ||
+              evidence.size < 1 || evidence.size > FEEDBACK_TOTAL_LIMIT - claimedBytes) {
+            throw createError(evidence && Number.isSafeInteger(evidence.size) &&
+              evidence.size > FEEDBACK_TOTAL_LIMIT - claimedBytes
+              ? 'FEEDBACK_TOTAL_TOO_LARGE'
+              : 'EVIDENCE_NOT_ATTACHABLE')
+          }
+          const uploaded = parseStrictTimestamp(evidence.uploadedAt)
+          if (!uploaded.valid || !uploaded.date || uploaded.date.getTime() > at.getTime()) {
+            throw createError('EVIDENCE_NOT_ATTACHABLE')
+          }
+          const evidencePurgeDueAt = new Date(uploaded.date.getTime() + RETENTION_MS)
+          claimedBytes += evidence.size
+          await transaction.collection('evidences').doc(evidenceId).update({ data: {
+            amendmentId: identity.amendmentId,
+            attachmentState: 'amendment_claimed',
+            retentionScope: 'evidence',
+            retentionSource: 'audit_amendment',
+            retentionStartedAt: uploaded.date,
+            purgeDueAt: evidencePurgeDueAt,
+            amendmentRollbackOrphanExpiresAt: evidence.orphanExpiresAt,
+            orphanExpiresAt: null,
+            updatedAt: db.serverDate()
+          } })
+        }
+        await transaction.collection(COLLECTIONS.audit).doc(identity.amendmentId).update({ data: {
+          claimedCount: nextCount,
+          claimedBytes,
+          claimedDigest: hash(JSON.stringify(input.evidenceIds.slice(0, nextCount))),
+          updatedAt: db.serverDate()
+        } })
+        return { done: nextCount === input.evidenceIds.length }
+      })
+      if (outcome.done) return outcome.result || null
+    }
+  }
+
+  async function finalizeAmendment(input, identity) {
+    return db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, COLLECTIONS.users, input.actor && input.actor._id)
+      assertAmendmentActor(actor)
+      const line = await readDocument(transaction, COLLECTIONS.lines, input.lineId)
+      if (!line || line.status === 'creating') throw createError('NOT_FOUND')
+      const reservation = await readDocument(transaction, COLLECTIONS.audit, identity.amendmentId)
+      assertAmendmentReservation(reservation, input, identity)
+      if (reservation.publishState === 'published') return clone(reservation.result)
+      if (!FROZEN_BUSINESS_STATUSES.has(line.status) || line.version !== input.expectedVersion) {
+        throw createError('VERSION_CONFLICT')
+      }
+      if (reservation.publishState !== 'reserved' || reservation.claimedCount !== input.evidenceIds.length ||
+          reservation.claimedDigest !== identity.evidenceDigest ||
+          !Number.isSafeInteger(reservation.claimedBytes) || reservation.claimedBytes < 0 ||
+          reservation.claimedBytes > FEEDBACK_TOTAL_LIMIT) {
+        throw createError('VERSION_CONFLICT')
+      }
+      const changes = { ...clone(input.changes), version: identity.nextVersion, updatedAt: db.serverDate() }
+      if (input.changes.status && input.changes.status !== line.status) {
+        changes[`${input.changes.status}At`] = reservation.transitionAt
+        if (input.changes.status === 'deleted' && !line.closedAt) changes.closedAt = reservation.transitionAt
+      }
+      await transaction.collection(COLLECTIONS.lines).doc(line._id).update({ data: changes })
+      const result = {
+        businessLineId: line._id,
+        amendmentId: identity.amendmentId,
+        version: identity.nextVersion
+      }
+      await transaction.collection(COLLECTIONS.audit).doc(identity.amendmentId).update({ data: {
+        publishState: 'published',
+        result,
+        publishedAt: reservation.transitionAt,
+        claimExpiresAt: db.command.remove(),
+        updatedAt: db.serverDate()
+      } })
+      return result
+    })
+  }
+
+  async function amendFrozenBusiness(input) {
+    const identity = amendmentIdentity(input)
+    const at = clock()
+    if (!(at instanceof Date) || Number.isNaN(at.getTime())) throw new TypeError('clock must return a Date')
+    const begun = await beginAmendment(input, identity, at)
+    if (begun.published) return begun.result
+    const published = await claimAmendmentEvidence(input, identity, at)
+    if (published) return published
+    return finalizeAmendment(input, identity)
   }
 
   function nodeId(lineId, sequence) {
@@ -479,7 +900,10 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     createBusinessSnapshot,
     listBusinessLines,
     getBusinessLine,
-    updateBusinessMetadata
+    updateBusinessMetadata,
+    rejectPreviousNode,
+    closeBusinessLine,
+    amendFrozenBusiness
   }
 }
 

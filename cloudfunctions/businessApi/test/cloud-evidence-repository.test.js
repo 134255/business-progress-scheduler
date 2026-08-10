@@ -117,6 +117,74 @@ test('authorizes before download, inspects bytes, and stores secret-free unattac
   assert.doesNotMatch(JSON.stringify(stored), /wx-current/)
 })
 
+test('超级管理员可在冻结业务上传独立修订附件且普通反馈规则不会被复用', async () => {
+  const documents = seed({
+    users: [{ _id: 'root', status: 'active', role: 'super_admin' }],
+    business_lines: [{
+      _id: 'business-1', status: 'completed', version: 4,
+      managerUserIds: [], memberUserIds: []
+    }],
+    business_nodes: []
+  })
+  const harness = createHarness({ documents })
+  const result = await harness.repository.registerUpload({
+    actor: { _id: 'root', status: 'active', role: 'super_admin' },
+    input: {
+      businessLineId: 'business-1', nodeId: null, purpose: 'audit_amendment',
+      fileId: 'cloud://test-env/amendments/report.pdf',
+      fileName: 'report.PDF', declaredSize: PDF_BYTES.length
+    }
+  })
+
+  assert.equal(result.evidenceId, 'evidence-1')
+  const stored = harness.fake.documents('evidences')[0]
+  assert.equal(stored.nodeId, null)
+  assert.equal(stored.feedbackId, null)
+  assert.equal(stored.uploadPurpose, 'audit_amendment')
+  assert.equal(stored.attachmentState, 'unattached')
+  assert.equal(stored.retentionScope, null)
+  assert.equal(stored.retentionSource, null)
+
+  for (const item of [
+    {
+      users: [{ _id: 'root', status: 'active', role: 'user' }],
+      lineStatus: 'completed', code: 'FORBIDDEN'
+    },
+    {
+      users: [{ _id: 'root', status: 'active', role: 'super_admin' }],
+      lineStatus: 'active', code: 'BUSINESS_FROZEN'
+    }
+  ]) {
+    const denied = createHarness({ documents: seed({
+      users: item.users,
+      business_lines: [{
+        _id: 'business-1', status: item.lineStatus,
+        managerUserIds: [], memberUserIds: []
+      }],
+      business_nodes: []
+    }) })
+    await assert.rejects(denied.repository.registerUpload({
+      actor: { _id: 'root', status: 'active', role: 'super_admin' },
+      input: {
+        businessLineId: 'business-1', nodeId: null, purpose: 'audit_amendment',
+        fileId: 'cloud://test-env/amendments/report.pdf',
+        fileName: 'report.PDF', declaredSize: PDF_BYTES.length
+      }
+    }), assertCode(item.code))
+    assert.equal(denied.calls.length, 0)
+  }
+})
+
+test('底层凭证仓库拒绝未知上传用途', async () => {
+  const harness = createHarness()
+
+  await assert.rejects(harness.repository.registerUpload(registration({
+    purpose: 'unknown-purpose'
+  })), assertCode('EVIDENCE_NOT_ATTACHABLE'))
+
+  assert.equal(harness.calls.length, 0)
+})
+
 test('denies unauthorized or non-current registration before any cloud download', async t => {
   const cases = [
     {
@@ -612,6 +680,48 @@ test('unattached evidence uses orphan expiry while explicit amendment evidence u
   const amendment = createHarness({ documents: amendmentDocuments })
   assert.equal((await amendment.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: 'evidence-1' })).url,
     'https://temporary.example/report.pdf')
+})
+
+test('新修订附件只有在所属审计修订发布后才可由业务成员访问', async () => {
+  function amendmentDocuments(publishState) {
+    const documents = seed({
+      evidences: [accessibleEvidence({
+        nodeId: null,
+        feedbackId: null,
+        amendmentId: 'business-amend-business-1-5',
+        attachmentState: 'amendment_claimed',
+        uploadPurpose: 'audit_amendment',
+        orphanExpiresAt: null,
+        retentionScope: 'evidence',
+        retentionSource: 'audit_amendment',
+        purgeDueAt: new Date(NOW.getTime() + 60_000)
+      })],
+      audit_logs: [{
+        _id: 'business-amend-business-1-5',
+        action: 'AMEND_FROZEN_BUSINESS', targetType: 'business_line', targetId: 'business-1',
+        publishState
+      }]
+    })
+    Object.assign(documents.business_lines[0], {
+      status: 'completed', purgeDueAt: new Date(NOW.getTime() + 1)
+    })
+    return documents
+  }
+
+  const published = createHarness({ documents: amendmentDocuments('published') })
+  assert.equal((await published.repository.getAccessGrant({
+    actor: { _id: 'account-1' }, evidenceId: 'evidence-1'
+  })).url, 'https://temporary.example/report.pdf')
+
+  for (const status of ['reserved', 'aborting', 'aborted', undefined]) {
+    const documents = amendmentDocuments(status)
+    if (status === undefined) documents.audit_logs = []
+    const hidden = createHarness({ documents })
+    await assert.rejects(hidden.repository.getAccessGrant({
+      actor: { _id: 'account-1' }, evidenceId: 'evidence-1'
+    }), assertCode('EVIDENCE_EXPIRED'))
+    assert.deepEqual(hidden.calls, [])
+  }
 })
 
 test('malformed line, evidence, or retention-scope metadata denies access before a temporary URL', async () => {

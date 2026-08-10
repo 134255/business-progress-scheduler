@@ -584,3 +584,472 @@ test('legacy metadata update authorizes the current transactional binding, not t
   assert.equal(unbound.fake.documents('business_lines')[0].version, 4)
   assert.equal(unbound.fake.documents('audit_logs').length, 0)
 })
+
+function rejectionSeed(overrides = {}) {
+  const previousCompletedAt = new Date('2026-08-06T04:00:00.000Z')
+  const previousDueAt = new Date('2026-08-05T04:00:00.000Z')
+  const currentActivatedAt = new Date('2026-08-06T04:00:00.000Z')
+  const currentDueAt = new Date('2026-08-07T12:00:00.000Z')
+  return seedDefinition({
+    users: [
+      { _id: 'user-1', status: 'active' },
+      { _id: 'user-2', status: 'active' },
+      { _id: 'user-3', status: 'active' }
+    ],
+    extra: {
+      business_lines: [{
+        _id: 'line-1', code: 'BL-20260807-0001', name: '业务线', status: 'active', version: 8,
+        managerUserIds: ['user-1'], memberUserIds: ['user-1', 'user-2', 'user-3'],
+        currentNodeId: 'node-2', currentNodeIndex: 1, currentNodeName: '复核', nodeCount: 3, progress: 33,
+        ...(overrides.line || {})
+      }],
+      business_nodes: [
+        {
+          _id: 'node-1', businessLineId: 'line-1', nodeCode: 'BL-20260807-0001-N001',
+          sequence: 0, name: '资料准备', status: 'completed', version: 5,
+          assigneeUserIds: ['user-2'], completedAt: previousCompletedAt, dueAt: previousDueAt,
+          latestFeedbackId: 'feedback-previous', latestFeedbackRevision: 2,
+          rejectionCount: 1, reworkWorkMinutes: 30,
+          ...(overrides.previous || {})
+        },
+        {
+          _id: 'node-2', businessLineId: 'line-1', nodeCode: 'BL-20260807-0001-N002',
+          sequence: 1, name: '复核', status: 'ready', version: 3,
+          assigneeUserIds: ['user-3'], activatedAt: currentActivatedAt, dueAt: currentDueAt,
+          ...(overrides.current || {})
+        },
+        {
+          _id: 'node-3', businessLineId: 'line-1', nodeCode: 'BL-20260807-0001-N003',
+          sequence: 2, name: '归档', status: 'waiting', version: 1,
+          assigneeUserIds: ['user-1']
+        }
+      ],
+      node_feedback: [{
+        _id: 'feedback-previous', businessLineId: 'line-1', nodeId: 'node-1',
+        publishState: 'published', revision: 2, status: 'completed', fieldValues: [{ fieldKey: 'a', value: '原值' }]
+      }],
+      evidences: [{
+        _id: 'evidence-previous', businessLineId: 'line-1', nodeId: 'node-1',
+        feedbackId: 'feedback-previous', attachmentState: 'attached', storageStatus: 'available'
+      }]
+    }
+  })
+}
+
+function rejectionInput(overrides = {}) {
+  return {
+    actor: { _id: 'user-3', status: 'active' },
+    lineId: 'line-1',
+    currentNodeId: 'node-2',
+    expectedCurrentVersion: 3,
+    expectedPreviousVersion: 5,
+    reason: '上一节点资料需要补充',
+    requestKey: 'reject-001',
+    ...overrides
+  }
+}
+
+test('当前节点负责人可原子驳回紧邻上一节点且不重置历史与计时信息', async () => {
+  const { fake, repository } = createRepositoryHarness(rejectionSeed())
+  const beforeFeedback = fake.documents('node_feedback')
+  const beforeEvidence = fake.documents('evidences')
+
+  const result = await repository.rejectPreviousNode(rejectionInput())
+
+  assert.deepEqual(result, {
+    businessLineId: 'line-1', previousNodeId: 'node-1', currentNodeId: 'node-2',
+    previousVersion: 6, currentVersion: 4, lineVersion: 9
+  })
+  const [previous, current] = fake.documents('business_nodes').sort((left, right) => left.sequence - right.sequence)
+  const line = fake.documents('business_lines')[0]
+  assert.equal(previous.status, 'in_progress')
+  assert.equal(previous.version, 6)
+  assert.equal(previous.rejectionCount, 2)
+  assert.deepEqual(previous.completedAt, new Date('2026-08-06T04:00:00.000Z'))
+  assert.deepEqual(previous.dueAt, new Date('2026-08-05T04:00:00.000Z'))
+  assert.equal(previous.latestFeedbackId, 'feedback-previous')
+  assert.equal(previous.latestFeedbackRevision, 2)
+  assert.equal(previous.reworkWorkMinutes, 30)
+  assert.equal(current.status, 'waiting')
+  assert.equal(current.version, 4)
+  assert.deepEqual(current.activatedAt, new Date('2026-08-06T04:00:00.000Z'))
+  assert.deepEqual(current.dueAt, new Date('2026-08-07T12:00:00.000Z'))
+  assert.equal(line.currentNodeId, 'node-1')
+  assert.equal(line.currentNodeIndex, 0)
+  assert.equal(line.currentNodeName, '资料准备')
+  assert.equal(line.progress, 0)
+  assert.equal(line.version, 9)
+  assert.deepEqual(fake.documents('node_feedback'), beforeFeedback)
+  assert.deepEqual(fake.documents('evidences'), beforeEvidence)
+  assert.deepEqual(fake.documents('audit_logs').map(item => ({
+    action: item.action, actorId: item.actorId, targetId: item.targetId,
+    previousNodeId: item.previousNodeId, currentNodeId: item.currentNodeId, reason: item.reason
+  })), [{
+    action: 'REJECT_PREVIOUS_NODE', actorId: 'user-3', targetId: 'line-1',
+    previousNodeId: 'node-1', currentNodeId: 'node-2', reason: '上一节点资料需要补充'
+  }])
+  assert.deepEqual(fake.transactionQueries, [])
+})
+
+test('同一驳回请求可幂等重试且变更内容会触发版本冲突', async () => {
+  const { fake, repository } = createRepositoryHarness(rejectionSeed())
+  const first = await repository.rejectPreviousNode(rejectionInput())
+  const retry = await repository.rejectPreviousNode(rejectionInput())
+  assert.deepEqual(retry, first)
+  assert.equal(fake.documents('business_nodes').find(item => item._id === 'node-1').rejectionCount, 2)
+  assert.equal(fake.documents('audit_logs').length, 1)
+
+  await assert.rejects(
+    repository.rejectPreviousNode(rejectionInput({ reason: '另一原因' })),
+    error => error.code === 'VERSION_CONFLICT'
+  )
+  assert.equal(fake.documents('audit_logs').length, 1)
+})
+
+test('驳回事务拒绝越权、非紧邻状态和并发版本变化且不产生部分写入', async t => {
+  const cases = [
+    ['非当前负责人', rejectionSeed(), rejectionInput({ actor: { _id: 'user-2', status: 'active' } }), 'FORBIDDEN'],
+    ['业务线当前指针不匹配', rejectionSeed({ line: { currentNodeId: 'node-3' } }), rejectionInput(), 'REJECTION_NOT_ALLOWED'],
+    ['当前节点已完成', rejectionSeed({ current: { status: 'completed' } }), rejectionInput(), 'REJECTION_NOT_ALLOWED'],
+    ['上一节点未完成', rejectionSeed({ previous: { status: 'in_progress' } }), rejectionInput(), 'REJECTION_NOT_ALLOWED'],
+    ['当前节点版本冲突', rejectionSeed(), rejectionInput({ expectedCurrentVersion: 2 }), 'VERSION_CONFLICT'],
+    ['上一节点版本冲突', rejectionSeed(), rejectionInput({ expectedPreviousVersion: 4 }), 'VERSION_CONFLICT']
+  ]
+
+  for (const [name, seed, value, code] of cases) {
+    await t.test(name, async () => {
+      const { fake, repository } = createRepositoryHarness(seed)
+      const before = {
+        line: fake.documents('business_lines'),
+        nodes: fake.documents('business_nodes'),
+        audit: fake.documents('audit_logs')
+      }
+      await assert.rejects(repository.rejectPreviousNode(value), error => error.code === code)
+      assert.deepEqual(fake.documents('business_lines'), before.line)
+      assert.deepEqual(fake.documents('business_nodes'), before.nodes)
+      assert.deepEqual(fake.documents('audit_logs'), before.audit)
+    })
+  }
+
+  await t.test('账号在路由解析后被停用', async () => {
+    const { fake, repository } = createRepositoryHarness(rejectionSeed())
+    fake.beforeNextTransaction(() => fake.replace('users', 'user-3', { status: 'disabled' }))
+    await assert.rejects(repository.rejectPreviousNode(rejectionInput()), error => error.code === 'FORBIDDEN')
+    assert.equal(fake.documents('business_nodes').find(item => item._id === 'node-1').status, 'completed')
+    assert.equal(fake.documents('audit_logs').length, 0)
+  })
+
+  await t.test('失效账号在节点定位前统一失败关闭', async () => {
+    const { fake, repository } = createRepositoryHarness(rejectionSeed({
+      current: { _id: 'node-existing' }
+    }))
+    fake.replace('users', 'user-3', { status: 'disabled' })
+    await assert.rejects(
+      repository.rejectPreviousNode(rejectionInput({ currentNodeId: 'node-does-not-exist' })),
+      error => error.code === 'FORBIDDEN'
+    )
+    assert.equal(fake.transactionQueries.length, 0)
+  })
+})
+
+function closureSeed(overrides = {}) {
+  return seedDefinition({
+    users: overrides.users || [
+      { _id: 'manager', status: 'active', role: 'user' },
+      { _id: 'member', status: 'active', role: 'user' },
+      { _id: 'root', status: 'active', role: 'super_admin' }
+    ],
+    extra: {
+      business_lines: [{
+        _id: 'line-close', code: 'BL-20260807-0099', name: '待关闭业务', status: 'active', version: 6,
+        managerUserIds: ['manager'], memberUserIds: ['manager', 'member'],
+        currentNodeId: 'node-close', currentNodeIndex: 0, currentNodeName: '办理', nodeCount: 1,
+        ...(overrides.line || {})
+      }],
+      business_nodes: [{
+        _id: 'node-close', businessLineId: 'line-close', sequence: 0, name: '办理',
+        status: 'ready', version: 2, assigneeUserIds: ['member']
+      }],
+      evidences: [{
+        _id: 'evidence-close', businessLineId: 'line-close', nodeId: 'node-close',
+        storageStatus: 'available', retentionScope: 'business_line', retentionSource: 'node_feedback',
+        purgeDueAt: null, retentionStartedAt: null
+      }]
+    }
+  })
+}
+
+test('业务线管理员关闭、取消或逻辑删除进行中业务并设置统一六十天保留期限', async () => {
+  for (const outcome of ['cancelled', 'closed', 'deleted']) {
+    const { fake, repository } = createRepositoryHarness(closureSeed())
+    const result = await repository.closeBusinessLine({
+      actor: { _id: 'manager', status: 'active' },
+      lineId: 'line-close', expectedVersion: 6, outcome, reason: `转为${outcome}`
+    })
+
+    assert.deepEqual(result, { businessLineId: 'line-close', status: outcome, version: 7 })
+    const line = fake.documents('business_lines')[0]
+    const at = new Date('2026-08-07T02:30:00.000Z')
+    assert.equal(line.status, outcome)
+    assert.equal(line.version, 7)
+    assert.deepEqual(line.frozenAt, at)
+    assert.deepEqual(line.retentionStartedAt, at)
+    assert.deepEqual(line.purgeDueAt, new Date(at.getTime() + 60 * 24 * 60 * 60 * 1000))
+    assert.deepEqual(line[`${outcome}At`], at)
+    if (outcome === 'deleted') assert.deepEqual(line.closedAt, at)
+    assert.equal(fake.documents('evidences')[0].purgeDueAt, null)
+    assert.equal(fake.documents('evidences')[0].retentionStartedAt, null)
+    assert.deepEqual(fake.documents('audit_logs').map(item => ({
+      actorId: item.actorId, action: item.action, beforeStatus: item.beforeStatus,
+      afterStatus: item.afterStatus, reason: item.reason
+    })), [{
+      actorId: 'manager', action: 'CLOSE_BUSINESS', beforeStatus: 'active',
+      afterStatus: outcome, reason: `转为${outcome}`
+    }])
+  }
+})
+
+test('超级管理员可关闭进行中业务，但普通成员、并发旧版本和冻结业务均失败关闭', async t => {
+  await t.test('超级管理员', async () => {
+    const { repository } = createRepositoryHarness(closureSeed())
+    const result = await repository.closeBusinessLine({
+      actor: { _id: 'root', status: 'active', role: 'super_admin' },
+      lineId: 'line-close', expectedVersion: 6, outcome: 'closed', reason: '管理关闭'
+    })
+    assert.equal(result.status, 'closed')
+  })
+
+  const deniedCases = [
+    ['普通成员', closureSeed(), { _id: 'member', status: 'active' }, 6, 'FORBIDDEN'],
+    ['旧版本', closureSeed(), { _id: 'manager', status: 'active' }, 5, 'VERSION_CONFLICT'],
+    ['已完成', closureSeed({ line: { status: 'completed' } }), { _id: 'manager', status: 'active' }, 6, 'BUSINESS_FROZEN'],
+    ['已取消', closureSeed({ line: { status: 'cancelled' } }), { _id: 'root', status: 'active', role: 'super_admin' }, 6, 'BUSINESS_FROZEN']
+  ]
+  for (const [name, seed, actor, expectedVersion, code] of deniedCases) {
+    await t.test(name, async () => {
+      const { fake, repository } = createRepositoryHarness(seed)
+      await assert.rejects(repository.closeBusinessLine({
+        actor, lineId: 'line-close', expectedVersion, outcome: 'closed', reason: '关闭'
+      }), error => error.code === code)
+      assert.equal(fake.documents('audit_logs').length, 0)
+    })
+  }
+
+  await t.test('事务内角色降级', async () => {
+    const { fake, repository } = createRepositoryHarness(closureSeed())
+    fake.beforeNextTransaction(() => fake.replace('users', 'root', { status: 'active', role: 'user' }))
+    await assert.rejects(repository.closeBusinessLine({
+      actor: { _id: 'root', status: 'active', role: 'super_admin' },
+      lineId: 'line-close', expectedVersion: 6, outcome: 'closed', reason: '关闭'
+    }), error => error.code === 'FORBIDDEN')
+    assert.equal(fake.documents('business_lines')[0].status, 'active')
+  })
+})
+
+function amendmentSeed(evidenceCount = 2, overrides = {}) {
+  return seedDefinition({
+    users: [
+      { _id: 'root', status: 'active', role: 'super_admin' },
+      { _id: 'manager', status: 'active', role: 'user' }
+    ],
+    extra: {
+      business_lines: [{
+        _id: 'line-frozen', code: 'BL-20260801-0001', name: '原业务名称', description: '原说明',
+        plannedStartDate: '2026-08-01', plannedEndDate: '2026-08-05',
+        status: 'completed', version: 9, managerUserIds: ['manager'], memberUserIds: ['manager'],
+        currentNodeId: 'node-frozen', currentNodeIndex: 0, currentNodeName: '完成', nodeCount: 1,
+        frozenAt: new Date('2026-08-06T01:00:00.000Z'),
+        retentionStartedAt: new Date('2026-08-06T01:00:00.000Z'),
+        purgeDueAt: new Date('2026-10-05T01:00:00.000Z'),
+        ...(overrides.line || {})
+      }],
+      business_nodes: [{
+        _id: 'node-frozen', businessLineId: 'line-frozen', sequence: 0, name: '完成',
+        status: 'completed', version: 4, latestFeedbackId: 'feedback-original'
+      }],
+      node_feedback: [{
+        _id: 'feedback-original', businessLineId: 'line-frozen', nodeId: 'node-frozen',
+        publishState: 'published', revision: 1, status: 'completed', fieldValues: [{ fieldKey: 'a', value: '原始值' }]
+      }],
+      evidences: Array.from({ length: evidenceCount }, (_, index) => ({
+        _id: `amendment-evidence-${index + 1}`,
+        businessLineId: 'line-frozen', nodeId: null, feedbackId: null,
+        uploadedBy: 'root', uploadPurpose: 'audit_amendment',
+        fileId: `cloud://env/amendment-${index + 1}.pdf`, fileName: `amendment-${index + 1}.pdf`,
+        category: 'pdf', size: 1, storageStatus: 'available', attachmentState: 'unattached',
+        uploadedAt: new Date(`2026-08-07T00:${String(index % 60).padStart(2, '0')}:00.000Z`),
+        orphanExpiresAt: new Date('2026-08-08T02:30:00.000Z'),
+        retentionStartedAt: null, purgeDueAt: null, purgedAt: null
+      }))
+    }
+  })
+}
+
+function amendmentInput(evidenceCount = 2, overrides = {}) {
+  return {
+    actor: { _id: 'root', status: 'active', role: 'super_admin' },
+    lineId: 'line-frozen', expectedVersion: 9,
+    reason: '审计更正业务信息',
+    changes: { name: '更正业务名称', description: '更正说明', status: 'closed' },
+    evidenceIds: Array.from({ length: evidenceCount }, (_, index) => `amendment-evidence-${index + 1}`),
+    ...overrides
+  }
+}
+
+test('超级管理员修订冻结业务时保存精确前后值且原节点反馈永久不变', async () => {
+  const { fake, repository } = createRepositoryHarness(amendmentSeed())
+  const originalNodes = fake.documents('business_nodes')
+  const originalFeedback = fake.documents('node_feedback')
+  const originalPurgeDueAt = fake.documents('business_lines')[0].purgeDueAt
+
+  const result = await repository.amendFrozenBusiness(amendmentInput())
+
+  assert.deepEqual(result, {
+    businessLineId: 'line-frozen', amendmentId: 'business-amend-line-frozen-10', version: 10
+  })
+  const line = fake.documents('business_lines')[0]
+  assert.equal(line.name, '更正业务名称')
+  assert.equal(line.description, '更正说明')
+  assert.equal(line.status, 'closed')
+  assert.equal(line.version, 10)
+  assert.equal(line.code, 'BL-20260801-0001')
+  assert.deepEqual(line.managerUserIds, ['manager'])
+  assert.deepEqual(line.purgeDueAt, originalPurgeDueAt)
+  assert.deepEqual(fake.documents('business_nodes'), originalNodes)
+  assert.deepEqual(fake.documents('node_feedback'), originalFeedback)
+  const [audit] = fake.documents('audit_logs')
+  assert.equal(audit.publishState, 'published')
+  assert.equal(audit.action, 'AMEND_FROZEN_BUSINESS')
+  assert.equal(audit.reason, '审计更正业务信息')
+  assert.deepEqual(audit.before, {
+    name: '原业务名称', description: '原说明', status: 'completed'
+  })
+  assert.deepEqual(audit.after, {
+    name: '更正业务名称', description: '更正说明', status: 'closed'
+  })
+  const evidences = fake.documents('evidences')
+  for (let index = 0; index < evidences.length; index += 1) {
+    const evidence = evidences[index]
+    const uploadedAt = new Date(`2026-08-07T00:${String(index % 60).padStart(2, '0')}:00.000Z`)
+    assert.equal(evidence.amendmentId, audit._id)
+    assert.equal(evidence.attachmentState, 'amendment_claimed')
+    assert.equal(evidence.retentionScope, 'evidence')
+    assert.equal(evidence.retentionSource, 'audit_amendment')
+    assert.deepEqual(evidence.retentionStartedAt, uploadedAt)
+    assert.deepEqual(evidence.purgeDueAt, new Date(uploadedAt.getTime() + 60 * 24 * 60 * 60 * 1000))
+    assert.deepEqual(evidence.amendmentRollbackOrphanExpiresAt, new Date('2026-08-08T02:30:00.000Z'))
+    assert.equal(evidence.orphanExpiresAt, null)
+  }
+  assert.equal(Object.hasOwn(audit, 'claimExpiresAt'), false)
+})
+
+test('审计修订附件可跨多个受控事务处理且不设置文件数量上限', async () => {
+  const evidenceCount = 105
+  const { fake, repository } = createRepositoryHarness(amendmentSeed(evidenceCount))
+  const input = amendmentInput(evidenceCount, { changes: {} })
+
+  const first = await repository.amendFrozenBusiness(input)
+  const retry = await repository.amendFrozenBusiness(input)
+
+  assert.deepEqual(retry, first)
+  assert.equal(fake.documents('evidences').every(item => item.attachmentState === 'amendment_claimed'), true)
+  assert.equal(fake.documents('audit_logs').length, 1)
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+  await assert.rejects(
+    repository.amendFrozenBusiness({ ...input, reason: '不同原因' }),
+    error => error.code === 'VERSION_CONFLICT'
+  )
+})
+
+test('同一审计修订并发重试返回相同结果且只发布一次', async () => {
+  const optimistic = createOptimisticBusinessDatabase(amendmentSeed(41))
+  const repository = createCloudBusinessRepository({
+    db: optimistic.db,
+    clock: () => new Date('2026-08-07T02:30:00.000Z')
+  })
+  const input = amendmentInput(41)
+
+  const [first, retry] = await Promise.all([
+    repository.amendFrozenBusiness(input),
+    repository.amendFrozenBusiness(input)
+  ])
+
+  assert.deepEqual(retry, first)
+  assert.equal(optimistic.documents('audit_logs').length, 1)
+  assert.equal(optimistic.documents('audit_logs')[0].publishState, 'published')
+  assert.equal(optimistic.documents('business_lines')[0].version, 10)
+  assert.equal(optimistic.documents('evidences').every(item =>
+    item.attachmentState === 'amendment_claimed'), true)
+  assert.equal(optimistic.metrics.maxActiveCallbacks >= 2, true)
+  assert.equal(optimistic.metrics.conflicts > 0, true)
+  assert.equal(optimistic.metrics.retries > 0, true)
+})
+
+test('审计修订在权限、冻结状态、版本和附件归属变化时失败关闭', async t => {
+  const cases = [
+    ['非超级管理员', amendmentSeed(), amendmentInput(2, { actor: { _id: 'manager', status: 'active', role: 'user' } }), 'FORBIDDEN'],
+    ['业务仍在进行', amendmentSeed(2, { line: { status: 'active' } }), amendmentInput(), 'BUSINESS_FROZEN'],
+    ['版本冲突', amendmentSeed(), amendmentInput(2, { expectedVersion: 8 }), 'VERSION_CONFLICT']
+  ]
+  for (const [name, seed, input, code] of cases) {
+    await t.test(name, async () => {
+      const { fake, repository } = createRepositoryHarness(seed)
+      await assert.rejects(repository.amendFrozenBusiness(input), error => error.code === code)
+      assert.equal(fake.documents('audit_logs').length, 0)
+      assert.equal(fake.documents('evidences').every(item => item.attachmentState === 'unattached'), true)
+    })
+  }
+
+  await t.test('附件不属于当前管理员', async () => {
+    const seed = amendmentSeed()
+    seed.evidences[0].uploadedBy = 'manager'
+    const { fake, repository } = createRepositoryHarness(seed)
+    await assert.rejects(repository.amendFrozenBusiness(amendmentInput()), error => error.code === 'EVIDENCE_NOT_ATTACHABLE')
+    assert.equal(fake.documents('business_lines')[0].version, 9)
+    assert.equal(fake.documents('audit_logs')[0].publishState, 'reserved')
+  })
+
+  await t.test('附件上传时间缺失、非法或晚于修订时间', async () => {
+    for (const uploadedAt of [undefined, 'not-a-date', new Date('2026-08-07T02:30:00.001Z')]) {
+      const seed = amendmentSeed()
+      seed.evidences[0].uploadedAt = uploadedAt
+      const { fake, repository } = createRepositoryHarness(seed)
+      await assert.rejects(
+        repository.amendFrozenBusiness(amendmentInput()),
+        error => error.code === 'EVIDENCE_NOT_ATTACHABLE'
+      )
+      assert.equal(fake.documents('business_lines')[0].version, 9)
+      assert.equal(fake.documents('audit_logs')[0].publishState, 'reserved')
+      assert.equal(fake.documents('evidences').every(item => item.attachmentState === 'unattached'), true)
+    }
+  })
+
+  await t.test('修订附件总量超过二十兆字节', async () => {
+    const seed = amendmentSeed()
+    seed.evidences[0].size = 10 * 1024 * 1024
+    seed.evidences[1].size = 10 * 1024 * 1024 + 1
+    const { fake, repository } = createRepositoryHarness(seed)
+    await assert.rejects(
+      repository.amendFrozenBusiness(amendmentInput()),
+      error => error.code === 'FEEDBACK_TOTAL_TOO_LARGE'
+    )
+    assert.equal(fake.documents('business_lines')[0].version, 9)
+    assert.equal(fake.documents('evidences').every(item => item.attachmentState === 'unattached'), true)
+  })
+
+  await t.test('分块期间账号被停用', async () => {
+    let transactions = 0
+    const { fake, repository } = createRepositoryHarness(amendmentSeed(41), {
+      afterTransaction: undefined
+    })
+    const originalRun = fake.db.runTransaction.bind(fake.db)
+    fake.db.runTransaction = async callback => {
+      transactions += 1
+      const result = await originalRun(callback)
+      if (transactions === 2) fake.replace('users', 'root', { status: 'disabled', role: 'super_admin' })
+      return result
+    }
+    await assert.rejects(repository.amendFrozenBusiness(amendmentInput(41)), error => error.code === 'FORBIDDEN')
+    assert.equal(fake.documents('business_lines')[0].version, 9)
+  })
+})

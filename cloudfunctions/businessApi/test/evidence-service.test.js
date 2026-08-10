@@ -50,6 +50,52 @@ test('normalizes registration input and delegates only the trusted actor contrac
   ]])
 })
 
+test('超级管理员修订附件使用专用上传用途且不伪造业务节点', async () => {
+  const harness = createHarness()
+  const actor = { _id: 'root', status: 'active', role: 'super_admin' }
+  await harness.service.registerUpload({
+    actor,
+    input: {
+      businessLineId: ' line-frozen ',
+      purpose: 'audit_amendment',
+      fileId: ' cloud://env/amendments/report.pdf ',
+      fileName: 'report.pdf',
+      declaredSize: 12
+    }
+  })
+
+  assert.deepEqual(harness.calls, [[
+    'registerUpload',
+    {
+      actor,
+      input: {
+        businessLineId: 'line-frozen', nodeId: null, purpose: 'audit_amendment',
+        fileId: 'cloud://env/amendments/report.pdf', fileName: 'report.pdf', declaredSize: 12
+      }
+    }
+  ]])
+})
+
+test('普通反馈上传仍要求节点且拒绝未知上传用途', async () => {
+  for (const input of [
+    {
+      businessLineId: 'business-1', fileId: 'cloud://env/a.pdf',
+      fileName: 'a.pdf', declaredSize: 12
+    },
+    {
+      businessLineId: 'business-1', nodeId: 'node-1', purpose: 'unknown',
+      fileId: 'cloud://env/a.pdf', fileName: 'a.pdf', declaredSize: 12
+    }
+  ]) {
+    const harness = createHarness()
+    await assert.rejects(
+      harness.service.registerUpload({ actor: { _id: 'account-1' }, input }),
+      assertCode('EVIDENCE_NOT_ATTACHABLE')
+    )
+    assert.deepEqual(harness.calls, [])
+  }
+})
+
 test('rejects malformed registration values before repository or cloud work', async () => {
   const invalidInputs = [
     null,

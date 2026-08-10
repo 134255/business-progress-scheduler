@@ -48,6 +48,7 @@ function createRouteHarness({
   protectedRoutes,
   templateService,
   businessService,
+  businessLifecycleService,
   evidenceService,
   feedbackService,
   legacyRoutes,
@@ -97,6 +98,7 @@ function createRouteHarness({
     },
     templateService,
     businessService,
+    businessLifecycleService,
     evidenceService,
     feedbackService,
     protectedRoutes,
@@ -314,6 +316,90 @@ test('business metadata update route delegates a trusted actor and exact optimis
   }])
 })
 
+test('上一节点驳回路由只使用受信账号并原样交给生命周期服务校验', async () => {
+  const calls = []
+  const businessLifecycleService = {
+    async rejectPreviousNode(input) {
+      calls.push(input)
+      return { businessLineId: 'line-1', previousNodeId: 'node-1', currentNodeId: 'node-2' }
+    }
+  }
+  const harness = createRouteHarness({ businessLifecycleService })
+  const payload = {
+    businessLineId: 'line-1', currentNodeId: 'node-2',
+    expectedCurrentVersion: 3, expectedPreviousVersion: 5,
+    reason: '资料需补充', requestKey: 'reject-route-001',
+    actor: { _id: 'forged' }
+  }
+
+  const result = await harness.api.main({ action: 'rejectPreviousNode', payload })
+
+  assert.deepEqual(result, {
+    ok: true,
+    data: { businessLineId: 'line-1', previousNodeId: 'node-1', currentNodeId: 'node-2' }
+  })
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    },
+    input: payload
+  }])
+})
+
+test('业务关闭路由只使用受信账号并交由生命周期服务限制终态', async () => {
+  const calls = []
+  const businessLifecycleService = {
+    async closeBusinessLine(input) {
+      calls.push(input)
+      return { businessLineId: 'line-1', status: 'closed', version: 9 }
+    }
+  }
+  const harness = createRouteHarness({ businessLifecycleService })
+  const payload = {
+    businessLineId: 'line-1', expectedVersion: 8,
+    outcome: 'closed', reason: '业务终止', actorId: 'forged'
+  }
+  const result = await harness.api.main({ action: 'closeBusinessLine', payload })
+
+  assert.deepEqual(result, {
+    ok: true, data: { businessLineId: 'line-1', status: 'closed', version: 9 }
+  })
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    },
+    input: payload
+  }])
+})
+
+test('冻结业务修订路由只使用受信账号并交由专用审计服务处理', async () => {
+  const calls = []
+  const businessLifecycleService = {
+    async amendFrozenBusiness(input) {
+      calls.push(input)
+      return { businessLineId: 'line-1', amendmentId: 'business-amend-line-1-10', version: 10 }
+    }
+  }
+  const harness = createRouteHarness({ businessLifecycleService })
+  const payload = {
+    businessLineId: 'line-1', expectedVersion: 9,
+    reason: '审计修订', changes: { name: '更正名称' }, evidenceIds: ['evidence-1'],
+    actorId: 'forged'
+  }
+  const result = await harness.api.main({ action: 'amendFrozenBusiness', payload })
+
+  assert.deepEqual(result, {
+    ok: true,
+    data: { businessLineId: 'line-1', amendmentId: 'business-amend-line-1-10', version: 10 }
+  })
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    },
+    input: payload
+  }])
+})
+
 test('default evidence routes delegate trusted actors and exact registration/access contracts', async () => {
   const calls = []
   const evidenceService = {
@@ -383,6 +469,12 @@ test('legacy feedback write and history handlers are absent after protected-rout
   const routes = createDefaultLegacyRoutes()
   assert.equal(Object.hasOwn(routes, 'submitNodeFeedback'), false)
   assert.equal(Object.hasOwn(routes, 'getNodeHistory'), false)
+})
+
+test('旧业务写入与删除入口在受保护生命周期接口接管后不可部署', () => {
+  const routes = createDefaultLegacyRoutes()
+  assert.equal(Object.hasOwn(routes, 'updateBusinessLine'), false)
+  assert.equal(Object.hasOwn(routes, 'deleteBusinessLine'), false)
 })
 
 test('evidence application errors are safe while unmarked storage errors remain generic', async () => {

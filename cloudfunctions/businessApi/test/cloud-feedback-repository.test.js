@@ -53,6 +53,36 @@ test('last-node completion freezes the line and records one authoritative 60-day
   }
 })
 
+test('被驳回节点重新提交后恢复下一节点但不刷新其原激活时间和到期时间', async () => {
+  const data = seed({ evidenceCount: 0 })
+  const originalActivatedAt = new Date('2026-08-06T03:00:00.000Z')
+  const originalDueAt = new Date('2026-08-07T11:00:00.000Z')
+  Object.assign(data.business_lines[0], {
+    currentNodeId: 'node-1', currentNodeIndex: 0, currentNodeName: '执行', version: 9
+  })
+  Object.assign(data.business_nodes[0], {
+    status: 'in_progress', version: 6, rejectionCount: 1,
+    lastRejectedAt: new Date('2026-08-07T02:30:00.000Z'),
+    latestFeedbackId: 'old-feedback', latestFeedbackRevision: 1,
+    completedAt: new Date('2026-08-06T02:00:00.000Z')
+  })
+  Object.assign(data.business_nodes[1], {
+    status: 'waiting', version: 4, activatedAt: originalActivatedAt, dueAt: originalDueAt
+  })
+  const { fake, repository } = createFeedbackHarness({ seed: data })
+
+  await repository.commitFeedback(submission({
+    input: { expectedNodeVersion: 6, requestKey: 'rework-submit-001' }
+  }))
+
+  const next = fake.documents('business_nodes').find(item => item._id === 'line-1-node-002')
+  assert.equal(next.status, 'ready')
+  assert.equal(next.version, 5)
+  assert.deepEqual(next.activatedAt, originalActivatedAt)
+  assert.deepEqual(next.dueAt, originalDueAt)
+  assert.equal(fake.documents('business_lines')[0].currentNodeId, 'line-1-node-002')
+})
+
 test('in-progress and blocked submissions append revisions without advancing the flow', async () => {
   const { fake, repository } = createFeedbackHarness({ evidenceCount: 0 })
   const first = await repository.commitFeedback(submission({ input: { status: 'in_progress', requestKey: 'progress-1' } }))

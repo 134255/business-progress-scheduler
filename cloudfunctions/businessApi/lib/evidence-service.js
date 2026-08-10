@@ -44,11 +44,18 @@ function createEvidenceService({ repository }) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
     if (input.declaredSize > MAX_SINGLE_FILE_SIZE) throw createError('FILE_TOO_LARGE')
+    const purpose = input.purpose === undefined ? 'node_feedback' : input.purpose
+    if (!['node_feedback', 'audit_amendment'].includes(purpose)) throw createError('EVIDENCE_NOT_ATTACHABLE')
+    if (purpose === 'audit_amendment' && actor.role !== 'super_admin') throw createError('FORBIDDEN')
+    const nodeId = purpose === 'audit_amendment'
+      ? null
+      : normalizeDocumentId(input.nodeId)
     return repository.registerUpload({
       actor,
       input: {
         businessLineId: normalizeDocumentId(input.businessLineId),
-        nodeId: normalizeDocumentId(input.nodeId),
+        nodeId,
+        ...(purpose === 'audit_amendment' ? { purpose } : {}),
         fileId: normalizeCloudFileId(input.fileId),
         fileName: normalizeFileName(input.fileName),
         declaredSize: input.declaredSize

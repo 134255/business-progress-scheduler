@@ -572,9 +572,13 @@ function createCloudFeedbackRepository({
         const next = await readDocument(transaction, COLLECTIONS.nodes, nextId)
         if (!next || next.businessLineId !== current.line._id || Number(next.sequence) !== Number(current.node.sequence) + 1 ||
             next.status !== 'waiting') throw createError('NODE_NOT_ACTIVE')
-        await transaction.collection(COLLECTIONS.nodes).doc(nextId).update({ data: {
-          status: 'ready', version: increment(next.version), activatedAt: reservation.transitionAt, updatedAt: db.serverDate()
-        } })
+        const nextChanges = {
+          status: 'ready', version: increment(next.version), updatedAt: db.serverDate()
+        }
+        if (next.activatedAt === undefined || next.activatedAt === null) {
+          nextChanges.activatedAt = reservation.transitionAt
+        }
+        await transaction.collection(COLLECTIONS.nodes).doc(nextId).update({ data: nextChanges })
         const progress = Math.floor(((Number(current.node.sequence) + 1) / Number(current.line.nodeCount)) * 100)
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
           currentNodeId: nextId, currentNodeIndex: next.sequence, currentNodeName: next.name,

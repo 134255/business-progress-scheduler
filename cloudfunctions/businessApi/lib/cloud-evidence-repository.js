@@ -9,7 +9,8 @@ const COLLECTIONS = Object.freeze({
   users: 'users',
   lines: 'business_lines',
   nodes: 'business_nodes',
-  evidences: 'evidences'
+  evidences: 'evidences',
+  audit: 'audit_logs'
 })
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
@@ -33,6 +34,7 @@ const MIME_TYPES = Object.freeze({
   mov: 'video/quicktime',
   m4v: 'video/x-m4v'
 })
+const ALL_EVIDENCE_TYPES = Object.freeze(Object.keys(MIME_TYPES))
 
 function createError(code) {
   const error = new Error(code)
@@ -177,10 +179,25 @@ function createCloudEvidenceRepository({
     return { actor, line, node, allowedTypes: allowedTypes(node, accountSchema) }
   }
 
+  async function authorizeAmendmentRegistration(database, actorId, businessLineId) {
+    const actor = await readDocument(database, COLLECTIONS.users, actorId)
+    if (!actor || actor.status !== 'active' || actor.role !== 'super_admin') throw createError('FORBIDDEN')
+    const line = await readDocument(database, COLLECTIONS.lines, businessLineId)
+    if (!line || line.status === 'creating') throw createError('NOT_FOUND')
+    if (!FROZEN_BUSINESS_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
+    return { actor, line, node: null, allowedTypes: ALL_EVIDENCE_TYPES }
+  }
+
   function validateRegistrationInput(actor, input) {
     const actorId = requireDocumentId(actor && actor._id)
     const businessLineId = requireDocumentId(input && input.businessLineId)
-    const nodeId = requireDocumentId(input && input.nodeId)
+    const requestedPurpose = input && input.purpose
+    if (requestedPurpose !== undefined &&
+        requestedPurpose !== 'node_feedback' && requestedPurpose !== 'audit_amendment') {
+      throw createError('EVIDENCE_NOT_ATTACHABLE')
+    }
+    const purpose = requestedPurpose || 'node_feedback'
+    const nodeId = purpose === 'audit_amendment' ? null : requireDocumentId(input && input.nodeId)
     let fileId
     try {
       fileId = normalizeCloudFileId(input && input.fileId)
@@ -192,17 +209,24 @@ function createCloudEvidenceRepository({
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
     if (input.declaredSize > MAX_SINGLE_FILE_SIZE) throw createError('FILE_TOO_LARGE')
-    return { actorId, businessLineId, nodeId, fileId }
+    return { actorId, businessLineId, nodeId, fileId, purpose }
   }
 
   async function registerUpload({ actor, input }) {
     const validated = validateRegistrationInput(actor, input)
-    const authorized = await db.runTransaction(transaction => authorizeRegistration(
-      transaction,
-      validated.actorId,
-      validated.businessLineId,
-      validated.nodeId
-    ))
+    const authorize = validated.purpose === 'audit_amendment'
+      ? transaction => authorizeAmendmentRegistration(
+        transaction,
+        validated.actorId,
+        validated.businessLineId
+      )
+      : transaction => authorizeRegistration(
+        transaction,
+        validated.actorId,
+        validated.businessLineId,
+        validated.nodeId
+      )
+    const authorized = await db.runTransaction(authorize)
     const downloaded = await cloud.downloadFile({ fileID: validated.fileId })
     const bytes = downloaded && downloaded.fileContent
     const file = classifyAndValidateFile({
@@ -217,12 +241,7 @@ function createCloudEvidenceRepository({
     const evidenceId = requireDocumentId(idFactory())
 
     await db.runTransaction(async transaction => {
-      const current = await authorizeRegistration(
-        transaction,
-        validated.actorId,
-        validated.businessLineId,
-        validated.nodeId
-      )
+      const current = await authorize(transaction)
       if (!current.allowedTypes.map(value => value.toLowerCase()).includes(file.extension)) {
         throw createError('UNSUPPORTED_FILE_TYPE')
       }
@@ -234,6 +253,9 @@ function createCloudEvidenceRepository({
           businessLineId: validated.businessLineId,
           nodeId: validated.nodeId,
           feedbackId: null,
+          ...(validated.purpose === 'audit_amendment'
+            ? { uploadPurpose: 'audit_amendment', attachmentState: 'unattached' }
+            : {}),
           fileId: validated.fileId,
           fileName: input.fileName,
           category: file.category,
@@ -282,10 +304,28 @@ function createCloudEvidenceRepository({
       if (!currentEvidence) throw createError('NOT_FOUND')
       const line = await readDocument(transaction, COLLECTIONS.lines, currentEvidence.businessLineId)
       if (!line || line.status === 'creating') throw createError('NOT_FOUND')
-      const node = await readDocument(transaction, COLLECTIONS.nodes, currentEvidence.nodeId)
-      if (!node || node.businessLineId !== line._id) throw createError('EVIDENCE_EXPIRED')
-      const accountSchema = usesAccountAuthorization(line, node)
-      if (!isMember(line, currentActor, accountSchema)) throw createError('FORBIDDEN')
+      const isNewAmendment = currentEvidence.retentionScope === RETENTION_SCOPES.EVIDENCE &&
+        currentEvidence.retentionSource === RETENTION_SOURCES.AUDIT_AMENDMENT &&
+        typeof currentEvidence.amendmentId === 'string'
+      let node = null
+      if (isNewAmendment) {
+        const accountSchema = usesAccountAuthorization(line, null)
+        if (currentActor.role !== 'super_admin' && !isMember(line, currentActor, accountSchema)) {
+          throw createError('FORBIDDEN')
+        }
+        const amendment = await readDocument(transaction, COLLECTIONS.audit, currentEvidence.amendmentId)
+        if (!amendment || amendment.action !== 'AMEND_FROZEN_BUSINESS' ||
+            amendment.targetType !== 'business_line' || amendment.targetId !== line._id ||
+            amendment.publishState !== 'published' || currentEvidence.nodeId !== null ||
+            currentEvidence.attachmentState !== 'amendment_claimed') {
+          throw createError('EVIDENCE_EXPIRED')
+        }
+      } else {
+        node = await readDocument(transaction, COLLECTIONS.nodes, currentEvidence.nodeId)
+        if (!node || node.businessLineId !== line._id) throw createError('EVIDENCE_EXPIRED')
+        const accountSchema = usesAccountAuthorization(line, node)
+        if (!isMember(line, currentActor, accountSchema)) throw createError('FORBIDDEN')
+      }
       const orphanExpiresAt = parseOptionalTimestamp(currentEvidence.orphanExpiresAt)
       const purgedAt = parseOptionalTimestamp(currentEvidence.purgedAt)
       const retention = classifyEvidenceRetention(currentEvidence, line)

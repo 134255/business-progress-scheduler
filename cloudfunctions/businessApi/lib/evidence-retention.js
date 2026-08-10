@@ -40,8 +40,11 @@ function classifyEvidenceRetention(evidence, line, { allowLegacy = false } = {})
   const lineDeadline = parseStrictTimestamp(line.purgeDueAt)
   if (!evidenceDeadline.valid || !lineDeadline.valid) return null
 
-  const attached = typeof evidence.feedbackId === 'string' && evidence.feedbackId &&
+  const feedbackAttached = typeof evidence.feedbackId === 'string' && evidence.feedbackId &&
     evidence.attachmentState === 'attached'
+  const amendmentAttached = typeof evidence.amendmentId === 'string' && evidence.amendmentId &&
+    evidence.attachmentState === 'amendment_claimed'
+  const attached = feedbackAttached || amendmentAttached
   const scopeAbsent = evidence.retentionScope === null || evidence.retentionScope === undefined
   const sourceAbsent = evidence.retentionSource === null || evidence.retentionSource === undefined
   if (allowLegacy && scopeAbsent && sourceAbsent) {
@@ -56,11 +59,13 @@ function classifyEvidenceRetention(evidence, line, { allowLegacy = false } = {})
   }
 
   if (evidence.retentionScope === 'business_line' && evidence.retentionSource === 'node_feedback') {
+    if (!feedbackAttached) return null
     if (line.status !== 'active' && !TERMINAL_LINE_STATUSES.has(line.status)) return null
     if (TERMINAL_LINE_STATUSES.has(line.status) && !lineDeadline.date) return null
     return { kind: 'business_line', effectivePurgeDueAt: lineDeadline.date }
   }
   if (evidence.retentionScope === 'evidence' && evidence.retentionSource === 'audit_amendment') {
+    if (!feedbackAttached && !amendmentAttached) return null
     if (!evidenceDeadline.date) return null
     return { kind: 'audit_amendment', effectivePurgeDueAt: evidenceDeadline.date }
   }

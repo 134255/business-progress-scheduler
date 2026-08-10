@@ -19,6 +19,7 @@ const { createAdminUserService } = require('./lib/admin-user-service')
 const { createCloudAccountRepository } = require('./lib/cloud-account-repository')
 const { createTemplateService } = require('./lib/template-service')
 const { createBusinessService } = require('./lib/business-service')
+const { createBusinessLifecycleService } = require('./lib/business-lifecycle-service')
 const {
   APPLICATION_ERROR_MARKER,
   createCloudTemplateRepository
@@ -185,6 +186,23 @@ function createBusinessRoutes(businessService) {
   }
 }
 
+function createBusinessLifecycleRoutes(businessLifecycleService) {
+  return {
+    rejectPreviousNode: ({ actor, payload }) => businessLifecycleService.rejectPreviousNode({
+      actor,
+      input: payload
+    }),
+    closeBusinessLine: ({ actor, payload }) => businessLifecycleService.closeBusinessLine({
+      actor,
+      input: payload
+    }),
+    amendFrozenBusiness: ({ actor, payload }) => businessLifecycleService.amendFrozenBusiness({
+      actor,
+      input: payload
+    })
+  }
+}
+
 function createEvidenceRoutes(evidenceService) {
   return {
     registerEvidenceUpload: ({ actor, payload }) => evidenceService.registerUpload({
@@ -215,6 +233,7 @@ function createBusinessApi({
   adminUserService,
   templateService,
   businessService,
+  businessLifecycleService,
   evidenceService,
   feedbackService,
   protectedRoutes = Object.create(null),
@@ -227,6 +246,7 @@ function createBusinessApi({
     Object.create(null),
     templateService ? createTemplateRoutes(templateService) : null,
     businessService ? createBusinessRoutes(businessService) : null,
+    businessLifecycleService ? createBusinessLifecycleRoutes(businessLifecycleService) : null,
     evidenceService ? createEvidenceRoutes(evidenceService) : null,
     feedbackService ? createFeedbackRoutes(feedbackService) : null,
     protectedRoutes
@@ -565,9 +585,7 @@ async function submitNodeFeedback(openid, payload) {
 function createDefaultLegacyRoutes() {
   return {
     updateUserProfile,
-    dashboard,
-    updateBusinessLine,
-    deleteBusinessLine
+    dashboard
   }
 }
 
@@ -592,6 +610,7 @@ function createDefaultBusinessApi() {
     keyFactory: prefix => `${prefix}_${crypto.randomBytes(16).toString('hex')}`
   })
   const businessService = createBusinessService({ repository: businessRepository })
+  const businessLifecycleService = createBusinessLifecycleService({ repository: businessRepository })
   const evidenceService = createEvidenceService({ repository: evidenceRepository })
   const feedbackService = createFeedbackService({ repository: feedbackRepository })
   return createBusinessApi({
@@ -600,6 +619,7 @@ function createDefaultBusinessApi() {
     adminUserService,
     templateService,
     businessService,
+    businessLifecycleService,
     evidenceService,
     feedbackService,
     getContext: () => cloud.getWXContext(),
