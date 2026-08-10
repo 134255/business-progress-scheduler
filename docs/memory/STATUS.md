@@ -4,6 +4,7 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 
 ## Verified state
 
+- Task 12 的本地发布资料已完成。新增中文 `docs/deployment/template-node-fields-setup.md`，以备份可读性为起点，固定集合、唯一值核对、索引、`businessApi`、`evidenceRetention`、停用状态每日触发器、分阶段脱敏验收和先停触发器再回滚的安全顺序；README 已提供统一入口。手册同时覆盖新账号与旧业务兼容查询索引、七段 Cron 与时区反向核对、图片/PDF/多视频、或签、驳回返工、冻结修订和隔离清理测试。真实 CloudBase 备份、索引、函数上传、触发器、真实云文件删除、多账号并发和微信开发者工具验收仍未执行，不能标记为发布完成。
 - Task 11 已完成本地实现与自审。独立 `evidenceRetention` 定时云函数按固定顺序回收过期反馈预约、回收过期审计修订预约、清理 24 小时孤立凭证、创建提前 15/7/1 天站内提醒并处理 60 天到期凭证。反馈与修订附件均按最多 40 个文件分块恢复，41 个修订附件测试证明事务不超过 100 次文档操作；缺失反馈预约只会清除到期且仍指向该编号的节点锁。文件删除前必须取得带随机令牌的 10 分钟事务租约，只有持有同一令牌的工作器可以确认成功或写入安全失败分类；中断后仅过期租约可重新认领。云对象已不存在视为幂等成功，元数据保留但永久文件编号被移除。提醒使用确定性编号并可跨批次跳过已存在记录。`wx-server-sdk` 已通过独立锁文件固定为 `4.0.2`。Task 11 定向测试 19 个全部通过；真实 CloudBase 定时触发器、目标环境索引、真实云文件删除和独立代码审查仍未验证。
 - Task 10 已完成本地实现与自审。节点反馈页只接收业务线和节点标识，并重新读取服务端业务、节点版本、字段快照、提交权限和不可变历史；客户端支持短文本、长文本、数字、布尔、日期、单选、多选 7 类字段及字段级快速校验，服务端仍是最终可信校验边界。图片、PDF、视频支持分批选择和多个视频，客户端执行图片 5 MB、PDF/视频 20 MB、单次合计 20 MB 的上传前校验；文件按顺序上传并立即登记，失败重试保留已登记凭证且最终只提交 `evidenceId`。图片、PDF、视频和批量下载均先获取 5 分钟临时访问地址，已清理凭证不再提供查看入口。业务详情新增相邻节点驳回、进行中业务关闭/取消/逻辑删除和冻结提示；超级管理员新增独立的冻结业务全局检索、脱敏详情、修订前后值、专用附件和审计式修订页面，普通成员读取规则未放宽。所有异步加载和写入在结果写回前复核当前账号。真实 CloudBase 部署、微信开发者工具交互和独立代码审查仍未验证。
 - Task 9 已完成本地实现与自审。当前活动节点负责人可原子驳回紧邻的上一已完成节点，业务指针与进度同步回退，但原反馈、凭证、到期时间、激活时间和完成时间均不重置；同一请求键幂等重试只产生一次状态变化和审计记录。业务线管理员或超级管理员可将进行中业务关闭、取消或逻辑删除，并在业务线上设置统一的 60 个自然日普通凭证清理期限；旧版业务更新、删除和反馈写入入口已从部署路由移除。冻结业务只允许超级管理员通过专用审计修订接口修改白名单字段，并保存原因、版本及精确前后值。修订附件通过确定性 `audit_logs` 预约按每块最多 40 个文件认领，单次总量不超过 20 MB、文件数量不设业务上限；每个附件从自身上传时间起独立保留 60 个自然日，只有预约发布后才允许访问。41 个附件的真实并发重试测试证明两个相同请求返回同一结果且只发布一次，105 个附件测试证明所有事务均不超过 100 次文档操作。中断预约回收义务已记录在 `ADR-0004`，由 Task 11 实现；独立代码审查、真实 CloudBase 部署和微信开发者工具验收仍未验证。
@@ -16,7 +17,7 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 - Task 3 of the template/node/field plan is implemented on its isolated worktree: protected template routes now expose administrator lifecycle operations and an ordinary-user enabled-template projection; the template service enforces super-administrator writes, disabled-before-edit, active account-document assignees, stable keys, optimistic versions, logical deletion, and a formally supported maximum of 48 nodes. The CloudBase repository paginates beyond the SDK's 100-document query window and atomically writes template metadata, fixed-ID node replacements, and one secret-free audit record using server dates after fixed-document template and active-assignee revalidation. Distinct assignee reads count against the 100-operation transaction budget; definitions that exceed the node or operation boundary return the safe `TEMPLATE_LIMIT_EXCEEDED` code and maximum-bearing message. Only template application errors carrying the shared private server-side `Symbol` may retain an allowlisted response; unmarked infrastructure failures return generic `INTERNAL_ERROR`.
 - Task 2 of the template/node/field plan is implemented on its isolated worktree: pure CommonJS `field-domain` and `template-domain` modules normalize the seven supported field types, validate denormalized submitted-value snapshots, enforce stable node/field keys and contiguous sequences, apply the 22-work-hour SLA default, restrict evidence types, require active assignee account document IDs for enablement, and reject definition edits while a template is enabled. Text regular-expression definitions use a conservative non-grouped grammar so stored patterns cannot trigger catastrophic backtracking during feedback validation.
 - Task 1 of the template/node/field plan is implemented on its isolated worktree: `createBusinessApi` accepts injected `protectedRoutes`; recognized protected actions receive the trusted resolved actor and payload separately, are rejected before handler invocation when authentication fails, and retain the existing account and legacy-route behavior.
-- 项目所有者已批准完整的模板、节点、字段、驳回、冻结修订、视频凭证和 60 个自然日清理方案。确认后的设计为 `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`，执行计划为 `docs/superpowers/plans/2026-08-07-template-node-fields.md`。Task 1 至 Task 10 已完成本地实现；下一步为 Task 11 定时提醒与清理工作器。
+- 项目所有者已批准完整的模板、节点、字段、驳回、冻结修订、视频凭证和 60 个自然日清理方案。确认后的设计为 `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`，执行计划为 `docs/superpowers/plans/2026-08-07-template-node-fields.md`。Task 1 至 Task 11 已完成本地实现，Task 12 本地部署资料已就绪；下一步是操作员按手册完成真实 CloudBase 和微信开发者工具验收。
 - WeChat DevTools account-administration smoke acceptance now covers automatic dashboard restoration, the authoritative super-administrator list state, creation of two ordinary test accounts and a second super administrator, case-insensitive duplicate-username rejection, safe disable/re-enable of the second administrator, rejection of disabling or demoting the final active super administrator, five-failure account lockout, administrator unlock, and read-only compatibility navigation through dashboard, business list, business detail, node feedback/history, and profile pages. No credential or identity value was recorded.
 - The obsolete `account-admin` linked worktree is fully cleaned up: its accidental deployment-manual edit was explicitly discarded, Git worktree registration and contents were removed, the merged local `codex/account-admin` branch was deleted through the non-force path, and the final empty `.worktrees/account-admin` directory was removed after WeChat DevTools released it.
 - Local `main` was fast-forwarded from `22a78f3` to the accepted account-administration head `f39c89e`. The merged result passed the full backend, client, WXML, syntax, diff, and project-memory checks. `origin/main` was then fast-forwarded through the integrated milestone and cleanup record at `b314785`.
@@ -38,6 +39,18 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-10 执行 Task 12 中文部署手册与发布前全量验证：
+
+| 命令或边界 | 结果 |
+|---|---|
+| 部署资料自检 | 通过：新增手册覆盖计划要求的 9 个集合、唯一索引前置检查、查询索引、两个云函数、七段 Cron、时区核对、停用后启用、回滚和脱敏验收矩阵；README 和稳定架构记忆已同步。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：364 个测试，0 个失败；仅出现两条既有 npm 用户配置警告。 |
+| `npm.cmd test --prefix cloudfunctions/evidenceRetention` | 通过：19 个测试，0 个失败。 |
+| `node --test miniprogram/test/account-flow.test.js miniprogram/test/admin-users-flow.test.js miniprogram/test/template-flow.test.js miniprogram/test/business-template-flow.test.js miniprogram/test/node-feedback-v2.test.js miniprogram/test/admin-business-amend-flow.test.js` | 通过：102 个测试，0 个失败。 |
+| `node tools/test-wxml-structure.mjs` | 通过：1 个测试，0 个失败。 |
+
+真实 CloudBase 备份可读性、唯一值、索引、函数上传、定时触发器、真实文件删除、多账号并发和微信开发者工具矩阵仍未验证。
 
 2026-08-10 执行 Task 11 凭证预约回收、提醒与幂等清理验证：
 
@@ -597,13 +610,13 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 - Administrator password reset manual acceptance is deferred because the current editable reset modal cannot mask the temporary password. The backend reset path remains automated-test covered; the client must move password entry to masked fields before manual use.
 - First-login binding, unbinding, rebinding with another identity, and ordinary-user route denial remain unverified because they require a second WeChat identity. These do not block the next core feature phase.
-- WeChat DevTools changed the uncommitted `project.config.json` base-library selection from `trial` to `3.17.1`. This operator-owned change is preserved and must not be mixed into feature commits without an explicit decision.
+- 当前工作树的 `project.config.json` 使用已提交的 `trial` 基础库设置，且没有未提交的操作员改动。真实发布前必须在微信开发者工具中明确选择目标基础库版本并单独记录，不把工具自动改写混入功能提交。
 - `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
 - Enterprise WeChat production identifiers and secret remain intentionally unavailable; strong-message delivery is deferred.
 
 ## Next actions
 
-1. 按 `docs/superpowers/plans/2026-08-07-template-node-fields.md` 执行 Task 11：预约回收、孤立文件清理、到期提醒和幂等云文件清理工作器。
-2. 在 Task 11 后执行部署手册、索引核对、真实 CloudBase 与微信开发者工具验收。
-3. 继续 SLA/日历、每工作小时提醒和企业微信适配器阶段。
+1. 由目标环境操作员按 `docs/deployment/template-node-fields-setup.md` 从备份可读性开始，依次完成唯一值检查、索引、`businessApi` 和 `evidenceRetention` 上传；每日触发器先保持停用。
+2. 使用隔离测试业务、测试账号和无敏感测试文件完成手册验收矩阵，确认重复调用幂等后再启用每日触发器；逐项把未验证结果更新为通过或失败。
+3. 继续 SLA/中国工作日历同步、每工作小时提醒和企业微信适配器阶段。
 4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。
