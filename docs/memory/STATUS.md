@@ -4,7 +4,7 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 
 ## Verified state
 
-- Task 11 第一阶段已完成本地实现与自审，但整个任务尚未完成。新增独立 `evidenceRetention` 纯编排服务，并以中文任务说明固定执行顺序：先回收过期反馈预约，再回收过期审计修订预约，然后清理 24 小时孤立凭证、创建 15/7/1 天站内提醒，最后处理 60 天到期凭证。编排层只在仓储事务认领成功后调用云存储删除；云对象已不存在视为幂等成功，暂时性失败只返回安全分类和计数，不返回文件、业务或身份信息。当前 4 个定向测试通过；CloudBase 仓储、真实删除适配器、定时入口、依赖锁文件、预约恢复细节和真机部署仍未实现，下一步继续该边界。
+- Task 11 已完成本地实现与自审。独立 `evidenceRetention` 定时云函数按固定顺序回收过期反馈预约、回收过期审计修订预约、清理 24 小时孤立凭证、创建提前 15/7/1 天站内提醒并处理 60 天到期凭证。反馈与修订附件均按最多 40 个文件分块恢复，41 个修订附件测试证明事务不超过 100 次文档操作；缺失反馈预约只会清除到期且仍指向该编号的节点锁。文件删除前必须取得带随机令牌的 10 分钟事务租约，只有持有同一令牌的工作器可以确认成功或写入安全失败分类；中断后仅过期租约可重新认领。云对象已不存在视为幂等成功，元数据保留但永久文件编号被移除。提醒使用确定性编号并可跨批次跳过已存在记录。`wx-server-sdk` 已通过独立锁文件固定为 `4.0.2`。Task 11 定向测试 19 个全部通过；真实 CloudBase 定时触发器、目标环境索引、真实云文件删除和独立代码审查仍未验证。
 - Task 10 已完成本地实现与自审。节点反馈页只接收业务线和节点标识，并重新读取服务端业务、节点版本、字段快照、提交权限和不可变历史；客户端支持短文本、长文本、数字、布尔、日期、单选、多选 7 类字段及字段级快速校验，服务端仍是最终可信校验边界。图片、PDF、视频支持分批选择和多个视频，客户端执行图片 5 MB、PDF/视频 20 MB、单次合计 20 MB 的上传前校验；文件按顺序上传并立即登记，失败重试保留已登记凭证且最终只提交 `evidenceId`。图片、PDF、视频和批量下载均先获取 5 分钟临时访问地址，已清理凭证不再提供查看入口。业务详情新增相邻节点驳回、进行中业务关闭/取消/逻辑删除和冻结提示；超级管理员新增独立的冻结业务全局检索、脱敏详情、修订前后值、专用附件和审计式修订页面，普通成员读取规则未放宽。所有异步加载和写入在结果写回前复核当前账号。真实 CloudBase 部署、微信开发者工具交互和独立代码审查仍未验证。
 - Task 9 已完成本地实现与自审。当前活动节点负责人可原子驳回紧邻的上一已完成节点，业务指针与进度同步回退，但原反馈、凭证、到期时间、激活时间和完成时间均不重置；同一请求键幂等重试只产生一次状态变化和审计记录。业务线管理员或超级管理员可将进行中业务关闭、取消或逻辑删除，并在业务线上设置统一的 60 个自然日普通凭证清理期限；旧版业务更新、删除和反馈写入入口已从部署路由移除。冻结业务只允许超级管理员通过专用审计修订接口修改白名单字段，并保存原因、版本及精确前后值。修订附件通过确定性 `audit_logs` 预约按每块最多 40 个文件认领，单次总量不超过 20 MB、文件数量不设业务上限；每个附件从自身上传时间起独立保留 60 个自然日，只有预约发布后才允许访问。41 个附件的真实并发重试测试证明两个相同请求返回同一结果且只发布一次，105 个附件测试证明所有事务均不超过 100 次文档操作。中断预约回收义务已记录在 `ADR-0004`，由 Task 11 实现；独立代码审查、真实 CloudBase 部署和微信开发者工具验收仍未验证。
 - Task 8-R is implemented, fully verified locally, and formally review-accepted after one fix round as the explicitly approved follow-up to Task 8's exhausted review ledger. Every actor-facing `reserved -> aborting` transition now commits in a transaction that reloads and authorizes the current actor, line, node, and exact reservation. Same-request expiry, OR-winner expiry, and submission-failure compensation cannot carry an authorization result into a later actorless recovery-start transaction. Before any reservation status or lease decision, same-request and OR paths verify the stored reservation ID, business-line ID, and node ID against the trusted request/node claim; a mismatched external reservation returns `VERSION_CONFLICT` without changing user, line, node, reservation, evidence, or audit state. OR recovery also rechecks that the node still claims the exact winner before mutation. Shared actorless rollback restores evidence and finalizes only an already-`aborting` reservation, while the repository-only Task 11 maintenance entry may independently start genuinely expired recovery, clears a claim only when the loaded node also belongs to the reservation line, and remains absent from public services and routes.
@@ -38,6 +38,18 @@ Status captured: 2026-08-10 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-10 执行 Task 11 凭证预约回收、提醒与幂等清理验证：
+
+| 命令或边界 | 结果 |
+|---|---|
+| `npm.cmd test --prefix cloudfunctions/evidenceRetention` | 通过：19 个测试，0 个失败；覆盖两类预约回收、41 个附件分块、缺失预约锁、上海日历 15/7/1 天提醒、精确到期、孤立保护、清理租约、对象不存在、失败重试和定时入口。仅出现两条既有 npm 用户配置警告。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：364 个测试，0 个失败。 |
+| `node tools/test-wxml-structure.mjs` | 通过：1 个测试，0 个失败。 |
+| JavaScript 语法、`git diff --check` 与项目记忆校验 | 通过；Git 仅提示预期的 LF/CRLF 工作区换行转换。 |
+| 依赖锁 | `npm.cmd ls wx-server-sdk --depth=0` 确认为 `4.0.2`；npm 报告官方依赖树中的 1 个中危和 5 个高危传递依赖，未执行破坏兼容性的强制降级。 |
+
+真实 CloudBase 定时触发器、目标环境索引、真实云文件删除、微信开发者工具和独立代码审查仍未验证。
 
 2026-08-10 执行 Task 10 动态反馈、凭证和冻结修订客户端验证：
 

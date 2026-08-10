@@ -21,7 +21,7 @@ function harness(overrides = {}) {
     async listExpiredOrphans(input) { calls.push(['listOrphans', input]); return pages.orphan.shift() || [] },
     async claimEvidenceForPurge(input) {
       calls.push(['claim', input])
-      return { evidenceId: input.evidenceId, fileId: `cloud://env/${input.evidenceId}` }
+      return { evidenceId: input.evidenceId, fileId: `cloud://env/${input.evidenceId}`, claimToken: `token-${input.evidenceId}` }
     },
     async markEvidencePurged(input) { calls.push(['purged', input]) },
     async markEvidencePurgeFailed(input) { calls.push(['failed', input]) },
@@ -69,14 +69,22 @@ test('清理只在认领成功后删除，确认对象不存在也记为已清�
       async claimEvidenceForPurge(input) {
         calls.push(['claim', input])
         if (input.evidenceId === 'due-1') return null
-        return { evidenceId: input.evidenceId, fileId: `cloud://env/${input.evidenceId}` }
+        return { evidenceId: input.evidenceId, fileId: `cloud://env/${input.evidenceId}`, claimToken: `token-${input.evidenceId}` }
       }
     }
   })
   const result = await service.runOnce()
   assert.equal(calls.some(call => call[0] === 'delete' && call[1].endsWith('due-1')), false)
   assert.equal(calls.some(call => call[0] === 'purged' && call[1].evidenceId === 'due-missing'), true)
+  assert.equal(calls.some(call => call[0] === 'purged' && call[1].claimToken === 'token-due-missing'), true)
   assert.equal(result.objectsPurged, 1)
+})
+
+test('删除成功和失败都携带同一次事务认领令牌', async () => {
+  const { service, calls } = harness()
+  await service.runOnce()
+  assert.equal(calls.some(call => call[0] === 'purged' && call[1].evidenceId === 'due-1' && call[1].claimToken === 'token-due-1'), true)
+  assert.equal(calls.some(call => call[0] === 'failed' && call[1].evidenceId === 'due-fail' && call[1].claimToken === 'token-due-fail'), true)
 })
 
 test('失败结果只保留安全分类，不返回文件、业务或身份信息', async () => {

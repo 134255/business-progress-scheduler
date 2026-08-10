@@ -74,7 +74,8 @@ function createRetentionService({ repository, storage, clock = () => new Date(),
       handle: async (_candidate, evidenceId) => {
         const claimed = await claim({ evidenceId, mode, now })
         if (!claimed) return false
-        if (typeof claimed.fileId !== 'string' || !claimed.fileId) {
+        if (typeof claimed.fileId !== 'string' || !claimed.fileId ||
+            typeof claimed.claimToken !== 'string' || !claimed.claimToken) {
           const error = { category: 'INVALID_RECORD' }
           await markFailed({ evidenceId, mode, now, errorCategory: error.category })
           throw error
@@ -85,13 +86,14 @@ function createRetentionService({ repository, storage, clock = () => new Date(),
             evidenceId,
             mode,
             now,
+            claimToken: claimed.claimToken,
             objectWasAbsent: Boolean(deletion && deletion.absent)
           })
           return true
         } catch (error) {
           const errorCategory = safeCategory(error)
           try {
-            await markFailed({ evidenceId, mode, now, errorCategory })
+            await markFailed({ evidenceId, mode, now, claimToken: claimed.claimToken, errorCategory })
           } catch (markError) {
             markError.category = safeCategory(markError)
             throw markError
