@@ -42,9 +42,9 @@ Executed on 2026-08-10 for Task 8-R atomic actor-facing feedback recovery:
 |---|---|
 | Initial inter-transaction RED matrix | Failed as expected: 3 tests, 0 passed. Revocation after contention authorization, same-request expiry detection, and submission failure all returned safe errors but still cleared claims and changed reservations through the later actorless recovery transaction. |
 | Changed-claim RED | Failed as expected: 1 test, 0 passed. An expired winner was changed to `aborted` after the node had switched to another winner. |
-| Feedback repository GREEN | Passed: 35 tests, 0 failures, including the four new deterministic recovery regressions and the existing 105-evidence transaction-budget case. |
+| Feedback repository GREEN | Passed: 36 tests, 0 failures, including five new deterministic recovery regressions, the complete six-variant account/relationship revocation matrix, and the existing 105-evidence transaction-budget case. |
 | Feedback service and protected route suites | Passed: 39 tests, 0 failures; `recoverExpiredReservation` remains repository-only. |
-| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 297 tests, 0 failures; npm emitted the two pre-existing malformed user-config warnings. |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | Passed: 298 tests, 0 failures; npm emitted the two pre-existing malformed user-config warnings. |
 | `node --test miniprogram/test/*.test.js` | Passed: 84 tests, 0 failures. |
 | `node tools/test-wxml-structure.mjs` | Passed: 1 test, 0 failures. |
 | Changed JavaScript syntax and `git diff --check` | Passed; Git emitted only expected LF-to-CRLF working-copy warnings. |

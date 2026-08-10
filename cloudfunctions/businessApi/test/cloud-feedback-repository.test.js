@@ -433,6 +433,69 @@ test('revocation between contention authorization and recovery start cannot muta
   assert.deepEqual(failures, [])
 })
 
+test('every account and relationship revocation has no post-authorization recovery window', async () => {
+  const mutations = {
+    disabled(fake) {
+      fake.replace('users', 'account-b', { _id: 'account-b', status: 'disabled' })
+    },
+    missing_user(fake) {
+      fake.state.users.delete('account-b')
+    },
+    removed_member(fake) {
+      const line = fake.documents('business_lines').find(item => item._id === 'line-1')
+      fake.replace('business_lines', 'line-1', { ...line, memberUserIds: ['account-a', 'manager'] })
+    },
+    removed_assignee(fake) {
+      const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+      fake.replace('business_nodes', 'node-1', { ...node, assigneeUserIds: ['account-a'] })
+    },
+    moved_node(fake) {
+      const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+      fake.replace('business_nodes', 'node-1', { ...node, businessLineId: 'other-line' })
+    },
+    changed_schema(fake) {
+      const line = fake.documents('business_lines').find(item => item._id === 'line-1')
+      const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+      delete line.managerUserIds
+      delete line.memberUserIds
+      delete node.assigneeUserIds
+      fake.replace('business_lines', 'line-1', { ...line, managerIds: ['legacy'], memberIds: ['legacy'] })
+      fake.replace('business_nodes', 'node-1', { ...node, assigneeIds: ['legacy'] })
+    }
+  }
+  const failures = []
+  for (const [name, mutate] of Object.entries(mutations)) {
+    const data = seed({ evidenceCount: 0 })
+    data.node_feedback = [{
+      _id: `expired-${name}`, businessLineId: 'line-1', nodeId: 'node-1', publishState: 'reserved',
+      status: 'completed', submittedBy: 'account-a', requestHash: 'old', inputHash: 'old',
+      claimExpiresAt: new Date(NOW.getTime() - 1)
+    }]
+    Object.assign(data.business_nodes[0], {
+      feedbackClaimId: `expired-${name}`, feedbackClaimHash: 'old',
+      feedbackClaimExpiresAt: new Date(NOW.getTime() - 1)
+    })
+    let fake
+    let injected = false
+    const harness = createFeedbackHarness({
+      seed: data,
+      afterTransaction: async ({ result }) => {
+        if (injected || !result || result.type !== 'reserved' || !result.winner) return
+        injected = true
+        mutate(fake)
+      }
+    })
+    fake = harness.fake
+    const outcome = await harness.repository.commitFeedback(submission({
+      actor: { _id: 'account-b', status: 'active' },
+      input: { requestKey: `matrix-${name}` }
+    })).then(() => 'FULFILLED', error => error.code)
+    if (injected) failures.push(`${name}:post-authorization-window:${outcome}`)
+    if (!injected && outcome !== 'FULFILLED') failures.push(`${name}:atomic-recovery:${outcome}`)
+  }
+  assert.deepEqual(failures, [])
+})
+
 test('same-request recovery cannot start after authorization is revoked', async () => {
   let fake
   let revocationInjected = false
