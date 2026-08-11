@@ -51,6 +51,7 @@ function createRouteHarness({
   businessLifecycleService,
   evidenceService,
   feedbackService,
+  calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
 } = {}) {
@@ -101,6 +102,7 @@ function createRouteHarness({
     businessLifecycleService,
     evidenceService,
     feedbackService,
+    calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
     clock: () => Date.parse('2026-08-06T00:00:00.000Z'),
@@ -149,6 +151,17 @@ test('changePassword ignores a forged payload actor and uses the trusted resolve
   assert.equal(result.ok, true)
   assert.equal(result.data.input.actor._id, 'actor-1')
   assert.equal(result.data.input.currentPassword, 'KnownPass8')
+})
+
+test('人工日历同步路由只传入可信账号且忽略客户端伪造身份与时间', async () => {
+  const calls = []
+  const harness = createRouteHarness({
+    calendarAdminService: { async sync(input) { calls.push(input); return { accepted: true } } }
+  })
+  const result = await harness.api.main({ action: 'syncWorkCalendar', payload: { actor: { role: 'super_admin' }, now: '2039-01-01' } })
+  assert.deepEqual(result, { ok: true, data: { accepted: true } })
+  assert.equal(calls[0].actor._id, 'actor-1')
+  assert.equal(Object.hasOwn(calls[0], 'now'), false)
 })
 
 test('protected domain routes receive the resolved actor and payload separately', async () => {

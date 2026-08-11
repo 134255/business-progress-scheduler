@@ -5,22 +5,41 @@ const { createCalendarSyncService } = require('./lib/calendar-sync-service')
 const { createCloudCalendarRepository } = require('./lib/cloud-calendar-repository')
 const { createWorkTimeService } = require('./lib/work-time-service')
 
-function normalizeNow(value, clock) {
-  if (value === undefined) return clock()
-  if (value instanceof Date) return new Date(value)
-  if (typeof value === 'string' || typeof value === 'number') return new Date(value)
-  return new Date(Number.NaN)
+function safeError(code, message) {
+  const error = new Error(message)
+  error.code = code
+  return error
 }
 
-function createCalendarSyncHandler({ service, clock = () => new Date() } = {}) {
+function createCalendarSyncHandler({
+  service,
+  manualAuthorizer = null,
+  getContext = () => ({}),
+  clock = () => new Date(),
+  logger = console
+} = {}) {
   if (!service || typeof service.run !== 'function') throw new TypeError('service.run is required')
   if (typeof clock !== 'function') throw new TypeError('clock is required')
   return async function calendarSyncHandler(event = {}) {
-    const mode = event.mode === undefined ? 'scheduled' : event.mode
-    if (!['scheduled', 'manual'].includes(mode)) throw new TypeError('mode must be scheduled or manual')
-    const now = normalizeNow(event.now, clock)
-    if (Number.isNaN(now.getTime())) throw new TypeError('now must be a valid date')
-    return service.run({ mode, now })
+    const context = getContext() || {}
+    if (typeof context.OPENID === 'string' && context.OPENID) throw safeError('FORBIDDEN', '禁止客户端直接调用日历同步')
+    const now = clock()
+    if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new TypeError('clock must return a valid Date')
+    let mode
+    if (event && event.Type === 'Timer' && !event.manualRequestId && event.mode === undefined) {
+      mode = 'scheduled'
+    } else if (event && typeof event.manualRequestId === 'string' && event.manualRequestId && manualAuthorizer &&
+        await manualAuthorizer.consume(event.manualRequestId, now)) {
+      mode = 'manual'
+    } else {
+      throw safeError('FORBIDDEN', '日历同步调用未经授权')
+    }
+    try {
+      return await service.run({ mode, now })
+    } catch (error) {
+      logger.error('[calendarSync]', { code: 'CALENDAR_SYNC_FAILED', mode })
+      throw safeError('CALENDAR_SYNC_FAILED', '工作日历同步失败，请稍后重试')
+    }
   }
 }
 
@@ -34,7 +53,21 @@ function createDefaultHandler() {
     calendarRepository: repository,
     workTimeService: createWorkTimeService({ calendarRepository: repository })
   })
-  return createCalendarSyncHandler({ service })
+  const manualAuthorizer = {
+    async consume(requestId, now) {
+      return db.runTransaction(async transaction => {
+        const ref = transaction.collection('calendar_sync_requests').doc(requestId)
+        let result
+        try { result = await ref.get() } catch (error) { return false }
+        const request = result && result.data
+        if (!request || request.purpose !== 'manual_calendar_sync' || request.status !== 'pending' || !(request.expiresAt instanceof Date) ||
+            request.expiresAt.getTime() <= now.getTime()) return false
+        await ref.update({ data: { status: 'consumed', consumedAt: db.serverDate() } })
+        return true
+      })
+    }
+  }
+  return createCalendarSyncHandler({ service, manualAuthorizer, getContext: () => cloud.getWXContext() })
 }
 
 let defaultHandler

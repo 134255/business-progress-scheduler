@@ -30,6 +30,7 @@ const { createCloudEvidenceRepository } = require('./lib/cloud-evidence-reposito
 const { createFeedbackService } = require('./lib/feedback-service')
 const { createCloudFeedbackRepository } = require('./lib/cloud-feedback-repository')
 const { hashPassword } = require('./lib/password')
+const { createCalendarAdminService } = require('./lib/calendar-admin-service')
 
 const COLLECTIONS = {
   users: 'users',
@@ -238,6 +239,12 @@ function createFeedbackRoutes(feedbackService) {
   }
 }
 
+function createCalendarAdminRoutes(calendarAdminService) {
+  return calendarAdminService ? {
+    syncWorkCalendar: ({ actor }) => calendarAdminService.sync({ actor })
+  } : null
+}
+
 function createBusinessApi({
   repository,
   authService,
@@ -247,6 +254,7 @@ function createBusinessApi({
   businessLifecycleService,
   evidenceService,
   feedbackService,
+  calendarAdminService,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
   getContext,
@@ -260,6 +268,7 @@ function createBusinessApi({
     businessLifecycleService ? createBusinessLifecycleRoutes(businessLifecycleService) : null,
     evidenceService ? createEvidenceRoutes(evidenceService) : null,
     feedbackService ? createFeedbackRoutes(feedbackService) : null,
+    createCalendarAdminRoutes(calendarAdminService),
     protectedRoutes
   )
 
@@ -624,6 +633,12 @@ function createDefaultBusinessApi() {
   const businessLifecycleService = createBusinessLifecycleService({ repository: businessRepository })
   const evidenceService = createEvidenceService({ repository: evidenceRepository })
   const feedbackService = createFeedbackService({ repository: feedbackRepository })
+  const calendarAdminService = createCalendarAdminService({
+    db,
+    invokeCalendarSync: data => cloud.callFunction({ name: 'calendarSync', data }),
+    clock: () => new Date(),
+    requestIdFactory: () => crypto.randomBytes(24).toString('hex')
+  })
   return createBusinessApi({
     repository,
     authService,
@@ -633,6 +648,7 @@ function createDefaultBusinessApi() {
     businessLifecycleService,
     evidenceService,
     feedbackService,
+    calendarAdminService,
     getContext: () => cloud.getWXContext(),
     clock,
     legacyRoutes: createDefaultLegacyRoutes()

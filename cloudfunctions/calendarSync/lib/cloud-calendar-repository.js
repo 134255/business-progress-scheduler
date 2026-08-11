@@ -2,8 +2,7 @@
 
 const crypto = require('node:crypto')
 
-const PRIMARY_COLLECTION = 'work_calendar'
-const SHADOW_COLLECTION = 'work_calendar_shadow'
+const ENTRY_COLLECTION = 'work_calendar_entries'
 const YEAR_COLLECTION = 'work_calendar_years'
 const PROCESSING_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const SYNC_LEASE_MS = 10 * 60 * 1000
@@ -107,25 +106,37 @@ function createCloudCalendarRepository({
     const at = clock()
     if (!validDate(at)) throw new TypeError('clock must return a valid Date')
     const syncToken = tokenFactory()
-    if (typeof syncToken !== 'string' || !syncToken) throw new TypeError('tokenFactory must return a string')
+    if (typeof syncToken !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(syncToken)) throw new TypeError('tokenFactory must return a safe string')
+    const generationId = `${year}_${syncToken}`
     const yearId = String(year)
-    const first = await readDocument(db, PRIMARY_COLLECTION, `${year}-01-01`)
-    const legacyPresent = Boolean(first && first.sourceYear === undefined && first.source === undefined)
+    const before = await readDocument(db, YEAR_COLLECTION, yearId)
+    let sameVersionComplete = false
+    if (before && before.year === year && before.sourceVersion === sourceVersion &&
+        typeof before.generationId === 'string' && before.generationId && before.dayCount === normalized.length) {
+      sameVersionComplete = true
+      for (const day of normalized) {
+        const record = await readDocument(db, ENTRY_COLLECTION, `${before.generationId}_${day.date}`)
+        if (!record || record.date !== day.date || record.sourceYear !== year ||
+            record.sourceVersion !== sourceVersion || record.generationId !== before.generationId ||
+            typeof record.isWorkday !== 'boolean') {
+          sameVersionComplete = false
+          break
+        }
+      }
+    }
     const claim = await db.runTransaction(async transaction => {
       const current = await readDocument(transaction, YEAR_COLLECTION, yearId)
-      if (current && current.sourceVersion === sourceVersion && ['primary', 'shadow'].includes(current.activeSlot)) {
-        return { changed: false, targetSlot: current.activeSlot }
+      if (sameVersionComplete && current && current.generationId === before.generationId &&
+          current.sourceVersion === sourceVersion) {
+        return { changed: false, generationId: current.generationId }
       }
       if (current && typeof current.syncToken === 'string' && current.syncToken &&
           validDate(current.syncExpiresAt) && current.syncExpiresAt.getTime() > at.getTime()) {
         throw new Error('calendar sync conflict')
       }
-      const activeSlot = current && ['primary', 'shadow', 'legacy', 'none'].includes(current.activeSlot)
-        ? current.activeSlot
-        : legacyPresent ? 'legacy' : 'none'
-      const targetSlot = activeSlot === 'primary' || activeSlot === 'legacy' ? 'shadow' : 'primary'
       const claimData = {
         syncToken,
+        pendingGenerationId: generationId,
         syncStartedAt: new Date(at),
         syncExpiresAt: new Date(at.getTime() + SYNC_LEASE_MS)
       }
@@ -134,36 +145,35 @@ function createCloudCalendarRepository({
       } else {
         await transaction.collection(YEAR_COLLECTION).doc(yearId).set({ data: {
           year,
-          activeSlot,
+          generationId: null,
           sourceVersion: null,
-          dayCount: activeSlot === 'legacy' ? null : 0,
+          dayCount: 0,
           syncedAt: null,
           ...claimData
         } })
       }
-      return { changed: true, targetSlot }
+      return { changed: true, generationId }
     })
-    if (!claim.changed) return { changed: false, activeSlot: claim.targetSlot }
-    const targetSlot = claim.targetSlot
-    const targetCollection = targetSlot === 'shadow' ? SHADOW_COLLECTION : PRIMARY_COLLECTION
+    if (!claim.changed) return { changed: false, generationId: claim.generationId }
     try {
       for (let offset = 0; offset < normalized.length; offset += WRITE_BATCH_SIZE) {
         await Promise.all(normalized.slice(offset, offset + WRITE_BATCH_SIZE).map(day =>
-          db.collection(targetCollection).doc(day.date).set({ data: {
+          db.collection(ENTRY_COLLECTION).doc(`${generationId}_${day.date}`).set({ data: {
             date: day.date,
             isWorkday: day.isWorkday,
             source: 'ailcc',
             sourceYear: year,
+            generationId,
             sourceVersion,
             syncedAt: new Date(syncedAt)
           } })))
       }
       await db.runTransaction(async transaction => {
         const latest = await readDocument(transaction, YEAR_COLLECTION, yearId)
-        if (!latest || latest.syncToken !== syncToken) throw new Error('calendar sync conflict')
+        if (!latest || latest.syncToken !== syncToken || latest.pendingGenerationId !== generationId) throw new Error('calendar sync conflict')
         await transaction.collection(YEAR_COLLECTION).doc(yearId).set({ data: {
           year,
-          activeSlot: targetSlot,
+          generationId,
           sourceVersion,
           dayCount: normalized.length,
           syncedAt: new Date(syncedAt)
@@ -186,22 +196,19 @@ function createCloudCalendarRepository({
       }
       throw error
     }
-    return { changed: true, activeSlot: targetSlot }
+    return { changed: true, generationId }
   }
 
   async function getDayRule(dateKey) {
     if (typeof dateKey !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return null
     const year = Number(dateKey.slice(0, 4))
     const generation = await readDocument(db, YEAR_COLLECTION, String(year))
-    if (generation && generation.activeSlot === 'none') return null
-    const collection = generation && generation.activeSlot === 'shadow' ? SHADOW_COLLECTION : PRIMARY_COLLECTION
-    const record = await readDocument(db, collection, dateKey)
-    if (!record || record._id !== dateKey || record.date !== dateKey || typeof record.isWorkday !== 'boolean') return null
-    if (generation && generation.activeSlot === 'legacy') {
-      if (record.sourceYear !== undefined || record.source !== undefined) return null
-    } else if (generation && (!['primary', 'shadow'].includes(generation.activeSlot) ||
-        record.sourceYear !== year || record.sourceVersion !== generation.sourceVersion)) return null
-    if (!generation && (record.sourceYear !== undefined || record.source !== undefined)) return null
+    if (!generation || generation.year !== year || typeof generation.sourceVersion !== 'string' ||
+        !generation.sourceVersion || typeof generation.generationId !== 'string' || !generation.generationId) return null
+    const record = await readDocument(db, ENTRY_COLLECTION, `${generation.generationId}_${dateKey}`)
+    if (!record || record._id !== `${generation.generationId}_${dateKey}` || record.date !== dateKey || typeof record.isWorkday !== 'boolean') return null
+    if (record.sourceYear !== year || record.sourceVersion !== generation.sourceVersion ||
+        record.generationId !== generation.generationId) return null
     return {
       date: record.date,
       isWorkday: record.isWorkday,
@@ -256,7 +263,8 @@ function createCloudCalendarRepository({
         const node = await readDocument(transaction, 'business_nodes', candidate.id)
         if (!node || node.businessLineId !== line._id || line.currentNodeId !== node._id ||
             node.status !== candidate.status || node.version !== candidate.version ||
-            !PROCESSING_STATUSES.has(node.status) || node.processingDueStatus !== 'pending_calendar') return false
+            !PROCESSING_STATUSES.has(node.status) || node.processingDueStatus !== 'pending_calendar' ||
+            node.version === Number.MAX_SAFE_INTEGER) return false
         await transaction.collection('business_nodes').doc(node._id).update({ data: {
           processingDueStatus: 'calculated',
           processingDueAt: new Date(calculation.dueAt),
@@ -276,6 +284,7 @@ function createCloudCalendarRepository({
             node.activeReviewRoundId !== round._id || node.version !== candidate.nodeVersion ||
             round.status !== candidate.status || round.status !== 'pending' || round.version !== candidate.version ||
             round.reviewDueStatus !== 'pending_calendar') return false
+        if (round.version === Number.MAX_SAFE_INTEGER) return false
         await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
           reviewDueStatus: 'calculated',
           reviewDueAt: new Date(calculation.dueAt),
@@ -295,8 +304,7 @@ function createCloudCalendarRepository({
 }
 
 module.exports = {
-  PRIMARY_COLLECTION,
-  SHADOW_COLLECTION,
+  ENTRY_COLLECTION,
   YEAR_COLLECTION,
   createCloudCalendarRepository
 }

@@ -32,23 +32,15 @@ function createCloudWorkCalendarRepository({ db } = {}) {
     if (!validDateKey(dateKey)) throw new TypeError('dateKey must be a real YYYY-MM-DD date')
     const year = Number(dateKey.slice(0, 4))
     const generation = await readDocument(db, 'work_calendar_years', String(year))
-    if (generation && generation.activeSlot === 'none') return null
-    const collection = generation && generation.activeSlot === 'shadow'
-      ? 'work_calendar_shadow'
-      : 'work_calendar'
-    const record = await readDocument(db, collection, dateKey)
-    if (!record || record._id !== dateKey || record.date !== dateKey || typeof record.isWorkday !== 'boolean') {
+    if (!generation || generation.year !== year || typeof generation.sourceVersion !== 'string' ||
+        !generation.sourceVersion || typeof generation.generationId !== 'string' || !generation.generationId) return null
+    const recordId = `${generation.generationId}_${dateKey}`
+    const record = await readDocument(db, 'work_calendar_entries', recordId)
+    if (!record || record._id !== recordId || record.date !== dateKey || typeof record.isWorkday !== 'boolean') {
       return null
     }
-    if (generation && generation.activeSlot === 'legacy') {
-      if (generation.year !== year || record.sourceYear !== undefined || record.source !== undefined) return null
-    } else if (generation) {
-      if (generation.year !== year || !['primary', 'shadow'].includes(generation.activeSlot) ||
-          typeof generation.sourceVersion !== 'string' || !generation.sourceVersion ||
-          record.sourceYear !== year || record.sourceVersion !== generation.sourceVersion) return null
-    } else if (record.sourceYear !== undefined || record.source !== undefined) {
-      return null
-    }
+    if (record.sourceYear !== year || record.sourceVersion !== generation.sourceVersion ||
+        record.generationId !== generation.generationId) return null
     return {
       date: record.date,
       isWorkday: record.isWorkday,

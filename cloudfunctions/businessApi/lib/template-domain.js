@@ -29,6 +29,10 @@ function normalizeSequence(value) {
   return value
 }
 
+function validSlaHours(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && Number.isSafeInteger(value * 60)
+}
+
 function normalizeAccountIds(value) {
   if (!Array.isArray(value)) throw createError('TEMPLATE_INVALID')
   const ids = value.map(requireText)
@@ -66,8 +70,8 @@ function normalizeTemplateNode(input) {
   if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
   const processingSlaWorkHours = input.processingSlaWorkHours === undefined ? DEFAULT_PROCESSING_SLA_WORK_HOURS : input.processingSlaWorkHours
   const reviewSlaWorkHours = input.reviewSlaWorkHours === undefined ? DEFAULT_REVIEW_SLA_WORK_HOURS : input.reviewSlaWorkHours
-  if (!Number.isFinite(processingSlaWorkHours) || processingSlaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
-  if (!Number.isFinite(reviewSlaWorkHours) || reviewSlaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
+  if (!validSlaHours(processingSlaWorkHours)) throw createError('TEMPLATE_INVALID')
+  if (!validSlaHours(reviewSlaWorkHours)) throw createError('TEMPLATE_INVALID')
   let reviewMode
   try {
     reviewMode = normalizeReviewMode(input.reviewMode === undefined ? 'any' : input.reviewMode)
@@ -99,7 +103,7 @@ function normalizeLegacyTemplateNode(input) {
   const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
   if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
   const slaWorkHours = input.slaWorkHours === undefined ? DEFAULT_PROCESSING_SLA_WORK_HOURS : input.slaWorkHours
-  if (!Number.isFinite(slaWorkHours) || slaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
+  if (!validSlaHours(slaWorkHours)) throw createError('TEMPLATE_INVALID')
   const allowedEvidenceTypes = normalizeEvidenceTypes(input.allowedEvidenceTypes === undefined ? [] : input.allowedEvidenceTypes)
   if (requiresEvidence && allowedEvidenceTypes.length === 0) throw createError('TEMPLATE_INVALID')
   return {

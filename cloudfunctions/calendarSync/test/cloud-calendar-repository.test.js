@@ -22,11 +22,11 @@ test('完整年份按日期幂等写入工作日历记录', async () => {
     sourceVersion: 'ailcc-v1',
     syncedAt: new Date('2026-08-11T00:00:00.000Z')
   })
-  const stored = fake.documents('work_calendar')
+  const stored = fake.documents('work_calendar_entries')
   assert.equal(stored.length, 365)
   assert.deepEqual(stored[0], {
-    _id: '2026-01-01', date: '2026-01-01', isWorkday: true,
-    source: 'ailcc', sourceYear: 2026, sourceVersion: 'ailcc-v1',
+    _id: fake.documents('work_calendar_years')[0].generationId + '_2026-01-01', date: '2026-01-01', isWorkday: true,
+    source: 'ailcc', sourceYear: 2026, generationId: fake.documents('work_calendar_years')[0].generationId, sourceVersion: 'ailcc-v1',
     syncedAt: new Date('2026-08-11T00:00:00.000Z')
   })
 })
@@ -54,12 +54,12 @@ test('同一年并发同步只有一个发布者且活动代际不会混入另�
   const firstWriteMayContinue = new Promise(resolve => { releaseFirstWrite = resolve })
   fake.db.collection = name => {
     const collection = baseCollection(name)
-    if (name !== 'work_calendar') return collection
+    if (name !== 'work_calendar_entries') return collection
     return {
       ...collection,
       doc(id) {
         const document = collection.doc(id)
-        if (id !== '2026-01-01') return document
+        if (!id.endsWith('_2026-01-01')) return document
         return {
           ...document,
           async set(input) {
@@ -75,10 +75,11 @@ test('同一年并发同步只有一个发布者且活动代际不会混入另�
     }
   }
   let token = 0
+  let clockNow = new Date('2026-08-11T00:00:00.000Z')
   const repository = createCloudCalendarRepository({
     db: fake.db,
     tokenFactory: () => `token-${++token}`,
-    clock: () => new Date('2026-08-11T00:00:00.000Z')
+    clock: () => new Date(clockNow)
   })
   const input = sourceVersion => ({
     year: 2026, days: yearDays(2026), sourceVersion,
@@ -86,6 +87,7 @@ test('同一年并发同步只有一个发布者且活动代际不会混入另�
   })
   const firstSync = repository.replaceYear(input('version-a'))
   await firstWriteStarted
+  clockNow = new Date('2026-08-11T00:11:00.000Z')
   const secondSettled = await Promise.allSettled([repository.replaceYear(input('version-b'))])
   releaseFirstWrite()
   const firstSettled = await Promise.allSettled([firstSync])
@@ -95,10 +97,54 @@ test('同一年并发同步只有一个发布者且活动代际不会混入另�
   const rule = await repository.getDayRule('2026-01-01')
   assert.ok(rule, JSON.stringify({
     metadata: fake.documents('work_calendar_years'),
-    primary: fake.documents('work_calendar').slice(0, 1),
-    shadow: fake.documents('work_calendar_shadow').slice(0, 1)
+    entries: fake.documents('work_calendar_entries').slice(0, 2)
   }))
   assert.equal(rule.calendarVersion, fake.documents('work_calendar_years')[0].sourceVersion)
+  assert.equal(rule.calendarVersion, 'version-b')
+})
+
+test('同版本活动代际缺日或坏记录时安全重建', async () => {
+  const fake = createFakeCloudDatabase()
+  let token = 0
+  const repository = createCloudCalendarRepository({ db: fake.db, tokenFactory: () => `repair-${++token}` })
+  const input = { year: 2026, days: yearDays(2026), sourceVersion: 'same', syncedAt: new Date() }
+  await repository.replaceYear(input)
+  const metadata = fake.documents('work_calendar_years')[0]
+  await fake.db.collection('work_calendar_entries').doc(`${metadata.generationId}_2026-12-31`).remove()
+  const result = await repository.replaceYear(input)
+  assert.equal(result.changed, true)
+  assert.notEqual(result.generationId, metadata.generationId)
+  assert.equal((await repository.getDayRule('2026-12-31')).calendarVersion, 'same')
+  const repaired = fake.documents('work_calendar_years')[0]
+  fake.replace('work_calendar_entries', `${repaired.generationId}_2026-06-01`, {
+    date: '2026-06-01', isWorkday: 1, sourceYear: 2026,
+    generationId: repaired.generationId, sourceVersion: 'same'
+  })
+  const rebuilt = await repository.replaceYear(input)
+  assert.equal(rebuilt.changed, true)
+  assert.notEqual(rebuilt.generationId, repaired.generationId)
+})
+
+test('代际年份或来源版本损坏时严格拒绝读取', async () => {
+  const fake = createFakeCloudDatabase()
+  const repository = createCloudCalendarRepository({ db: fake.db, tokenFactory: () => 'metadata' })
+  await repository.replaceYear({ year: 2026, days: yearDays(2026), sourceVersion: 'v1', syncedAt: new Date() })
+  fake.replace('work_calendar_years', '2026', { ...fake.documents('work_calendar_years')[0], year: 2025 })
+  assert.equal(await repository.getDayRule('2026-01-01'), null)
+  fake.replace('work_calendar_years', '2026', { ...fake.documents('work_calendar_years')[0], year: 2026, sourceVersion: '' })
+  assert.equal(await repository.getDayRule('2026-01-01'), null)
+})
+
+test('版本达到 MAX_SAFE_INTEGER 时不溢出写回', async () => {
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-max', status: 'active', currentNodeId: 'node-max' }],
+    business_nodes: [{ _id: 'node-max', businessLineId: 'line-max', status: 'ready', version: Number.MAX_SAFE_INTEGER, processingDueStatus: 'pending_calendar' }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  assert.equal(await repository.applyDueCalculation({
+    candidate: { kind: 'processing', id: 'node-max', businessLineId: 'line-max', status: 'ready', version: Number.MAX_SAFE_INTEGER },
+    calculation: { status: 'calculated', dueAt: new Date(), calendarVersion: 'v1' }, now: new Date()
+  }), false)
 })
 
 test('候选读取合计不超过40条', async () => {

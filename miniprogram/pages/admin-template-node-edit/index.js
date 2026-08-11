@@ -284,9 +284,9 @@ Page({
       this.setData({ errorMessage: '请填写节点名称' })
       return
     }
-    if (!Number.isFinite(node.processingSlaWorkHours) || node.processingSlaWorkHours <= 0 ||
-      !Number.isFinite(node.reviewSlaWorkHours) || node.reviewSlaWorkHours <= 0) {
-      this.setData({ errorMessage: '请填写正数处理与审核 SLA' })
+    if (!Number.isSafeInteger(node.processingSlaWorkHours * 60) || node.processingSlaWorkHours <= 0 ||
+      !Number.isSafeInteger(node.reviewSlaWorkHours * 60) || node.reviewSlaWorkHours <= 0) {
+      this.setData({ errorMessage: '处理与审核 SLA 必须是可精确换算为整分钟的正数小时' })
       return
     }
     if (!node.processorUserIds.length) {

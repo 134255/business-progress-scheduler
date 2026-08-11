@@ -261,6 +261,20 @@ test('node editor rejects overlapping roles and a missing reviewer before commit
   delete global.wx
 })
 
+test('node editor rejects SLA hours that cannot be represented as whole minutes', async () => {
+  const processor = { _id: 'processor-1', displayName: 'P', username: 'processor' }
+  const reviewer = { _id: 'reviewer-1', displayName: 'R', username: 'reviewer' }
+  let accepted = 0
+  const page = createNodeEditor({ users: [processor, reviewer], acceptNodeFromEditor: () => { accepted += 1 } })
+  page.setData({ name: 'node', processorUserIds: [processor._id], reviewerUserIds: [reviewer._id], processingSlaWorkHours: '0.333', reviewSlaWorkHours: '0.1' })
+  await page.submit()
+  assert.equal(accepted, 0)
+  assert.equal(page.data.errorMessage, '处理与审核 SLA 必须是可精确换算为整分钟的正数小时')
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
 test('node editor keeps enabled-template nodes read-only', async () => {
   const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
   const reviewer = { _id: 'reviewer-1', displayName: '审核人', username: 'reviewer' }
