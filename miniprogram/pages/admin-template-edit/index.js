@@ -11,6 +11,10 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value))
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
 function decode(value) {
   if (typeof value !== 'string') return ''
   try { return decodeURIComponent(value) } catch (error) { return '' }
@@ -41,13 +45,18 @@ function cleanField(field, sequence) {
 }
 
 function cleanNode(node, sequence) {
+  const isLegacyNode = !hasOwn(node, 'workflowMode')
   return {
     ...(node.nodeKey ? { nodeKey: node.nodeKey } : {}),
     sequence,
     name: node.name,
     description: node.description || '',
-    assigneeUserIds: (node.assigneeUserIds || []).slice(),
-    slaWorkHours: node.slaWorkHours,
+    workflowMode: 'review',
+    processorUserIds: (isLegacyNode ? node.assigneeUserIds : node.processorUserIds || []).slice(),
+    reviewerUserIds: (isLegacyNode ? [] : node.reviewerUserIds || []).slice(),
+    reviewMode: !isLegacyNode && node.reviewMode === 'all' ? 'all' : 'any',
+    processingSlaWorkHours: !isLegacyNode && node.processingSlaWorkHours !== undefined ? node.processingSlaWorkHours : 22,
+    reviewSlaWorkHours: !isLegacyNode && node.reviewSlaWorkHours !== undefined ? node.reviewSlaWorkHours : 8,
     requiresEvidence: Boolean(node.requiresEvidence),
     allowedEvidenceTypes: (node.allowedEvidenceTypes || []).slice(),
     fields: (node.fields || []).map(cleanField)
@@ -57,7 +66,8 @@ function cleanNode(node, sequence) {
 function messageFor(error) {
   if (error && error.code === 'VERSION_CONFLICT') return '模板已被其他管理员更新，已刷新为最新版本'
   if (error && error.code === 'TEMPLATE_NOT_EDITABLE') return '启用中的模板为只读，请先停用模板'
-  if (error && error.code === 'ASSIGNEE_INACTIVE') return '节点负责人已停用，请重新选择启用账号'
+  if (error && error.code === 'PROCESSOR_INACTIVE') return '节点处理人已停用，请重新选择启用账号'
+  if (error && error.code === 'REVIEWER_INACTIVE') return '节点审核人已停用，请重新选择启用账号'
   if (error && error.code === 'TEMPLATE_INVALID') return '模板定义不完整，请检查节点、字段和负责人'
   return error && error.message ? error.message : '网络异常，请稍后重试'
 }

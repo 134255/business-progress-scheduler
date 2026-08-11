@@ -11,17 +11,35 @@
       <label class="field-label" for="node-description">节点说明</label>
       <textarea id="node-description" class="textarea" value="{{description}}" maxlength="500" disabled="{{readOnly}}" bindinput="onDescriptionInput" />
     </view>
-    <view class="field">
-      <label class="field-label" for="node-sla">SLA 工时</label>
-      <input id="node-sla" class="input" type="digit" value="{{slaWorkHours}}" disabled="{{readOnly}}" bindinput="onSlaInput" />
+    <view class="field sla-grid">
+      <view>
+        <label class="field-label" for="node-processing-sla">处理 SLA 工时</label>
+        <input id="node-processing-sla" class="input" type="digit" value="{{processingSlaWorkHours}}" disabled="{{readOnly}}" bindinput="onProcessingSlaInput" />
+      </view>
+      <view>
+        <label class="field-label" for="node-review-sla">审核 SLA 工时</label>
+        <input id="node-review-sla" class="input" type="digit" value="{{reviewSlaWorkHours}}" disabled="{{readOnly}}" bindinput="onReviewSlaInput" />
+      </view>
     </view>
     <view class="field">
-      <text class="field-label">负责人（任一人完成即通过）</text>
-      <checkbox-group class="option-list" bindchange="onAssigneesChange">
-        <label wx:for="{{assigneeOptions}}" wx:key="_id">
-          <checkbox value="{{item._id}}" checked="{{item.selected}}" disabled="{{readOnly}}" />{{item.displayName || item.username}}（@{{item.username}}）
+      <text class="field-label">处理人</text>
+      <view class="option-list">
+        <label wx:for="{{accountOptions}}" wx:key="_id" data-id="{{item._id}}" bindtap="onProcessorToggle">
+          <checkbox checked="{{item.processorSelected}}" disabled="{{readOnly}}" />{{item.displayName || item.username}}（@{{item.username}}）
         </label>
-      </checkbox-group>
+      </view>
+    </view>
+    <view class="field">
+      <text class="field-label">审核人</text>
+      <view class="option-list">
+        <label wx:for="{{accountOptions}}" wx:key="_id" data-id="{{item._id}}" bindtap="onReviewerToggle">
+          <checkbox checked="{{item.reviewerSelected}}" disabled="{{readOnly}}" />{{item.displayName || item.username}}（@{{item.username}}）
+        </label>
+      </view>
+      <radio-group class="review-mode" bindchange="onReviewModeChange">
+        <label><radio value="any" checked="{{reviewMode === 'any'}}" disabled="{{readOnly}}" />或签（任一审核人通过）</label>
+        <label><radio value="all" checked="{{reviewMode === 'all'}}" disabled="{{readOnly}}" />会签（全部审核人通过）</label>
+      </radio-group>
     </view>
     <view class="field">
       <text class="field-label">凭证要求</text>

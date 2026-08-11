@@ -15,6 +15,7 @@ function nextUiKey(prefix) {
 }
 
 function clone(value) { return JSON.parse(JSON.stringify(value)) }
+function hasOwn(value, key) { return Object.prototype.hasOwnProperty.call(value, key) }
 function uniqueTexts(value) {
   return [...new Set(String(value || '').split(/[,，\n]/).map(item => item.trim()).filter(Boolean))]
 }
@@ -26,7 +27,8 @@ function newField() {
 }
 function newNode() {
   return {
-    _uiKey: nextUiKey('node'), sequence: 0, name: '', description: '', assigneeUserIds: [], slaWorkHours: 22,
+    _uiKey: nextUiKey('node'), sequence: 0, name: '', description: '', workflowMode: 'review',
+    processorUserIds: [], reviewerUserIds: [], reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8,
     requiresEvidence: false, allowedEvidenceTypes: [], fields: []
   }
 }
@@ -38,9 +40,12 @@ Page({
     readOnly: false,
     name: '',
     description: '',
-    assigneeOptions: [],
-    assigneeUserIds: [],
-    slaWorkHours: 22,
+    accountOptions: [],
+    processorUserIds: [],
+    reviewerUserIds: [],
+    reviewMode: 'any',
+    processingSlaWorkHours: 22,
+    reviewSlaWorkHours: 8,
     requiresEvidence: false,
     allowedEvidenceTypes: [],
     fields: [],
@@ -64,6 +69,9 @@ Page({
     const index = Number.isInteger(parsed) ? parsed : -1
     const context = this.ownerPage.getNodeEditorContext(index)
     const node = context.node || newNode()
+    const isLegacyNode = !hasOwn(node, 'workflowMode')
+    const processorUserIds = clone(isLegacyNode ? (node.assigneeUserIds || []) : (node.processorUserIds || []))
+    const reviewerUserIds = clone(isLegacyNode ? [] : (node.reviewerUserIds || []))
     this.nodeKey = node.nodeKey
     this.uiKey = node._uiKey || node.nodeKey || nextUiKey('node')
     this.setData({
@@ -72,11 +80,18 @@ Page({
       readOnly: Boolean(context.readOnly),
       name: node.name || '',
       description: node.description || '',
-      assigneeOptions: clone(context.assigneeOptions || []).map(item => ({
-        ...item, selected: (node.assigneeUserIds || []).includes(item._id)
+      accountOptions: clone(context.assigneeOptions || []).map(item => ({
+        _id: item._id,
+        displayName: item.displayName,
+        username: item.username,
+        processorSelected: processorUserIds.includes(item._id),
+        reviewerSelected: reviewerUserIds.includes(item._id)
       })),
-      assigneeUserIds: clone(node.assigneeUserIds || []),
-      slaWorkHours: node.slaWorkHours === undefined ? 22 : node.slaWorkHours,
+      processorUserIds,
+      reviewerUserIds,
+      reviewMode: !isLegacyNode && node.reviewMode === 'all' ? 'all' : 'any',
+      processingSlaWorkHours: !isLegacyNode && node.processingSlaWorkHours !== undefined ? node.processingSlaWorkHours : 22,
+      reviewSlaWorkHours: !isLegacyNode && node.reviewSlaWorkHours !== undefined ? node.reviewSlaWorkHours : 8,
       requiresEvidence: Boolean(node.requiresEvidence),
       allowedEvidenceTypes: clone(node.allowedEvidenceTypes || []),
       evidenceTypeOptions: EVIDENCE_TYPE_OPTIONS.map(item => ({
@@ -107,16 +122,35 @@ Page({
   onDescriptionInput(event) {
     if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ description: event.detail.value })
   },
-  onSlaInput(event) {
-    if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ slaWorkHours: event.detail.value })
+  onProcessingSlaInput(event) {
+    if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ processingSlaWorkHours: event.detail.value })
   },
-  onAssigneesChange(event) {
+  onReviewSlaInput(event) {
+    if (this.requireSuperAdmin() && !this.data.readOnly) this.setData({ reviewSlaWorkHours: event.detail.value })
+  },
+  toggleAccountRole(role, event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
-    const selected = event.detail.value.slice()
+    const id = event && event.currentTarget && event.currentTarget.dataset.id
+    if (typeof id !== 'string' || !this.data.accountOptions.some(item => item._id === id)) return
+    const dataKey = role === 'processor' ? 'processorUserIds' : 'reviewerUserIds'
+    const selected = this.data[dataKey].includes(id)
+      ? this.data[dataKey].filter(item => item !== id)
+      : [...this.data[dataKey], id]
     this.setData({
-      assigneeUserIds: selected,
-      assigneeOptions: this.data.assigneeOptions.map(item => ({ ...item, selected: selected.includes(item._id) }))
+      [dataKey]: selected,
+      accountOptions: this.data.accountOptions.map(item => ({
+        ...item,
+        processorSelected: role === 'processor' ? selected.includes(item._id) : item.processorSelected,
+        reviewerSelected: role === 'reviewer' ? selected.includes(item._id) : item.reviewerSelected
+      }))
     })
+  },
+  onProcessorToggle(event) { this.toggleAccountRole('processor', event) },
+  onReviewerToggle(event) { this.toggleAccountRole('reviewer', event) },
+  onReviewModeChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
+    const reviewMode = event && event.detail && event.detail.value
+    if (reviewMode === 'any' || reviewMode === 'all') this.setData({ reviewMode })
   },
   onRequiresEvidenceChange(event) {
     if (this.requireSuperAdmin() && !this.data.readOnly) {
@@ -223,16 +257,51 @@ Page({
     return normalized
   },
 
+  buildNodeForSave() {
+    const fields = this.data.fields.map((field, sequence) => this.normalizedField(field, sequence))
+    return {
+      _uiKey: this.uiKey,
+      ...(this.nodeKey ? { nodeKey: this.nodeKey } : {}),
+      sequence: this.data.index >= 0 ? this.data.index : 0,
+      name: this.data.name.trim(),
+      description: this.data.description.trim(),
+      workflowMode: 'review',
+      processorUserIds: this.data.processorUserIds.slice(),
+      reviewerUserIds: this.data.reviewerUserIds.slice(),
+      reviewMode: this.data.reviewMode,
+      processingSlaWorkHours: Number(this.data.processingSlaWorkHours),
+      reviewSlaWorkHours: Number(this.data.reviewSlaWorkHours),
+      requiresEvidence: this.data.requiresEvidence,
+      allowedEvidenceTypes: this.data.allowedEvidenceTypes.slice(),
+      fields
+    }
+  },
+
   async submit() {
     if (!this.requireSuperAdmin() || this.unavailable || this.data.readOnly || this.committed || this.data.submitting) return
-    const name = this.data.name.trim()
-    const slaWorkHours = Number(this.data.slaWorkHours)
-    const fields = this.data.fields.map((field, sequence) => this.normalizedField(field, sequence))
-    if (!name || !Number.isFinite(slaWorkHours) || slaWorkHours <= 0 || !this.data.assigneeUserIds.length) {
-      this.setData({ errorMessage: '请填写节点名称、正数 SLA，并至少选择一名负责人' })
+    const node = this.buildNodeForSave()
+    if (!node.name) {
+      this.setData({ errorMessage: '请填写节点名称' })
       return
     }
-    if (fields.some(field => !field.name ||
+    if (!Number.isFinite(node.processingSlaWorkHours) || node.processingSlaWorkHours <= 0 ||
+      !Number.isFinite(node.reviewSlaWorkHours) || node.reviewSlaWorkHours <= 0) {
+      this.setData({ errorMessage: '请填写正数处理与审核 SLA' })
+      return
+    }
+    if (!node.processorUserIds.length) {
+      this.setData({ errorMessage: '请至少选择一名处理人' })
+      return
+    }
+    if (!node.reviewerUserIds.length) {
+      this.setData({ errorMessage: '请至少选择一名审核人' })
+      return
+    }
+    if (node.processorUserIds.some(id => node.reviewerUserIds.includes(id))) {
+      this.setData({ errorMessage: '处理人与审核人不能为同一账号' })
+      return
+    }
+    if (node.fields.some(field => !field.name ||
       ((field.type === 'single_select' || field.type === 'multi_select') && !field.constraints.options.length))) {
       this.setData({ errorMessage: '请完整填写字段名称和选项' })
       return
@@ -240,18 +309,6 @@ Page({
     if (this.data.requiresEvidence && !this.data.allowedEvidenceTypes.length) {
       this.setData({ errorMessage: '要求凭证时至少选择一种凭证类型' })
       return
-    }
-    const node = {
-      _uiKey: this.uiKey,
-      ...(this.nodeKey ? { nodeKey: this.nodeKey } : {}),
-      sequence: this.data.index >= 0 ? this.data.index : 0,
-      name,
-      description: this.data.description.trim(),
-      assigneeUserIds: this.data.assigneeUserIds.slice(),
-      slaWorkHours,
-      requiresEvidence: this.data.requiresEvidence,
-      allowedEvidenceTypes: this.data.allowedEvidenceTypes.slice(),
-      fields
     }
     if (!this.requireSuperAdmin()) return
     this.committed = true

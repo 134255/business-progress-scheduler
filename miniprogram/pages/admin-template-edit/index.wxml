@@ -22,10 +22,10 @@
   <view wx:if="{{nodes.length}}">
     <view class="card node-card" wx:for="{{nodes}}" wx:key="_uiKey">
       <view class="row-between">
-        <view><view class="node-name">{{index + 1}}. {{item.name}}</view><text class="muted">SLA {{item.slaWorkHours}} 工时</text></view>
+        <view><view class="node-name">{{index + 1}}. {{item.name}}</view><text class="muted">处理人 {{item.workflowMode === undefined ? item.assigneeUserIds.length : (item.processorUserIds ? item.processorUserIds.length : 0)}} 人 · 审核人 {{item.workflowMode === undefined ? 0 : (item.reviewerUserIds ? item.reviewerUserIds.length : 0)}} 人 · {{item.reviewMode === 'all' ? '会签' : '或签'}} · 处理 {{item.processingSlaWorkHours === undefined ? 22 : item.processingSlaWorkHours}} 小时 · 审核 {{item.reviewSlaWorkHours === undefined ? 8 : item.reviewSlaWorkHours}} 小时</text></view>
         <text class="muted">字段 {{item.fields.length}} 个</text>
       </view>
-      <view class="node-meta">负责人 {{item.assigneeUserIds.length}} 人 · {{item.requiresEvidence ? '需要凭证' : '无需凭证'}}</view>
+      <view class="node-meta">{{item.requiresEvidence ? '需要凭证' : '无需凭证'}}</view>
       <view class="actions">
         <button size="mini" data-index="{{index}}" bindtap="openNodeEditor">{{readOnly ? '查看' : '编辑'}}</button>
         <button wx:if="{{!readOnly && index > 0}}" size="mini" data-index="{{index}}" data-direction="-1" bindtap="moveNode">上移</button>

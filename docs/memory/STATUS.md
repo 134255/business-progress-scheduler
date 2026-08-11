@@ -4,6 +4,8 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 
 ## Verified state
 
+- 2026-08-11 节点独立审核流程 Task 3 已完成超级管理员模板节点编辑页升级：节点页以明确 `workflowMode: 'review'` 输出处理人、审核人、或签/会签和处理/审核双 SLA（默认 22/8），保存对象不再携带旧 `assigneeUserIds` 或单一 `slaWorkHours`。纯旧节点仅在缺少 `workflowMode` 时将旧负责人映射为处理人初值；任何已声明的模式均不读取旧负责人。重新保存和模板定义清理均写入显式新版字段。处理人与审核人用同一受控账号选项分别勾选，保存前拒绝交集和空角色；启用模板的节点页继续只读。节点摘要显示两类人数、或签/会签及双时限；异步保存返回处理人/审核人失效码时保留页面并显示安全提示。导航仅携带节点索引，账号选择的 WXML dataset 仅携带内部账号编号，新增 WXML 门禁防止整条账号对象进入 dataset。真实微信开发者工具交互验收仍未执行。
+
 - 2026-08-11 节点独立审核流程 Task 2 已完成模板审核配置持久化：模板服务以一个排序去重的参与账号集合统一覆盖处理人与审核人；创建、更新、启用均先验证角色规则并将该集合交给仓储事务复核，启用模板的可用性投影也读取全量参与账号。CloudBase 模板仓储参数已从 `assigneeUserIds` 迁移为 `participantUserIds`，并在同一事务中逐个固定读取活跃账号；创建预算为节点数加不同参与账号数加 2，更新/状态变更预算在既有固定操作数上同样计入所有参与账号，超过 100 次操作失败关闭。为衔接后续业务快照迁移，模板服务按相同参与账号集合预演快照预算，48 节点、47 个不同参与账号的 101 次预算模板不会向普通用户显示为可用；旧版纯 `assigneeUserIds` 模板兼容边界与空节点草稿仍保持。2026-08-11 本地验证：聚焦 RED 命令 `node --test cloudfunctions/businessApi/test/template-service.test.js cloudfunctions/businessApi/test/cloud-template-repository.test.js` 如预期 6 项失败（旧仓储忽略新参数且旧快照预算未计审核人）；独立复审补强更新/启用传参和精确 100 次操作边界后，同命令为 35/35 通过；`node --test cloudfunctions/businessApi/test/template-domain.test.js cloudfunctions/businessApi/test/template-service.test.js cloudfunctions/businessApi/test/cloud-template-repository.test.js` 为 39/39 通过；最终 `npm.cmd test --prefix cloudfunctions/businessApi` 为 376/376 通过（仅有两项既存 malformed npm user-config 警告），`node tools/test-wxml-structure.mjs` 为 2/2 通过。
 
 - 2026-08-11 节点独立审核流程 Task 1 已完成本地领域实现及修复轮次 1、2：新增 `review-domain` 固定审核工作流、或签/会签和处理动作的封闭枚举、投票输入校验及轮次/审核人确定性投票编号；新版模板节点固定快照处理人、审核人、审核模式、处理与审核双 SLA，处理默认 22 工时、审核默认 8 工时。模板服务按处理人与审核人的去重参与账号校验并安全映射处理人失效、审核人失效和角色交集；业务服务验证新版定义。仅当所有节点均未声明 `workflowMode` 时，旧 `assigneeUserIds` 节点才走显式兼容边界；声明 `workflowMode: review` 的节点绝不回退到旧字段。草稿模板可创建或更新为显式/隐式空节点集合，但启用仍必须有节点并继续执行新版角色、角色交集和旧模板兼容校验。完整 `businessApi` 回归为 371/371 通过；CloudBase 仓储持久化、事务预算和业务快照的新版字段迁移仍由后续 Task 2 负责。
@@ -47,6 +49,19 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-11 节点独立审核流程 Task 3：
+
+| 命令或边界 | 结果 |
+|---|---|
+| `node --test miniprogram/test/template-flow.test.js`（RED） | 按预期失败：20 个测试中 16 通过、4 失败；缺少处理人/审核人切换与新版保存构造，异步处理人失效码仍显示原始错误。 |
+| `node tools/test-wxml-structure.mjs`（RED） | 按预期失败：3 个测试中 2 通过、1 失败；账号 dataset 安全门禁函数尚不存在。 |
+| 复审兼容边界 RED：`node --test miniprogram/test/template-flow.test.js` | 按预期失败：22 个测试中 21 通过、1 失败；已声明未知 `workflowMode` 被错误映射为旧负责人。 |
+| `node --test miniprogram/test/template-flow.test.js` | 通过：22 个测试，0 失败。 |
+| `node tools/test-wxml-structure.mjs` | 通过：3 个测试，0 失败。 |
+| `node --test miniprogram/test/*.test.js` | 通过：108 个测试，0 失败。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：376 个测试，0 失败；仅有两条既有 malformed npm user-config 警告。 |
+
 
 2026-08-11 节点独立审核流程 Task 1：
 

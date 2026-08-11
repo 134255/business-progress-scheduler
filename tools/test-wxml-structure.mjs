@@ -79,6 +79,22 @@ function findConditionalLoopConflicts(source) {
   return errors;
 }
 
+function findUnsafeAccountDatasets(source) {
+  const errors = [];
+  const selectorPattern = /<label\b([^>]*\bbindtap="on(?:Processor|Reviewer)Toggle"[^>]*)>/g;
+  let match;
+
+  while ((match = selectorPattern.exec(source))) {
+    const attributes = match[1].trim();
+    const datasetAttributes = attributes.match(/\bdata-[\w-]+\s*=\s*"{{[^}]+}}"/g) || [];
+    const isSafeIdOnly = datasetAttributes.length === 1 &&
+      /^data-id\s*=\s*"{{\s*item\._id\s*}}"$/.test(datasetAttributes[0]);
+    if (!isSafeIdOnly) errors.push({ attributes });
+  }
+
+  return errors;
+}
+
 test('wx:else 和 wx:elif 必须紧邻同级 wx:if 或 wx:elif', () => {
   const failures = listWxmlFiles(miniProgramRoot).flatMap((file) =>
     findInvalidConditionalSiblings(fs.readFileSync(file, 'utf8')).map((error) => ({
@@ -99,4 +115,15 @@ test('wx:else 和 wx:elif 不得与 wx:for 位于同一元素', () => {
   );
 
   assert.deepEqual(failures, []);
+});
+
+test('节点账号选择 dataset 只能携带内部账号编号', () => {
+  const source = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8');
+  assert.deepEqual(findUnsafeAccountDatasets(source), []);
+  assert.deepEqual(findUnsafeAccountDatasets('<label data-id="{{item}}" bindtap="onProcessorToggle">'), [
+    { attributes: 'data-id="{{item}}" bindtap="onProcessorToggle"' },
+  ]);
+  assert.deepEqual(findUnsafeAccountDatasets('<label data-account="{{selectedAccount}}" bindtap="onReviewerToggle">'), [
+    { attributes: 'data-account="{{selectedAccount}}" bindtap="onReviewerToggle"' },
+  ]);
 });

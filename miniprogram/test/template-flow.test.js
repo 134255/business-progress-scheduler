@@ -176,6 +176,167 @@ function storedNode(overrides = {}) {
   }
 }
 
+function createNodeEditor({ users, node = null, readOnly = false, acceptNodeFromEditor = () => {} }) {
+  const previousPage = {
+    getNodeEditorContext: () => ({ readOnly, assigneeOptions: users, node }),
+    acceptNodeFromEditor
+  }
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.getCurrentPages = () => [previousPage, {}]
+  global.wx = { setNavigationBarTitle: () => {}, navigateBack: () => {}, reLaunch: () => {} }
+  const page = loadPage('pages/admin-template-node-edit/index.js')
+  page.onLoad({ index: node ? '0' : '-1' })
+  return page
+}
+
+test('node editor saves separate processor reviewer mode and dual SLA fields', () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  const reviewer = { _id: 'reviewer-1', displayName: '审核人', username: 'reviewer' }
+  const page = createNodeEditor({
+    users: [processor, reviewer],
+    node: storedNode({ assigneeUserIds: [processor._id] })
+  })
+
+  page.onReviewerToggle({ currentTarget: { dataset: { id: reviewer._id } } })
+  page.onReviewModeChange({ detail: { value: 'all' } })
+  page.onProcessingSlaInput({ detail: { value: '22' } })
+  page.onReviewSlaInput({ detail: { value: '8' } })
+  const node = page.buildNodeForSave()
+
+  assert.equal(node.workflowMode, 'review')
+  assert.deepEqual(node.processorUserIds, [processor._id])
+  assert.deepEqual(node.reviewerUserIds, [reviewer._id])
+  assert.equal(node.reviewMode, 'all')
+  assert.equal(node.processingSlaWorkHours, 22)
+  assert.equal(node.reviewSlaWorkHours, 8)
+  assert.equal(Object.hasOwn(node, 'assigneeUserIds'), false)
+  assert.equal(Object.hasOwn(node, 'slaWorkHours'), false)
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor maps legacy assignees only when workflowMode is absent', () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  const reviewer = { _id: 'reviewer-1', displayName: '审核人', username: 'reviewer' }
+  const page = createNodeEditor({
+    users: [processor, reviewer],
+    node: storedNode({
+      workflowMode: 'future_mode', assigneeUserIds: ['legacy-1'],
+      processorUserIds: [processor._id], reviewerUserIds: [reviewer._id],
+      reviewMode: 'all', processingSlaWorkHours: 4, reviewSlaWorkHours: 2
+    })
+  })
+
+  assert.deepEqual(page.data.processorUserIds, [processor._id])
+  assert.deepEqual(page.data.reviewerUserIds, [reviewer._id])
+  assert.equal(page.data.reviewMode, 'all')
+  assert.equal(page.data.processingSlaWorkHours, 4)
+  assert.equal(page.data.reviewSlaWorkHours, 2)
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor rejects overlapping roles and a missing reviewer before commit', async () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  let accepted = 0
+  const page = createNodeEditor({
+    users: [processor],
+    acceptNodeFromEditor: () => { accepted += 1 }
+  })
+  page.setData({ name: '需求确认' })
+  page.onProcessorToggle({ currentTarget: { dataset: { id: processor._id } } })
+  page.onReviewerToggle({ currentTarget: { dataset: { id: processor._id } } })
+  await page.submit()
+  assert.equal(accepted, 0)
+  assert.equal(page.data.errorMessage, '处理人与审核人不能为同一账号')
+
+  page.setData({ reviewerUserIds: [] })
+  await page.submit()
+  assert.equal(accepted, 0)
+  assert.match(page.data.errorMessage, /至少选择一名审核人/)
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor keeps enabled-template nodes read-only', async () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  const reviewer = { _id: 'reviewer-1', displayName: '审核人', username: 'reviewer' }
+  let accepted = 0
+  const page = createNodeEditor({
+    users: [processor, reviewer],
+    node: {
+      ...storedNode(), workflowMode: 'review', processorUserIds: [processor._id], reviewerUserIds: [reviewer._id],
+      reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8
+    },
+    readOnly: true,
+    acceptNodeFromEditor: () => { accepted += 1 }
+  })
+  const original = JSON.parse(JSON.stringify(page.data))
+  page.onProcessorToggle({ currentTarget: { dataset: { id: reviewer._id } } })
+  page.onReviewModeChange({ detail: { value: 'all' } })
+  page.onProcessingSlaInput({ detail: { value: '4' } })
+  await page.submit()
+  assert.equal(accepted, 0)
+  assert.deepEqual(page.data.processorUserIds, original.processorUserIds)
+  assert.deepEqual(page.data.reviewerUserIds, original.reviewerUserIds)
+  assert.equal(page.data.reviewMode, original.reviewMode)
+  assert.equal(page.data.processingSlaWorkHours, original.processingSlaWorkHours)
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('template editor fails closed when a selected processor becomes inactive during save', async () => {
+  const navigations = []
+  const inactive = new Error('inactive')
+  inactive.code = 'PROCESSOR_INACTIVE'
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { showToast: () => {}, navigateBack: options => navigations.push(options), reLaunch: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': { updateTemplate: async () => { throw inactive } },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  page.setData({
+    editMode: true, templateId: 't1', version: 1, name: '交付模板',
+    nodes: [{
+      ...storedNode(), workflowMode: 'review', processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
+      reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8
+    }]
+  })
+  await page.submit()
+  assert.equal(page.data.errorMessage, '节点处理人已停用，请重新选择启用账号')
+  assert.deepEqual(navigations, [])
+  delete global.getApp
+  delete global.wx
+})
+
+test('template editor fails closed when a selected reviewer becomes inactive during save', async () => {
+  const navigations = []
+  const inactive = new Error('inactive')
+  inactive.code = 'REVIEWER_INACTIVE'
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { showToast: () => {}, navigateBack: options => navigations.push(options), reLaunch: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': { updateTemplate: async () => { throw inactive } },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  page.setData({
+    editMode: true, templateId: 't1', version: 1, name: '交付模板',
+    nodes: [{
+      ...storedNode(), workflowMode: 'review', processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
+      reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8
+    }]
+  })
+  await page.submit()
+  assert.equal(page.data.errorMessage, '节点审核人已停用，请重新选择启用账号')
+  assert.deepEqual(navigations, [])
+  delete global.getApp
+  delete global.wx
+})
+
 test('template editor loads every active account and preserves stable keys through node edits and reorder', async () => {
   const userQueries = []
   global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
@@ -313,7 +474,9 @@ test('node editor returns normalized stable-key data through the previous page w
   page.onFieldNameInput({ currentTarget: { dataset: { index: 1 } }, detail: { value: '验收项' } })
   page.onFieldTypeChange({ currentTarget: { dataset: { index: 1 } }, detail: { value: '5' } })
   page.onFieldOptionsInput({ currentTarget: { dataset: { index: 1 } }, detail: { value: '通过, 退回,通过' } })
-  page.onAssigneesChange({ detail: { value: ['account-2'] } })
+  page.onProcessorToggle({ currentTarget: { dataset: { id: 'account-1' } } })
+  page.onProcessorToggle({ currentTarget: { dataset: { id: 'account-2' } } })
+  page.onReviewerToggle({ currentTarget: { dataset: { id: 'account-1' } } })
   await page.submit()
 
   assert.equal(accepted[0], 0)
@@ -321,7 +484,9 @@ test('node editor returns normalized stable-key data through the previous page w
   assert.equal(accepted[1].fields[0].fieldKey, 'field-stable-1')
   assert.equal(Object.hasOwn(accepted[1].fields[1], 'fieldKey'), false)
   assert.deepEqual(accepted[1].fields[1].constraints.options, ['通过', '退回'])
-  assert.deepEqual(accepted[1].assigneeUserIds, ['account-2'])
+  assert.equal(accepted[1].workflowMode, 'review')
+  assert.deepEqual(accepted[1].processorUserIds, ['account-2'])
+  assert.deepEqual(accepted[1].reviewerUserIds, ['account-1'])
   assert.deepEqual(accepted[1].fields.map(field => field.sequence), [0, 1])
 
   const templateSource = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-edit/index.js'), 'utf8')
@@ -446,7 +611,10 @@ test('template pages recheck active super-administrator authority at every load 
   const previousPage = {
     getNodeEditorContext: () => ({
       readOnly: false,
-      assigneeOptions: [{ _id: 'account-1', displayName: '甲', username: 'alpha' }],
+      assigneeOptions: [
+        { _id: 'account-1', displayName: '甲', username: 'alpha' },
+        { _id: 'account-2', displayName: '乙', username: 'beta' }
+      ],
       node: null
     }),
     acceptNodeFromEditor: () => { acceptedNodes += 1 }
@@ -626,7 +794,7 @@ test('node editor commits a new node only once across rapid submit calls', async
   }
   const page = loadPage('pages/admin-template-node-edit/index.js')
   page.onLoad({ index: '-1' })
-  page.setData({ name: '新增节点', assigneeUserIds: ['account-1'] })
+  page.setData({ name: '新增节点', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'] })
 
   const first = page.submit()
   const second = page.submit()
