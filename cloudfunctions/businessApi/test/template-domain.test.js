@@ -13,8 +13,11 @@ function createNode(overrides = {}) {
     sequence: 0,
     name: '启动',
     description: '',
-    assigneeUserIds: ['user-1'],
-    slaWorkHours: 8,
+    processorUserIds: ['user-1'],
+    reviewerUserIds: ['reviewer-1'],
+    reviewMode: 'any',
+    processingSlaWorkHours: 8,
+    reviewSlaWorkHours: 4,
     requiresEvidence: false,
     allowedEvidenceTypes: ['pdf'],
     fields: [{ fieldKey: 'field-1', sequence: 0, name: '说明', type: 'short_text' }],
@@ -22,10 +25,11 @@ function createNode(overrides = {}) {
   }
 }
 
-test('normalizes node fields into contiguous sequence while preserving stable keys', () => {
+test('规范化新版节点的处理人、审核人、审核模式和双 SLA，并保留稳定字段键', () => {
   const node = normalizeTemplateNode(createNode({
     name: ' 启动 ',
-    slaWorkHours: undefined,
+    processingSlaWorkHours: undefined,
+    reviewSlaWorkHours: undefined,
     fields: [
       { fieldKey: 'field-name', sequence: 9, name: '名称', type: 'short_text' },
       { fieldKey: 'field-date', sequence: 2, name: '日期', type: 'date' }
@@ -37,8 +41,12 @@ test('normalizes node fields into contiguous sequence while preserving stable ke
     sequence: 0,
     name: '启动',
     description: '',
-    assigneeUserIds: ['user-1'],
-    slaWorkHours: 22,
+    workflowMode: 'review',
+    processorUserIds: ['user-1'],
+    reviewerUserIds: ['reviewer-1'],
+    reviewMode: 'any',
+    processingSlaWorkHours: 22,
+    reviewSlaWorkHours: 22,
     requiresEvidence: false,
     allowedEvidenceTypes: ['pdf'],
     fields: [
@@ -48,11 +56,13 @@ test('normalizes node fields into contiguous sequence while preserving stable ke
   })
 })
 
-test('rejects invalid SLA, evidence rules, and duplicate stable keys in a node', () => {
+test('拒绝无效双 SLA、审核配置、凭证规则和重复稳定键', () => {
   assert.deepEqual(normalizeTemplateNode(createNode({
     allowedEvidenceTypes: ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v']
   })).allowedEvidenceTypes, ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
-  assert.throws(() => normalizeTemplateNode(createNode({ slaWorkHours: 0 })), error => error.code === 'TEMPLATE_INVALID')
+  assert.throws(() => normalizeTemplateNode(createNode({ processingSlaWorkHours: 0 })), error => error.code === 'TEMPLATE_INVALID')
+  assert.throws(() => normalizeTemplateNode(createNode({ reviewSlaWorkHours: 0 })), error => error.code === 'TEMPLATE_INVALID')
+  assert.throws(() => normalizeTemplateNode(createNode({ reviewMode: 'majority' })), error => error.code === 'TEMPLATE_INVALID')
   assert.throws(() => normalizeTemplateNode(createNode({ allowedEvidenceTypes: ['exe'] })), error => error.code === 'TEMPLATE_INVALID')
   assert.throws(() => normalizeTemplateNode(createNode({ requiresEvidence: true, allowedEvidenceTypes: [] })), error => error.code === 'TEMPLATE_INVALID')
   assert.throws(() => normalizeTemplateNode(createNode({ fields: [
@@ -61,17 +71,20 @@ test('rejects invalid SLA, evidence rules, and duplicate stable keys in a node',
   ] })), error => error.code === 'TEMPLATE_INVALID')
 })
 
-test('requires contiguous unique node keys and active account-document assignees before enable', () => {
+test('启用前要求连续唯一节点键、启用处理人和审核人、且角色严格分离', () => {
   const template = { status: 'draft' }
-  const first = createNode({ nodeKey: 'node-first', sequence: 0, assigneeUserIds: ['account-1'] })
-  const second = createNode({ nodeKey: 'node-second', sequence: 1, assigneeUserIds: ['account-2'] })
+  const first = createNode({ nodeKey: 'node-first', sequence: 0, processorUserIds: ['account-1'], reviewerUserIds: ['account-3'] })
+  const second = createNode({ nodeKey: 'node-second', sequence: 1, processorUserIds: ['account-2'], reviewerUserIds: ['account-4'] })
 
-  assert.equal(validateTemplateForEnable(template, [first, second], ['account-1', 'account-2']), true)
+  assert.equal(validateTemplateForEnable(template, [first, second], ['account-1', 'account-2', 'account-3', 'account-4']), true)
   assert.throws(() => validateTemplateForEnable(template, [], ['account-1']), error => error.code === 'TEMPLATE_INVALID')
-  assert.throws(() => validateTemplateForEnable(template, [first, { ...second, nodeKey: 'node-first' }], ['account-1', 'account-2']), error => error.code === 'TEMPLATE_INVALID')
-  assert.throws(() => validateTemplateForEnable(template, [first, { ...second, sequence: 2 }], ['account-1', 'account-2']), error => error.code === 'TEMPLATE_INVALID')
-  assert.throws(() => validateTemplateForEnable(template, [{ ...first, assigneeUserIds: [] }], ['account-1']), error => error.code === 'ASSIGNEE_INACTIVE')
-  assert.throws(() => validateTemplateForEnable(template, [first], ['another-account']), error => error.code === 'ASSIGNEE_INACTIVE')
+  assert.throws(() => validateTemplateForEnable(template, [first, { ...second, nodeKey: 'node-first' }], ['account-1', 'account-2', 'account-3', 'account-4']), error => error.code === 'TEMPLATE_INVALID')
+  assert.throws(() => validateTemplateForEnable(template, [first, { ...second, sequence: 2 }], ['account-1', 'account-2', 'account-3', 'account-4']), error => error.code === 'TEMPLATE_INVALID')
+  assert.throws(() => validateTemplateForEnable(template, [{ ...first, processorUserIds: [] }], ['account-1', 'account-3']), error => error.code === 'TEMPLATE_INVALID')
+  assert.throws(() => validateTemplateForEnable(template, [first], ['another-account', 'account-3']), error => error.code === 'PROCESSOR_INACTIVE')
+  assert.throws(() => validateTemplateForEnable(template, [first], ['account-1']), error => error.code === 'REVIEWER_INACTIVE')
+  assert.throws(() => validateTemplateForEnable(template, [{ ...first, reviewerUserIds: ['account-1'] }], ['account-1']), error => error.code === 'ROLE_OVERLAP')
+  assert.throws(() => validateTemplateForEnable(template, [{ ...first, reviewerUserIds: [] }], ['account-1']), error => error.code === 'TEMPLATE_INVALID')
 })
 
 test('enabled templates are read-only until disabled and deleted templates are unavailable', () => {

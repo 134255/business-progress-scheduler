@@ -1,4 +1,5 @@
 const { normalizeFieldDefinition } = require('./field-domain')
+const { WORKFLOW_MODE, normalizeReviewMode } = require('./review-domain')
 
 const DEFAULT_SLA_WORK_HOURS = 22
 const ALLOWED_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
@@ -58,8 +59,16 @@ function normalizeTemplateNode(input) {
   if (!isPlainObject(input)) throw createError('TEMPLATE_INVALID')
   const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
   if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
-  const slaWorkHours = input.slaWorkHours === undefined ? DEFAULT_SLA_WORK_HOURS : input.slaWorkHours
-  if (!Number.isFinite(slaWorkHours) || slaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
+  const processingSlaWorkHours = input.processingSlaWorkHours === undefined ? DEFAULT_SLA_WORK_HOURS : input.processingSlaWorkHours
+  const reviewSlaWorkHours = input.reviewSlaWorkHours === undefined ? DEFAULT_SLA_WORK_HOURS : input.reviewSlaWorkHours
+  if (!Number.isFinite(processingSlaWorkHours) || processingSlaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
+  if (!Number.isFinite(reviewSlaWorkHours) || reviewSlaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
+  let reviewMode
+  try {
+    reviewMode = normalizeReviewMode(input.reviewMode === undefined ? 'any' : input.reviewMode)
+  } catch (error) {
+    throw createError('TEMPLATE_INVALID')
+  }
   const allowedEvidenceTypes = normalizeEvidenceTypes(input.allowedEvidenceTypes === undefined ? [] : input.allowedEvidenceTypes)
   if (requiresEvidence && allowedEvidenceTypes.length === 0) throw createError('TEMPLATE_INVALID')
 
@@ -68,8 +77,12 @@ function normalizeTemplateNode(input) {
     sequence: input.sequence === undefined ? 0 : normalizeSequence(input.sequence),
     name: requireText(input.name),
     description: typeof input.description === 'string' ? input.description.trim() : '',
-    assigneeUserIds: normalizeAccountIds(input.assigneeUserIds === undefined ? [] : input.assigneeUserIds),
-    slaWorkHours,
+    workflowMode: WORKFLOW_MODE,
+    processorUserIds: normalizeAccountIds(input.processorUserIds === undefined ? [] : input.processorUserIds),
+    reviewerUserIds: normalizeAccountIds(input.reviewerUserIds === undefined ? [] : input.reviewerUserIds),
+    reviewMode,
+    processingSlaWorkHours,
+    reviewSlaWorkHours,
     requiresEvidence,
     allowedEvidenceTypes,
     fields: normalizeFields(input.fields === undefined ? [] : input.fields)
@@ -98,9 +111,10 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
   if (!Array.isArray(activeUserIds)) throw createError('TEMPLATE_INVALID')
   const active = new Set(activeUserIds)
   for (const node of orderedNodes) {
-    if (!node.assigneeUserIds.length || node.assigneeUserIds.some(id => !active.has(id))) {
-      throw createError('ASSIGNEE_INACTIVE')
-    }
+    if (!node.processorUserIds.length || !node.reviewerUserIds.length) throw createError('TEMPLATE_INVALID')
+    if (node.processorUserIds.some(id => !active.has(id))) throw createError('PROCESSOR_INACTIVE')
+    if (node.reviewerUserIds.some(id => !active.has(id))) throw createError('REVIEWER_INACTIVE')
+    if (node.processorUserIds.some(id => node.reviewerUserIds.includes(id))) throw createError('ROLE_OVERLAP')
   }
   return true
 }
