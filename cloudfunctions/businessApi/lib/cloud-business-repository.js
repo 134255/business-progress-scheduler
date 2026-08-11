@@ -5,6 +5,7 @@ const { createCloudWorkCalendarRepository } = require('./cloud-work-calendar-rep
 const { createWorkTimeService } = require('./work-time-service')
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { parseStrictTimestamp } = require('./evidence-retention')
+const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
 const {
   APPLICATION_ERROR_MARKER,
   MAX_TEMPLATE_NODES,
@@ -186,6 +187,117 @@ function createCloudBusinessRepository({
       Object.prototype.hasOwnProperty.call(line, 'memberUserIds')
   }
 
+  function safeDisplayName(account) {
+    for (const key of ['displayName', 'username']) {
+      const field = ownDataValue(account, key)
+      if (field.valid && typeof field.value === 'string') {
+        const value = field.value.trim()
+        if (value && value.length <= 100 && !/[\u0000-\u001f\u007f]/.test(value)) return value
+      }
+    }
+    throw createError('FORBIDDEN')
+  }
+
+  async function requireCurrentReader(actor) {
+    if (!actor || typeof actor._id !== 'string') throw createError('FORBIDDEN')
+    const current = await readDocument(db, COLLECTIONS.users, actor._id)
+    if (!current || current.status !== 'active') throw createError('FORBIDDEN')
+    return { ...current, openid: actor.openid }
+  }
+
+  function exactNewLineRelationships(line) {
+    if (!usesAccountMembership(line)) return null
+    const managers = ownExactAccountIds(line, 'managerUserIds') || []
+    const members = ownExactAccountIds(line, 'memberUserIds') || []
+    return { managers, members }
+  }
+
+  function safeNewLineMember(line, actorId) {
+    const relationships = exactNewLineRelationships(line)
+    return Boolean(relationships &&
+      (relationships.managers.includes(actorId) || relationships.members.includes(actorId)))
+  }
+
+  function publicLineProjection(line) {
+    return {
+      _id: line._id,
+      code: line.code || '',
+      name: line.name || '',
+      description: line.description || '',
+      plannedStartDate: line.plannedStartDate || '',
+      plannedEndDate: line.plannedEndDate || '',
+      status: line.status,
+      version: line.version,
+      progress: Number(line.progress || 0),
+      nodeCount: Number(line.nodeCount || 0),
+      currentNodeId: line.currentNodeId || '',
+      currentNodeName: line.currentNodeName || '',
+      updatedAt: clone(line.updatedAt || null)
+    }
+  }
+
+  async function accountDisplayNames(ids) {
+    const exact = Array.isArray(ids) && ids.length <= MAX_TEMPLATE_NODES * 2 &&
+      ids.every(id => typeof id === 'string') && new Set(ids).size === ids.length
+    if (!exact) throw createError('FORBIDDEN')
+    const accounts = await Promise.all(ids.map(id => readDocument(db, COLLECTIONS.users, id)))
+    return accounts.map((account, index) => {
+      if (!account || account._id !== ids[index] || account.status !== 'active') throw createError('FORBIDDEN')
+      return safeDisplayName(account)
+    })
+  }
+
+  async function publicNodeProjection(node, actor, canManage, accountSchema) {
+    const base = {
+      _id: node._id,
+      nodeCode: node.nodeCode || '',
+      sequence: Number(node.sequence || 0),
+      name: node.name || '',
+      description: node.description || '',
+      status: node.status,
+      version: node.version
+    }
+    if (node.workflowMode === 'review') {
+      const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
+      const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+      if (!processors || !reviewers || processors.some(id => reviewers.includes(id))) {
+        throw createError('FORBIDDEN')
+      }
+      return {
+        ...base,
+        workflowMode: 'review',
+        processorDisplayNames: await accountDisplayNames(processors),
+        reviewerDisplayNames: await accountDisplayNames(reviewers),
+        reviewMode: node.reviewMode,
+        processingRoundNumber: node.processingRoundNumber,
+        reviewRoundNumber: node.reviewRoundNumber,
+        processingDueStatus: node.processingDueStatus,
+        processingDueAt: clone(node.processingDueAt || null),
+        processingOverdueWorkMinutes: Number(node.processingOverdueWorkMinutes || 0),
+        reviewDueStatus: node.reviewDueStatus,
+        reviewDueAt: clone(node.reviewDueAt || null),
+        reviewOverdueWorkMinutes: Number(node.reviewOverdueWorkMinutes || 0),
+        activeReviewRoundId: node.activeReviewRoundId || '',
+        canFeedback: processors.includes(actor._id)
+      }
+    }
+    const assigneeIds = accountSchema
+      ? ownExactAccountIds(node, 'assigneeUserIds')
+      : membershipArray(node.assigneeIds)
+    if (accountSchema && !assigneeIds) throw createError('FORBIDDEN')
+    return {
+      ...base,
+      requiresEvidence: Boolean(node.requiresEvidence),
+      allowedEvidenceTypes: Array.isArray(node.allowedEvidenceTypes) ? clone(node.allowedEvidenceTypes) : [],
+      dueAt: clone(node.dueAt || null),
+      completedAt: clone(node.completedAt || null),
+      canFeedback: canManage || (accountSchema
+        ? assigneeIds.includes(actor._id)
+        : Boolean(actor.openid) && assigneeIds.includes(actor.openid)),
+      assigneeNamesText: Array.isArray(node.assigneeNames) ? node.assigneeNames.join('、') : ''
+    }
+  }
+
   function assertLineMember(line, actor) {
     const allowed = usesAccountMembership(line)
       ? isNewLineMember(line, actor._id)
@@ -257,20 +369,21 @@ function createCloudBusinessRepository({
   }
 
   async function listBusinessLines({ actor, query = {} }) {
+    const currentActor = await requireCurrentReader(actor)
     const accountMemberLines = await readAll(() => db.collection(COLLECTIONS.lines)
-      .where({ memberUserIds: actor._id })
+      .where({ memberUserIds: currentActor._id })
       .orderBy('updatedAt', 'desc'))
     const accountManagerLines = await readAll(() => db.collection(COLLECTIONS.lines)
-      .where({ managerUserIds: actor._id })
+      .where({ managerUserIds: currentActor._id })
       .orderBy('updatedAt', 'desc'))
-    const legacyMemberLines = actor.openid
+    const legacyMemberLines = currentActor.openid
       ? await readAll(() => db.collection(COLLECTIONS.lines)
-        .where({ memberIds: actor.openid })
+        .where({ memberIds: currentActor.openid })
         .orderBy('updatedAt', 'desc'))
       : []
-    const legacyManagerLines = actor.openid
+    const legacyManagerLines = currentActor.openid
       ? await readAll(() => db.collection(COLLECTIONS.lines)
-        .where({ managerIds: actor.openid })
+        .where({ managerIds: currentActor.openid })
         .orderBy('updatedAt', 'desc'))
       : []
     const byId = new Map([
@@ -284,8 +397,8 @@ function createCloudBusinessRepository({
     const end = query.endDate ? new Date(`${query.endDate}T23:59:59+08:00`) : null
     const visible = [...byId.values()]
       .filter(line => usesAccountMembership(line)
-        ? isNewLineMember(line, actor._id)
-        : isLegacyLineMember(line, actor.openid))
+        ? safeNewLineMember(line, currentActor._id)
+        : isLegacyLineMember(line, currentActor.openid))
       .filter(line => line.status !== 'creating' && line.status !== 'deleted')
       .filter(line => !keyword || [line.name, line.code]
         .some(value => String(value || '').toLowerCase().includes(keyword)))
@@ -299,8 +412,9 @@ function createCloudBusinessRepository({
       ? query.pageSize
       : 20
     const offset = (page - 1) * pageSize
+    await requireCurrentReader(actor)
     return {
-      items: visible.slice(offset, offset + pageSize),
+      items: visible.slice(offset, offset + pageSize).map(publicLineProjection),
       page,
       pageSize,
       total: visible.length,
@@ -428,26 +542,47 @@ function createCloudBusinessRepository({
   }
 
   async function getBusinessLine({ actor, lineId }) {
+    const currentActor = await requireCurrentReader(actor)
     const line = await readDocument(db, COLLECTIONS.lines, lineId)
     if (!line || line.status === 'creating' || line.status === 'deleted') throw createError('NOT_FOUND')
-    assertLineMember(line, actor)
+    if (usesAccountMembership(line)) {
+      if (!safeNewLineMember(line, currentActor._id)) throw createError('FORBIDDEN')
+    } else assertLineMember(line, currentActor)
     const nodes = (await readAll(() => db.collection(COLLECTIONS.nodes)
       .where({ businessLineId: line._id })
       .orderBy('sequence', 'asc'))).sort(compareNodes)
     const accountSchema = usesAccountMembership(line)
     const canManage = accountSchema
-      ? membershipArray(line.managerUserIds).includes(actor._id)
-      : Boolean(actor.openid) && membershipArray(line.managerIds).includes(actor.openid)
-    const projectedNodes = nodes.map(node => ({
-      ...node,
-      canFeedback: canManage || (accountSchema
-        ? membershipArray(node.assigneeUserIds).includes(actor._id)
-        : Boolean(actor.openid) && membershipArray(node.assigneeIds).includes(actor.openid)),
-      assigneeNamesText: (node.assigneeNames || []).join('、')
-    }))
+      ? exactNewLineRelationships(line).managers.includes(currentActor._id)
+      : Boolean(currentActor.openid) && membershipArray(line.managerIds).includes(currentActor.openid)
+    const projectedNodes = await Promise.all(nodes.map(node =>
+      publicNodeProjection(node, currentActor, canManage, accountSchema)))
     const canEditNodes = !accountSchema && canManage && Number(line.progress || 0) === 0 &&
-      projectedNodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
-    return { line, nodes: projectedNodes, canManage, canEditNodes }
+      nodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
+    await db.runTransaction(async transaction => {
+      const latestActor = await readDocument(transaction, COLLECTIONS.users, actor && actor._id)
+      if (!latestActor || latestActor.status !== 'active') throw createError('FORBIDDEN')
+      const trustedActor = { ...latestActor, openid: actor.openid }
+      const latestLine = await readDocument(transaction, COLLECTIONS.lines, lineId)
+      if (!latestLine || latestLine.status === 'creating' || latestLine.status === 'deleted') {
+        throw createError('NOT_FOUND')
+      }
+      if (usesAccountMembership(latestLine)) {
+        if (!safeNewLineMember(latestLine, trustedActor._id)) throw createError('FORBIDDEN')
+      } else assertLineMember(latestLine, trustedActor)
+      if (latestLine.version !== line.version || latestLine.status !== line.status) {
+        throw createError('VERSION_CONFLICT')
+      }
+      for (const node of nodes.filter(item => item.workflowMode === 'review')) {
+        const latestNode = await readDocument(transaction, COLLECTIONS.nodes, node._id)
+        if (!latestNode || latestNode.businessLineId !== latestLine._id ||
+            latestNode.version !== node.version || latestNode.status !== node.status ||
+            latestNode.activeReviewRoundId !== node.activeReviewRoundId) {
+          throw createError('VERSION_CONFLICT')
+        }
+      }
+    })
+    return { line: publicLineProjection(line), nodes: projectedNodes, canManage, canEditNodes }
   }
 
   async function updateBusinessMetadata({ actor, lineId, expectedVersion, metadata }) {

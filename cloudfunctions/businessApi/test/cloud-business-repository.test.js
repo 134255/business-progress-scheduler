@@ -433,7 +433,7 @@ test('business list and detail reads support account-id snapshots and legacy Ope
       ]
     }
   })
-  const { repository } = createRepositoryHarness(seed)
+  const { fake, repository } = createRepositoryHarness(seed)
   const actor = { _id: 'user-1', openid: 'wx-user-1', status: 'active' }
 
   const listed = await repository.listBusinessLines({ actor, query: { page: 1, pageSize: 20 } })
@@ -449,6 +449,63 @@ test('business list and detail reads support account-id snapshots and legacy Ope
   assert.equal(legacy.line._id, 'legacy-active')
   assert.equal(legacy.nodes[0].canFeedback, true)
   assert.equal(legacy.nodes[0].assigneeNamesText, '旧用户')
+})
+
+test('新版业务详情只返回审核流程安全投影与负责人显示名', async () => {
+  const seed = seedDefinition({
+    users: [
+      { _id: 'user-1', status: 'active', displayName: '业务管理员', credentialHash: 'secret' },
+      { _id: 'user-2', status: 'active', displayName: '处理人', openid: 'wx-secret' },
+      { _id: 'user-3', status: 'active', username: 'reviewer03' }
+    ],
+    extra: {
+      business_lines: [{
+        _id: 'line-review', code: 'BL-20260811-0001', name: '审核业务', status: 'active',
+        managerUserIds: ['user-1'], memberUserIds: ['user-1', 'user-2', 'user-3'],
+        currentNodeId: 'node-review', currentNodeIndex: 0, version: 3,
+        creationRequestHash: 'secret-request', internalLease: 'secret-lease'
+      }],
+      business_nodes: [{
+        _id: 'node-review', businessLineId: 'line-review', nodeCode: 'BL-20260811-0001-N001',
+        sequence: 0, name: '资料收集', status: 'pending_review', workflowMode: 'review', version: 5,
+        processorUserIds: ['user-2'], reviewerUserIds: ['user-3'], reviewMode: 'any',
+        processingRoundNumber: 2, reviewRoundNumber: 1,
+        processingDueStatus: 'calculated', processingDueAt: new Date('2026-08-11T08:00:00.000Z'),
+        processingOverdueWorkMinutes: 30, reviewDueStatus: 'calculated',
+        reviewDueAt: new Date('2026-08-11T09:00:00.000Z'), reviewOverdueWorkMinutes: 10,
+        activeReviewRoundId: 'round-1', latestFeedbackId: 'feedback-secret', feedbackClaimId: 'claim-secret'
+      }]
+    }
+  })
+  const { fake, repository } = createRepositoryHarness(seed)
+  const result = await repository.getBusinessLine({
+    actor: { _id: 'user-1', status: 'active' }, lineId: 'line-review'
+  })
+
+  assert.deepEqual(result.line, {
+    _id: 'line-review', code: 'BL-20260811-0001', name: '审核业务', description: '',
+    plannedStartDate: '', plannedEndDate: '', status: 'active', version: 3,
+    progress: 0, nodeCount: 0, currentNodeId: 'node-review', currentNodeName: '', updatedAt: null
+  })
+  assert.deepEqual(result.nodes[0], {
+    _id: 'node-review', nodeCode: 'BL-20260811-0001-N001', sequence: 0,
+    name: '资料收集', description: '', status: 'pending_review', version: 5,
+    workflowMode: 'review', processorDisplayNames: ['处理人'], reviewerDisplayNames: ['reviewer03'],
+    reviewMode: 'any', processingRoundNumber: 2, reviewRoundNumber: 1,
+    processingDueStatus: 'calculated', processingDueAt: new Date('2026-08-11T08:00:00.000Z'),
+    processingOverdueWorkMinutes: 30, reviewDueStatus: 'calculated',
+    reviewDueAt: new Date('2026-08-11T09:00:00.000Z'), reviewOverdueWorkMinutes: 10,
+    activeReviewRoundId: 'round-1', canFeedback: false
+  })
+  assert.doesNotMatch(JSON.stringify(result), /user-2|user-3|wx-secret|credentialHash|secret-request|secret-lease|feedback-secret|claim-secret/)
+
+  fake.beforeNextTransaction(() => {
+    const user = fake.documents('users').find(item => item._id === 'user-1')
+    fake.replace('users', 'user-1', { ...user, status: 'disabled' })
+  })
+  await assert.rejects(repository.getBusinessLine({
+    actor: { _id: 'user-1', status: 'active' }, lineId: 'line-review'
+  }), error => error.code === 'FORBIDDEN')
 })
 
 test('business detail reads hide creating reservations and deny non-members in both schemas', async () => {

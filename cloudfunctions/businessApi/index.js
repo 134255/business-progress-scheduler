@@ -31,6 +31,8 @@ const { createEvidenceService } = require('./lib/evidence-service')
 const { createCloudEvidenceRepository } = require('./lib/cloud-evidence-repository')
 const { createFeedbackService } = require('./lib/feedback-service')
 const { createCloudFeedbackRepository } = require('./lib/cloud-feedback-repository')
+const { createReviewService } = require('./lib/review-service')
+const { createCloudReviewRepository } = require('./lib/cloud-review-repository')
 const { hashPassword } = require('./lib/password')
 const { createCalendarAdminService } = require('./lib/calendar-admin-service')
 
@@ -115,10 +117,12 @@ const LOGGABLE_ERROR_CODES = new Set([
   'NODE_STRUCTURE_LOCKED',
   'NODE_ALREADY_COMPLETED',
   'NODE_NOT_ACTIVE',
+  'NODE_PENDING_REVIEW',
   'NOT_FOUND',
   'OPENID_ALREADY_BOUND',
   'PASSWORD_CHANGE_REQUIRED',
   'REJECTION_NOT_ALLOWED',
+  'REVIEW_COMMENT_REQUIRED',
   'TEMPLATE_INVALID',
   'TEMPLATE_LIMIT_EXCEEDED',
   'TEMPLATE_NOT_EDITABLE',
@@ -130,6 +134,8 @@ const LOGGABLE_ERROR_CODES = new Set([
   'USERNAME_TAKEN',
   'VALIDATION_ERROR',
   'VERSION_CONFLICT',
+  'VOTE_CONFLICT',
+  'VOTE_DECISION_INVALID',
   'WEAK_PASSWORD',
   'WECHAT_ALREADY_BOUND'
 ])
@@ -247,6 +253,57 @@ function createCalendarAdminRoutes(calendarAdminService) {
   } : null
 }
 
+const CLIENT_IDENTITY_KEYS = new Set(['actor', 'actorId', 'openid', 'openId', 'role'])
+
+function selectProtectedPayload(payload, allowedKeys) {
+  assert(payload && typeof payload === 'object' && !Array.isArray(payload),
+    'Invalid payload', 'VALIDATION_ERROR')
+  const result = {}
+  for (const key of Reflect.ownKeys(payload)) {
+    assert(typeof key === 'string', 'Invalid payload', 'VALIDATION_ERROR')
+    const descriptor = Object.getOwnPropertyDescriptor(payload, key)
+    assert(descriptor && hasOwn(descriptor, 'value'), 'Invalid payload', 'VALIDATION_ERROR')
+    if (CLIENT_IDENTITY_KEYS.has(key)) continue
+    assert(allowedKeys.has(key), 'Invalid payload', 'VALIDATION_ERROR')
+    result[key] = descriptor.value
+  }
+  return result
+}
+
+function createReviewRoutes(reviewService) {
+  if (!reviewService) return null
+  return {
+    submitNodeForReview: ({ actor, payload }) => reviewService.submitNodeForReview({
+      actor,
+      input: selectProtectedPayload(payload, new Set([
+        'businessLineId', 'nodeId', 'expectedNodeVersion', 'requestKey'
+      ]))
+    }),
+    submitReviewVote: ({ actor, payload }) => reviewService.submitReviewVote({
+      actor,
+      input: selectProtectedPayload(payload, new Set([
+        'reviewRoundId', 'expectedRoundVersion', 'decision', 'comment', 'requestKey'
+      ]))
+    }),
+    listMyPendingReviews: ({ actor, payload }) => reviewService.listMyPendingReviews({
+      actor,
+      query: selectProtectedPayload(payload, new Set(['page', 'pageSize']))
+    }),
+    getReviewDetail: ({ actor, payload }) => reviewService.getReviewDetail({
+      actor,
+      reviewRoundId: selectProtectedPayload(payload, new Set(['reviewRoundId'])).reviewRoundId
+    }),
+    listMyNotifications: ({ actor, payload }) => reviewService.listMyNotifications({
+      actor,
+      query: selectProtectedPayload(payload, new Set(['page', 'pageSize']))
+    }),
+    markNotificationRead: ({ actor, payload }) => reviewService.markNotificationRead({
+      actor,
+      notificationId: selectProtectedPayload(payload, new Set(['notificationId'])).notificationId
+    })
+  }
+}
+
 function createBusinessApi({
   repository,
   authService,
@@ -256,6 +313,7 @@ function createBusinessApi({
   businessLifecycleService,
   evidenceService,
   feedbackService,
+  reviewService,
   calendarAdminService,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
@@ -270,6 +328,7 @@ function createBusinessApi({
     businessLifecycleService ? createBusinessLifecycleRoutes(businessLifecycleService) : null,
     evidenceService ? createEvidenceRoutes(evidenceService) : null,
     feedbackService ? createFeedbackRoutes(feedbackService) : null,
+    createReviewRoutes(reviewService),
     createCalendarAdminRoutes(calendarAdminService),
     protectedRoutes
   )
@@ -620,6 +679,7 @@ function createDefaultBusinessApi() {
   })
   const evidenceRepository = createCloudEvidenceRepository({ db, cloud, clock: () => new Date() })
   const feedbackRepository = createCloudFeedbackRepository({ db, clock: () => new Date() })
+  const reviewRepository = createCloudReviewRepository({ db, clock: () => new Date() })
   const clock = Date.now
   const authService = createAuthService({
     repository,
@@ -642,6 +702,12 @@ function createDefaultBusinessApi() {
   const businessLifecycleService = createBusinessLifecycleService({ repository: businessRepository })
   const evidenceService = createEvidenceService({ repository: evidenceRepository })
   const feedbackService = createFeedbackService({ repository: feedbackRepository })
+  const reviewService = createReviewService({
+    feedbackRepository,
+    reviewRepository,
+    workTimeService,
+    clock: () => new Date()
+  })
   const calendarAdminService = createCalendarAdminService({
     db,
     invokeCalendarSync: data => cloud.callFunction({ name: 'calendarSync', data }),
@@ -657,6 +723,7 @@ function createDefaultBusinessApi() {
     businessLifecycleService,
     evidenceService,
     feedbackService,
+    reviewService,
     calendarAdminService,
     getContext: () => cloud.getWXContext(),
     clock,

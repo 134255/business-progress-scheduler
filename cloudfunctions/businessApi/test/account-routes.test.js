@@ -51,6 +51,7 @@ function createRouteHarness({
   businessLifecycleService,
   evidenceService,
   feedbackService,
+  reviewService,
   calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
@@ -102,6 +103,7 @@ function createRouteHarness({
     businessLifecycleService,
     evidenceService,
     feedbackService,
+    reviewService,
     calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
@@ -110,6 +112,72 @@ function createRouteHarness({
   })
   return { api, authService, calls, errors }
 }
+
+test('审核与通知路由只传递解析后的当前账号和白名单输入', async () => {
+  const calls = []
+  const reviewService = Object.fromEntries([
+    'submitNodeForReview', 'submitReviewVote', 'listMyPendingReviews',
+    'getReviewDetail', 'listMyNotifications', 'markNotificationRead'
+  ].map(name => [name, async input => {
+    calls.push([name, input])
+    return { action: name }
+  }]))
+  const harness = createRouteHarness({ reviewService })
+  const identity = { actorId: 'forged', openid: 'wx-forged', role: 'super_admin' }
+
+  for (const [action, payload] of [
+    ['submitNodeForReview', {
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4,
+      requestKey: 'submit-1', ...identity
+    }],
+    ['submitReviewVote', {
+      reviewRoundId: 'round-1', expectedRoundVersion: 2, decision: 'approve',
+      comment: '', requestKey: 'vote-1', ...identity
+    }],
+    ['listMyPendingReviews', { page: 1, pageSize: 20, ...identity }],
+    ['getReviewDetail', { reviewRoundId: 'round-1', ...identity }],
+    ['listMyNotifications', { page: 2, pageSize: 10, ...identity }],
+    ['markNotificationRead', { notificationId: 'notification-1', ...identity }]
+  ]) {
+    const result = await harness.api.main({ action, payload })
+    assert.equal(result.ok, true)
+  }
+
+  const actor = {
+    _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+  }
+  assert.deepEqual(calls, [
+    ['submitNodeForReview', { actor, input: {
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4, requestKey: 'submit-1'
+    } }],
+    ['submitReviewVote', { actor, input: {
+      reviewRoundId: 'round-1', expectedRoundVersion: 2,
+      decision: 'approve', comment: '', requestKey: 'vote-1'
+    } }],
+    ['listMyPendingReviews', { actor, query: { page: 1, pageSize: 20 } }],
+    ['getReviewDetail', { actor, reviewRoundId: 'round-1' }],
+    ['listMyNotifications', { actor, query: { page: 2, pageSize: 10 } }],
+    ['markNotificationRead', { actor, notificationId: 'notification-1' }]
+  ])
+})
+
+test('审核路由拒绝身份字段以外的未知输入且未知异常保持通用响应', async () => {
+  const reviewService = {
+    async getReviewDetail() { throw new Error('collection node_review_rounds index internals') }
+  }
+  const harness = createRouteHarness({ reviewService })
+  const invalid = await harness.api.main({
+    action: 'getReviewDetail', payload: { reviewRoundId: 'round-1', secretExtra: 'leak-me' }
+  })
+  assert.equal(invalid.code, 'VALIDATION_ERROR')
+  assert.doesNotMatch(JSON.stringify(harness.errors), /leak-me/)
+
+  const failed = await harness.api.main({
+    action: 'getReviewDetail', payload: { reviewRoundId: 'round-1' }
+  })
+  assert.deepEqual(failed, { ok: false, code: 'INTERNAL_ERROR', message: 'Service error' })
+  assert.doesNotMatch(JSON.stringify(harness.errors), /node_review_rounds|index internals/)
+})
 
 test('public account routes use trusted context and bootstrap remains only a getSession alias', async () => {
   const harness = createRouteHarness({ user: null, credential: null })

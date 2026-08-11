@@ -202,6 +202,257 @@ test('提交审核在一个事务内创建轮次、锁定节点并写确定性�
   assert.equal(fake.transactionRuns[0].operations <= 100, true)
 })
 
+test('待我审核列表只返回当前审核人真实待办并稳定投影已投会签状态', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.business_lines[0].code = 'BL-20260811-0001'
+  data.business_lines[0].name = '安全测试业务'
+  data.node_review_rounds.push({
+    ...structuredClone(data.node_review_rounds[0]),
+    _id: 'review-foreign', reviewerUserIds: ['reviewer-2'], createdAt: new Date('2026-08-11T04:00:00.000Z')
+  })
+  data.node_review_rounds[0].createdAt = new Date('2026-08-11T03:00:00.000Z')
+  const voteId = `review-vote-${crypto.createHash('sha256')
+    .update('review-feedback-current\0reviewer-1').digest('hex')}`
+  data.node_review_votes = [{
+    _id: voteId, reviewRoundId: 'review-feedback-current', businessLineId: 'line-1',
+    nodeId: 'node-1', reviewerUserId: 'reviewer-1', reviewerDisplayName: '审核人一',
+    decision: 'approved', comment: '', expectedRoundVersion: 1,
+    requestKeyHash: 'a'.repeat(64), inputHash: 'b'.repeat(64), createdAt: NOW
+  }]
+  const { fake, repository } = harness({ seed: data })
+
+  const result = await repository.listPendingReviews({
+    actor: { _id: 'reviewer-1', status: 'active' }, query: { page: 1, pageSize: 20 }
+  })
+
+  assert.equal(result.items.length, 1)
+  assert.deepEqual(result.items[0], {
+    reviewRoundId: 'review-feedback-current', businessLineId: 'line-1',
+    businessCode: 'BL-20260811-0001', businessName: '安全测试业务',
+    nodeId: 'node-1', nodeCode: 'BL-20260811-0001-N001', nodeName: '资料收集',
+    reviewMode: 'all', reviewRoundNumber: 1, status: 'pending',
+    reviewDueStatus: 'calculated', reviewDueAt: new Date('2026-08-12T06:00:00.000Z'),
+    reviewOverdueWorkMinutes: 0, hasVoted: true, canApprove: false, canReject: false,
+    createdAt: new Date('2026-08-11T03:00:00.000Z')
+  })
+})
+
+test('审核详情只允许当前审核人、业务管理员或超级管理员并返回最小安全投影', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.users.push({ _id: 'root-1', status: 'active', role: 'super_admin', displayName: '总管理员' })
+  data.business_lines[0].code = 'BL-20260811-0001'
+  data.business_lines[0].name = '安全测试业务'
+  data.node_review_rounds[0].fieldValues = [{
+    fieldKey: 'summary', name: '摘要', type: 'short_text', value: '仅业务内容',
+    constraints: { maxLength: 100 }, internalHash: 'field-secret'
+  }]
+  data.node_review_rounds[0].evidenceIds = ['evidence-a']
+  data.evidences = [{
+    _id: 'evidence-a', businessLineId: 'line-1', nodeId: 'node-1',
+    fileId: 'cloud://secret', sha256: 'secret-hash', size: 999, reservationId: 'secret-reservation'
+  }]
+  data.node_review_votes = [{
+    _id: 'vote-a', reviewRoundId: 'review-feedback-current', businessLineId: 'line-1',
+    nodeId: 'node-1', reviewerUserId: 'reviewer-2', reviewerDisplayName: '审核人二',
+    decision: 'approved', comment: '同意', requestKeyHash: 'secret-request', inputHash: 'secret-input',
+    createdAt: NOW
+  }]
+  const { repository } = harness({ seed: data })
+
+  const detail = await repository.getReviewDetail({
+    actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  })
+  assert.deepEqual(detail.fieldValues, [{
+    fieldKey: 'summary', name: '摘要', type: 'short_text', value: '仅业务内容'
+  }])
+  assert.deepEqual(detail.evidences, [{ evidenceId: 'evidence-a' }])
+  assert.deepEqual(detail.votes, [{
+    reviewerDisplayName: '审核人二', decision: 'approved', createdAt: NOW
+  }])
+  assert.equal(detail.canApprove, true)
+  assert.equal(detail.canReject, true)
+  assert.doesNotMatch(JSON.stringify(detail), /cloud:\/\/|secret-hash|secret-request|reservation|999/)
+
+  await assert.rejects(repository.getReviewDetail({
+    actor: { _id: 'processor-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  }), error => error.code === 'FORBIDDEN')
+  assert.equal((await repository.getReviewDetail({
+    actor: { _id: 'manager-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  })).reviewRoundId, 'review-feedback-current')
+  assert.equal((await repository.getReviewDetail({
+    actor: { _id: 'root-1', status: 'active', role: 'super_admin' }, reviewRoundId: 'review-feedback-current'
+  })).reviewRoundId, 'review-feedback-current')
+  await assert.rejects(repository.getReviewDetail({
+    actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'missing-round'
+  }), error => error.code === 'FORBIDDEN')
+})
+
+test('审核详情按凭证编号投影全部合法凭证且不引入文件数量上限', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.business_lines[0].code = 'BL-20260811-0001'
+  data.business_lines[0].name = '多凭证测试'
+  data.node_review_rounds[0].evidenceIds = Array.from(
+    { length: 101 }, (_, index) => `evidence-${String(index + 1).padStart(3, '0')}`
+  )
+  const { repository } = harness({ seed: data })
+
+  const detail = await repository.getReviewDetail({
+    actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  })
+  assert.equal(detail.evidences.length, 101)
+  assert.deepEqual(detail.evidences[100], { evidenceId: 'evidence-101' })
+})
+
+test('通知查询和已读只作用于当前活动账号并隔离角色告警', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.users.push(
+    { _id: 'root-1', status: 'active', role: 'super_admin' },
+    { _id: 'member-1', status: 'active', role: 'user' }
+  )
+  data.notifications = [
+    {
+      _id: 'direct-reviewer', type: 'review_started', recipientUserIds: ['reviewer-1'],
+      businessLineId: 'line-1', nodeId: 'node-1', reviewRoundId: 'review-feedback-current',
+      status: 'unread', createdAt: new Date('2026-08-11T03:00:00.000Z'), secretBody: '不得返回'
+    },
+    {
+      _id: 'direct-other', type: 'review_started', recipientUserIds: ['reviewer-2'],
+      businessLineId: 'line-1', nodeId: 'node-1', reviewRoundId: 'review-feedback-current',
+      status: 'unread', createdAt: new Date('2026-08-11T04:00:00.000Z')
+    },
+    {
+      _id: 'role-warning', type: 'work_calendar_missing', audienceRole: 'super_admin',
+      status: 'pending', createdAt: new Date('2026-08-11T05:00:00.000Z')
+    }
+  ]
+  const { fake, repository } = harness({ seed: data })
+
+  const reviewer = await repository.listNotifications({
+    actor: { _id: 'reviewer-1', status: 'active', role: 'user' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(reviewer.items.map(item => item.notificationId), ['direct-reviewer'])
+  assert.doesNotMatch(JSON.stringify(reviewer), /不得返回|recipientUserIds|audienceRole/)
+
+  const root = await repository.listNotifications({
+    actor: { _id: 'root-1', status: 'active', role: 'super_admin' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(root.items.map(item => item.notificationId), ['role-warning'])
+
+  assert.deepEqual(await repository.markNotificationRead({
+    actor: { _id: 'reviewer-1', status: 'active' }, notificationId: 'direct-reviewer'
+  }), { notificationId: 'direct-reviewer', read: true })
+  assert.equal(fake.documents('notifications').some(item =>
+    item.type === 'notification_read_marker' && item.parentNotificationId === 'direct-reviewer' &&
+    item.userId === 'reviewer-1'), true)
+  await assert.rejects(repository.markNotificationRead({
+    actor: { _id: 'reviewer-1', status: 'active' }, notificationId: 'direct-other'
+  }), error => error.code === 'FORBIDDEN')
+  await assert.rejects(repository.markNotificationRead({
+    actor: { _id: 'member-1', status: 'active', role: 'user' }, notificationId: 'role-warning'
+  }), error => error.code === 'FORBIDDEN')
+})
+
+test('角色通知使用每账号确定性已读回执且第51个管理员仍可正常标记', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.users.push(...Array.from({ length: 51 }, (_, index) => ({
+    _id: `root-${index + 1}`, status: 'active', role: 'super_admin'
+  })))
+  data.notifications = [{
+    _id: 'role-warning', type: 'work_calendar_missing', audienceRole: 'super_admin',
+    status: 'pending', createdAt: NOW
+  }]
+  const { fake, repository } = harness({ seed: data })
+
+  for (let index = 1; index <= 51; index += 1) {
+    assert.deepEqual(await repository.markNotificationRead({
+      actor: { _id: `root-${index}`, status: 'active' }, notificationId: 'role-warning'
+    }), { notificationId: 'role-warning', read: true })
+  }
+  assert.equal(fake.documents('notifications').filter(item =>
+    item.type === 'notification_read_marker').length, 51)
+  const last = await repository.listNotifications({
+    actor: { _id: 'root-51', status: 'active' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.equal(last.items[0].read, true)
+})
+
+test('伪造或跨账号的确定性已读回执不能标记、泄露或覆盖当前账号状态', async () => {
+  const markerId = `notification-read-${crypto.createHash('sha256')
+    .update('direct-reviewer\0reviewer-1').digest('hex').slice(0, 48)}`
+  const data = votingSeed({ mode: 'all' })
+  data.notifications = [
+    {
+      _id: 'direct-reviewer', type: 'review_started', recipientUserIds: ['reviewer-1'],
+      businessLineId: 'line-1', nodeId: 'node-1', reviewRoundId: 'review-feedback-current',
+      status: 'unread', createdAt: NOW
+    },
+    {
+      _id: markerId, type: 'notification_read_marker', parentNotificationId: 'direct-reviewer',
+      userId: 'reviewer-2', createdAt: NOW
+    }
+  ]
+  const { repository } = harness({ seed: data })
+
+  const hidden = await repository.listNotifications({
+    actor: { _id: 'reviewer-1', status: 'active' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(hidden.items, [])
+  await assert.rejects(repository.markNotificationRead({
+    actor: { _id: 'reviewer-1', status: 'active' }, notificationId: 'direct-reviewer'
+  }), error => error.code === 'FORBIDDEN')
+  await assert.rejects(repository.markNotificationRead({
+    actor: { _id: 'reviewer-2', status: 'active' }, notificationId: 'direct-reviewer'
+  }), error => error.code === 'FORBIDDEN')
+})
+
+test('超级管理员合并定向与角色通知后再执行稳定窗口截取', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.users.push({ _id: 'root-1', status: 'active', role: 'super_admin' })
+  data.notifications = [
+    ...Array.from({ length: 100 }, (_, index) => ({
+      _id: `direct-root-${String(index + 1).padStart(3, '0')}`,
+      type: 'review_started', recipientUserIds: ['root-1'], createdAt: new Date(index)
+    })),
+    {
+      _id: 'role-latest', type: 'work_calendar_missing', audienceRole: 'super_admin',
+      createdAt: NOW
+    }
+  ]
+  const { repository } = harness({ seed: data })
+
+  const result = await repository.listNotifications({
+    actor: { _id: 'root-1', status: 'active' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.equal(result.items[0].notificationId, 'role-latest')
+  assert.equal(result.items.length, 20)
+  assert.equal(result.hasMore, true)
+})
+
+test('驳回后审核人仍可读取已固化轮次但处理人不能借历史轮次越权', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.business_lines[0].code = 'BL-20260811-0001'
+  data.business_lines[0].name = '驳回详情测试'
+  const { fake, repository } = harness({ seed: data })
+  await repository.submitReviewVote(voteRequest('reviewer-1', {
+    input: { decision: 'reject', comment: '字段需返工' },
+    context: {
+      businessLineId: 'line-1', nodeId: 'node-1', transition: 'rework',
+      processingWorkMinutes: 1200, nodeVersion: 5, roundVersion: 1
+    }
+  }))
+  const vote = fake.documents('node_review_votes')[0]
+  fake.replace('node_review_votes', vote._id, { ...vote, createdAt: NOW })
+
+  const detail = await repository.getReviewDetail({
+    actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  })
+  assert.equal(detail.status, 'rejected')
+  assert.equal(detail.canApprove, false)
+  await assert.rejects(repository.getReviewDetail({
+    actor: { _id: 'processor-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  }), error => error.code === 'FORBIDDEN')
+})
+
 test('审核仓储逐字段拒绝账号关系的访问器和继承数组', async () => {
   for (const kind of ['accessor', 'prototype']) {
     const { repository } = harness({

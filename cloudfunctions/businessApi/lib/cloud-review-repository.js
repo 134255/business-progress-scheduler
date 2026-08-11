@@ -11,6 +11,15 @@ const REVIEW_MODES = new Set(['any', 'all'])
 const HASH = /^[a-f0-9]{64}$/
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const RETENTION_MS = 60 * 24 * 60 * 60 * 1000
+const MAX_QUERY_WINDOW = 100
+const NOTIFICATION_TYPES = new Set([
+  'review_started',
+  'node_review_rejected',
+  'business_completed',
+  'node_processing_started',
+  'work_calendar_missing',
+  'evidence_retention'
+])
 
 function createError(code) {
   const error = new Error(code)
@@ -131,6 +140,143 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     const value = clock()
     if (!validDate(value)) throw new TypeError('clock must return a Date')
     return new Date(value)
+  }
+
+  function readMarkerId(notificationId, actorId) {
+    return `notification-read-${hash(`${notificationId}\0${actorId}`).slice(0, 48)}`
+  }
+
+  function safeAccount(account, actorId) {
+    if (!account || account._id !== actorId || account.status !== 'active' ||
+        typeof account._id !== 'string' || !DOCUMENT_ID.test(account._id)) {
+      throw createError('FORBIDDEN')
+    }
+    const role = ownDataValue(account, 'role')
+    if (role.present && (!role.valid || !['user', 'super_admin'].includes(role.value))) {
+      throw createError('FORBIDDEN')
+    }
+    return { account, role: role.valid ? role.value : 'user' }
+  }
+
+  async function requireCurrentAccount(database, actor) {
+    if (!actor || typeof actor._id !== 'string' || !DOCUMENT_ID.test(actor._id)) {
+      throw createError('FORBIDDEN')
+    }
+    return safeAccount(await readDocument(database, 'users', actor._id), actor._id)
+  }
+
+  function safeLineRelationships(line) {
+    const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
+    const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
+    if (!managers || !members) throw createError('FORBIDDEN')
+    return { managers, members }
+  }
+
+  function safeRoundRelationships(line, node, round) {
+    if (!line || line.status === 'creating' || line.status === 'deleted' || !node || !round ||
+        node.businessLineId !== line._id || round.businessLineId !== line._id ||
+        round.nodeId !== node._id || node.workflowMode !== 'review') throw createError('FORBIDDEN')
+    const lineRelationships = safeLineRelationships(line)
+    const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
+    const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+    const roundReviewers = ownExactAccountIds(round, 'reviewerUserIds', { nonEmpty: true })
+    const roundNumbersMatch = round.status === 'rejected' && node.lastReviewRoundId === round._id
+      ? node.processingRoundNumber === round.processingRoundNumber + 1 &&
+        node.reviewRoundNumber === round.reviewRoundNumber
+      : round.processingRoundNumber === node.processingRoundNumber &&
+        round.reviewRoundNumber === node.reviewRoundNumber
+    if (!processors || !reviewers || !roundReviewers || !sameIds(reviewers, roundReviewers) ||
+        processors.some(id => reviewers.includes(id)) || !REVIEW_MODES.has(round.reviewMode) ||
+        round.reviewMode !== node.reviewMode || !safeInteger(round.processingRoundNumber, 1) ||
+        !safeInteger(round.reviewRoundNumber, 1) || !roundNumbersMatch) throw createError('FORBIDDEN')
+    return { ...lineRelationships, processors, reviewers }
+  }
+
+  function currentPendingRound(line, node, round) {
+    return line.status === 'active' && isCurrentNode(line, node) && node.status === 'pending_review' &&
+      round.status === 'pending' && node.activeReviewRoundId === round._id &&
+      node.version === round.lockedNodeVersion
+  }
+
+  function safeFieldValues(value) {
+    if (!Array.isArray(value) || value.length > 50) throw createError('FORBIDDEN')
+    return value.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw createError('FORBIDDEN')
+      const result = {}
+      for (const key of ['fieldKey', 'name', 'type']) {
+        const field = ownDataValue(item, key)
+        if (!field.valid || typeof field.value !== 'string' || !field.value || field.value.length > 200) {
+          throw createError('FORBIDDEN')
+        }
+        result[key] = field.value
+      }
+      const field = ownDataValue(item, 'value')
+      const validPrimitive = field.valid && (field.value === null ||
+        ['string', 'number', 'boolean'].includes(typeof field.value))
+      const validArray = field.valid && Array.isArray(field.value) && field.value.length <= 100 &&
+        field.value.every(entry => entry === null || ['string', 'number', 'boolean'].includes(typeof entry))
+      if (!validPrimitive && !validArray) throw createError('FORBIDDEN')
+      result.value = clone(field.value)
+      return result
+    })
+  }
+
+  function safeEvidenceIds(value) {
+    if (!Array.isArray(value) || value.some(id =>
+      typeof id !== 'string' || !DOCUMENT_ID.test(id)) || new Set(value).size !== value.length) {
+      throw createError('FORBIDDEN')
+    }
+    return value.map(evidenceId => ({ evidenceId }))
+  }
+
+  function safeDate(value) {
+    if (value === null || value === undefined) return null
+    if (!validDate(value)) throw createError('FORBIDDEN')
+    return new Date(value)
+  }
+
+  function safeReviewSummary(line, node, round, vote, actorId) {
+    const hasVoted = Boolean(vote)
+    return {
+      reviewRoundId: round._id,
+      businessLineId: line._id,
+      businessCode: validDisplayName(line.code, 100) || '',
+      businessName: validDisplayName(line.name, 200) || '',
+      nodeId: node._id,
+      nodeCode: validDisplayName(node.nodeCode, 100) || '',
+      nodeName: validDisplayName(node.name, 200) || '',
+      reviewMode: round.reviewMode,
+      reviewRoundNumber: round.reviewRoundNumber,
+      status: round.status,
+      reviewDueStatus: round.reviewDueStatus,
+      reviewDueAt: safeDate(round.reviewDueAt),
+      reviewOverdueWorkMinutes: safeInteger(round.reviewOverdueWorkMinutes)
+        ? round.reviewOverdueWorkMinutes
+        : 0,
+      hasVoted,
+      canApprove: !hasVoted && round.status === 'pending' && round.reviewerUserIds.includes(actorId),
+      canReject: !hasVoted && round.status === 'pending' && round.reviewerUserIds.includes(actorId),
+      createdAt: safeDate(round.createdAt)
+    }
+  }
+
+  function safeNotificationShape(notification, account) {
+    if (!notification || typeof notification._id !== 'string' ||
+        !DOCUMENT_ID.test(notification._id) || !NOTIFICATION_TYPES.has(notification.type)) return null
+    const recipientsField = ownDataValue(notification, 'recipientUserIds')
+    const roleField = ownDataValue(notification, 'audienceRole')
+    const recipients = recipientsField.present
+      ? ownExactAccountIds(notification, 'recipientUserIds', { nonEmpty: true })
+      : null
+    const direct = Boolean(recipients && recipients.includes(account._id))
+    const role = roleField.valid && roleField.value === 'super_admin' && account.role === 'super_admin'
+    if (recipientsField.present && !recipients || roleField.present &&
+        (!roleField.valid || roleField.value !== 'super_admin') || direct === role || !direct && !role) {
+      return null
+    }
+    const oldReads = ownDataValue(notification, 'readByUserIds')
+    if (oldReads.present && !ownExactAccountIds(notification, 'readByUserIds')) return null
+    return { direct, role, oldRead: oldReads.present && oldReads.value.includes(account._id) }
   }
 
   function assertBaseAuthorization(actor, line, node) {
@@ -1038,12 +1184,267 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     })
   }
 
+  async function validatedPendingCandidate(candidate, actorId) {
+    try {
+      return await db.runTransaction(async transaction => {
+        const { account } = await requireCurrentAccount(transaction, { _id: actorId })
+        const round = await readDocument(transaction, 'node_review_rounds', candidate && candidate._id)
+        const line = round && await readDocument(transaction, 'business_lines', round.businessLineId)
+        const node = round && await readDocument(transaction, 'business_nodes', round.nodeId)
+        const relationships = safeRoundRelationships(line, node, round)
+        if (!relationships.members.includes(account._id) ||
+            !relationships.reviewers.includes(account._id) || !currentPendingRound(line, node, round)) {
+          throw createError('FORBIDDEN')
+        }
+        const vote = await readDocument(
+          transaction, 'node_review_votes', deterministicVoteId(round._id, account._id)
+        )
+        if (vote && (vote.reviewRoundId !== round._id || vote.reviewerUserId !== account._id ||
+            !['approved', 'rejected'].includes(vote.decision))) throw createError('FORBIDDEN')
+        return safeReviewSummary(line, node, round, vote, account._id)
+      })
+    } catch (error) {
+      if (error && error[APPLICATION_ERROR_MARKER]) return null
+      throw error
+    }
+  }
+
+  async function listPendingReviews({ actor, query }) {
+    const { account } = await requireCurrentAccount(db, actor)
+    const requested = query.page * query.pageSize
+    if (!safeInteger(requested, 1) || requested > MAX_QUERY_WINDOW) throw createError('INVALID_PAGINATION')
+    const response = await db.collection('node_review_rounds')
+      .where({ status: 'pending', reviewerUserIds: account._id })
+      .orderBy('createdAt', 'desc')
+      .orderBy('_id', 'asc')
+      .limit(MAX_QUERY_WINDOW)
+      .get()
+    const candidates = Array.isArray(response && response.data) ? response.data : []
+    const validated = (await Promise.all(candidates.map(candidate =>
+      validatedPendingCandidate(candidate, account._id)))).filter(Boolean)
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() ||
+        left.reviewRoundId.localeCompare(right.reviewRoundId))
+    await requireCurrentAccount(db, actor)
+    const offset = (query.page - 1) * query.pageSize
+    return {
+      items: validated.slice(offset, offset + query.pageSize),
+      page: query.page,
+      pageSize: query.pageSize,
+      hasMore: offset + query.pageSize < validated.length
+    }
+  }
+
+  function authorizeReviewDetail(account, line, node, round) {
+    const relationships = safeRoundRelationships(line, node, round)
+    const isReviewer = relationships.members.includes(account._id) &&
+      relationships.reviewers.includes(account._id)
+    const isManager = relationships.managers.includes(account._id)
+    const isSuperAdmin = account.role === 'super_admin'
+    const roundAttached = currentPendingRound(line, node, round) ||
+      node.lastReviewRoundId === round._id && ['approved', 'rejected'].includes(round.status)
+    if (!roundAttached || !isReviewer && !isManager && !isSuperAdmin) throw createError('FORBIDDEN')
+    return { relationships, isReviewer }
+  }
+
+  function safeVoteProjection(vote, round) {
+    if (!vote || vote.reviewRoundId !== round._id ||
+        !round.reviewerUserIds.includes(vote.reviewerUserId) ||
+        !['approved', 'rejected'].includes(vote.decision)) return null
+    const displayName = validDisplayName(vote.reviewerDisplayName, 100)
+    if (!displayName || !validDate(vote.createdAt)) return null
+    return {
+      reviewerDisplayName: displayName,
+      decision: vote.decision,
+      createdAt: new Date(vote.createdAt)
+    }
+  }
+
+  async function readAuthorizedDetailSnapshot(actor, reviewRoundId) {
+    return db.runTransaction(async transaction => {
+      const { account, role } = await requireCurrentAccount(transaction, actor)
+      const round = await readDocument(transaction, 'node_review_rounds', reviewRoundId)
+      const line = round && await readDocument(transaction, 'business_lines', round.businessLineId)
+      const node = round && await readDocument(transaction, 'business_nodes', round.nodeId)
+      const authorization = authorizeReviewDetail({ ...account, role }, line, node, round)
+      const vote = authorization.isReviewer
+        ? await readDocument(transaction, 'node_review_votes', deterministicVoteId(round._id, account._id))
+        : null
+      if (vote && (vote.reviewRoundId !== round._id || vote.reviewerUserId !== account._id)) {
+        throw createError('FORBIDDEN')
+      }
+      return {
+        accountId: account._id,
+        line,
+        node,
+        round,
+        isReviewer: authorization.isReviewer,
+        hasVoted: Boolean(vote)
+      }
+    })
+  }
+
+  async function getReviewDetail({ actor, reviewRoundId }) {
+    let first
+    try {
+      first = await readAuthorizedDetailSnapshot(actor, reviewRoundId)
+    } catch (error) {
+      if (error && error[APPLICATION_ERROR_MARKER]) throw createError('FORBIDDEN')
+      throw error
+    }
+    const votesResponse = await db.collection('node_review_votes')
+      .where({ reviewRoundId })
+      .orderBy('createdAt', 'asc')
+      .orderBy('_id', 'asc')
+      .limit(first.round.reviewerUserIds.length + 1)
+      .get()
+    const second = await readAuthorizedDetailSnapshot(actor, reviewRoundId)
+    if (first.line.version !== second.line.version || first.node.version !== second.node.version ||
+        first.round.version !== second.round.version || first.round.status !== second.round.status) {
+      throw createError('VERSION_CONFLICT')
+    }
+    const rawVotes = votesResponse.data || []
+    const votes = rawVotes.map(vote => safeVoteProjection(vote, second.round))
+    if (rawVotes.length > second.round.reviewerUserIds.length || votes.some(vote => !vote) ||
+        new Set(rawVotes.map(vote => vote.reviewerUserId)).size !== rawVotes.length) {
+      throw createError('FORBIDDEN')
+    }
+    const canAct = second.isReviewer && !second.hasVoted && second.round.status === 'pending'
+    return {
+      reviewRoundId: second.round._id,
+      businessLineId: second.line._id,
+      businessCode: validDisplayName(second.line.code, 100) || '',
+      businessName: validDisplayName(second.line.name, 200) || '',
+      nodeId: second.node._id,
+      nodeCode: validDisplayName(second.node.nodeCode, 100) || '',
+      nodeName: validDisplayName(second.node.name, 200) || '',
+      reviewMode: second.round.reviewMode,
+      reviewRoundNumber: second.round.reviewRoundNumber,
+      status: second.round.status,
+      fieldValues: safeFieldValues(second.round.fieldValues),
+      evidences: safeEvidenceIds(second.round.evidenceIds),
+      votes,
+      reviewDueStatus: second.round.reviewDueStatus,
+      reviewDueAt: safeDate(second.round.reviewDueAt),
+      reviewOverdueWorkMinutes: safeInteger(second.round.reviewOverdueWorkMinutes)
+        ? second.round.reviewOverdueWorkMinutes
+        : 0,
+      hasVoted: second.hasVoted,
+      canApprove: canAct,
+      canReject: canAct
+    }
+  }
+
+  async function validatedNotification(notificationId, actor) {
+    try {
+      return await db.runTransaction(async transaction => {
+        const { account, role } = await requireCurrentAccount(transaction, actor)
+        const note = await readDocument(transaction, 'notifications', notificationId)
+        const visibility = safeNotificationShape(note, { ...account, role })
+        if (!visibility) throw createError('FORBIDDEN')
+        const marker = await readDocument(transaction, 'notifications', readMarkerId(note._id, account._id))
+        if (marker && (marker.type !== 'notification_read_marker' ||
+            marker.parentNotificationId !== note._id || marker.userId !== account._id)) {
+          throw createError('FORBIDDEN')
+        }
+        const result = {
+          notificationId: note._id,
+          type: note.type,
+          read: visibility.oldRead || Boolean(marker),
+          createdAt: safeDate(note.createdAt)
+        }
+        for (const key of ['businessLineId', 'nodeId', 'reviewRoundId']) {
+          if (note[key] !== undefined && note[key] !== null) {
+            if (typeof note[key] !== 'string' || !DOCUMENT_ID.test(note[key])) throw createError('FORBIDDEN')
+            result[key] = note[key]
+          }
+        }
+        return result
+      })
+    } catch (error) {
+      if (error && error[APPLICATION_ERROR_MARKER]) return null
+      throw error
+    }
+  }
+
+  async function listNotifications({ actor, query }) {
+    const { account, role } = await requireCurrentAccount(db, actor)
+    const direct = await db.collection('notifications')
+      .where({ recipientUserIds: account._id })
+      .orderBy('createdAt', 'desc')
+      .orderBy('_id', 'asc')
+      .limit(MAX_QUERY_WINDOW)
+      .get()
+    const roleRows = role === 'super_admin'
+      ? (await db.collection('notifications')
+        .where({ audienceRole: 'super_admin' })
+        .orderBy('createdAt', 'desc')
+        .orderBy('_id', 'asc')
+        .limit(MAX_QUERY_WINDOW)
+        .get()).data || []
+      : []
+    const candidates = [...new Map([...(direct.data || []), ...roleRows]
+      .map(item => [item._id, item])).values()]
+      .filter(item => item.type !== 'notification_read_marker')
+      .sort((left, right) => {
+        const leftTime = validDate(left.createdAt) ? left.createdAt.getTime() : Number.NEGATIVE_INFINITY
+        const rightTime = validDate(right.createdAt) ? right.createdAt.getTime() : Number.NEGATIVE_INFINITY
+        return rightTime - leftTime || String(left._id || '').localeCompare(String(right._id || ''))
+      })
+      .slice(0, MAX_QUERY_WINDOW)
+    const items = (await Promise.all(candidates.map(item =>
+      validatedNotification(item._id, { _id: account._id })))).filter(Boolean)
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() ||
+        left.notificationId.localeCompare(right.notificationId))
+    await requireCurrentAccount(db, actor)
+    const offset = (query.page - 1) * query.pageSize
+    return {
+      items: items.slice(offset, offset + query.pageSize),
+      page: query.page,
+      pageSize: query.pageSize,
+      hasMore: offset + query.pageSize < items.length
+    }
+  }
+
+  async function markNotificationRead({ actor, notificationId }) {
+    try {
+      return await db.runTransaction(async transaction => {
+        const { account, role } = await requireCurrentAccount(transaction, actor)
+        const note = await readDocument(transaction, 'notifications', notificationId)
+        const visibility = safeNotificationShape(note, { ...account, role })
+        if (!visibility) throw createError('FORBIDDEN')
+        const markerId = readMarkerId(note._id, account._id)
+        const existing = await readDocument(transaction, 'notifications', markerId)
+        if (existing) {
+          if (existing.type !== 'notification_read_marker' ||
+              existing.parentNotificationId !== note._id || existing.userId !== account._id) {
+            throw createError('FORBIDDEN')
+          }
+        } else {
+          await transaction.collection('notifications').doc(markerId).set({ data: {
+            type: 'notification_read_marker',
+            parentNotificationId: note._id,
+            userId: account._id,
+            createdAt: db.serverDate()
+          } })
+        }
+        return { notificationId: note._id, read: true }
+      })
+    } catch (error) {
+      if (error && error[APPLICATION_ERROR_MARKER]) throw createError('FORBIDDEN')
+      throw error
+    }
+  }
+
   return {
     inspectReviewRoundRetry,
     findReviewRoundRetry,
     createReviewRound,
     prepareReviewVote,
-    submitReviewVote
+    submitReviewVote,
+    listPendingReviews,
+    getReviewDetail,
+    listNotifications,
+    markNotificationRead
   }
 }
 

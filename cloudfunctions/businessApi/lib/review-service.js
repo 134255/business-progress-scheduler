@@ -8,6 +8,11 @@ const INPUT_KEYS = new Set(['businessLineId', 'nodeId', 'expectedNodeVersion', '
 const VOTE_INPUT_KEYS = new Set([
   'reviewRoundId', 'expectedRoundVersion', 'decision', 'comment', 'requestKey'
 ])
+const QUERY_KEYS = new Set(['page', 'pageSize'])
+const DEFAULT_PAGE = 1
+const DEFAULT_PAGE_SIZE = 20
+const MAX_PAGE_SIZE = 50
+const MAX_QUERY_WINDOW = 100
 
 function createError(code) {
   const error = new Error(code)
@@ -26,6 +31,30 @@ function requireActiveActor(actor) {
   if (!actor || actor.status !== 'active' || typeof actor._id !== 'string' || !DOCUMENT_ID.test(actor._id)) {
     throw createError('FORBIDDEN')
   }
+}
+
+function normalizeDocumentId(value) {
+  if (typeof value !== 'string' || !DOCUMENT_ID.test(value)) throw createError('VALIDATION_ERROR')
+  return value
+}
+
+function normalizeQuery(query) {
+  const value = query === undefined ? {} : query
+  if (!isPlainOwnObject(value) || Reflect.ownKeys(value).some(key =>
+    typeof key !== 'string' || !QUERY_KEYS.has(key))) throw createError('INVALID_QUERY')
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw createError('INVALID_QUERY')
+    }
+  }
+  const page = value.page === undefined ? DEFAULT_PAGE : value.page
+  const pageSize = value.pageSize === undefined ? DEFAULT_PAGE_SIZE : value.pageSize
+  if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) ||
+      pageSize < 1 || pageSize > MAX_PAGE_SIZE || page * pageSize > MAX_QUERY_WINDOW) {
+    throw createError('INVALID_PAGINATION')
+  }
+  return { page, pageSize }
 }
 
 function normalizeInput(input) {
@@ -194,6 +223,13 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
       typeof reviewRepository.submitReviewVote !== 'function') {
     throw new TypeError('reviewRepository vote methods are required')
   }
+  for (const method of [
+    'listPendingReviews', 'getReviewDetail', 'listNotifications', 'markNotificationRead'
+  ]) {
+    if (typeof reviewRepository[method] !== 'function') {
+      throw new TypeError(`reviewRepository.${method} is required`)
+    }
+  }
   if (!workTimeService || typeof workTimeService.workingMinutesBetween !== 'function' ||
       typeof workTimeService.tryAddWorkMinutes !== 'function') {
     throw new TypeError('workTimeService is required')
@@ -333,7 +369,40 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
     })
   }
 
-  return { submitNodeForReview, submitReviewVote }
+  async function listMyPendingReviews({ actor, query }) {
+    requireActiveActor(actor)
+    return reviewRepository.listPendingReviews({ actor, query: normalizeQuery(query) })
+  }
+
+  async function getReviewDetail({ actor, reviewRoundId }) {
+    requireActiveActor(actor)
+    return reviewRepository.getReviewDetail({
+      actor,
+      reviewRoundId: normalizeDocumentId(reviewRoundId)
+    })
+  }
+
+  async function listMyNotifications({ actor, query }) {
+    requireActiveActor(actor)
+    return reviewRepository.listNotifications({ actor, query: normalizeQuery(query) })
+  }
+
+  async function markNotificationRead({ actor, notificationId }) {
+    requireActiveActor(actor)
+    return reviewRepository.markNotificationRead({
+      actor,
+      notificationId: normalizeDocumentId(notificationId)
+    })
+  }
+
+  return {
+    submitNodeForReview,
+    submitReviewVote,
+    listMyPendingReviews,
+    getReviewDetail,
+    listMyNotifications,
+    markNotificationRead
+  }
 }
 
 module.exports = { createReviewService }

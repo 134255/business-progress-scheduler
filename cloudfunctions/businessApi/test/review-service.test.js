@@ -81,6 +81,22 @@ function harness(overrides = {}) {
         lineStatus: 'active',
         nextNodeId: 'line-1-node-002'
       }
+    },
+    async listPendingReviews(value) {
+      calls.push(['list-pending', structuredClone(value)])
+      return overrides.pendingResult || { items: [], page: value.query.page, pageSize: value.query.pageSize, hasMore: false }
+    },
+    async getReviewDetail(value) {
+      calls.push(['review-detail', structuredClone(value)])
+      return overrides.detailResult || { reviewRoundId: value.reviewRoundId }
+    },
+    async listNotifications(value) {
+      calls.push(['list-notifications', structuredClone(value)])
+      return overrides.notificationResult || { items: [], page: value.query.page, pageSize: value.query.pageSize, hasMore: false }
+    },
+    async markNotificationRead(value) {
+      calls.push(['mark-notification', structuredClone(value)])
+      return { notificationId: value.notificationId, read: true }
     }
   }
   const workTimeService = {
@@ -266,4 +282,30 @@ test('终态投票同请求重试不再计算截止时间并只向仓储传递�
   const submitted = calls.at(-1)[1]
   assert.deepEqual(Object.keys(submitted.timing), ['transitionAt'])
   assert.equal(JSON.stringify([prepared, submitted]).includes('vote-final-retry'), false)
+})
+
+test('审核查询与通知服务严格校验当前账号、分页和文档编号', async () => {
+  const { calls, service } = harness()
+  const actor = { _id: 'reviewer-1', status: 'active' }
+
+  await service.listMyPendingReviews({ actor, query: { page: 2, pageSize: 10 } })
+  await service.getReviewDetail({ actor, reviewRoundId: 'review-feedback-current' })
+  await service.listMyNotifications({ actor, query: {} })
+  await service.markNotificationRead({ actor, notificationId: 'notification-1' })
+
+  assert.deepEqual(calls.slice(-4), [
+    ['list-pending', { actor, query: { page: 2, pageSize: 10 } }],
+    ['review-detail', { actor, reviewRoundId: 'review-feedback-current' }],
+    ['list-notifications', { actor, query: { page: 1, pageSize: 20 } }],
+    ['mark-notification', { actor, notificationId: 'notification-1' }]
+  ])
+
+  for (const operation of [
+    () => service.listMyPendingReviews({ actor, query: { page: 6, pageSize: 20 } }),
+    () => service.listMyNotifications({ actor, query: { pageSize: 51 } }),
+    () => service.getReviewDetail({ actor, reviewRoundId: '../round' }),
+    () => service.markNotificationRead({ actor: { _id: 'reviewer-1', status: 'disabled' }, notificationId: 'notification-1' })
+  ]) {
+    await assert.rejects(operation(), error => ['FORBIDDEN', 'INVALID_PAGINATION', 'VALIDATION_ERROR'].includes(error.code))
+  }
 })
