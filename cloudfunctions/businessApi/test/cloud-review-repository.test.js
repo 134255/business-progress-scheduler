@@ -11,12 +11,13 @@ function seed(overrides = {}) {
   return {
     users: overrides.users || [
       { _id: 'processor-1', status: 'active' },
+      { _id: 'manager-1', status: 'active' },
       { _id: 'reviewer-1', status: 'active' },
       { _id: 'reviewer-2', status: 'active' }
     ],
     business_lines: overrides.lines || [{
       _id: 'line-1', status: 'active', currentNodeId: 'node-1', currentNodeIndex: 0,
-      managerUserIds: [], memberUserIds: ['processor-1', 'reviewer-1', 'reviewer-2'], version: 1
+      managerUserIds: ['manager-1'], memberUserIds: ['processor-1', 'reviewer-1', 'reviewer-2'], version: 1
     }],
     business_nodes: overrides.nodes || [{
       _id: 'node-1', businessLineId: 'line-1', nodeCode: 'BL-20260811-0001-N001',
@@ -138,6 +139,36 @@ test('审核仓储逐字段拒绝账号关系的访问器和继承数组', async
     await assert.rejects(repository.createReviewRound(request()), error => error.code === 'FORBIDDEN')
   }
 })
+
+for (const [label, mutate] of [
+  ['管理人数组为空', line => { line.managerUserIds = [] }],
+  ['成员数组为空', line => {
+      line.managerUserIds = ['processor-1']
+      line.memberUserIds = []
+    }]
+]) {
+  test(`${label}时审核创建、预检和最终重试均失败关闭`, async () => {
+    const invalidSeed = seed()
+    mutate(invalidSeed.business_lines[0])
+    await assert.rejects(
+      harness({ seed: invalidSeed }).repository.createReviewRound(request()),
+      error => error.code === 'FORBIDDEN'
+    )
+
+    const { fake, repository } = harness()
+    const value = request()
+    value.draftHash = retryValue(value).draftHash
+    await repository.createReviewRound(value)
+    const line = fake.documents('business_lines')[0]
+    mutate(line)
+    fake.replace('business_lines', line._id, line)
+    const retryInput = retryValue(value)
+    await assert.rejects(repository.inspectReviewRoundRetry(retryInput), error =>
+      error.code === 'FORBIDDEN')
+    await assert.rejects(repository.findReviewRoundRetry(retryInput), error =>
+      error.code === 'FORBIDDEN')
+  })
+}
 
 test('同请求同输入幂等，不同输入冲突且不会重复写通知和审计', async () => {
   const { fake, repository } = harness()

@@ -49,8 +49,8 @@ function validDate(value) {
 }
 
 function lineMember(line, actorId) {
-  const managers = ownExactAccountIds(line, 'managerUserIds')
-  const members = ownExactAccountIds(line, 'memberUserIds')
+  const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
+  const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
   return Boolean(managers && members && (managers.includes(actorId) || members.includes(actorId)))
 }
 
