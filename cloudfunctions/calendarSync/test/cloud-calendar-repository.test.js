@@ -125,6 +125,67 @@ test('同版本活动代际缺日或坏记录时安全重建', async () => {
   assert.notEqual(rebuilt.generationId, repaired.generationId)
 })
 
+test('同版本活动代际工作日值被篡改时按真实全年输入重建修复', async () => {
+  const fake = createFakeCloudDatabase()
+  let token = 0
+  const repository = createCloudCalendarRepository({ db: fake.db, tokenFactory: () => `value-${++token}` })
+  const days = yearDays(2026)
+  days.find(day => day.date === '2026-08-11').isWorkday = false
+  const input = { year: 2026, days, sourceVersion: 'same-values', syncedAt: new Date() }
+  await repository.replaceYear(input)
+  const before = fake.documents('work_calendar_years')[0]
+  fake.replace('work_calendar_entries', `${before.generationId}_2026-08-11`, {
+    date: '2026-08-11', isWorkday: true, source: 'ailcc', sourceYear: 2026,
+    generationId: before.generationId, sourceVersion: 'same-values', syncedAt: new Date()
+  })
+  const rebuilt = await repository.replaceYear(input)
+  assert.equal(rebuilt.changed, true)
+  assert.notEqual(rebuilt.generationId, before.generationId)
+  assert.equal((await repository.getDayRule('2026-08-11')).isWorkday, false)
+})
+
+test('两年同版本 no-op 用有界分页校验而不逐日远程读取', async () => {
+  const fake = createFakeCloudDatabase()
+  let token = 0
+  const repository = createCloudCalendarRepository({ db: fake.db, tokenFactory: () => `bounded-${++token}` })
+  for (const year of [2026, 2027]) {
+    await repository.replaceYear({ year, days: yearDays(year), sourceVersion: `v-${year}`, syncedAt: new Date() })
+  }
+  const baseCollection = fake.db.collection.bind(fake.db)
+  let entryDocumentReads = 0
+  let entryQueryReads = 0
+  fake.db.collection = name => {
+    const collection = baseCollection(name)
+    if (name !== 'work_calendar_entries') return collection
+    return {
+      ...collection,
+      doc(id) {
+        const document = collection.doc(id)
+        return { ...document, async get() { entryDocumentReads += 1; return document.get() } }
+      },
+      where(criteria) {
+        const query = collection.where(criteria)
+        function wrap(current) {
+          return {
+            ...current,
+            orderBy(field, direction) { return wrap(current.orderBy(field, direction)) },
+            skip(offset) { return wrap(current.skip(offset)) },
+            limit(limit) { return wrap(current.limit(limit)) },
+            async get() { entryQueryReads += 1; return current.get() }
+          }
+        }
+        return wrap(query)
+      }
+    }
+  }
+  for (const year of [2026, 2027]) {
+    const result = await repository.replaceYear({ year, days: yearDays(year), sourceVersion: `v-${year}`, syncedAt: new Date() })
+    assert.equal(result.changed, false)
+  }
+  assert.equal(entryDocumentReads, 0)
+  assert.ok(entryQueryReads > 0 && entryQueryReads <= 8, `entryQueryReads=${entryQueryReads}`)
+})
+
 test('代际年份或来源版本损坏时严格拒绝读取', async () => {
   const fake = createFakeCloudDatabase()
   const repository = createCloudCalendarRepository({ db: fake.db, tokenFactory: () => 'metadata' })

@@ -13,14 +13,24 @@ test('客户端直调与伪造计划事件都被拒绝', async () => {
   assert.equal(calls.length, 0)
 })
 
+test('匿名或服务端调用伪造 event.Type 不能获得计划权限', async () => {
+  const calls = []
+  const handler = createCalendarSyncHandler({
+    service: { async run(input) { calls.push(input); return { ok: true } }, },
+    getContext: () => ({})
+  })
+  await assert.rejects(handler({ Type: 'Timer' }), error => error.code === 'FORBIDDEN')
+  assert.equal(calls.length, 0)
+})
+
 test('合法计划触发只使用服务端时钟', async () => {
   const calls = []
   const now = new Date('2026-08-11T03:00:00.000Z')
   const handler = createCalendarSyncHandler({
     service: { async run(input) { calls.push(input); return { ok: true } } },
-    getContext: () => ({}), clock: () => now
+    getContext: () => ({ TRIGGER_SRC: 'timer' }), clock: () => now
   })
-  assert.deepEqual(await handler({ Type: 'Timer', now: '2039-01-01T00:00:00Z' }), { ok: true })
+  assert.deepEqual(await handler({ Type: 'forged-client-data', now: '2039-01-01T00:00:00Z' }), { ok: true })
   assert.deepEqual(calls, [{ mode: 'scheduled', now }])
 })
 

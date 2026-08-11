@@ -26,7 +26,7 @@ function createCalendarSyncHandler({
     const now = clock()
     if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new TypeError('clock must return a valid Date')
     let mode
-    if (event && event.Type === 'Timer' && !event.manualRequestId && event.mode === undefined) {
+    if (context.TRIGGER_SRC === 'timer' && !event.manualRequestId) {
       mode = 'scheduled'
     } else if (event && typeof event.manualRequestId === 'string' && event.manualRequestId && manualAuthorizer &&
         await manualAuthorizer.consume(event.manualRequestId, now)) {

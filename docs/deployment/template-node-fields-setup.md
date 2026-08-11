@@ -59,6 +59,9 @@
 | `business_nodes` | 模板节点快照与运行状态 |
 | `node_feedback` | 不可变反馈版本及内部预约状态 |
 | `evidences` | 文件元数据、关联、租约与清理状态 |
+| `work_calendar_entries` | 按唯一 generation 保存的不可变工作日记录 |
+| `work_calendar_years` | 每年活动 generation 指针与同步租约 |
+| `calendar_sync_requests` | 超级管理员人工同步的短效一次性票据 |
 | `notifications` | 站内通知和凭证到期提醒 |
 | `audit_logs` | 模板、业务、反馈、修订和清理审计 |
 
@@ -102,6 +105,9 @@
 | `evidences` | `amendmentId` 升序、`_id` 升序 | 否 | 定时工作器分块恢复修订预约 |
 | `audit_logs` | `targetType` 升序、`targetId` 升序、`createdAt` 降序 | 否 | 对象审计历史 |
 | `audit_logs` | `targetId` 升序、`createdAt` 降序 | 否 | 冻结业务修订详情 |
+| `work_calendar_entries` | `sourceYear` 升序、`generationId` 升序、`date` 升序 | 否 | 同版本全年完整性的有界分页校验 |
+
+`work_calendar_entries` 索引未在真实 CloudBase 验证前，不得将日历同步标记为可部署通过；索引错误应保留旧活动代际并返回安全失败。
 
 ### 5.2 旧业务兼容索引
 

@@ -60,6 +60,24 @@ function safeVersion(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
+async function readGenerationRecords(source, year, generationId, expectedLength) {
+  const pageSize = 100
+  const pages = Math.ceil((expectedLength + 1) / pageSize)
+  const records = []
+  for (let page = 0; page < pages; page += 1) {
+    const result = await source.collection(ENTRY_COLLECTION)
+      .where({ sourceYear: year, generationId })
+      .orderBy('date', 'asc')
+      .skip(page * pageSize)
+      .limit(pageSize)
+      .get()
+    const batch = Array.isArray(result && result.data) ? result.data : []
+    records.push(...batch)
+    if (batch.length < pageSize) break
+  }
+  return records
+}
+
 function processingMinutes(node) {
   if (Number.isSafeInteger(node.processingRemainingWorkMinutes) && node.processingRemainingWorkMinutes >= 0) {
     return node.processingRemainingWorkMinutes
@@ -113,16 +131,13 @@ function createCloudCalendarRepository({
     let sameVersionComplete = false
     if (before && before.year === year && before.sourceVersion === sourceVersion &&
         typeof before.generationId === 'string' && before.generationId && before.dayCount === normalized.length) {
-      sameVersionComplete = true
-      for (const day of normalized) {
-        const record = await readDocument(db, ENTRY_COLLECTION, `${before.generationId}_${day.date}`)
-        if (!record || record.date !== day.date || record.sourceYear !== year ||
-            record.sourceVersion !== sourceVersion || record.generationId !== before.generationId ||
-            typeof record.isWorkday !== 'boolean') {
-          sameVersionComplete = false
-          break
-        }
-      }
+      const records = await readGenerationRecords(db, year, before.generationId, normalized.length)
+      sameVersionComplete = records.length === normalized.length && records.every((record, index) => {
+        const day = normalized[index]
+        return record && record._id === `${before.generationId}_${day.date}` && record.date === day.date &&
+          record.sourceYear === year && record.sourceVersion === sourceVersion &&
+          record.generationId === before.generationId && record.isWorkday === day.isWorkday
+      })
     }
     const claim = await db.runTransaction(async transaction => {
       const current = await readDocument(transaction, YEAR_COLLECTION, yearId)
