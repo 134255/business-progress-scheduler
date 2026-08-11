@@ -303,18 +303,58 @@ function createCloudBusinessRepository({
     return definitions.map(field => clone(field))
   }
 
+  function evidencePolicyField(node, key) {
+    if (!node || typeof node !== 'object') return { present: false, valid: false }
+    const visited = new Set()
+    let current = node
+    while (current && typeof current === 'object' && !visited.has(current)) {
+      visited.add(current)
+      const descriptor = Object.getOwnPropertyDescriptor(current, key)
+      if (descriptor) {
+        return {
+          present: true,
+          valid: current === node && Object.prototype.hasOwnProperty.call(descriptor, 'value'),
+          value: descriptor.value
+        }
+      }
+      current = Object.getPrototypeOf(current)
+    }
+    return { present: false, valid: false }
+  }
+
+  function safeEvidenceTypes(value) {
+    if (!Array.isArray(value) || value.length > ALLOWED_EVIDENCE_TYPES.length) {
+      throw createError('FORBIDDEN')
+    }
+    const types = []
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+          typeof descriptor.value !== 'string' ||
+          !ALLOWED_EVIDENCE_TYPES.includes(descriptor.value)) throw createError('FORBIDDEN')
+      types.push(descriptor.value)
+    }
+    if (new Set(types).size !== types.length) throw createError('FORBIDDEN')
+    return types
+  }
+
   function safeEvidencePolicy(node) {
-    const requiredField = ownDataValue(node, 'requiresEvidence')
-    const allowedField = ownDataValue(node, 'allowedEvidenceTypes')
+    const requiredField = evidencePolicyField(node, 'requiresEvidence')
+    const allowedField = evidencePolicyField(node, 'allowedEvidenceTypes')
+    const legacyField = evidencePolicyField(node, 'evidenceTypes')
     if (requiredField.present && (!requiredField.valid || typeof requiredField.value !== 'boolean') ||
-        allowedField.present && !allowedField.valid) throw createError('FORBIDDEN')
+        allowedField.present && !allowedField.valid || legacyField.present && !legacyField.valid ||
+        allowedField.present && legacyField.present ||
+        node.workflowMode === 'review' && legacyField.present) throw createError('FORBIDDEN')
     const requiresEvidence = requiredField.present ? requiredField.value : false
-    const allowedEvidenceTypes = allowedField.present ? allowedField.value : []
-    if (!Array.isArray(allowedEvidenceTypes) || allowedEvidenceTypes.some(type =>
-      typeof type !== 'string' || !ALLOWED_EVIDENCE_TYPES.includes(type)) ||
-      new Set(allowedEvidenceTypes).size !== allowedEvidenceTypes.length ||
-      requiresEvidence && allowedEvidenceTypes.length === 0) throw createError('FORBIDDEN')
-    return { requiresEvidence, allowedEvidenceTypes: allowedEvidenceTypes.slice() }
+    const source = allowedField.present
+      ? allowedField.value
+      : node.workflowMode === 'review' || !legacyField.present
+        ? []
+        : legacyField.value
+    const allowedEvidenceTypes = safeEvidenceTypes(source)
+    if (requiresEvidence && allowedEvidenceTypes.length === 0) throw createError('FORBIDDEN')
+    return { requiresEvidence, allowedEvidenceTypes }
   }
 
   function publicNodeProjection(node, actor, canManage, accountSchema, displayNames) {

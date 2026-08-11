@@ -429,7 +429,8 @@ test('business list and detail reads support account-id snapshots and legacy Ope
         },
         {
           _id: 'legacy-node', businessLineId: 'legacy-active', sequence: 0, name: '旧节点',
-          status: 'ready', assigneeIds: ['wx-user-1'], assigneeNames: ['旧用户']
+          status: 'ready', assigneeIds: ['wx-user-1'], assigneeNames: ['旧用户'],
+          requiresEvidence: false
         }
       ]
     }
@@ -450,6 +451,8 @@ test('business list and detail reads support account-id snapshots and legacy Ope
   assert.equal(legacy.line._id, 'legacy-active')
   assert.equal(legacy.nodes[0].canFeedback, true)
   assert.equal(legacy.nodes[0].assigneeNamesText, '旧用户')
+  assert.equal(legacy.nodes[0].requiresEvidence, false)
+  assert.deepEqual(legacy.nodes[0].allowedEvidenceTypes, [])
 })
 
 test('新版业务详情只返回审核流程安全投影与负责人显示名', async () => {
@@ -569,7 +572,7 @@ test('旧业务节点详情保留动态字段和必传凭证契约并剥离字�
         _id: 'legacy-node', businessLineId: 'legacy-line', nodeCode: 'BL-LEGACY-N001',
         sequence: 0, name: '旧节点', status: 'ready', version: 1,
         assigneeIds: ['wx-user-1'], assigneeNames: ['旧负责人'], requiresEvidence: true,
-        allowedEvidenceTypes: ['jpg', 'pdf'],
+        evidenceTypes: ['jpg', 'png', 'pdf', 'mp4'],
         fieldDefinitions: [{
           fieldKey: 'notes', sequence: 0, name: '说明', description: '', type: 'long_text',
           required: true, constraints: { maxLength: 500 }, internalDigest: 'do-not-return'
@@ -584,12 +587,130 @@ test('旧业务节点详情保留动态字段和必传凭证契约并剥离字�
   })
 
   assert.equal(result.nodes[0].requiresEvidence, true)
-  assert.deepEqual(result.nodes[0].allowedEvidenceTypes, ['jpg', 'pdf'])
+  assert.deepEqual(result.nodes[0].allowedEvidenceTypes, ['jpg', 'png', 'pdf', 'mp4'])
   assert.deepEqual(result.nodes[0].fieldDefinitions, [{
     fieldKey: 'notes', sequence: 0, name: '说明', description: '', type: 'long_text',
     required: true, constraints: { maxLength: 500 }
   }])
-  assert.doesNotMatch(JSON.stringify(result), /internalDigest|do-not-return/)
+  assert.doesNotMatch(JSON.stringify(result), /evidenceTypes|internalDigest|do-not-return/)
+})
+
+test('新版审核节点凭证策略拒绝旧字段回退、混合字段、访问器和原型链', async () => {
+  const baseNode = {
+    _id: 'node-review-policy', businessLineId: 'line-review-policy',
+    nodeCode: 'BL-20260811-0100-N001', sequence: 0, name: 'Review node',
+    status: 'ready', version: 1, workflowMode: 'review',
+    processorUserIds: ['user-2'], reviewerUserIds: ['user-3'], reviewMode: 'any',
+    processingRoundNumber: 1, reviewRoundNumber: 0,
+    processingDueStatus: 'calculated', reviewDueStatus: 'not_started',
+    requiresEvidence: false, fieldDefinitions: []
+  }
+  const cases = [
+    {
+      name: '旧字段回退',
+      mutate(node) { node.evidenceTypes = ['pdf'] }
+    },
+    {
+      name: '新旧字段混合',
+      mutate(node) {
+        node.allowedEvidenceTypes = ['pdf']
+        node.evidenceTypes = ['png']
+      }
+    },
+    {
+      name: '非法类型',
+      mutate(node) { node.allowedEvidenceTypes = ['exe'] }
+    },
+    {
+      name: '重复类型',
+      mutate(node) { node.allowedEvidenceTypes = ['pdf', 'pdf'] }
+    },
+    {
+      name: '非数组类型列表',
+      mutate(node) { node.allowedEvidenceTypes = 'pdf' }
+    },
+    {
+      name: '继承新版字段',
+      mutate(node) {
+        Object.setPrototypeOf(node, { allowedEvidenceTypes: ['pdf'] })
+      }
+    },
+    {
+      name: '继承旧字段',
+      mutate(node) {
+        Object.setPrototypeOf(node, { evidenceTypes: ['pdf'] })
+      }
+    },
+    {
+      name: '新版字段访问器',
+      mutate(node, reads) {
+        Object.defineProperty(node, 'allowedEvidenceTypes', {
+          configurable: true,
+          get() {
+            reads.count += 1
+            return ['pdf']
+          }
+        })
+      }
+    },
+    {
+      name: '旧字段访问器',
+      mutate(node, reads) {
+        Object.defineProperty(node, 'evidenceTypes', {
+          configurable: true,
+          get() {
+            reads.count += 1
+            return ['pdf']
+          }
+        })
+      }
+    },
+    {
+      name: '数组元素访问器',
+      mutate(node, reads) {
+        const types = []
+        Object.defineProperty(types, '0', {
+          configurable: true,
+          get() {
+            reads.count += 1
+            return 'pdf'
+          }
+        })
+        types.length = 1
+        node.allowedEvidenceTypes = types
+      }
+    }
+  ]
+
+  for (const item of cases) {
+    const reads = { count: 0 }
+    const seed = seedDefinition({
+      extra: {
+        business_lines: [{
+          _id: 'line-review-policy', code: 'BL-20260811-0100', name: 'Review policy',
+          status: 'active', version: 1, managerUserIds: ['user-1'],
+          memberUserIds: ['user-1', 'user-2', 'user-3'], currentNodeId: 'node-review-policy',
+          currentNodeIndex: 0, nodeCount: 1
+        }],
+        business_nodes: [{ ...baseNode }]
+      }
+    })
+    const { repository } = createRepositoryHarness(seed, {
+      fakeOptions: {
+        transformRead({ collection, data }) {
+          if (collection === 'business_nodes' && data._id === 'node-review-policy') {
+            item.mutate(data, reads)
+          }
+          return data
+        }
+      }
+    })
+
+    await assert.rejects(repository.getBusinessLine({
+      actor: { _id: 'user-1', status: 'active' }, lineId: 'line-review-policy'
+    }), error => error.code === 'FORBIDDEN', item.name)
+    assert.equal(reads.count, 0, `${item.name} 不得执行访问器`)
+  }
 })
 
 test('业务详情按请求缓存负责人显示名且重复账号只解析一次', async () => {

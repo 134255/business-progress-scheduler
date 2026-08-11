@@ -4,6 +4,7 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 
 ## Verified state
 
+- 2026-08-11 节点独立审核流程 Task 8 正式复审修复轮次 2 已完成本地实现与回归。业务详情安全投影现在兼容真实历史节点：当节点没有 `workflowMode: review`、`requiresEvidence` 为真且仅保存旧字段 `evidenceTypes` 时，会使用既有图片、PDF、视频类型白名单严格校验，并只以响应字段 `allowedEvidenceTypes` 返回，旧字段本身和其他内部属性不会泄漏。新版审核节点仍只接受自有数据属性 `allowedEvidenceTypes`，不会回退旧 `evidenceTypes`；新旧字段混用、非法或重复类型、非数组、字段/数组访问器、原型链继承值均失败关闭且不执行访问器。旧节点 `requiresEvidence: false` 的默认兼容行为保持不变。TDD RED 为业务仓储聚焦测试 66 项中 64 通过、2 项按预期失败；GREEN 为 66/66。最终本地回归为 `businessApi` 473/473、`calendarSync` 47/47、小程序 109/109、WXML 3/3。真实 CloudBase 部署和历史节点端到端读取仍未验证。
 - 2026-08-11 节点独立审核流程 Task 8 正式复审修复轮次 1 已完成本地实现与回归。业务详情的旧、新节点安全投影均恢复 `fieldDefinitions`、`requiresEvidence` 与 `allowedEvidenceTypes`，字段定义按现有字段域重新规范化并只返回稳定字段标识、顺序、名称、说明、类型、必填标记和类型约束，未知内部属性被剥离，损坏结构失败关闭；因此现有动态反馈表单与图片、PDF、视频凭证策略不再因脱敏投影丢失。单次业务详情先汇总全部审核处理人、审核人及账号制旧负责人，在请求内按账号编号去重读取并缓存安全显示名；48 节点、46 名不同负责人只解析读取 46 次且重复显示一致，不缓存账号对象或跨请求复用。待办和通知在原有候选初验后增加返回前最后一轮固定文档事务复核：待办重新读取活动账号、业务、节点、审核轮次和确定性投票，通知重新读取活动账号、通知和当前账号已读回执；查询期间撤销成员、审核人、定向受众或超级管理员角色后不再返回旧结果。通知白名单新增后续合法的 `processing_reminder` 与 `review_reminder`，未知类型和普通账号无权角色提醒仍隐藏。TDD RED 聚焦 110 项中 104 通过、6 项按预期失败；GREEN 为 110/110。最终本地回归为 `businessApi` 472/472、`calendarSync` 47/47、小程序 109/109、WXML 3/3，四个改动 JavaScript 文件语法检查通过。真实 CloudBase 索引、并发撤权时序、部署和微信开发者工具端到端交互仍未验证。
 
 - 2026-08-11 节点独立审核流程 Task 8 已完成本地实现：默认 `businessApi` 已装配审核服务与工作时间服务，并开放 `submitNodeForReview`、`submitReviewVote`、`listMyPendingReviews`、`getReviewDetail`、`listMyNotifications`、`markNotificationRead` 六个受保护动作。路由只使用会话解析出的当前账号，客户端伪造身份字段会被剥离，其他未知字段和越界分页会在服务调用前拒绝。待办、审核详情和通知查询都先读取当前活动账号，再在固定文档事务中复核业务、节点、审核轮次和账号关系；`creating` 业务不会出现在任何读取边界，缺失与无权审核详情统一返回 `FORBIDDEN`。审核详情只返回字段快照、凭证编号、安全显示名、审核模式、截止与逾期状态及当前账号动作权限；业务详情只返回负责人显示名、双轮次、双截止、双逾期和安全状态，不返回内部账号编号、OpenID、凭据、请求摘要、租约或预约字段。通知支持定向账号和既有 `super_admin` 角色告警，已读状态使用同一集合内由“通知编号 + 当前账号编号”确定性生成的每账号 `notification_read_marker` 回执，避免共享数组无界增长或第 51 个管理员无法标记；旧 `readByUserIds` 只作严格兼容读取，结构损坏时失败关闭。初始 RED 为 147 项中 140 通过、7 项预期失败；聚焦 GREEN 在补强回归前达到 147/147。最终本地回归为 `businessApi` 467/467、`calendarSync` 47/47、小程序 109/109、WXML 3/3。真实 CloudBase 部署、索引适配、角色通知回执写入和微信开发者工具端到端交互仍未验证；Task 9 才实现客户端审核与通知页面。
@@ -72,6 +73,18 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-11 节点独立审核流程 Task 8 正式复审修复轮次 2：
+
+| 命令或边界 | 结果 |
+|---|---|
+| 业务仓储聚焦 RED | 按预期：66 项中 64 通过、2 项失败；分别复现真实旧节点 `evidenceTypes` 被误拒绝，以及新版审核节点未拒绝旧字段回退。 |
+| `node --test cloudfunctions/businessApi/test/cloud-business-repository.test.js` | 通过：66 项，0 失败；覆盖旧字段安全映射以及混合、非法、重复、非数组、访问器和原型链失败关闭。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：473 项，0 失败；仅有两条既有 npm 用户配置警告。 |
+| `npm.cmd test --prefix cloudfunctions/calendarSync` | 通过：47 项，0 失败；仅有两条既有 npm 用户配置警告。 |
+| `node --test miniprogram/test/*.test.js` | 通过：109 项，0 失败。 |
+| `node tools/test-wxml-structure.mjs` | 通过：3 项，0 失败。 |
+| 真实 CloudBase 与微信开发者工具 | 未验证：尚未部署本轮修复，也未用真实旧节点执行端到端反馈页读取。 |
 
 2026-08-11 节点独立审核流程 Task 7 正式复审修复轮次 1：
 
