@@ -39,11 +39,19 @@ function harness(overrides = {}) {
     async getCurrentProcessingRoundDraft(value) {
       calls.push(['draft', structuredClone(value)])
       return overrides.draft || draft()
+    },
+    async getLockedProcessingRoundDraft(value) {
+      calls.push(['locked-draft', structuredClone(value)])
+      return overrides.lockedDraft || overrides.draft || draft()
     }
   }
   const reviewRepository = {
+    async inspectReviewRoundRetry(value) {
+      calls.push(['inspect-retry', structuredClone(value)])
+      return overrides.retry ? { reviewRoundId: overrides.retry.reviewRoundId } : null
+    },
     async findReviewRoundRetry(value) {
-      calls.push(['retry', structuredClone(value)])
+      calls.push(['confirm-retry', structuredClone(value)])
       return overrides.retry || null
     },
     async createReviewRound(value) {
@@ -99,7 +107,7 @@ test('服务入口对已锁定审核轮次执行重新授权的同请求幂等�
   const { calls, service } = harness({ retry: existing })
 
   assert.deepEqual(await service.submitNodeForReview({ actor: ACTOR, input: input() }), existing)
-  assert.deepEqual(calls.map(call => call[0]), ['retry'])
+  assert.deepEqual(calls.map(call => call[0]), ['inspect-retry', 'locked-draft', 'confirm-retry'])
   assert.equal(calls[0][1].requestKeyHash.length, 64)
   assert.equal(calls[0][1].inputHash.length, 64)
   assert.equal(JSON.stringify(calls[0][1]).includes('review-request-1'), false)

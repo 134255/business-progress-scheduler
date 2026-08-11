@@ -44,6 +44,14 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex')
 }
 
+function hashDraft(actorId, input, draft) {
+  return sha256(JSON.stringify([
+    actorId, input.businessLineId, input.nodeId, input.expectedNodeVersion,
+    draft.feedbackId, draft.feedbackRevision, draft.processingRoundNumber,
+    draft.fieldSnapshots, draft.evidenceIds, draft.evidenceTotalBytes
+  ]))
+}
+
 function strictWorkMinutes(value, code = 'VERSION_CONFLICT') {
   if (!Number.isSafeInteger(value) || value < 0) throw createError(code)
   return value
@@ -112,11 +120,17 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
   if (!feedbackRepository || typeof feedbackRepository.getCurrentProcessingRoundDraft !== 'function') {
     throw new TypeError('feedbackRepository.getCurrentProcessingRoundDraft is required')
   }
+  if (typeof feedbackRepository.getLockedProcessingRoundDraft !== 'function') {
+    throw new TypeError('feedbackRepository.getLockedProcessingRoundDraft is required')
+  }
   if (!reviewRepository || typeof reviewRepository.createReviewRound !== 'function') {
     throw new TypeError('reviewRepository.createReviewRound is required')
   }
   if (typeof reviewRepository.findReviewRoundRetry !== 'function') {
     throw new TypeError('reviewRepository.findReviewRoundRetry is required')
+  }
+  if (typeof reviewRepository.inspectReviewRoundRetry !== 'function') {
+    throw new TypeError('reviewRepository.inspectReviewRoundRetry is required')
   }
   if (!workTimeService || typeof workTimeService.workingMinutesBetween !== 'function' ||
       typeof workTimeService.tryAddWorkMinutes !== 'function') {
@@ -135,13 +149,27 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
     const inputHash = sha256(JSON.stringify([
       actor._id, safeInput.businessLineId, safeInput.nodeId, safeInput.expectedNodeVersion
     ]))
-    const retried = await reviewRepository.findReviewRoundRetry({
+    const retryContext = await reviewRepository.inspectReviewRoundRetry({
       actor,
       input: safeInput,
       requestKeyHash,
       inputHash
     })
-    if (retried) return retried
+    if (retryContext) {
+      const lockedDraft = await feedbackRepository.getLockedProcessingRoundDraft({
+        actor,
+        businessLineId: normalized.businessLineId,
+        nodeId: normalized.nodeId,
+        expectedNodeVersion: normalized.expectedNodeVersion,
+        reviewRoundId: retryContext.reviewRoundId
+      })
+      return reviewRepository.findReviewRoundRetry({
+        actor, input: safeInput, requestKeyHash, inputHash,
+        reviewRoundId: retryContext.reviewRoundId,
+        draft: lockedDraft,
+        draftHash: hashDraft(actor._id, normalized, lockedDraft)
+      })
+    }
     const draft = await feedbackRepository.getCurrentProcessingRoundDraft({
       actor,
       businessLineId: normalized.businessLineId,
@@ -158,11 +186,7 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
     const reviewMinutes = draft.node.reviewSlaWorkHours * 60
     if (!Number.isSafeInteger(reviewMinutes) || reviewMinutes <= 0) throw createError('VERSION_CONFLICT')
     const reviewDue = await workTimeService.tryAddWorkMinutes(new Date(at), reviewMinutes)
-    const draftHash = sha256(JSON.stringify([
-      actor._id, normalized.businessLineId, normalized.nodeId, normalized.expectedNodeVersion,
-      draft.feedbackId, draft.feedbackRevision, draft.processingRoundNumber,
-      draft.fieldSnapshots, draft.evidenceIds, draft.evidenceTotalBytes
-    ]))
+    const draftHash = hashDraft(actor._id, normalized, draft)
     return reviewRepository.createReviewRound({
       actor,
       input: safeInput,

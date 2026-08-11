@@ -46,9 +46,21 @@ function membership(value) {
   return Array.isArray(value) ? value : []
 }
 
+function ownDataValue(value, key) {
+  if (!value || typeof value !== 'object') return { present: false, valid: false, value: undefined }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  if (!descriptor) return { present: false, valid: false, value: undefined }
+  return {
+    present: true,
+    valid: Object.prototype.hasOwnProperty.call(descriptor, 'value'),
+    value: descriptor.value
+  }
+}
+
 function hasAccountRelationship(value) {
-  return Boolean(value && typeof value === 'object' && Object.getOwnPropertyNames(value)
-    .some(key => /UserIds?$/.test(key)))
+  return Boolean(value && typeof value === 'object' && [
+    'managerUserIds', 'memberUserIds', 'processorUserIds', 'reviewerUserIds', 'assigneeUserIds'
+  ].some(key => Object.getOwnPropertyDescriptor(value, key)))
 }
 
 function exactAccountIds(value, { nonEmpty = false } = {}) {
@@ -60,15 +72,20 @@ function exactAccountIds(value, { nonEmpty = false } = {}) {
 
 function accountSchema(line, node) {
   if (!hasAccountRelationship(line) && !hasAccountRelationship(node)) return false
-  const managers = exactAccountIds(line && line.managerUserIds, { nonEmpty: true })
-  const members = exactAccountIds(line && line.memberUserIds, { nonEmpty: true })
+  const managerField = ownDataValue(line, 'managerUserIds')
+  const memberField = ownDataValue(line, 'memberUserIds')
+  const managers = managerField.valid && exactAccountIds(managerField.value, { nonEmpty: true })
+  const members = memberField.valid && exactAccountIds(memberField.value, { nonEmpty: true })
   if (!managers || !members) return false
   if (node && node.workflowMode === 'review') {
-    const processors = exactAccountIds(node.processorUserIds, { nonEmpty: true })
-    const reviewers = exactAccountIds(node.reviewerUserIds, { nonEmpty: true })
+    const processorField = ownDataValue(node, 'processorUserIds')
+    const reviewerField = ownDataValue(node, 'reviewerUserIds')
+    const processors = processorField.valid && exactAccountIds(processorField.value, { nonEmpty: true })
+    const reviewers = reviewerField.valid && exactAccountIds(reviewerField.value, { nonEmpty: true })
     return Boolean(processors && reviewers && !processors.some(id => reviewers.includes(id)))
   }
-  return Boolean(exactAccountIds(node && node.assigneeUserIds, { nonEmpty: true }))
+  const assigneeField = ownDataValue(node, 'assigneeUserIds')
+  return Boolean(assigneeField.valid && exactAccountIds(assigneeField.value, { nonEmpty: true }))
 }
 
 function isAccountMember(line, actorId) {
@@ -882,17 +899,7 @@ function createCloudFeedbackRepository({
     }
   }
 
-  async function getCurrentProcessingRoundDraft({ actor, businessLineId, nodeId, expectedNodeVersion }) {
-    const input = { businessLineId, nodeId, expectedNodeVersion, status: 'in_progress' }
-    const context = await db.runTransaction(async transaction => {
-      const documents = await readSubmissionDocuments(transaction, actor && actor._id, input)
-      assertActiveAccountSubmission(documents.actor, documents.line, documents.node, input)
-      if (documents.node.workflowMode !== 'review' ||
-          !safeInteger(documents.node.processingRoundNumber, { minimum: 1 })) {
-        throw createError('VALIDATION_ERROR')
-      }
-      return documents
-    })
+  async function aggregateProcessingRoundDraft(context, { businessLineId, nodeId }) {
     const processingRoundNumber = context.node.processingRoundNumber
     const stored = await readAll(() => db.collection(COLLECTIONS.feedback).where({ nodeId }))
     const feedback = stored.filter(item =>
@@ -928,9 +935,13 @@ function createCloudFeedbackRepository({
         throw createError('EVIDENCE_NOT_ATTACHABLE')
       }
       if (retention.effectivePurgeDueAt && retention.effectivePurgeDueAt.getTime() <= at) continue
-      const order = safeInteger(evidence.feedbackEvidenceOrder)
-        ? evidence.feedbackEvidenceOrder
-        : null
+      const descriptor = Object.getOwnPropertyDescriptor(evidence, 'feedbackEvidenceOrder')
+      if (!descriptor && 'feedbackEvidenceOrder' in evidence || descriptor &&
+          (!Object.prototype.hasOwnProperty.call(descriptor, 'value') || !safeInteger(descriptor.value) ||
+            descriptor.value === Number.MAX_SAFE_INTEGER)) {
+        throw createError('EVIDENCE_NOT_ATTACHABLE')
+      }
+      const order = descriptor ? descriptor.value : null
       accepted.push({ evidence, revision: ownerFeedback.revision, order })
     }
     const orders = new Set()
@@ -962,15 +973,46 @@ function createCloudFeedbackRepository({
     }
     if (context.node.requiresEvidence && evidenceIds.length === 0) throw createError('EVIDENCE_NOT_ATTACHABLE')
     return {
-      line: clone(context.line),
-      node: clone(context.node),
-      feedbackId: latest._id,
-      feedbackRevision: latest.revision,
-      processingRoundNumber,
-      fieldSnapshots: clone(latest.fieldValues),
-      evidenceIds,
-      evidenceTotalBytes
+      line: clone(context.line), node: clone(context.node), feedbackId: latest._id,
+      feedbackRevision: latest.revision, processingRoundNumber,
+      fieldSnapshots: clone(latest.fieldValues), evidenceIds, evidenceTotalBytes
     }
+  }
+
+  async function getCurrentProcessingRoundDraft({ actor, businessLineId, nodeId, expectedNodeVersion }) {
+    const input = { businessLineId, nodeId, expectedNodeVersion, status: 'in_progress' }
+    const context = await db.runTransaction(async transaction => {
+      const documents = await readSubmissionDocuments(transaction, actor && actor._id, input)
+      assertActiveAccountSubmission(documents.actor, documents.line, documents.node, input)
+      if (documents.node.workflowMode !== 'review' ||
+          !safeInteger(documents.node.processingRoundNumber, { minimum: 1 })) {
+        throw createError('VALIDATION_ERROR')
+      }
+      return documents
+    })
+    return aggregateProcessingRoundDraft(context, { businessLineId, nodeId })
+  }
+
+  async function getLockedProcessingRoundDraft({ actor, businessLineId, nodeId, expectedNodeVersion, reviewRoundId }) {
+    const input = { businessLineId, nodeId, expectedNodeVersion, status: 'in_progress' }
+    const context = await db.runTransaction(async transaction => {
+      const documents = await readSubmissionDocuments(transaction, actor && actor._id, input)
+      assertCurrentActorAuthorization(documents.actor, documents.line, documents.node)
+      if (documents.line.status !== 'active' || !isCurrentNode(documents.line, documents.node) ||
+          documents.node.workflowMode !== 'review' || documents.node.status !== 'pending_review' ||
+          documents.node.activeReviewRoundId !== reviewRoundId ||
+          documents.node.version !== expectedNodeVersion + 1 ||
+          !safeInteger(documents.node.processingRoundNumber, { minimum: 1 })) {
+        throw createError('VERSION_CONFLICT')
+      }
+      const round = await readDocument(transaction, 'node_review_rounds', reviewRoundId)
+      if (!round || round.businessLineId !== businessLineId || round.nodeId !== nodeId ||
+          round.status !== 'pending' || round.submittedBy !== documents.actor._id ||
+          round.submittedNodeVersion !== expectedNodeVersion || round.lockedNodeVersion !== documents.node.version ||
+          round.processingRoundNumber !== documents.node.processingRoundNumber) throw createError('VERSION_CONFLICT')
+      return documents
+    })
+    return aggregateProcessingRoundDraft(context, { businessLineId, nodeId })
   }
 
   async function getNodeHistory({ actor, businessLineId, nodeId }) {
@@ -1056,7 +1098,8 @@ function createCloudFeedbackRepository({
     recoverExpiredReservation,
     commitFeedback,
     getNodeHistory,
-    getCurrentProcessingRoundDraft
+    getCurrentProcessingRoundDraft,
+    getLockedProcessingRoundDraft
   }
 }
 

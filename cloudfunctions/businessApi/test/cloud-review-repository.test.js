@@ -68,8 +68,24 @@ function request(overrides = {}) {
   }
 }
 
+function retryValue(value) {
+  const { requestKey: ignoredRequestKey, ...safeInput } = value.input
+  const draftHash = crypto.createHash('sha256').update(JSON.stringify([
+    value.actor._id, safeInput.businessLineId, safeInput.nodeId, safeInput.expectedNodeVersion,
+    value.draft.feedbackId, value.draft.feedbackRevision, value.draft.processingRoundNumber,
+    value.draft.fieldSnapshots, value.draft.evidenceIds, value.draft.evidenceTotalBytes
+  ])).digest('hex')
+  return {
+    actor: value.actor, input: safeInput, requestKeyHash: value.requestKeyHash,
+    inputHash: value.inputHash, draft: value.draft, draftHash,
+    reviewRoundId: `review-${value.draft.feedbackId}`
+  }
+}
+
 function harness(overrides = {}) {
-  const fake = createFakeCloudDatabase(overrides.seed || seed(overrides))
+  const fake = createFakeCloudDatabase(overrides.seed || seed(overrides), {
+    transformRead: overrides.transformRead
+  })
   const repository = createCloudReviewRepository({ db: fake.db, clock: () => new Date(NOW) })
   return { fake, repository }
 }
@@ -105,6 +121,24 @@ test('提交审核在一个事务内创建轮次、锁定节点并写确定性�
   assert.equal(fake.transactionRuns[0].operations <= 100, true)
 })
 
+test('审核仓储逐字段拒绝账号关系的访问器和继承数组', async () => {
+  for (const kind of ['accessor', 'prototype']) {
+    const { repository } = harness({
+      transformRead({ collection, data }) {
+        if (collection !== 'business_nodes') return data
+        delete data.reviewerUserIds
+        if (kind === 'accessor') {
+          Object.defineProperty(data, 'reviewerUserIds', { get: () => ['reviewer-1'] })
+        } else {
+          Object.setPrototypeOf(data, { reviewerUserIds: ['reviewer-1'] })
+        }
+        return data
+      }
+    })
+    await assert.rejects(repository.createReviewRound(request()), error => error.code === 'FORBIDDEN')
+  }
+})
+
 test('同请求同输入幂等，不同输入冲突且不会重复写通知和审计', async () => {
   const { fake, repository } = harness()
   const first = await repository.createReviewRound(request())
@@ -123,15 +157,13 @@ test('同请求同输入幂等，不同输入冲突且不会重复写通知和�
 test('服务入口重试预检在返回审核轮次前重新授权并比较请求摘要', async () => {
   const { fake, repository } = harness()
   const value = request()
+  value.draftHash = retryValue(value).draftHash
   const first = await repository.createReviewRound(value)
-  const { requestKey: ignoredRequestKey, ...safeInput } = value.input
-  const retryInput = {
-    actor: value.actor,
-    input: safeInput,
-    requestKeyHash: value.requestKeyHash,
-    inputHash: value.inputHash
-  }
+  const retryInput = retryValue(value)
 
+  assert.deepEqual(await repository.inspectReviewRoundRetry(retryInput), {
+    reviewRoundId: 'review-feedback-current'
+  })
   assert.deepEqual(await repository.findReviewRoundRetry(retryInput), first)
   await assert.rejects(
     repository.findReviewRoundRetry({ ...retryInput, inputHash: 'f'.repeat(64) }),
@@ -152,6 +184,27 @@ test('服务入口重试预检在返回审核轮次前重新授权并比较请�
     ...fake.documents('business_nodes')[0], processorUserIds: ['processor-other']
   })
   await assert.rejects(repository.findReviewRoundRetry(retryInput), error => error.code === 'FORBIDDEN')
+})
+
+test('幂等重试必须用重新构建的完整草稿拒绝审核轮次摘要篡改', async () => {
+  for (const mutate of [
+    round => { round.draftHash = 'f'.repeat(64) },
+    round => { round.feedbackId = 'feedback-other' },
+    round => { round.feedbackRevision = 3 },
+    round => { round.fieldValues = [{ fieldKey: 'summary', value: '篡改' }] },
+    round => { round.evidenceIds = ['evidence-b', 'evidence-a'] },
+    round => { round.evidenceTotalBytes = 2048 }
+  ]) {
+    const { fake, repository } = harness()
+    const value = request()
+    value.draftHash = retryValue(value).draftHash
+    await repository.createReviewRound(value)
+    const round = fake.documents('node_review_rounds')[0]
+    mutate(round)
+    fake.replace('node_review_rounds', round._id, round)
+    await assert.rejects(repository.findReviewRoundRetry(retryValue(value)), error =>
+      error.code === 'VERSION_CONFLICT')
+  }
 })
 
 test('事务内重新校验账号、处理角色、节点版本、当前节点和活动轮次完整性', async () => {

@@ -62,6 +62,7 @@
 | `work_calendar_entries` | 按唯一 generation 保存的不可变工作日记录 |
 | `work_calendar_years` | 每年活动 generation 指针与同步租约 |
 | `calendar_sync_requests` | 超级管理员人工同步的短效一次性票据 |
+| `system_settings` | 账号守卫及日历补算的无业务内容持久游标 |
 | `notifications` | 站内通知和凭证到期提醒 |
 | `audit_logs` | 模板、业务、反馈、修订和清理审计 |
 
@@ -109,6 +110,8 @@
 | `work_calendar_entries` | `sourceYear` 升序、`generationId` 升序、`date` 升序 | 否 | 同版本全年完整性的有界分页校验 |
 
 `work_calendar_entries` 索引未在真实 CloudBase 验证前，不得将日历同步标记为可部署通过；索引错误应保留旧活动代际并返回安全失败。
+
+`calendarSync` 会自动创建或更新固定文档 `system_settings/calendar-review-processing-cursor`，其中只保存 `kind`、`cursorId`、`version` 和更新时间，不含业务正文或账号信息。部署前不要手工伪造该文档；若已有同编号但结构不符的文档，函数会失败关闭，应先停止触发器并按审计流程核查，不能直接删除或覆盖。该游标沿用上表的 `business_nodes(processingTimingStatus ASC, _id ASC)` 索引，不需要新增游标集合索引。
 
 ### 5.2 旧业务兼容索引
 

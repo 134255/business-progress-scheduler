@@ -47,15 +47,19 @@ function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
 }
 
-function exactAccountIds(value) {
+function ownExactAccountIds(value, key) {
+  if (!value || typeof value !== 'object') return null
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return null
+  value = descriptor.value
   if (!Array.isArray(value) || value.some(id => typeof id !== 'string' || !DOCUMENT_ID.test(id)) ||
       new Set(value).size !== value.length) return null
   return value
 }
 
 function lineMember(line, actorId) {
-  const managers = exactAccountIds(line && line.managerUserIds)
-  const members = exactAccountIds(line && line.memberUserIds)
+  const managers = ownExactAccountIds(line, 'managerUserIds')
+  const members = ownExactAccountIds(line, 'memberUserIds')
   return Boolean(managers && members && (managers.includes(actorId) || members.includes(actorId)))
 }
 
@@ -98,8 +102,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     if (FROZEN_LINE_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
     if (line.status !== 'active') throw createError('NODE_NOT_ACTIVE')
     if (node.workflowMode !== 'review') throw createError('VALIDATION_ERROR')
-    const processors = exactAccountIds(node.processorUserIds)
-    const reviewers = exactAccountIds(node.reviewerUserIds)
+    const processors = ownExactAccountIds(node, 'processorUserIds')
+    const reviewers = ownExactAccountIds(node, 'reviewerUserIds')
     if (!processors || !processors.length || !reviewers || !reviewers.length ||
         processors.some(id => reviewers.includes(id)) || !lineMember(line, actor._id) ||
         !processors.includes(actor._id)) throw createError('FORBIDDEN')
@@ -160,19 +164,31 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         round.submittedNodeVersion !== value.input.expectedNodeVersion ||
         node.status !== 'pending_review' || node.activeReviewRoundId !== roundId ||
         node.version !== round.lockedNodeVersion ||
-        node.processingRoundNumber !== round.processingRoundNumber) {
+        node.processingRoundNumber !== round.processingRoundNumber ||
+        round.feedbackId !== value.draft.feedbackId ||
+        round.feedbackRevision !== value.draft.feedbackRevision ||
+        round.processingRoundNumber !== value.draft.processingRoundNumber ||
+        round.evidenceTotalBytes !== value.draft.evidenceTotalBytes ||
+        JSON.stringify(round.fieldValues) !== JSON.stringify(value.draft.fieldSnapshots) ||
+        JSON.stringify(round.evidenceIds) !== JSON.stringify(value.draft.evidenceIds)) {
       throw createError('VERSION_CONFLICT')
     }
   }
 
-  async function findReviewRoundRetry(value) {
+  function validateRetryIdentity(value, requireDraft = false) {
     if (!value || !value.actor || !value.input ||
         typeof value.input.businessLineId !== 'string' || !DOCUMENT_ID.test(value.input.businessLineId) ||
         typeof value.input.nodeId !== 'string' || !DOCUMENT_ID.test(value.input.nodeId) ||
         !safeInteger(value.input.expectedNodeVersion, 1) ||
-        !HASH.test(value.requestKeyHash || '') || !HASH.test(value.inputHash || '')) {
+        !HASH.test(value.requestKeyHash || '') || !HASH.test(value.inputHash || '') || requireDraft &&
+        (!value.draft || !HASH.test(value.draftHash || '') || typeof value.reviewRoundId !== 'string' ||
+          !DOCUMENT_ID.test(value.reviewRoundId))) {
       throw createError('VALIDATION_ERROR')
     }
+  }
+
+  async function inspectReviewRoundRetry(value) {
+    validateRetryIdentity(value)
     return db.runTransaction(async transaction => {
       const actor = await readDocument(transaction, 'users', value.actor._id)
       const line = await readDocument(transaction, 'business_lines', value.input.businessLineId)
@@ -197,6 +213,29 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           round.requestKeyHash !== value.requestKeyHash || round.inputHash !== value.inputHash) {
         throw createError('VERSION_CONFLICT')
       }
+      return { reviewRoundId: round._id }
+    })
+  }
+
+  async function findReviewRoundRetry(value) {
+    validateRetryIdentity(value, true)
+    return db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, 'users', value.actor._id)
+      const line = await readDocument(transaction, 'business_lines', value.input.businessLineId)
+      const node = await readDocument(transaction, 'business_nodes', value.input.nodeId)
+      assertBaseAuthorization(actor, line, node)
+      if (node.status !== 'pending_review' || node.activeReviewRoundId !== value.reviewRoundId ||
+          node.version !== value.input.expectedNodeVersion + 1) throw createError('VERSION_CONFLICT')
+      const round = await readDocument(transaction, 'node_review_rounds', value.reviewRoundId)
+      const feedback = await readDocument(transaction, 'node_feedback', value.draft.feedbackId)
+      validateDraft(value, node, feedback)
+      const recomputedDraftHash = hash(JSON.stringify([
+        actor._id, value.input.businessLineId, value.input.nodeId, value.input.expectedNodeVersion,
+        value.draft.feedbackId, value.draft.feedbackRevision, value.draft.processingRoundNumber,
+        value.draft.fieldSnapshots, value.draft.evidenceIds, value.draft.evidenceTotalBytes
+      ]))
+      if (recomputedDraftHash !== value.draftHash) throw createError('VERSION_CONFLICT')
+      assertIdempotentRound(round, node, value, value.reviewRoundId)
       return publicResult(round)
     })
   }
@@ -219,6 +258,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       const { reviewers } = assertBaseAuthorization(actor, line, node)
       const existing = await readDocument(transaction, 'node_review_rounds', roundId)
       if (existing) {
+        const feedback = await readDocument(transaction, 'node_feedback', value.draft.feedbackId)
+        validateDraft(value, node, feedback)
         assertIdempotentRound(existing, node, value, roundId)
         return publicResult(existing)
       }
@@ -314,7 +355,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     })
   }
 
-  return { findReviewRoundRetry, createReviewRound }
+  return { inspectReviewRoundRetry, findReviewRoundRetry, createReviewRound }
 }
 
 module.exports = { createCloudReviewRepository }

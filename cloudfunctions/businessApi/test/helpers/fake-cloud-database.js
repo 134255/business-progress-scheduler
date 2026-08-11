@@ -12,6 +12,13 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   let serverDateSequence = 0
   let transactionQueue = Promise.resolve()
 
+  function readClone(name, document) {
+    const value = clone(document)
+    return typeof options.transformRead === 'function'
+      ? options.transformRead({ collection: name, data: value }) || value
+      : value
+  }
+
   for (const [name, documents] of Object.entries(seed)) {
     state[name] = new Map(documents.map(document => [document._id, clone(document)]))
   }
@@ -87,7 +94,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
         if (!document) {
           throw new Error(`document.get:fail document with _id ${id} does not exist`)
         }
-        return { data: clone(document) }
+        return { data: readClone(name, document) }
       },
       async set({ data }) {
         countOperation()
@@ -123,9 +130,10 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   }
 
   function matches(document, criteria) {
-    return Object.entries(criteria || {}).every(([key, value]) => Array.isArray(document[key])
-      ? document[key].includes(value)
-      : document[key] === value)
+    return Object.entries(criteria || {}).every(([key, value]) => {
+      if (value && value.__operator === 'gt') return String(document[key] || '') > String(value.value)
+      return Array.isArray(document[key]) ? document[key].includes(value) : document[key] === value
+    })
   }
 
   function createQuery(name, transaction, criteria = null, order = [], offset = 0, maximum = 100) {
@@ -164,7 +172,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
             return direction === 'desc' ? -comparison : comparison
           })
         }
-        return { data: clone(result.slice(offset, offset + maximum)) }
+        return { data: result.slice(offset, offset + maximum).map(document => readClone(name, document)) }
       },
       async count() {
         rejectTransactionQuery('count')
@@ -195,7 +203,10 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   }
 
   const db = {
-    command: { remove: () => removeValue },
+    command: {
+      remove: () => removeValue,
+      gt: value => ({ __operator: 'gt', value })
+    },
     collection(name) {
       return createQuery(name, false)
     },

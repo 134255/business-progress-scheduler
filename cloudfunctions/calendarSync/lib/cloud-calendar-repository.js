@@ -7,6 +7,8 @@ const YEAR_COLLECTION = 'work_calendar_years'
 const PROCESSING_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const SYNC_LEASE_MS = 10 * 60 * 1000
 const WRITE_BATCH_SIZE = 20
+const REVIEW_PROCESSING_CURSOR_ID = 'calendar-review-processing-cursor'
+const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
@@ -71,6 +73,16 @@ function safeNonNegativeInteger(value) {
 function calendarWarningId(lineId) {
   const digest = crypto.createHash('sha256').update(`${lineId}\0processing`).digest('hex')
   return `work-calendar-missing-${digest.slice(0, 40)}`
+}
+
+function validateReviewProcessingCursor(document) {
+  if (!document) return { exists: false, cursorId: null, version: 0 }
+  if (document._id !== REVIEW_PROCESSING_CURSOR_ID || document.kind !== 'review_processing' ||
+      safeVersion(document.version) === null ||
+      document.cursorId !== null && (typeof document.cursorId !== 'string' || !DOCUMENT_ID.test(document.cursorId))) {
+    throw new TypeError('review processing cursor is invalid')
+  }
+  return { exists: true, cursorId: document.cursorId, version: document.version }
 }
 
 async function readGenerationRecords(source, year, generationId, expectedLength) {
@@ -260,9 +272,39 @@ function createCloudCalendarRepository({
       })
     }
     if (result.length >= limit) return result
+    const capacity = limit - result.length
+    const cursorSnapshot = validateReviewProcessingCursor(
+      await readDocument(db, 'system_settings', REVIEW_PROCESSING_CURSOR_ID)
+    )
+    const reviewCriteria = { processingTimingStatus: 'pending_calendar' }
+    if (cursorSnapshot.cursorId !== null) reviewCriteria._id = db.command.gt(cursorSnapshot.cursorId)
     const reviewProcessing = await db.collection('business_nodes')
-      .where({ processingTimingStatus: 'pending_calendar' }).orderBy('_id', 'asc').limit(limit - result.length).get()
-    for (const node of Array.isArray(reviewProcessing && reviewProcessing.data) ? reviewProcessing.data : []) {
+      .where(reviewCriteria).orderBy('_id', 'asc').limit(capacity).get()
+    const reviewRows = Array.isArray(reviewProcessing && reviewProcessing.data) ? reviewProcessing.data : []
+    const nextCursorId = reviewRows.length ? reviewRows.at(-1)._id : null
+    const cursorClaimed = await db.runTransaction(async transaction => {
+      const current = validateReviewProcessingCursor(
+        await readDocument(transaction, 'system_settings', REVIEW_PROCESSING_CURSOR_ID)
+      )
+      if (current.exists !== cursorSnapshot.exists || current.cursorId !== cursorSnapshot.cursorId ||
+          current.version !== cursorSnapshot.version) return false
+      if (!reviewRows.length && cursorSnapshot.cursorId === null) return true
+      if (current.version === Number.MAX_SAFE_INTEGER) {
+        throw new TypeError('review processing cursor is invalid')
+      }
+      const data = {
+        kind: 'review_processing', cursorId: nextCursorId,
+        version: current.version + 1, updatedAt: db.serverDate()
+      }
+      if (current.exists) {
+        await transaction.collection('system_settings').doc(REVIEW_PROCESSING_CURSOR_ID).update({ data })
+      } else {
+        await transaction.collection('system_settings').doc(REVIEW_PROCESSING_CURSOR_ID).set({ data })
+      }
+      return true
+    })
+    if (!cursorClaimed) return result
+    for (const node of reviewRows) {
       if (result.length >= limit) break
       if (node.status !== 'pending_review' || typeof node.businessLineId !== 'string' ||
           typeof node.activeReviewRoundId !== 'string' || !node.activeReviewRoundId ||
@@ -277,7 +319,7 @@ function createCloudCalendarRepository({
           round.status !== 'pending' || round.lockedNodeVersion !== node.version ||
           round.processingTimingStatus !== 'pending_calendar' || !validDate(round.reviewStartedAt) ||
           safeVersion(round.version) === null || baseElapsedWorkMinutes === null ||
-          !Number.isSafeInteger(totalWorkMinutes) || totalWorkMinutes < baseElapsedWorkMinutes) continue
+          !Number.isSafeInteger(totalWorkMinutes)) continue
       result.push({
         kind: 'review_processing', id: round._id, businessLineId: node.businessLineId,
         nodeId: node._id, status: round.status, version: round.version, nodeVersion: node.version,

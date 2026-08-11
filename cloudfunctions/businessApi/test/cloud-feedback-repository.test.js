@@ -1401,6 +1401,109 @@ test('当前处理轮草稿保留同一反馈内凭证的首次选择顺序', as
   assert.deepEqual(result.evidenceIds, ['evidence-b', 'evidence-a'])
 })
 
+test('凭证顺序字段存在时必须是自有数据安全整数且不得重复', async () => {
+  for (const invalid of ['0', -1, 0.5, Number.MAX_SAFE_INTEGER, [0, 0]]) {
+    const data = reviewWorkflowSeed()
+    data.node_feedback = [{
+      _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
+      revision: 1, action: 'save_progress', processingRoundNumber: 1, submittedBy: 'account-a',
+      submittedAt: NOW, fieldValues: []
+    }]
+    data.business_nodes[0].latestFeedbackId = 'feedback-current'
+    data.business_nodes[0].latestFeedbackRevision = 1
+    const invalidOrders = Array.isArray(invalid) ? invalid : [invalid]
+    data.evidences = invalidOrders.map((feedbackEvidenceOrder, index) => ({
+      _id: `evidence-${index}`, businessLineId: 'line-1', nodeId: 'node-1', feedbackId: 'feedback-current',
+      feedbackRevision: 1, processingRoundNumber: 1, feedbackEvidenceOrder,
+      attachmentState: 'attached', retentionScope: 'business_line', retentionSource: 'node_feedback',
+      storageStatus: 'available', size: 1, purgedAt: null, purgeDueAt: null
+    }))
+    const { repository } = createFeedbackHarness({ seed: data })
+    await assert.rejects(repository.getCurrentProcessingRoundDraft({
+      actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1',
+      nodeId: 'node-1', expectedNodeVersion: 4
+    }), error => error.code === 'EVIDENCE_NOT_ATTACHABLE')
+  }
+
+  for (const kind of ['accessor', 'prototype']) {
+    const data = reviewWorkflowSeed()
+    data.node_feedback = [{
+      _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
+      revision: 1, action: 'save_progress', processingRoundNumber: 1, submittedBy: 'account-a',
+      submittedAt: NOW, fieldValues: []
+    }]
+    data.business_nodes[0].latestFeedbackId = 'feedback-current'
+    data.business_nodes[0].latestFeedbackRevision = 1
+    data.evidences = [{
+      _id: 'evidence-a', businessLineId: 'line-1', nodeId: 'node-1', feedbackId: 'feedback-current',
+      feedbackRevision: 1, processingRoundNumber: 1, attachmentState: 'attached',
+      retentionScope: 'business_line', retentionSource: 'node_feedback', storageStatus: 'available',
+      size: 1, purgedAt: null, purgeDueAt: null
+    }]
+    const { repository } = createFeedbackHarness({
+      seed: data,
+      transformRead({ collection, data: row }) {
+        if (collection !== 'evidences') return row
+        if (kind === 'accessor') Object.defineProperty(row, 'feedbackEvidenceOrder', { get: () => 0 })
+        else Object.setPrototypeOf(row, { feedbackEvidenceOrder: 0 })
+        return row
+      }
+    })
+    await assert.rejects(repository.getCurrentProcessingRoundDraft({
+      actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1',
+      nodeId: 'node-1', expectedNodeVersion: 4
+    }), error => error.code === 'EVIDENCE_NOT_ATTACHABLE')
+  }
+})
+
+test('账号关系字段的继承值和访问器属性均不得授权', async () => {
+  for (const kind of ['accessor', 'prototype']) {
+    const data = reviewWorkflowSeed()
+    const { repository } = createFeedbackHarness({
+      seed: data,
+      transformRead({ collection, data: row }) {
+        if (collection !== 'business_lines') return row
+        delete row.memberUserIds
+        if (kind === 'accessor') Object.defineProperty(row, 'memberUserIds', { get: () => ['account-a'] })
+        else Object.setPrototypeOf(row, { memberUserIds: ['account-a'] })
+        return row
+      }
+    })
+    await assert.rejects(repository.getCurrentProcessingRoundDraft({
+      actor: { _id: 'account-a', status: 'active', openid: 'wx-a' }, businessLineId: 'line-1',
+      nodeId: 'node-1', expectedNodeVersion: 4
+    }), error => error.code === 'FORBIDDEN')
+  }
+})
+
+test('待审核节点只能按活动轮次重建已锁定处理草稿', async () => {
+  const data = reviewWorkflowSeed()
+  Object.assign(data.business_nodes[0], {
+    status: 'pending_review', version: 5, activeReviewRoundId: 'review-feedback-current',
+    latestFeedbackId: 'feedback-current', latestFeedbackRevision: 1
+  })
+  data.node_feedback = [{
+    _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
+    revision: 1, action: 'save_progress', processingRoundNumber: 1, submittedBy: 'account-a',
+    submittedAt: NOW, fieldValues: []
+  }]
+  data.node_review_rounds = [{
+    _id: 'review-feedback-current', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending',
+    submittedBy: 'account-a', submittedNodeVersion: 4, lockedNodeVersion: 5, processingRoundNumber: 1
+  }]
+  data.evidences = []
+  const { repository } = createFeedbackHarness({ seed: data })
+  const result = await repository.getLockedProcessingRoundDraft({
+    actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    expectedNodeVersion: 4, reviewRoundId: 'review-feedback-current'
+  })
+  assert.equal(result.feedbackId, 'feedback-current')
+  await assert.rejects(repository.getLockedProcessingRoundDraft({
+    actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    expectedNodeVersion: 4, reviewRoundId: 'review-other'
+  }), error => error.code === 'VERSION_CONFLICT')
+})
+
 test('当前处理轮草稿拒绝跨轮次、错误归属和超过20MB的凭证集合', async () => {
   const data = reviewWorkflowSeed()
   data.node_feedback = [{

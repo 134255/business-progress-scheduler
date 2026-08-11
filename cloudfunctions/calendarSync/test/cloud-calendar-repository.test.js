@@ -467,3 +467,69 @@ test('待审核处理时长补算原子复核活动轮次并同步节点与轮�
     now: new Date('2026-08-11T04:00:00Z')
   }), false)
 })
+
+test('处理时长候选用持久游标越过40条失效记录并在后续调用安全回绕', async () => {
+  const invalid = Array.from({ length: 40 }, (_, index) => ({
+    _id: `node-${String(index).padStart(3, '0')}`, businessLineId: 'line-1', status: 'ready', version: 1,
+    processingTimingStatus: 'pending_calendar'
+  }))
+  const valid = {
+    _id: 'node-040', businessLineId: 'line-1', status: 'pending_review', version: 7,
+    activeReviewRoundId: 'round-1', processingTimingStatus: 'pending_calendar',
+    processingStartedAt: new Date('2026-08-11T01:00:00Z'), processingElapsedWorkMinutes: 120,
+    processingSlaWorkHours: 22
+  }
+  const fake = createFakeCloudDatabase({
+    business_nodes: [...invalid, valid],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-040', status: 'pending', version: 2,
+      lockedNodeVersion: 7, reviewDueStatus: 'calculated', processingTimingStatus: 'pending_calendar',
+      reviewStartedAt: new Date('2026-08-11T03:00:00Z')
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  assert.deepEqual(await repository.listPendingDueCandidates({ limit: 40 }), [])
+  const second = await repository.listPendingDueCandidates({ limit: 40 })
+  assert.equal(second.length, 1)
+  assert.equal(second[0].nodeId, 'node-040')
+  assert.deepEqual(await repository.listPendingDueCandidates({ limit: 40 }), [])
+  assert.deepEqual(await repository.listPendingDueCandidates({ limit: 40 }), [])
+  const fifth = await repository.listPendingDueCandidates({ limit: 40 })
+  assert.equal(fifth[0].nodeId, 'node-040')
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+})
+
+test('处理时长候选游标损坏时失败关闭', async () => {
+  const fake = createFakeCloudDatabase({ system_settings: [{
+    _id: 'calendar-review-processing-cursor', kind: 'review_processing', cursorId: 42, version: 1
+  }] })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  await assert.rejects(repository.listPendingDueCandidates({ limit: 40 }), /cursor is invalid/)
+})
+
+test('已超过总处理时限的待审核节点仍可补算并累加历史与本段逾期分钟', async () => {
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-1' }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', status: 'pending_review', version: 7,
+      activeReviewRoundId: 'round-1', processingTimingStatus: 'pending_calendar',
+      processingStartedAt: new Date('2026-08-11T01:00:00Z'), processingElapsedWorkMinutes: 1400,
+      processingRemainingWorkMinutes: 0, processingOverdueWorkMinutes: 80, processingSlaWorkHours: 22
+    }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending', version: 2,
+      lockedNodeVersion: 7, processingTimingStatus: 'pending_calendar',
+      reviewStartedAt: new Date('2026-08-11T03:00:00Z')
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const [candidate] = await repository.listPendingDueCandidates({ limit: 40 })
+  assert.equal(candidate.baseElapsedWorkMinutes, 1400)
+  assert.equal(await repository.applyDueCalculation({
+    candidate, calculation: { status: 'calculated', minutes: 30, calendarVersion: 'v1' },
+    now: new Date('2026-08-11T04:00:00Z')
+  }), true)
+  const node = fake.documents('business_nodes')[0]
+  assert.equal(node.processingRemainingWorkMinutes, 0)
+  assert.equal(node.processingOverdueWorkMinutes, 110)
+})
