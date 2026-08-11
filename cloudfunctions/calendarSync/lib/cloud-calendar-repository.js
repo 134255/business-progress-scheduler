@@ -9,6 +9,7 @@ const SYNC_LEASE_MS = 10 * 60 * 1000
 const WRITE_BATCH_SIZE = 20
 const REVIEW_PROCESSING_CURSOR_ID = 'calendar-review-processing-cursor'
 const REVIEW_CARRYOVER_CURSOR_ID = 'calendar-review-carryover-cursor'
+const REVIEW_TIMING_CARRYOVER_CURSOR_ID = 'calendar-review-timing-carryover-cursor'
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 function validDate(value) {
@@ -71,6 +72,30 @@ function safeNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
+function pendingReviewTimingCarryover(round) {
+  const base = safeNonNegativeInteger(
+    round && round.reviewTimingCarryoverBaseElapsedWorkMinutes
+  )
+  const total = safeNonNegativeInteger(
+    round && round.reviewTimingCarryoverTotalWorkMinutes
+  )
+  const slaTotal = round && round.reviewSlaWorkHours * 60
+  if (!round || round.resultReviewCarryoverPending !== true ||
+      round.reviewTimingStatus !== 'pending_calendar' ||
+      round.reviewTimingCarryoverStatus !== 'pending' ||
+      !validDate(round.reviewStartedAt) || !validDate(round.decidedAt) ||
+      !sameDate(round.reviewTimingCarryoverStartedAt, round.reviewStartedAt) ||
+      !sameDate(round.reviewTimingCarryoverEndedAt, round.decidedAt) ||
+      round.reviewStartedAt.getTime() > round.decidedAt.getTime() ||
+      base === null || total === null || total < 1 ||
+      !Number.isSafeInteger(slaTotal) || slaTotal !== total ||
+      round.reviewElapsedWorkMinutes !== base ||
+      round.reviewRemainingWorkMinutes !== Math.max(0, total - base) ||
+      round.reviewOverdueWorkMinutes !== Math.max(0, base - total) ||
+      round.reviewCalendarVersion !== null) return null
+  return { baseElapsedWorkMinutes: base, totalWorkMinutes: total }
+}
+
 function calendarWarningId(lineId) {
   const digest = crypto.createHash('sha256').update(`${lineId}\0processing`).digest('hex')
   return `work-calendar-missing-${digest.slice(0, 40)}`
@@ -92,6 +117,17 @@ function validateCarryoverCursor(document) {
       safeVersion(document.version) === null ||
       document.cursorId !== null && (typeof document.cursorId !== 'string' || !DOCUMENT_ID.test(document.cursorId))) {
     throw new TypeError('review carryover cursor is invalid')
+  }
+  return { exists: true, cursorId: document.cursorId, version: document.version }
+}
+
+function validateReviewTimingCarryoverCursor(document) {
+  if (!document) return { exists: false, cursorId: null, version: 0 }
+  if (document._id !== REVIEW_TIMING_CARRYOVER_CURSOR_ID ||
+      document.kind !== 'review_timing_carryover' || safeVersion(document.version) === null ||
+      document.cursorId !== null &&
+      (typeof document.cursorId !== 'string' || !DOCUMENT_ID.test(document.cursorId))) {
+    throw new TypeError('review timing carryover cursor is invalid')
   }
   return { exists: true, cursorId: document.cursorId, version: document.version }
 }
@@ -275,8 +311,10 @@ function createCloudCalendarRepository({
     )
     const carryCriteria = { processingCarryoverStatus: 'pending' }
     if (carryCursor.cursorId !== null) carryCriteria._id = db.command.gt(carryCursor.cursorId)
+    // 为独立的审核时长游标至少保留一个名额，避免处理时长长期满批时饥饿。
+    const carryCapacity = limit > 1 ? limit - 1 : 1
     const carryQuery = await db.collection('node_review_rounds')
-      .where(carryCriteria).orderBy('_id', 'asc').limit(limit).get()
+      .where(carryCriteria).orderBy('_id', 'asc').limit(carryCapacity).get()
     const carryRows = Array.isArray(carryQuery && carryQuery.data) ? carryQuery.data : []
     const carryNextCursorId = carryRows.length ? carryRows.at(-1)._id : null
     const carryCursorClaimed = await db.runTransaction(async transaction => {
@@ -330,6 +368,68 @@ function createCloudCalendarRepository({
           ? node.activeReviewRoundId
           : null,
         baseElapsedWorkMinutes, currentElapsedWorkMinutes, totalWorkMinutes
+      })
+    }
+    if (result.length >= limit) return result
+    const reviewTimingCapacity = limit - result.length
+    const reviewTimingCursor = validateReviewTimingCarryoverCursor(
+      await readDocument(db, 'system_settings', REVIEW_TIMING_CARRYOVER_CURSOR_ID)
+    )
+    const reviewTimingCriteria = { reviewTimingCarryoverStatus: 'pending' }
+    if (reviewTimingCursor.cursorId !== null) {
+      reviewTimingCriteria._id = db.command.gt(reviewTimingCursor.cursorId)
+    }
+    const reviewTimingQuery = await db.collection('node_review_rounds')
+      .where(reviewTimingCriteria).orderBy('_id', 'asc').limit(reviewTimingCapacity).get()
+    const reviewTimingRows = Array.isArray(reviewTimingQuery && reviewTimingQuery.data)
+      ? reviewTimingQuery.data
+      : []
+    const reviewTimingNextCursorId = reviewTimingRows.length
+      ? reviewTimingRows.at(-1)._id
+      : null
+    const reviewTimingCursorClaimed = await db.runTransaction(async transaction => {
+      const current = validateReviewTimingCarryoverCursor(
+        await readDocument(transaction, 'system_settings', REVIEW_TIMING_CARRYOVER_CURSOR_ID)
+      )
+      if (current.exists !== reviewTimingCursor.exists ||
+          current.cursorId !== reviewTimingCursor.cursorId ||
+          current.version !== reviewTimingCursor.version) return false
+      if (!reviewTimingRows.length && reviewTimingCursor.cursorId === null) return true
+      if (current.version === Number.MAX_SAFE_INTEGER) {
+        throw new TypeError('review timing carryover cursor is invalid')
+      }
+      const data = {
+        kind: 'review_timing_carryover', cursorId: reviewTimingNextCursorId,
+        version: current.version + 1, updatedAt: db.serverDate()
+      }
+      if (current.exists) {
+        await transaction.collection('system_settings')
+          .doc(REVIEW_TIMING_CARRYOVER_CURSOR_ID).update({ data })
+      } else {
+        await transaction.collection('system_settings')
+          .doc(REVIEW_TIMING_CARRYOVER_CURSOR_ID).set({ data })
+      }
+      return true
+    })
+    if (!reviewTimingCursorClaimed) return result
+    for (const round of reviewTimingRows) {
+      if (result.length >= limit) break
+      const node = await readDocument(db, 'business_nodes', round.nodeId)
+      const timing = pendingReviewTimingCarryover(round)
+      if (!node || round.businessLineId !== node.businessLineId || round.nodeId !== node._id ||
+          !['approved', 'rejected'].includes(round.status) ||
+          !timing ||
+          safeVersion(node.version) === null || safeVersion(round.version) === null) continue
+      result.push({
+        kind: 'review_timing_carryover', id: round._id,
+        businessLineId: round.businessLineId, nodeId: round.nodeId,
+        status: round.status, version: round.version, nodeVersion: node.version,
+        activeReviewRoundId: typeof node.activeReviewRoundId === 'string'
+          ? node.activeReviewRoundId
+          : null,
+        startAt: round.reviewTimingCarryoverStartedAt,
+        endAt: round.reviewTimingCarryoverEndedAt,
+        ...timing
       })
     }
     if (result.length >= limit) return result
@@ -427,8 +527,10 @@ function createCloudCalendarRepository({
   async function applyDueCalculation({ candidate, calculation, now } = {}) {
     const reviewProcessingCalculation = candidate && candidate.kind === 'review_processing'
     const carryoverCalculation = candidate && candidate.kind === 'review_processing_carryover'
+    const reviewTimingCarryoverCalculation = candidate &&
+      candidate.kind === 'review_timing_carryover'
     if (!candidate || !calculation || calculation.status !== 'calculated' ||
-        (reviewProcessingCalculation || carryoverCalculation
+        (reviewProcessingCalculation || carryoverCalculation || reviewTimingCarryoverCalculation
           ? safeNonNegativeInteger(calculation.minutes) === null
           : !validDate(calculation.dueAt)) ||
         carryoverCalculation && validDate(candidate.resumeAt) &&
@@ -440,7 +542,8 @@ function createCloudCalendarRepository({
     }
     return db.runTransaction(async transaction => {
       const line = await readDocument(transaction, 'business_lines', candidate.businessLineId)
-      if (!line || !carryoverCalculation && line.status !== 'active') return false
+      if (!line || !carryoverCalculation && !reviewTimingCarryoverCalculation &&
+          line.status !== 'active') return false
       if (candidate.kind === 'processing') {
         const node = await readDocument(transaction, 'business_nodes', candidate.id)
         if (!node || node.businessLineId !== line._id || line.currentNodeId !== node._id ||
@@ -614,12 +717,79 @@ function createCloudCalendarRepository({
         }
         return true
       }
+      if (candidate.kind === 'review_timing_carryover') {
+        const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
+        const round = await readDocument(transaction, 'node_review_rounds', candidate.id)
+        const activeRound = candidate.activeReviewRoundId === null
+          ? null
+          : await readDocument(transaction, 'node_review_rounds', candidate.activeReviewRoundId)
+        const reviewTiming = pendingReviewTimingCarryover(round)
+        if (!node || !round || node.businessLineId !== line._id ||
+            round.businessLineId !== line._id || round.nodeId !== node._id ||
+            node.version !== candidate.nodeVersion || round.version !== candidate.version ||
+            round.status !== candidate.status || !['approved', 'rejected'].includes(round.status) ||
+            !reviewTiming ||
+            !sameDate(round.reviewTimingCarryoverStartedAt, candidate.startAt) ||
+            !sameDate(round.reviewTimingCarryoverEndedAt, candidate.endAt) ||
+            reviewTiming.baseElapsedWorkMinutes !== candidate.baseElapsedWorkMinutes ||
+            reviewTiming.totalWorkMinutes !== candidate.totalWorkMinutes ||
+            candidate.activeReviewRoundId !== (typeof node.activeReviewRoundId === 'string'
+              ? node.activeReviewRoundId
+              : null) || node.version === Number.MAX_SAFE_INTEGER ||
+            round.version === Number.MAX_SAFE_INTEGER) return false
+        if (activeRound && (activeRound._id === round._id || activeRound.status !== 'pending' ||
+            activeRound.businessLineId !== line._id || activeRound.nodeId !== node._id ||
+            activeRound.lockedNodeVersion !== node.version ||
+            activeRound.version === Number.MAX_SAFE_INTEGER)) return false
+        const elapsed = candidate.baseElapsedWorkMinutes + calculation.minutes
+        if (!Number.isSafeInteger(elapsed)) return false
+        const remaining = Math.max(0, candidate.totalWorkMinutes - elapsed)
+        const overdue = Math.max(0, elapsed - candidate.totalWorkMinutes)
+        const nodeVersion = node.version + 1
+        const latestReview = node.lastReviewRoundId === round._id ||
+          node.reviewRoundNumber === round.reviewRoundNumber && !activeRound
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          ...(latestReview
+            ? {
+                lastReviewRoundId: round._id,
+                lastReviewTimingStatus: 'calculated',
+                lastReviewElapsedWorkMinutes: elapsed,
+                lastReviewRemainingWorkMinutes: remaining,
+                lastReviewOverdueWorkMinutes: overdue,
+                lastReviewCalendarVersion: calculation.calendarVersion
+              }
+            : {}),
+          version: nodeVersion,
+          updatedAt: db.serverDate()
+        } })
+        await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
+          reviewTimingStatus: 'calculated',
+          reviewElapsedWorkMinutes: elapsed,
+          reviewRemainingWorkMinutes: remaining,
+          reviewOverdueWorkMinutes: overdue,
+          reviewCalendarVersion: calculation.calendarVersion,
+          reviewTimingCarryoverStatus: 'resolved',
+          reviewTimingCarryoverResolvedAt: new Date(now),
+          calendarRecalculatedAt: new Date(now),
+          version: round.version + 1,
+          updatedAt: db.serverDate()
+        } })
+        if (activeRound) {
+          await transaction.collection('node_review_rounds').doc(activeRound._id).update({ data: {
+            lockedNodeVersion: nodeVersion,
+            version: activeRound.version + 1,
+            updatedAt: db.serverDate()
+          } })
+        }
+        return true
+      }
       return false
     })
   }
 
   async function ensurePendingCalendarWarning({ candidate } = {}) {
-    if (!candidate || !['processing', 'review_processing', 'review_processing_carryover'].includes(candidate.kind) || typeof candidate.id !== 'string' ||
+    if (!candidate || !['processing', 'review_processing', 'review_processing_carryover',
+      'review_timing_carryover'].includes(candidate.kind) || typeof candidate.id !== 'string' ||
         typeof candidate.businessLineId !== 'string' || typeof candidate.status !== 'string' ||
         safeVersion(candidate.version) === null) return false
     return db.runTransaction(async transaction => {
@@ -627,7 +797,7 @@ function createCloudCalendarRepository({
       const nodeId = candidate.kind === 'processing' ? candidate.id : candidate.nodeId
       const node = await readDocument(transaction, 'business_nodes', nodeId)
       if (!line || !node || node.businessLineId !== line._id ||
-          candidate.kind !== 'review_processing_carryover' &&
+          !['review_processing_carryover', 'review_timing_carryover'].includes(candidate.kind) &&
           (line.status !== 'active' || line.currentNodeId !== nodeId)) return false
       if (candidate.kind === 'processing') {
         if (node.status !== candidate.status || node.version !== candidate.version ||
@@ -640,11 +810,17 @@ function createCloudCalendarRepository({
             round.version !== candidate.version || round.lockedNodeVersion !== node.version ||
             node.processingTimingStatus !== 'pending_calendar' ||
             round.processingTimingStatus !== 'pending_calendar') return false
-      } else {
+      } else if (candidate.kind === 'review_processing_carryover') {
         const round = await readDocument(transaction, 'node_review_rounds', candidate.id)
         if (!round || round.processingCarryoverStatus !== 'pending' ||
             node.version !== candidate.nodeVersion || round.version !== candidate.version ||
             round.processingTimingStatus !== 'pending_calendar' ||
+            round.businessLineId !== line._id || round.nodeId !== node._id ||
+            !['approved', 'rejected'].includes(round.status)) return false
+      } else {
+        const round = await readDocument(transaction, 'node_review_rounds', candidate.id)
+        if (!round || !pendingReviewTimingCarryover(round) ||
+            node.version !== candidate.nodeVersion || round.version !== candidate.version ||
             round.businessLineId !== line._id || round.nodeId !== node._id ||
             !['approved', 'rejected'].includes(round.status)) return false
       }

@@ -4,6 +4,8 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 
 ## Verified state
 
+- 2026-08-11 节点独立审核流程 Task 7 正式复审修复轮次 1 已完成本地实现与回归。客户端投票语义仍为 `approve/reject`，投票、轮次结论和审计持久化统一为 `approved/rejected`；投票显示名来自事务内活动账号的自有数据属性，合法显示名缺失时只回退到合法用户名，访问器、继承值或损坏字段失败关闭且不会执行。每个最终审核投票按工作日历结算审核开始至决定时刻的已用、剩余和逾期工作分钟；日历缺失仍允许通过或驳回，并在不可变终态轮次保存独立审核时长补算边界与确定性脱敏告警。`calendarSync` 使用 `calendar-review-timing-carryover-cursor` 和每批不超过 40 条的独立公平扫描，在返工、多轮审核、下游推进或业务完成后仍只修正时序元数据；处理时长长期满批时仍为审核时长保留进度，并发只签发一批，游标签发后工作器崩溃也会回绕重取。候选、事务写回和告警均重新绑定终态轮次的审核开始、决定时间、审核 SLA 与 pending 算术快照。同一轮处理与审核两类补算可分别解决，终态重试仅接受零、一或两次合法系统补算对应的精确双版本链。新增真实重叠的或签通过/驳回竞争回归，断言回调重叠、事务冲突和重试均发生且仅有一个终态、投票、审计和结果通知。正式复审初始聚焦 RED 为 72 项中 59 通过、13 项按预期失败；补强的末节点缺日历告警、不可变边界篡改、显示名访问器、跨类型饥饿与损坏终态快照测试也先失败再转绿。最终审核聚焦 42/42、日历聚焦 37/37、`businessApi` 455/455、`calendarSync` 47/47。真实 CloudBase 仍未验证；部署前新增并验证 `node_review_rounds(reviewTimingCarryoverStatus ASC, _id ASC)` 组合索引，且现有两个历史补算索引也必须保持有效。
+
 - 2026-08-11 节点独立审核流程 Task 7 已完成本地实现与回归。新增 `submitReviewVote` 服务与 CloudBase 仓储，投票输入固定为审核轮次、期望轮次版本、`approve/reject`、意见和请求键；请求键只保存 SHA-256 摘要，投票编号由轮次与审核人确定性生成。最终投票事务按账号、业务线、当前节点、审核轮次顺序重读并在读取既有投票前重新校验活动状态、当前关系、审核人快照、双向轮次锁和版本；或签首个有效通过只推进一次，会签全部快照审核人通过才推进，任一驳回立即结束本轮并恢复剩余处理分钟进入新处理轮。通过会完成并冻结当前节点，激活下一节点并计算处理截止，或在末节点完成业务线并建立统一 60 天凭证保留期。两轮独立复审发现的重要边界均已用补强 RED 修复：最终投票响应丢失后的重试仍先完成当前授权再读取确定性投票，终态固化锁版本、节点版本、轮次版本、审核模式和双轮次语义，只接受原终态或该轮待补算处理段明确解决后各提升一次的唯一版本链；处理时间仍为 `pending_calendar` 就立即通过或驳回时，补算边界绑定不可变审核轮次而非节点即时状态，`calendarSync` 使用独立持久游标有界扫描，因此再次提交审核或下游继续推进后仍可补算。补算事务直接返工为 3 次读取和 2 次写入，再次待审核时最多 4 次读取和 3 次写入并同步活动轮次累计值及双向锁；通过后只修正历史与累计值，不回滚流转。日历仍缺失时保留待补算状态并写安全管理员告警。测试用 CloudBase 数据库改为真实重叠的乐观事务模型，可观测冲突与回调重试，确定性投票、审计和通知保证唯一提交；事务操作数门禁保持不超过 100。初始 TDD RED 为 30 项中 19 通过、11 项按预期失败；两轮复审补强 RED 均精确失败后转绿，第三轮独立终审未发现核心流转的 Critical/Important，其发现的新游标索引手册漏项已补入正式部署手册。最终审核/反馈/fake 聚焦 90/90、`businessApi` 446/446、`calendarSync` 40/40、小程序 109/109、WXML 3/3。真实 CloudBase 并发重试、部署、索引与微信开发者工具交互仍未验证；部署前需按手册新增并验证 `node_review_rounds(processingCarryoverStatus ASC, _id ASC)` 组合索引；Task 8 负责路由和客户端接入。
 
 - 2026-08-11 节点独立审核流程 Task 6 正式复审修复轮次 4 已完成本地实现与回归。审核仓储现在要求业务线 `managerUserIds` 与 `memberUserIds` 都是自有数据属性、严格合法且非空的内部账号数组；即使当前处理人在另一数组中，只要任一关系数组为空、缺失或非法，审核轮次创建、幂等预检和最终重试都会失败关闭。TDD RED 精确复现空管理人和空成员两项错误放行；GREEN 后反馈与审核聚焦 69/69、`businessApi` 430/430、`calendarSync` 34/34、小程序 109/109、WXML 3/3。真实 CloudBase 事务和部署联动仍未验证。
@@ -66,6 +68,18 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-11 节点独立审核流程 Task 7 正式复审修复轮次 1：
+
+| 命令或边界 | 结果 |
+|---|---|
+| 正式复审初始聚焦 RED | 按预期：72 项中 59 通过、13 失败，精确暴露持久化决策/显示名、审核计时、终态审核补算和独立游标缺口。 |
+| 补强 RED | 末节点审核日历缺失告警、终态审核补算边界篡改、显示名访问器、跨类型饥饿与损坏终态快照均先按预期失败，最小修复后转绿。 |
+| `node --test test/review-service.test.js test/cloud-review-repository.test.js`（在 `cloudfunctions/businessApi` 下） | 通过：42 个测试，0 失败。 |
+| `node --test test/calendar-sync-service.test.js test/cloud-calendar-repository.test.js`（在 `cloudfunctions/calendarSync` 下） | 通过：37 个测试，0 失败。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：455 个测试，0 失败；仅有两条既有 npm 用户配置警告。 |
+| `npm.cmd test --prefix cloudfunctions/calendarSync` | 通过：47 个测试，0 失败；仅有两条既有 npm 用户配置警告。 |
+| 真实 CloudBase | 未验证：尚未部署本修复，也未验证新增审核时长补算组合索引和真实并发事务。 |
 
 2026-08-11 节点独立审核流程 Task 7：
 

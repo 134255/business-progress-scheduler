@@ -10,10 +10,10 @@ const NOW = new Date('2026-08-11T03:00:00.000Z')
 function seed(overrides = {}) {
   return {
     users: overrides.users || [
-      { _id: 'processor-1', status: 'active' },
-      { _id: 'manager-1', status: 'active' },
-      { _id: 'reviewer-1', status: 'active' },
-      { _id: 'reviewer-2', status: 'active' }
+      { _id: 'processor-1', status: 'active', displayName: '处理人一' },
+      { _id: 'manager-1', status: 'active', displayName: '管理员一' },
+      { _id: 'reviewer-1', status: 'active', displayName: '审核人一' },
+      { _id: 'reviewer-2', status: 'active', displayName: '审核人二' }
     ],
     business_lines: overrides.lines || [{
       _id: 'line-1', status: 'active', currentNodeId: 'node-1', currentNodeIndex: 0,
@@ -130,8 +130,10 @@ function votingSeed({ mode = 'all', terminal = false } = {}) {
     fieldValues: [], evidenceIds: [], evidenceTotalBytes: 0,
     processingTimingStatus: 'calculated', processingElapsedWorkMinutes: 120,
     processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0,
-    reviewStartedAt: NOW, reviewDueStatus: 'calculated',
+    reviewSlaWorkHours: 8, reviewStartedAt: NOW, reviewDueStatus: 'calculated',
     reviewDueAt: new Date('2026-08-12T06:00:00.000Z'),
+    reviewElapsedWorkMinutes: 0, reviewRemainingWorkMinutes: 480,
+    reviewOverdueWorkMinutes: 0, reviewCalendarVersion: 'calendar-a',
     approvedVoteCount: 0, voteCount: 0, version: 1
   }]
   data.node_review_votes = []
@@ -144,19 +146,26 @@ function voteRequest(actorId, overrides = {}) {
     decision: 'approve', comment: '', ...overrides.input
   }
   const requestKey = overrides.requestKey || `vote-${actorId}`
+  const defaultContext = {
+    businessLineId: 'line-1', nodeId: 'node-1', transition: 'next_node',
+    nextNodeId: 'line-1-node-002', nextNodeVersion: 1,
+    processingWorkMinutes: 1320, nodeVersion: 5, roundVersion: 1,
+    reviewStartedAt: NOW, reviewTotalWorkMinutes: 480,
+    reviewBaseElapsedWorkMinutes: 0
+  }
+  const defaultTiming = {
+    transitionAt: NOW, processingDueStatus: 'calculated',
+    processingDueAt: new Date('2026-08-13T03:00:00.000Z'),
+    processingCalendarVersion: 'calendar-a',
+    reviewTimingStatus: 'calculated', reviewElapsedWorkMinutes: 120,
+    reviewRemainingWorkMinutes: 360, reviewOverdueWorkMinutes: 0,
+    reviewCalendarVersion: 'calendar-a'
+  }
   return {
     actor: { _id: actorId, status: 'active' },
     input,
-    context: overrides.context || {
-      businessLineId: 'line-1', nodeId: 'node-1', transition: 'next_node',
-      nextNodeId: 'line-1-node-002', nextNodeVersion: 1,
-      processingWorkMinutes: 1320, nodeVersion: 5, roundVersion: 1
-    },
-    timing: overrides.timing || {
-      transitionAt: NOW, processingDueStatus: 'calculated',
-      processingDueAt: new Date('2026-08-13T03:00:00.000Z'),
-      processingCalendarVersion: 'calendar-a'
-    },
+    context: { ...defaultContext, ...(overrides.context || {}) },
+    timing: { ...defaultTiming, ...(overrides.timing || {}) },
     requestKeyHash: crypto.createHash('sha256').update(requestKey).digest('hex'),
     inputHash: crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex')
   }
@@ -443,9 +452,92 @@ test('或签两个通过事务真实重叠、发生冲突重试且只流转一�
   assert.equal(results.filter(item => item.status === 'fulfilled').length, 1)
   assert.equal(fake.documents('business_nodes').filter(node => node.status === 'ready').length, 1)
   assert.equal(fake.documents('node_review_votes').length, 1)
+  assert.equal(fake.documents('node_review_votes')[0].decision, 'approved')
+  assert.equal(fake.documents('node_review_votes')[0].reviewerDisplayName, '审核人一')
   assert.equal(fake.documents('notifications').filter(item => item.type === 'node_processing_started').length, 1)
   assert.equal(fake.documents('audit_logs').filter(item => item.action === 'SUBMIT_REVIEW_VOTE').length, 1)
   assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+})
+
+test('驳回投票持久化为 rejected 并保存事务内审核人显示名快照', async () => {
+  const { fake, repository } = harness({ seed: votingSeed({ mode: 'any' }) })
+  await repository.submitReviewVote(voteRequest('reviewer-1', {
+    input: { decision: 'reject', comment: '需要返工' },
+    context: {
+      businessLineId: 'line-1', nodeId: 'node-1', transition: 'rework',
+      processingWorkMinutes: 1200, processingCarryoverPending: false,
+      nodeVersion: 5, roundVersion: 1,
+      reviewStartedAt: NOW, reviewTotalWorkMinutes: 480,
+      reviewBaseElapsedWorkMinutes: 0
+    }
+  }))
+  const [vote] = fake.documents('node_review_votes')
+  assert.equal(vote.decision, 'rejected')
+  assert.equal(vote.reviewerDisplayName, '审核人一')
+  assert.equal(fake.documents('node_review_rounds')[0].finalDecision, 'rejected')
+  assert.equal(fake.documents('audit_logs')[0].decision, 'rejected')
+})
+
+test('投票同请求按规范决策幂等，旧持久语义不能混作新语义', async () => {
+  const data = votingSeed({ mode: 'all' })
+  const value = voteRequest('reviewer-1')
+  const voteId = `review-vote-${crypto.createHash('sha256')
+    .update(`review-feedback-current\0reviewer-1`).digest('hex')}`
+  data.node_review_votes = [{
+    _id: voteId, reviewRoundId: 'review-feedback-current', businessLineId: 'line-1',
+    nodeId: 'node-1', reviewerUserId: 'reviewer-1', reviewerDisplayName: '审核人一',
+    decision: 'approve', comment: '', expectedRoundVersion: 1,
+    requestKeyHash: value.requestKeyHash, inputHash: value.inputHash
+  }]
+  const { repository } = harness({ seed: data })
+  await assert.rejects(repository.submitReviewVote(value), error => error.code === 'VOTE_CONFLICT')
+})
+
+test('损坏的审核人显示名与用户名在写票前失败关闭', async () => {
+  const data = votingSeed({ mode: 'any' })
+  data.users = data.users.map(user => user._id === 'reviewer-1'
+    ? { ...user, displayName: 'x'.repeat(101), username: '\n' }
+    : user)
+  const { fake, repository } = harness({ seed: data })
+  await assert.rejects(repository.submitReviewVote(voteRequest('reviewer-1')), error =>
+    error.code === 'VERSION_CONFLICT')
+  assert.equal(fake.documents('node_review_votes').length, 0)
+})
+
+test('审核人显示名为空时只回退到事务内合法用户名快照', async () => {
+  const data = votingSeed({ mode: 'any' })
+  data.users = data.users.map(user => user._id === 'reviewer-1'
+    ? { ...user, displayName: '   ', username: 'reviewer01' }
+    : user)
+  const { fake, repository } = harness({ seed: data })
+
+  await repository.submitReviewVote(voteRequest('reviewer-1'))
+
+  assert.equal(fake.documents('node_review_votes')[0].reviewerDisplayName, 'reviewer01')
+})
+
+test('审核人显示名访问器不能执行且只回退到自有用户名', async () => {
+  let getterCalls = 0
+  const { fake, repository } = harness({
+    seed: votingSeed({ mode: 'any' }),
+    transformRead({ collection, data }) {
+      if (collection !== 'users' || data._id !== 'reviewer-1') return data
+      data.username = 'reviewer01'
+      delete data.displayName
+      Object.defineProperty(data, 'displayName', {
+        get() {
+          getterCalls += 1
+          return '客户端伪造姓名'
+        }
+      })
+      return data
+    }
+  })
+
+  await repository.submitReviewVote(voteRequest('reviewer-1'))
+
+  assert.equal(getterCalls, 0)
+  assert.equal(fake.documents('node_review_votes')[0].reviewerDisplayName, 'reviewer01')
 })
 
 test('会签逐票通过、同票同输入幂等且改票冲突', async () => {
@@ -558,6 +650,81 @@ test('终态重试接受该轮待补算处理段被明确解决后的唯一一�
   }), first)
 })
 
+test('终态重试版本链严格等于处理与审核两类已解决补算数', async () => {
+  const data = votingSeed({ mode: 'any' })
+  for (const target of [data.business_nodes[0], data.node_review_rounds[0]]) {
+    Object.assign(target, {
+      processingTimingStatus: 'pending_calendar', processingElapsedWorkMinutes: 120,
+      processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0,
+      processingCalendarVersion: null
+    })
+  }
+  const { fake, repository } = harness({ seed: data })
+  const value = voteRequest('reviewer-1', {
+    timing: {
+      transitionAt: NOW, processingDueStatus: 'calculated',
+      processingDueAt: new Date('2026-08-13T03:00:00Z'), processingCalendarVersion: 'calendar-a',
+      reviewTimingStatus: 'pending_calendar', reviewElapsedWorkMinutes: 0,
+      reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0, reviewCalendarVersion: null
+    }
+  })
+  const first = await repository.submitReviewVote(value)
+  const round = fake.documents('node_review_rounds')[0]
+  const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+  fake.replace('node_review_rounds', round._id, {
+    ...round,
+    processingCarryoverStatus: 'resolved',
+    processingCarryoverResolvedAt: new Date('2026-08-11T04:00:00.000Z'),
+    processingTimingStatus: 'calculated', processingElapsedWorkMinutes: 300,
+    processingRemainingWorkMinutes: 1020, processingOverdueWorkMinutes: 0,
+    processingCalendarVersion: 'calendar-processing',
+    reviewTimingCarryoverStatus: 'resolved',
+    reviewTimingCarryoverResolvedAt: new Date('2026-08-11T04:00:01.000Z'),
+    reviewTimingStatus: 'calculated', reviewElapsedWorkMinutes: 60,
+    reviewRemainingWorkMinutes: 420, reviewOverdueWorkMinutes: 0,
+    reviewCalendarVersion: 'calendar-review',
+    version: round.resultRoundVersion + 2
+  })
+  fake.replace('business_nodes', node._id, { ...node, version: round.resultNodeVersion + 2 })
+  const context = await repository.prepareReviewVote({
+    actor: value.actor, input: value.input,
+    requestKeyHash: value.requestKeyHash, inputHash: value.inputHash
+  })
+  assert.deepEqual(await repository.submitReviewVote({
+    ...value, context, timing: { transitionAt: NOW }
+  }), first)
+  fake.replace('business_nodes', node._id, {
+    ...fake.documents('business_nodes').find(item => item._id === node._id),
+    version: round.resultNodeVersion + 1
+  })
+  await assert.rejects(repository.prepareReviewVote({
+    actor: value.actor, input: value.input,
+    requestKeyHash: value.requestKeyHash, inputHash: value.inputHash
+  }), error => error.code === 'VERSION_CONFLICT')
+})
+
+test('终态重试拒绝待补算审核段不可变边界被篡改', async () => {
+  const { fake, repository } = harness({ seed: votingSeed({ mode: 'any' }) })
+  const value = voteRequest('reviewer-1', {
+    timing: {
+      reviewTimingStatus: 'pending_calendar', reviewElapsedWorkMinutes: 0,
+      reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0,
+      reviewCalendarVersion: null
+    }
+  })
+  await repository.submitReviewVote(value)
+  const round = fake.documents('node_review_rounds')[0]
+  fake.replace('node_review_rounds', round._id, {
+    ...round,
+    reviewTimingCarryoverStartedAt: new Date('2026-08-11T02:59:59.000Z')
+  })
+
+  await assert.rejects(repository.prepareReviewVote({
+    actor: value.actor, input: value.input,
+    requestKeyHash: value.requestKeyHash, inputHash: value.inputHash
+  }), error => error.code === 'VERSION_CONFLICT')
+})
+
 test('会签任一驳回立即进入新处理轮且原因必填由服务契约保证', async () => {
   const { fake, repository } = harness({ seed: votingSeed({ mode: 'all' }) })
   const value = voteRequest('reviewer-1', {
@@ -607,7 +774,10 @@ test('处理时长待补算时驳回会保留旧处理段边界供日历恢复�
     },
     timing: {
       transitionAt: NOW, processingDueStatus: 'pending_calendar',
-      processingDueAt: null, processingCalendarVersion: null
+      processingDueAt: null, processingCalendarVersion: null,
+      reviewTimingStatus: 'pending_calendar', reviewElapsedWorkMinutes: 0,
+      reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0,
+      reviewCalendarVersion: null
     }
   }))
 
@@ -619,6 +789,55 @@ test('处理时长待补算时驳回会保留旧处理段边界供日历恢复�
   assert.equal(round.processingCarryoverTotalWorkMinutes, 1320)
   const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
   assert.equal(node.processingCarryoverReviewRoundId, undefined)
+  assert.equal(round.reviewTimingStatus, 'pending_calendar')
+  assert.equal(round.reviewTimingCarryoverStatus, 'pending')
+  assert.deepEqual(round.reviewTimingCarryoverStartedAt, NOW)
+  assert.deepEqual(round.reviewTimingCarryoverEndedAt, NOW)
+  assert.equal(round.reviewTimingCarryoverBaseElapsedWorkMinutes, 0)
+  assert.equal(round.reviewTimingCarryoverTotalWorkMinutes, 480)
+})
+
+test('终态审核段即时结算剩余与逾期工作分钟', async () => {
+  const { fake, repository } = harness({ seed: votingSeed({ mode: 'any' }) })
+  await repository.submitReviewVote(voteRequest('reviewer-1', {
+    timing: {
+      transitionAt: NOW, processingDueStatus: 'calculated',
+      processingDueAt: new Date('2026-08-13T03:00:00.000Z'),
+      processingCalendarVersion: 'calendar-a',
+      reviewTimingStatus: 'calculated', reviewElapsedWorkMinutes: 600,
+      reviewRemainingWorkMinutes: 0, reviewOverdueWorkMinutes: 120,
+      reviewCalendarVersion: 'calendar-review'
+    }
+  }))
+  const round = fake.documents('node_review_rounds')[0]
+  assert.equal(round.reviewTimingStatus, 'calculated')
+  assert.equal(round.reviewElapsedWorkMinutes, 600)
+  assert.equal(round.reviewRemainingWorkMinutes, 0)
+  assert.equal(round.reviewOverdueWorkMinutes, 120)
+  assert.equal(round.reviewCalendarVersion, 'calendar-review')
+  assert.equal(round.reviewTimingCarryoverStatus, undefined)
+})
+
+test('末节点审核段缺少日历仍完成业务并写一条确定性脱敏告警', async () => {
+  const { fake, repository } = harness({ seed: votingSeed({ mode: 'any', terminal: true }) })
+  const request = voteRequest('reviewer-1', {
+    context: { transition: 'complete_line', nextNodeId: undefined, nextNodeVersion: undefined,
+      processingWorkMinutes: null },
+    timing: {
+      reviewTimingStatus: 'pending_calendar', reviewElapsedWorkMinutes: 0,
+      reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0,
+      reviewCalendarVersion: null
+    }
+  })
+
+  const result = await repository.submitReviewVote(request)
+
+  assert.equal(result.lineStatus, 'completed')
+  const warnings = fake.documents('notifications').filter(item => item.type === 'work_calendar_missing')
+  assert.equal(warnings.length, 1)
+  assert.equal(warnings[0].audienceRole, 'super_admin')
+  assert.equal(JSON.stringify(warnings[0]).includes('资料'), false)
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
 })
 
 test('投票早返之前重新校验账号、审核关系、业务、双向轮次锁与期望版本', async () => {
@@ -647,8 +866,8 @@ test('投票早返之前重新校验账号、审核关系、业务、双向轮�
   )
 })
 
-test('通过与驳回真实并发时只产生一个确定终态和一组副作用', async () => {
-  const { fake, repository } = harness({ seed: votingSeed({ mode: 'all' }) })
+test('真正或签的通过与驳回真实重叠时只提交一个终态', async () => {
+  const { fake, repository } = harness({ seed: votingSeed({ mode: 'any' }) })
   const outcomes = await Promise.allSettled([
     repository.submitReviewVote(voteRequest('reviewer-1')),
     repository.submitReviewVote(voteRequest('reviewer-2', {
@@ -662,9 +881,12 @@ test('通过与驳回真实并发时只产生一个确定终态和一组副作�
 
   assert.equal(fake.metrics.maxActiveCallbacks >= 2, true)
   assert.equal(fake.metrics.conflicts >= 1, true)
-  assert.equal(outcomes.filter(item => item.status === 'fulfilled').length >= 1, true)
-  assert.equal(fake.documents('node_review_rounds')[0].status, 'rejected')
-  assert.equal(fake.documents('business_nodes').find(node => node._id === 'node-1').status, 'in_progress')
+  assert.equal(fake.metrics.retries >= 1, true)
+  assert.equal(outcomes.filter(item => item.status === 'fulfilled').length, 1)
+  const finalStatus = fake.documents('node_review_rounds')[0].status
+  assert.equal(['approved', 'rejected'].includes(finalStatus), true)
+  assert.equal(fake.documents('node_review_votes').length, 1)
+  assert.equal(fake.documents('audit_logs').filter(item => item.action === 'SUBMIT_REVIEW_VOTE').length, 1)
   assert.equal(fake.documents('notifications').filter(item =>
     ['node_review_rejected', 'node_processing_started'].includes(item.type)).length, 1)
 })

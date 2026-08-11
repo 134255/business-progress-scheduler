@@ -5,6 +5,25 @@ const assert = require('node:assert/strict')
 const { createFakeCloudDatabase } = require('../../businessApi/test/helpers/fake-cloud-database')
 const { createCloudCalendarRepository } = require('../lib/cloud-calendar-repository')
 
+function pendingReviewTiming(startAt, endAt, { base = 0, total = 480 } = {}) {
+  return {
+    resultReviewCarryoverPending: true,
+    reviewSlaWorkHours: total / 60,
+    reviewStartedAt: new Date(startAt),
+    decidedAt: new Date(endAt),
+    reviewTimingStatus: 'pending_calendar',
+    reviewElapsedWorkMinutes: base,
+    reviewRemainingWorkMinutes: Math.max(0, total - base),
+    reviewOverdueWorkMinutes: Math.max(0, base - total),
+    reviewCalendarVersion: null,
+    reviewTimingCarryoverStatus: 'pending',
+    reviewTimingCarryoverStartedAt: new Date(startAt),
+    reviewTimingCarryoverEndedAt: new Date(endAt),
+    reviewTimingCarryoverBaseElapsedWorkMinutes: base,
+    reviewTimingCarryoverTotalWorkMinutes: total
+  }
+}
+
 function yearDays(year) {
   const rows = []
   for (let at = Date.UTC(year, 0, 1); new Date(at).getUTCFullYear() === year; at += 86400000) {
@@ -709,4 +728,174 @@ test('历史待补算轮次游标损坏时失败关闭', async () => {
   }] })
   const repository = createCloudCalendarRepository({ db: fake.db })
   await assert.rejects(repository.listPendingDueCandidates({ limit: 40 }), /cursor is invalid/)
+})
+
+test('末节点完成后审核时长补算只修正时序元数据', async () => {
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'completed', currentNodeId: 'node-1', currentNodeIndex: 0 }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', sequence: 0, status: 'completed', version: 6,
+      reviewRoundNumber: 1, lastReviewRoundId: 'round-1', lastReviewTimingStatus: 'pending_calendar'
+    }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'approved', version: 2,
+      lockedNodeVersion: 5, reviewRoundNumber: 1, resultNodeVersion: 6, resultRoundVersion: 2,
+      resultNodeStatus: 'completed', resultLineStatus: 'completed', resultNextNodeId: null,
+      ...pendingReviewTiming('2026-08-11T01:00:00Z', '2026-08-11T12:00:00Z')
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const [candidate] = await repository.listPendingDueCandidates({ limit: 40 })
+  assert.equal(candidate.kind, 'review_timing_carryover')
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 600, calendarVersion: 'calendar-a' },
+    now: new Date('2026-08-11T13:00:00Z')
+  }), true)
+  const round = fake.documents('node_review_rounds')[0]
+  const node = fake.documents('business_nodes')[0]
+  assert.equal(round.reviewTimingCarryoverStatus, 'resolved')
+  assert.equal(round.reviewElapsedWorkMinutes, 600)
+  assert.equal(round.reviewRemainingWorkMinutes, 0)
+  assert.equal(round.reviewOverdueWorkMinutes, 120)
+  assert.equal(round.version, 3)
+  assert.equal(node.version, 7)
+  assert.equal(node.lastReviewElapsedWorkMinutes, 600)
+  assert.equal(fake.documents('business_lines')[0].status, 'completed')
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+})
+
+test('审核时长补算拒绝与终态轮次不一致的边界和算术快照', async () => {
+  const fake = createFakeCloudDatabase({
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', status: 'completed', version: 6 }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'approved', version: 2,
+      resultReviewCarryoverPending: true, reviewTimingStatus: 'pending_calendar',
+      reviewSlaWorkHours: 8, reviewStartedAt: new Date('2026-08-11T00:00:00Z'),
+      decidedAt: new Date('2026-08-11T03:00:00Z'),
+      reviewElapsedWorkMinutes: 0, reviewRemainingWorkMinutes: 480,
+      reviewOverdueWorkMinutes: 0, reviewCalendarVersion: null,
+      reviewTimingCarryoverStatus: 'pending',
+      reviewTimingCarryoverStartedAt: new Date('2026-08-11T01:00:00Z'),
+      reviewTimingCarryoverEndedAt: new Date('2026-08-11T03:00:00Z'),
+      reviewTimingCarryoverBaseElapsedWorkMinutes: 0,
+      reviewTimingCarryoverTotalWorkMinutes: 480
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+
+  assert.deepEqual(await repository.listPendingDueCandidates({ limit: 40 }), [])
+})
+
+test('旧审核时长在新一轮待审核后仍可补算并同步活动锁', async () => {
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-1', currentNodeIndex: 0 }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', sequence: 0, status: 'pending_review', version: 9,
+      reviewRoundNumber: 2, activeReviewRoundId: 'round-2', lastReviewRoundId: 'round-2'
+    }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'rejected', version: 2,
+      lockedNodeVersion: 5, reviewRoundNumber: 1, resultNodeVersion: 6, resultRoundVersion: 2,
+      resultNodeStatus: 'in_progress', resultLineStatus: 'active', resultNextNodeId: null,
+      ...pendingReviewTiming('2026-08-11T01:00:00Z', '2026-08-11T03:00:00Z')
+    }, {
+      _id: 'round-2', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending', version: 1,
+      lockedNodeVersion: 9, reviewRoundNumber: 2
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const [candidate] = await repository.listPendingDueCandidates({ limit: 40 })
+  assert.equal(candidate.id, 'round-1')
+  assert.equal(await repository.applyDueCalculation({
+    candidate, calculation: { status: 'calculated', minutes: 120, calendarVersion: 'calendar-a' },
+    now: new Date('2026-08-11T07:00:00Z')
+  }), true)
+  const node = fake.documents('business_nodes')[0]
+  const active = fake.documents('node_review_rounds').find(round => round._id === 'round-2')
+  assert.equal(node.version, 10)
+  assert.equal(active.lockedNodeVersion, 10)
+  assert.equal(active.version, 2)
+})
+
+test('审核时长游标越过40条失效轮次并对损坏状态失败关闭', async () => {
+  const invalid = Array.from({ length: 40 }, (_, index) => ({
+    _id: `review-time-${String(index).padStart(3, '0')}`,
+    businessLineId: 'line-1', nodeId: 'missing', status: 'approved', version: 2,
+    reviewTimingCarryoverStatus: 'pending'
+  }))
+  const valid = {
+    _id: 'review-time-040', businessLineId: 'line-1', nodeId: 'node-1', status: 'approved', version: 2,
+    ...pendingReviewTiming('2026-08-11T01:00:00Z', '2026-08-11T03:00:00Z')
+  }
+  const fake = createFakeCloudDatabase({
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', status: 'completed', version: 6 }],
+    node_review_rounds: [...invalid, valid]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  assert.deepEqual(await repository.listPendingDueCandidates({ limit: 40 }), [])
+  assert.equal((await repository.listPendingDueCandidates({ limit: 40 }))[0].id, 'review-time-040')
+  fake.replace('system_settings', 'calendar-review-timing-carryover-cursor', {
+    _id: 'calendar-review-timing-carryover-cursor', kind: 'review_timing_carryover',
+    cursorId: 42, version: 1
+  })
+  await assert.rejects(repository.listPendingDueCandidates({ limit: 40 }), /cursor is invalid/)
+})
+
+test('审核时长游标并发只签发一批且工作器崩溃后可回绕重取', async () => {
+  const round = {
+    _id: 'review-time-001', businessLineId: 'line-1', nodeId: 'node-1',
+    status: 'approved', version: 2,
+    ...pendingReviewTiming('2026-08-11T01:00:00Z', '2026-08-11T03:00:00Z')
+  }
+  const fake = createFakeCloudDatabase({
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', status: 'completed', version: 6 }],
+    node_review_rounds: [round]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+
+  const concurrent = await Promise.all([
+    repository.listPendingDueCandidates({ limit: 40 }),
+    repository.listPendingDueCandidates({ limit: 40 })
+  ])
+  assert.equal(concurrent.flat().filter(item => item.id === round._id).length, 1)
+  assert.equal(fake.metrics.maxActiveCallbacks >= 2, true)
+  assert.equal(fake.metrics.conflicts >= 1, true)
+  assert.equal(fake.metrics.retries >= 1, true)
+
+  // 不执行 applyDueCalculation，模拟游标提交后工作器崩溃。
+  assert.deepEqual(await repository.listPendingDueCandidates({ limit: 40 }), [])
+  assert.equal((await repository.listPendingDueCandidates({ limit: 40 }))[0].id, round._id)
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+})
+
+test('处理时长候选持续满批时仍为审核时长独立游标保留进度', async () => {
+  const processing = Array.from({ length: 40 }, (_, index) => ({
+    _id: `processing-${String(index).padStart(3, '0')}`,
+    businessLineId: 'line-1', nodeId: 'node-1', status: 'approved', version: 2,
+    processingTimingStatus: 'pending_calendar', processingCarryoverStatus: 'pending',
+    processingCarryoverStartedAt: new Date('2026-08-11T01:00:00Z'),
+    processingCarryoverEndedAt: new Date('2026-08-11T03:00:00Z'),
+    processingCarryoverBaseElapsedWorkMinutes: 120,
+    processingCarryoverTotalWorkMinutes: 1320
+  }))
+  const review = {
+    _id: 'review-001', businessLineId: 'line-1', nodeId: 'node-1',
+    status: 'approved', version: 2,
+    ...pendingReviewTiming('2026-08-11T01:00:00Z', '2026-08-11T03:00:00Z')
+  }
+  const fake = createFakeCloudDatabase({
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', status: 'completed', version: 6,
+      processingSlaWorkHours: 22, processingElapsedWorkMinutes: 120
+    }],
+    node_review_rounds: [...processing, review]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+
+  const candidates = await repository.listPendingDueCandidates({ limit: 40 })
+
+  assert.equal(candidates.length, 40)
+  assert.equal(candidates.filter(item => item.kind === 'review_processing_carryover').length, 39)
+  assert.equal(candidates.filter(item => item.kind === 'review_timing_carryover').length, 1)
 })

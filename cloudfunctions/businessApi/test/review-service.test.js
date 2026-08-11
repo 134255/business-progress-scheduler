@@ -66,7 +66,10 @@ function harness(overrides = {}) {
       calls.push(['prepare-vote', structuredClone(value)])
       return overrides.voteContext || {
         transition: 'next_node',
-        processingWorkMinutes: 1320
+        processingWorkMinutes: 1320,
+        reviewStartedAt: new Date('2026-08-11T01:00:00.000Z'),
+        reviewTotalWorkMinutes: 480,
+        reviewBaseElapsedWorkMinutes: 0
       }
     },
     async submitReviewVote(value) {
@@ -81,7 +84,11 @@ function harness(overrides = {}) {
     }
   }
   const workTimeService = {
-    async workingMinutesBetween() {
+    async workingMinutesBetween(startAt, endAt) {
+      calls.push(['work-minutes', { startAt: new Date(startAt), endAt: new Date(endAt) }])
+      if (startAt.getTime() === new Date('2026-08-11T01:00:00.000Z').getTime() &&
+          endAt.getTime() === new Date('2026-08-11T03:00:00.000Z').getTime() &&
+          overrides.reviewElapsed) return overrides.reviewElapsed
       return overrides.processingTime || { status: 'calculated', minutes: 120, calendarVersion: 'calendar-a' }
     },
     async tryAddWorkMinutes() {
@@ -176,7 +183,9 @@ test('审核投票只接受 approve/reject 且驳回原因必填', async () => {
 })
 
 test('审核通过为下一节点计算处理截止且请求键只传递摘要', async () => {
-  const { calls, service } = harness()
+  const { calls, service } = harness({
+    reviewElapsed: { status: 'calculated', minutes: 180, calendarVersion: 'calendar-review' }
+  })
   const result = await service.submitReviewVote({
     actor: { _id: 'reviewer-1', status: 'active' },
     input: {
@@ -186,10 +195,17 @@ test('审核通过为下一节点计算处理截止且请求键只传递摘要',
   })
 
   assert.equal(result.status, 'approved')
-  assert.deepEqual(calls.map(call => call[0]).slice(-2), ['prepare-vote', 'submit-vote'])
+  assert.deepEqual(calls.map(call => call[0]).slice(-3), [
+    'prepare-vote', 'work-minutes', 'submit-vote'
+  ])
   const submitted = calls.at(-1)[1]
   assert.equal(submitted.timing.processingDueStatus, 'calculated')
   assert.equal(submitted.timing.processingDueAt.toISOString(), '2026-08-12T06:00:00.000Z')
+  assert.equal(submitted.timing.reviewTimingStatus, 'calculated')
+  assert.equal(submitted.timing.reviewElapsedWorkMinutes, 180)
+  assert.equal(submitted.timing.reviewRemainingWorkMinutes, 300)
+  assert.equal(submitted.timing.reviewOverdueWorkMinutes, 0)
+  assert.equal(submitted.timing.reviewCalendarVersion, 'calendar-review')
   assert.equal(submitted.requestKeyHash.length, 64)
   assert.equal(submitted.inputHash.length, 64)
   assert.equal(JSON.stringify(submitted).includes('vote-request-1'), false)
@@ -197,7 +213,12 @@ test('审核通过为下一节点计算处理截止且请求键只传递摘要',
 
 test('驳回返工继承剩余处理分钟且日历缺失不阻断投票', async () => {
   const { calls, service } = harness({
-    voteContext: { transition: 'rework', processingWorkMinutes: 1200 },
+    voteContext: {
+      transition: 'rework', processingWorkMinutes: 1200,
+      reviewStartedAt: new Date('2026-08-11T01:00:00.000Z'),
+      reviewTotalWorkMinutes: 480, reviewBaseElapsedWorkMinutes: 0
+    },
+    reviewElapsed: { status: 'pending_calendar', minutes: null, missingDate: '2026-08-11' },
     reviewDue: { status: 'pending_calendar', dueAt: null, missingDate: '2026-08-12' },
     voteResult: {
       reviewRoundId: 'review-feedback-current', status: 'rejected',
@@ -216,6 +237,9 @@ test('驳回返工继承剩余处理分钟且日历缺失不阻断投票', async
   const submitted = calls.at(-1)[1]
   assert.equal(submitted.timing.processingDueStatus, 'pending_calendar')
   assert.equal(submitted.timing.processingDueAt, null)
+  assert.equal(submitted.timing.reviewTimingStatus, 'pending_calendar')
+  assert.equal(submitted.timing.reviewElapsedWorkMinutes, 0)
+  assert.equal(submitted.timing.reviewRemainingWorkMinutes, 480)
 })
 
 test('终态投票同请求重试不再计算截止时间并只向仓储传递摘要', async () => {

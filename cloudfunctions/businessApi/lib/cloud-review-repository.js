@@ -2,7 +2,7 @@ const crypto = require('node:crypto')
 
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
-const { ownExactAccountIds } = require('./account-relationship-schema')
+const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
 const { deterministicVoteId } = require('./review-domain')
 
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
@@ -48,6 +48,32 @@ function increment(value) {
 
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
+}
+
+function persistedDecision(value) {
+  if (value === 'approve') return 'approved'
+  if (value === 'reject') return 'rejected'
+  throw createError('VALIDATION_ERROR')
+}
+
+function validDisplayName(value, maximum) {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  return normalized && normalized.length <= maximum && !/[\u0000-\u001f\u007f]/.test(normalized)
+    ? normalized
+    : null
+}
+
+function reviewerDisplayName(actor) {
+  const displayNameField = ownDataValue(actor, 'displayName')
+  const displayName = displayNameField.valid
+    ? validDisplayName(displayNameField.value, 100)
+    : null
+  if (displayName) return displayName
+  const usernameField = ownDataValue(actor, 'username')
+  const username = usernameField.valid ? validDisplayName(usernameField.value, 64) : null
+  if (username) return username
+  throw createError('VERSION_CONFLICT')
 }
 
 function lineMember(line, actorId) {
@@ -166,21 +192,70 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     if (!vote || vote.reviewRoundId !== round._id || vote.reviewerUserId !== actor._id ||
         vote.requestKeyHash !== value.requestKeyHash || vote.inputHash !== value.inputHash ||
         vote.expectedRoundVersion !== value.input.expectedRoundVersion ||
-        vote.decision !== value.input.decision || vote.comment !== value.input.comment) {
+        vote.decision !== persistedDecision(value.input.decision) ||
+        !validDisplayName(vote.reviewerDisplayName, 100) || vote.comment !== value.input.comment) {
       throw createError(vote ? 'VOTE_CONFLICT' : 'VERSION_CONFLICT')
     }
+  }
+
+  function terminalCarryoverStateValid(round, kind, pending) {
+    const review = kind === 'review'
+    const statusKey = review ? 'reviewTimingCarryoverStatus' : 'processingCarryoverStatus'
+    const startedKey = review ? 'reviewTimingCarryoverStartedAt' : 'processingCarryoverStartedAt'
+    const endedKey = review ? 'reviewTimingCarryoverEndedAt' : 'processingCarryoverEndedAt'
+    const baseKey = review
+      ? 'reviewTimingCarryoverBaseElapsedWorkMinutes'
+      : 'processingCarryoverBaseElapsedWorkMinutes'
+    const totalKey = review
+      ? 'reviewTimingCarryoverTotalWorkMinutes'
+      : 'processingCarryoverTotalWorkMinutes'
+    const resolvedKey = review ? 'reviewTimingCarryoverResolvedAt' : 'processingCarryoverResolvedAt'
+    const fields = [statusKey, startedKey, endedKey, baseKey, totalKey, resolvedKey]
+    if (!pending) return fields.every(key => round[key] === undefined || round[key] === null)
+    const status = round[statusKey]
+    const startedAt = round[startedKey]
+    const endedAt = round[endedKey]
+    const base = round[baseKey]
+    const total = round[totalKey]
+    if (!['pending', 'resolved'].includes(status) || !validDate(startedAt) ||
+        !validDate(endedAt) || startedAt.getTime() > endedAt.getTime() ||
+        !safeInteger(base) || !safeInteger(total, 1)) return false
+    if (review && (!sameDateValue(startedAt, round.reviewStartedAt) ||
+        !sameDateValue(endedAt, round.decidedAt) || total !== round.reviewSlaWorkHours * 60)) {
+      return false
+    }
+    const prefix = review ? 'review' : 'processing'
+    const timingStatus = round[`${prefix}TimingStatus`]
+    const elapsed = round[`${prefix}ElapsedWorkMinutes`]
+    const remaining = round[`${prefix}RemainingWorkMinutes`]
+    const overdue = round[`${prefix}OverdueWorkMinutes`]
+    const calendarVersion = round[`${prefix}CalendarVersion`]
+    if (!safeInteger(elapsed) || !safeInteger(remaining) || !safeInteger(overdue) ||
+        elapsed < base || remaining !== Math.max(0, total - elapsed) ||
+        overdue !== Math.max(0, elapsed - total)) return false
+    return status === 'pending'
+      ? timingStatus === 'pending_calendar' && elapsed === base && calendarVersion === null &&
+          (round[resolvedKey] === undefined || round[resolvedKey] === null)
+      : timingStatus === 'calculated' && validDisplayName(calendarVersion, 200) !== null &&
+          validDate(round[resolvedKey])
   }
 
   function assertFinalRetryAuthorization(actor, line, node, round, input) {
     assertVoteRelationships(actor, line, node, round)
     const baseRoundVersion = input.expectedRoundVersion + 1
     const baseNodeVersion = round.lockedNodeVersion + 1
-    const carryoverResolved = round.resultProcessingCarryoverPending === true &&
-      round.processingCarryoverStatus === 'resolved' &&
-      round.version === baseRoundVersion + 1 && node.version === baseNodeVersion + 1
-    const exactFinalVersion = round.version === baseRoundVersion && node.version === baseNodeVersion
+    const processingPending = round.resultProcessingCarryoverPending === true
+    const reviewPending = round.resultReviewCarryoverPending === true
+    const processingStateValid = terminalCarryoverStateValid(round, 'processing', processingPending)
+    const reviewStateValid = terminalCarryoverStateValid(round, 'review', reviewPending)
+    const resolvedCount = Number(processingPending && round.processingCarryoverStatus === 'resolved') +
+      Number(reviewPending && round.reviewTimingCarryoverStatus === 'resolved')
+    const exactFinalVersion = round.version === baseRoundVersion + resolvedCount &&
+      node.version === baseNodeVersion + resolvedCount
     if (!['approved', 'rejected'].includes(round.status) ||
-        input.reviewRoundId !== round._id || !exactFinalVersion && !carryoverResolved ||
+        input.reviewRoundId !== round._id || !processingStateValid || !reviewStateValid ||
+        typeof round.resultProcessingCarryoverPending !== 'boolean' ||
+        typeof round.resultReviewCarryoverPending !== 'boolean' || !exactFinalVersion ||
         round.resultRoundVersion !== baseRoundVersion || round.resultNodeVersion !== baseNodeVersion ||
         round.resultLockedNodeVersion !== round.lockedNodeVersion ||
         round.resultReviewMode !== round.reviewMode || round.resultReviewMode !== node.reviewMode ||
@@ -245,6 +320,81 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     } else if (timing.processingDueAt !== null || timing.processingCalendarVersion !== null) {
       throw createError('VERSION_CONFLICT')
     }
+  }
+
+  function reviewTimingContext(round) {
+    const total = round && round.reviewSlaWorkHours * 60
+    const base = round && round.reviewElapsedWorkMinutes
+    if (!round || !validDate(round.reviewStartedAt) || !safeInteger(total, 1) ||
+        !safeInteger(base) || !safeInteger(round.reviewRemainingWorkMinutes) ||
+        !safeInteger(round.reviewOverdueWorkMinutes) ||
+        round.reviewRemainingWorkMinutes !== Math.max(0, total - base) ||
+        round.reviewOverdueWorkMinutes !== Math.max(0, base - total)) {
+      throw createError('VERSION_CONFLICT')
+    }
+    return {
+      reviewStartedAt: new Date(round.reviewStartedAt),
+      reviewTotalWorkMinutes: total,
+      reviewBaseElapsedWorkMinutes: base
+    }
+  }
+
+  function validateCompletedReviewTiming(timing, context, round) {
+    const expected = reviewTimingContext(round)
+    if (!context || !sameDateValue(context.reviewStartedAt, expected.reviewStartedAt) ||
+        context.reviewTotalWorkMinutes !== expected.reviewTotalWorkMinutes ||
+        context.reviewBaseElapsedWorkMinutes !== expected.reviewBaseElapsedWorkMinutes ||
+        !['calculated', 'pending_calendar'].includes(timing.reviewTimingStatus) ||
+        !safeInteger(timing.reviewElapsedWorkMinutes) ||
+        !safeInteger(timing.reviewRemainingWorkMinutes) ||
+        !safeInteger(timing.reviewOverdueWorkMinutes) ||
+        timing.reviewRemainingWorkMinutes !== Math.max(0,
+          expected.reviewTotalWorkMinutes - timing.reviewElapsedWorkMinutes) ||
+        timing.reviewOverdueWorkMinutes !== Math.max(0,
+          timing.reviewElapsedWorkMinutes - expected.reviewTotalWorkMinutes) ||
+        timing.reviewElapsedWorkMinutes < expected.reviewBaseElapsedWorkMinutes) {
+      throw createError('VERSION_CONFLICT')
+    }
+    if (timing.reviewTimingStatus === 'calculated') {
+      if (timing.reviewCalendarVersion !== null &&
+          (typeof timing.reviewCalendarVersion !== 'string' || !timing.reviewCalendarVersion)) {
+        throw createError('VERSION_CONFLICT')
+      }
+    } else if (timing.reviewElapsedWorkMinutes !== expected.reviewBaseElapsedWorkMinutes ||
+        timing.reviewCalendarVersion !== null) throw createError('VERSION_CONFLICT')
+    return expected
+  }
+
+  function sameDateValue(left, right) {
+    return validDate(left) && validDate(right) && left.getTime() === right.getTime()
+  }
+
+  function completedReviewTiming(round, timing, at) {
+    const fields = [
+      'reviewTimingCarryoverStatus', 'reviewTimingCarryoverStartedAt',
+      'reviewTimingCarryoverEndedAt', 'reviewTimingCarryoverBaseElapsedWorkMinutes',
+      'reviewTimingCarryoverTotalWorkMinutes'
+    ]
+    if (fields.some(key => round[key] !== undefined && round[key] !== null)) {
+      throw createError('VERSION_CONFLICT')
+    }
+    const data = {
+      reviewTimingStatus: timing.reviewTimingStatus,
+      reviewElapsedWorkMinutes: timing.reviewElapsedWorkMinutes,
+      reviewRemainingWorkMinutes: timing.reviewRemainingWorkMinutes,
+      reviewOverdueWorkMinutes: timing.reviewOverdueWorkMinutes,
+      reviewCalendarVersion: timing.reviewCalendarVersion
+    }
+    if (timing.reviewTimingStatus === 'pending_calendar') {
+      Object.assign(data, {
+        reviewTimingCarryoverStatus: 'pending',
+        reviewTimingCarryoverStartedAt: new Date(round.reviewStartedAt),
+        reviewTimingCarryoverEndedAt: new Date(at),
+        reviewTimingCarryoverBaseElapsedWorkMinutes: round.reviewElapsedWorkMinutes,
+        reviewTimingCarryoverTotalWorkMinutes: round.reviewSlaWorkHours * 60
+      })
+    }
+    return data
   }
 
   function processingCarryover(node, round) {
@@ -549,6 +699,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         }
       }
       assertVoteAuthorization(actor, line, node, round, value.input)
+      const reviewContext = reviewTimingContext(round)
       if (!safeInteger(line.nodeCount, 1) || !safeInteger(node.sequence) ||
           node.sequence >= line.nodeCount) throw createError('VERSION_CONFLICT')
       if (value.input.decision === 'reject') {
@@ -560,7 +711,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           roundVersion: round.version,
           transition: 'rework',
           processingWorkMinutes: round.processingRemainingWorkMinutes,
-          processingCarryoverPending: round.processingTimingStatus === 'pending_calendar'
+          processingCarryoverPending: round.processingTimingStatus === 'pending_calendar',
+          ...reviewContext
         }
       }
       if (node.sequence + 1 === line.nodeCount) {
@@ -570,7 +722,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           nodeVersion: node.version,
           roundVersion: round.version,
           transition: 'complete_line',
-          processingWorkMinutes: null
+          processingWorkMinutes: null,
+          ...reviewContext
         }
       }
       const nextId = instanceNodeId(line._id, node.sequence + 1)
@@ -592,7 +745,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         transition: 'next_node',
         nextNodeId: next._id,
         nextNodeVersion: next.version,
-        processingWorkMinutes: minutes
+        processingWorkMinutes: minutes,
+        ...reviewContext
       }
     })
   }
@@ -633,6 +787,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         assertMatchingVote(existingVote, actor, round, value)
         return voteResult(round, node.status, line.status)
       }
+      validateCompletedReviewTiming(value.timing, context, round)
+      const displayName = reviewerDisplayName(actor)
 
       if (!safeInteger(line.nodeCount, 1) || !safeInteger(node.sequence) ||
           node.sequence >= line.nodeCount) throw createError('VERSION_CONFLICT')
@@ -683,12 +839,14 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           ? 'approved'
           : 'pending'
       const at = new Date(value.timing.transitionAt)
+      const normalizedDecision = persistedDecision(value.input.decision)
       await transaction.collection('node_review_votes').doc(voteId).set({ data: {
         reviewRoundId: round._id,
         businessLineId: line._id,
         nodeId: node._id,
         reviewerUserId: actor._id,
-        decision: value.input.decision,
+        reviewerDisplayName: displayName,
+        decision: normalizedDecision,
         comment: value.input.comment,
         expectedRoundVersion: value.input.expectedRoundVersion,
         requestKeyHash: value.requestKeyHash,
@@ -704,7 +862,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         targetId: round._id,
         businessLineId: line._id,
         nodeId: node._id,
-        decision: value.input.decision,
+        decision: normalizedDecision,
         resultStatus: finalStatus,
         createdAt: db.serverDate()
       } })
@@ -718,9 +876,11 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         return voteResult({ ...round, status: 'pending' }, node.status, line.status)
       }
 
+      const reviewTiming = completedReviewTiming(round, value.timing, at)
+
       await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
         status: finalStatus,
-        finalDecision: value.input.decision,
+        finalDecision: normalizedDecision,
         finalActorId: actor._id,
         rejectionComment: finalStatus === 'rejected' ? value.input.comment : '',
         approvedVoteCount,
@@ -739,7 +899,9 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         resultProcessingRoundNumber: round.processingRoundNumber,
         resultReviewRoundNumber: round.reviewRoundNumber,
         resultProcessingCarryoverPending: Boolean(carryover),
+        resultReviewCarryoverPending: reviewTiming.reviewTimingCarryoverStatus === 'pending',
         ...(carryover || {}),
+        ...reviewTiming,
         decidedAt: at,
         version: increment(round.version),
         updatedAt: db.serverDate()
@@ -769,6 +931,12 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           reviewDueStatus: db.command.remove(),
           reviewDueAt: db.command.remove(),
           reviewCalendarVersion: db.command.remove(),
+          lastReviewRoundId: round._id,
+          lastReviewTimingStatus: reviewTiming.reviewTimingStatus,
+          lastReviewElapsedWorkMinutes: reviewTiming.reviewElapsedWorkMinutes,
+          lastReviewRemainingWorkMinutes: reviewTiming.reviewRemainingWorkMinutes,
+          lastReviewOverdueWorkMinutes: reviewTiming.reviewOverdueWorkMinutes,
+          lastReviewCalendarVersion: reviewTiming.reviewCalendarVersion,
           version: increment(node.version),
           updatedAt: db.serverDate()
         } })
@@ -784,6 +952,12 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           status: nodeStatus,
           completedAt: at,
           activeReviewRoundId: db.command.remove(),
+          lastReviewRoundId: round._id,
+          lastReviewTimingStatus: reviewTiming.reviewTimingStatus,
+          lastReviewElapsedWorkMinutes: reviewTiming.reviewElapsedWorkMinutes,
+          lastReviewRemainingWorkMinutes: reviewTiming.reviewRemainingWorkMinutes,
+          lastReviewOverdueWorkMinutes: reviewTiming.reviewOverdueWorkMinutes,
+          lastReviewCalendarVersion: reviewTiming.reviewCalendarVersion,
           version: increment(node.version),
           updatedAt: db.serverDate()
         } })
@@ -843,8 +1017,10 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         status: 'unread',
         createdAt: db.serverDate()
       } })
-      if (expectedTransition !== 'complete_line' &&
-          value.timing.processingDueStatus === 'pending_calendar') {
+      const processingCalendarMissing = expectedTransition !== 'complete_line' &&
+        value.timing.processingDueStatus === 'pending_calendar'
+      const reviewCalendarMissing = value.timing.reviewTimingStatus === 'pending_calendar'
+      if (processingCalendarMissing || reviewCalendarMissing) {
         const calendarNotificationId = `work-calendar-missing-${hash(`${line._id}\0processing`).slice(0, 40)}`
         const existingWarning = await readDocument(transaction, 'notifications', calendarNotificationId)
         if (!existingWarning) {

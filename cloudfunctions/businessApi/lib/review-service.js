@@ -144,6 +144,36 @@ function buildReviewTiming(node, startedAt, calculated) {
   throw createError('VERSION_CONFLICT')
 }
 
+function buildCompletedReviewTiming(context, calculated) {
+  if (!context || !validDate(context.reviewStartedAt) ||
+      !Number.isSafeInteger(context.reviewTotalWorkMinutes) || context.reviewTotalWorkMinutes <= 0 ||
+      !Number.isSafeInteger(context.reviewBaseElapsedWorkMinutes) ||
+      context.reviewBaseElapsedWorkMinutes < 0) throw createError('VERSION_CONFLICT')
+  const base = context.reviewBaseElapsedWorkMinutes
+  if (calculated && calculated.status === 'calculated' &&
+      Number.isSafeInteger(calculated.minutes) && calculated.minutes >= 0 &&
+      Number.isSafeInteger(base + calculated.minutes)) {
+    const elapsed = base + calculated.minutes
+    return {
+      reviewTimingStatus: 'calculated',
+      reviewElapsedWorkMinutes: elapsed,
+      reviewRemainingWorkMinutes: Math.max(0, context.reviewTotalWorkMinutes - elapsed),
+      reviewOverdueWorkMinutes: Math.max(0, elapsed - context.reviewTotalWorkMinutes),
+      reviewCalendarVersion: calculated.calendarVersion || null
+    }
+  }
+  if (calculated && calculated.status === 'pending_calendar' && calculated.minutes === null) {
+    return {
+      reviewTimingStatus: 'pending_calendar',
+      reviewElapsedWorkMinutes: base,
+      reviewRemainingWorkMinutes: Math.max(0, context.reviewTotalWorkMinutes - base),
+      reviewOverdueWorkMinutes: Math.max(0, base - context.reviewTotalWorkMinutes),
+      reviewCalendarVersion: null
+    }
+  }
+  throw createError('VERSION_CONFLICT')
+}
+
 function createReviewService({ feedbackRepository, reviewRepository, workTimeService, clock = () => new Date() }) {
   if (!feedbackRepository || typeof feedbackRepository.getCurrentProcessingRoundDraft !== 'function') {
     throw new TypeError('feedbackRepository.getCurrentProcessingRoundDraft is required')
@@ -258,6 +288,12 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
       throw createError('VERSION_CONFLICT')
     }
     const timing = { transitionAt: new Date(at) }
+    if (context.transition !== 'finalized_retry') {
+      const elapsed = await workTimeService.workingMinutesBetween(
+        new Date(context.reviewStartedAt), new Date(at)
+      )
+      Object.assign(timing, buildCompletedReviewTiming(context, elapsed))
+    }
     if (context.transition === 'rework' && context.processingCarryoverPending === true) {
       Object.assign(timing, {
         processingDueStatus: 'pending_calendar',
