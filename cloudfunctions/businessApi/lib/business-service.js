@@ -1,4 +1,4 @@
-const { validateTemplateForEnable } = require('./template-domain')
+const { collectTemplateParticipantUserIds, validateTemplateForEnable } = require('./template-domain')
 const {
   APPLICATION_ERROR_MARKER,
   MAX_TEMPLATE_NODES,
@@ -94,9 +94,10 @@ function requireEnabledDefinition(definition) {
     throw createError('TEMPLATE_LIMIT_EXCEEDED', TEMPLATE_LIMIT_MESSAGE)
   }
   if (definition.template.nodeCount !== definition.nodes.length) throw createError('TEMPLATE_INVALID')
-  const assigneeIds = [...new Set(definition.nodes.flatMap(node => node.assigneeUserIds || []))]
+  let participantUserIds
   try {
-    validateTemplateForEnable(definition.template, definition.nodes, assigneeIds)
+    participantUserIds = collectTemplateParticipantUserIds(definition.nodes)
+    validateTemplateForEnable(definition.template, definition.nodes, participantUserIds)
   } catch (error) {
     error[APPLICATION_ERROR_MARKER] = true
     throw error

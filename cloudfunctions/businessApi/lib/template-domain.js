@@ -1,7 +1,8 @@
 const { normalizeFieldDefinition } = require('./field-domain')
 const { WORKFLOW_MODE, normalizeReviewMode } = require('./review-domain')
 
-const DEFAULT_SLA_WORK_HOURS = 22
+const DEFAULT_PROCESSING_SLA_WORK_HOURS = 22
+const DEFAULT_REVIEW_SLA_WORK_HOURS = 8
 const ALLOWED_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
 
 function createError(code, message = code) {
@@ -12,6 +13,10 @@ function createError(code, message = code) {
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key)
 }
 
 function requireText(value) {
@@ -59,8 +64,8 @@ function normalizeTemplateNode(input) {
   if (!isPlainObject(input)) throw createError('TEMPLATE_INVALID')
   const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
   if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
-  const processingSlaWorkHours = input.processingSlaWorkHours === undefined ? DEFAULT_SLA_WORK_HOURS : input.processingSlaWorkHours
-  const reviewSlaWorkHours = input.reviewSlaWorkHours === undefined ? DEFAULT_SLA_WORK_HOURS : input.reviewSlaWorkHours
+  const processingSlaWorkHours = input.processingSlaWorkHours === undefined ? DEFAULT_PROCESSING_SLA_WORK_HOURS : input.processingSlaWorkHours
+  const reviewSlaWorkHours = input.reviewSlaWorkHours === undefined ? DEFAULT_REVIEW_SLA_WORK_HOURS : input.reviewSlaWorkHours
   if (!Number.isFinite(processingSlaWorkHours) || processingSlaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
   if (!Number.isFinite(reviewSlaWorkHours) || reviewSlaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
   let reviewMode
@@ -89,28 +94,73 @@ function normalizeTemplateNode(input) {
   }
 }
 
+function normalizeLegacyTemplateNode(input) {
+  if (!isPlainObject(input)) throw createError('TEMPLATE_INVALID')
+  const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
+  if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
+  const slaWorkHours = input.slaWorkHours === undefined ? DEFAULT_PROCESSING_SLA_WORK_HOURS : input.slaWorkHours
+  if (!Number.isFinite(slaWorkHours) || slaWorkHours <= 0) throw createError('TEMPLATE_INVALID')
+  const allowedEvidenceTypes = normalizeEvidenceTypes(input.allowedEvidenceTypes === undefined ? [] : input.allowedEvidenceTypes)
+  if (requiresEvidence && allowedEvidenceTypes.length === 0) throw createError('TEMPLATE_INVALID')
+  return {
+    nodeKey: requireText(input.nodeKey),
+    sequence: input.sequence === undefined ? 0 : normalizeSequence(input.sequence),
+    name: requireText(input.name),
+    assigneeUserIds: normalizeAccountIds(input.assigneeUserIds),
+    slaWorkHours,
+    requiresEvidence,
+    allowedEvidenceTypes,
+    fields: normalizeFields(input.fields === undefined ? [] : input.fields)
+  }
+}
+
+function normalizeDefinitionNodes(nodes) {
+  if (!Array.isArray(nodes) || nodes.length === 0) throw createError('TEMPLATE_INVALID')
+  const workflowModes = nodes.map(node => {
+    if (!isPlainObject(node)) throw createError('TEMPLATE_INVALID')
+    if (node.workflowMode === WORKFLOW_MODE ||
+        (!hasOwn(node, 'workflowMode') && (hasOwn(node, 'processorUserIds') || hasOwn(node, 'reviewerUserIds')))) {
+      return WORKFLOW_MODE
+    }
+    if (!hasOwn(node, 'workflowMode') && hasOwn(node, 'assigneeUserIds')) return 'legacy'
+    throw createError('TEMPLATE_INVALID')
+  })
+  if (new Set(workflowModes).size !== 1) throw createError('TEMPLATE_INVALID')
+  const workflowMode = workflowModes[0]
+  const normalizedNodes = workflowMode === WORKFLOW_MODE
+    ? nodes.map(normalizeTemplateNode)
+    : nodes.map(normalizeLegacyTemplateNode)
+  if (new Set(normalizedNodes.map(node => node.nodeKey)).size !== normalizedNodes.length) {
+    throw createError('TEMPLATE_INVALID')
+  }
+  const orderedNodes = normalizedNodes.slice().sort((left, right) => left.sequence - right.sequence)
+  if (orderedNodes.some((node, index) => node.sequence !== index)) throw createError('TEMPLATE_INVALID')
+  return { workflowMode, nodes: orderedNodes }
+}
+
+function collectTemplateParticipantUserIds(nodes) {
+  const definition = normalizeDefinitionNodes(nodes)
+  const userIds = definition.workflowMode === WORKFLOW_MODE
+    ? definition.nodes.flatMap(node => [...node.processorUserIds, ...node.reviewerUserIds])
+    : definition.nodes.flatMap(node => node.assigneeUserIds)
+  return [...new Set(userIds)]
+}
+
 function assertTemplateEditable(template) {
   if (!isPlainObject(template) || template.status === 'deleted') throw createError('NOT_FOUND')
   if (template.status === 'enabled') throw createError('TEMPLATE_NOT_EDITABLE')
 }
 
 function validateTemplateForEnable(template, nodes, activeUserIds) {
-  if (!Array.isArray(nodes) || nodes.length === 0) throw createError('TEMPLATE_INVALID')
-  let normalizedNodes
-  try {
-    normalizedNodes = nodes.map(normalizeTemplateNode)
-  } catch (error) {
-    if (error.code === 'TEMPLATE_INVALID') throw error
-    throw createError('TEMPLATE_INVALID')
-  }
-  if (new Set(normalizedNodes.map(node => node.nodeKey)).size !== normalizedNodes.length) {
-    throw createError('TEMPLATE_INVALID')
-  }
-  const orderedNodes = normalizedNodes.slice().sort((left, right) => left.sequence - right.sequence)
-  if (orderedNodes.some((node, index) => node.sequence !== index)) throw createError('TEMPLATE_INVALID')
+  const definition = normalizeDefinitionNodes(nodes)
   if (!Array.isArray(activeUserIds)) throw createError('TEMPLATE_INVALID')
   const active = new Set(activeUserIds)
-  for (const node of orderedNodes) {
+  for (const node of definition.nodes) {
+    if (definition.workflowMode === 'legacy') {
+      if (!node.assigneeUserIds.length) throw createError('TEMPLATE_INVALID')
+      if (node.assigneeUserIds.some(id => !active.has(id))) throw createError('ASSIGNEE_INACTIVE')
+      continue
+    }
     if (!node.processorUserIds.length || !node.reviewerUserIds.length) throw createError('TEMPLATE_INVALID')
     if (node.processorUserIds.some(id => !active.has(id))) throw createError('PROCESSOR_INACTIVE')
     if (node.reviewerUserIds.some(id => !active.has(id))) throw createError('REVIEWER_INACTIVE')
@@ -120,9 +170,11 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
 }
 
 module.exports = {
-  DEFAULT_SLA_WORK_HOURS,
+  DEFAULT_PROCESSING_SLA_WORK_HOURS,
+  DEFAULT_REVIEW_SLA_WORK_HOURS,
   ALLOWED_EVIDENCE_TYPES,
   normalizeTemplateNode,
+  collectTemplateParticipantUserIds,
   validateTemplateForEnable,
   assertTemplateEditable
 }

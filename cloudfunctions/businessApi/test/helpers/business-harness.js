@@ -17,12 +17,14 @@ function businessTemplate(overrides = {}) {
     nodes: overrides.nodes || [
       {
         _id: 'template-node-1', templateId: 'template-1', nodeKey: 'node-a', sequence: 0,
-        name: '启动', description: '', assigneeUserIds: ['user-2'], slaWorkHours: 8,
+        name: '启动', description: '', workflowMode: 'review', processorUserIds: ['user-2'],
+        reviewerUserIds: ['user-3'], reviewMode: 'any', processingSlaWorkHours: 8, reviewSlaWorkHours: 4,
         requiresEvidence: false, allowedEvidenceTypes: ['pdf'], fields: []
       },
       {
         _id: 'template-node-2', templateId: 'template-1', nodeKey: 'node-b', sequence: 1,
-        name: '交付', description: '', assigneeUserIds: ['user-3'], slaWorkHours: 22,
+        name: '交付', description: '', workflowMode: 'review', processorUserIds: ['user-3'],
+        reviewerUserIds: ['user-4'], reviewMode: 'all', processingSlaWorkHours: 22, reviewSlaWorkHours: 8,
         requiresEvidence: true, allowedEvidenceTypes: ['pdf'], fields: []
       }
     ]

@@ -48,6 +48,43 @@ test('an idempotent retry returns its reservation without requiring the template
   assert.deepEqual(harness.calls.map(call => call[0]), ['findCreationResult'])
 })
 
+test('legacy enabled templates remain compatible only when no node declares the review workflow', async () => {
+  const harness = createBusinessHarness({
+    definition: businessTemplate({
+      nodes: businessTemplate().nodes.map(node => {
+        const {
+          workflowMode, processorUserIds, reviewerUserIds, reviewMode,
+          processingSlaWorkHours, reviewSlaWorkHours, ...legacy
+        } = node
+        return { ...legacy, assigneeUserIds: ['user-2'], slaWorkHours: 8 }
+      })
+    })
+  })
+
+  await assert.doesNotReject(harness.service.createFromTemplate({ actor: harness.actor, input: validInput() }))
+})
+
+test('a declared review workflow cannot fall back to legacy assignees', async () => {
+  const harness = createBusinessHarness({
+    definition: businessTemplate({
+      nodes: [
+        {
+          ...businessTemplate().nodes[0],
+          processorUserIds: undefined,
+          reviewerUserIds: undefined,
+          assigneeUserIds: ['user-2']
+        }
+      ],
+      template: { nodeCount: 1 }
+    })
+  })
+
+  await assert.rejects(
+    harness.service.createFromTemplate({ actor: harness.actor, input: validInput() }),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+})
+
 test('creation rejects unavailable templates and invalid account or request metadata', async t => {
   await t.test('template is not enabled', async () => {
     const harness = createBusinessHarness({

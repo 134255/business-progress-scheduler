@@ -1,5 +1,6 @@
 const {
   normalizeTemplateNode,
+  collectTemplateParticipantUserIds,
   validateTemplateForEnable,
   assertTemplateEditable
 } = require('./template-domain')
@@ -26,7 +27,8 @@ function callTemplateDomain(operation) {
   try {
     return operation()
   } catch (error) {
-    if (['TEMPLATE_INVALID', 'TEMPLATE_NOT_EDITABLE', 'ASSIGNEE_INACTIVE', 'NOT_FOUND'].includes(error.code)) {
+    if (['TEMPLATE_INVALID', 'TEMPLATE_NOT_EDITABLE', 'ASSIGNEE_INACTIVE',
+      'PROCESSOR_INACTIVE', 'REVIEWER_INACTIVE', 'ROLE_OVERLAP', 'NOT_FOUND'].includes(error.code)) {
       error[APPLICATION_ERROR_MARKER] = true
     }
     throw error
@@ -145,17 +147,15 @@ function assignUpdateKeys(current, inputNodes, keyFactory) {
   })
 }
 
-function allAssigneeIds(nodes) {
-  return [...new Set(nodes.flatMap(node => node.assigneeUserIds))]
+function allParticipantUserIds(nodes) {
+  return callTemplateDomain(() => collectTemplateParticipantUserIds(nodes))
 }
 
-async function assertActiveAssignees(repository, nodes, { requireNodes = false } = {}) {
-  const requested = allAssigneeIds(nodes)
+async function assertActiveParticipants(repository, nodes, { requireNodes = false } = {}) {
+  const requested = allParticipantUserIds(nodes)
   const active = await repository.listActiveUserIds(requested)
-  if ((requireNodes && nodes.length === 0) || active.length !== requested.length ||
-      nodes.some(node => node.assigneeUserIds.length === 0)) {
-    throw createError(requested.length ? 'ASSIGNEE_INACTIVE' : 'TEMPLATE_INVALID')
-  }
+  if (requireNodes && nodes.length === 0) throw createError('TEMPLATE_INVALID')
+  callTemplateDomain(() => validateTemplateForEnable({}, nodes, active))
   return active
 }
 
@@ -213,11 +213,11 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     requireSuperAdmin(actor)
     const metadata = normalizeMetadata(input)
     const nodes = assignCreateKeys(requireNodeBudget(input.nodes === undefined ? [] : input.nodes), keyFactory)
-    await assertActiveAssignees(repository, nodes)
+    await assertActiveParticipants(repository, nodes)
     const at = clock()
     return repository.createTemplateDefinition({
       actor,
-      assigneeUserIds: allAssigneeIds(nodes),
+      assigneeUserIds: allParticipantUserIds(nodes),
       definition: {
         template: {
           ...metadata,
@@ -245,13 +245,13 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       requireNodeBudget(input.nodes === undefined ? [] : input.nodes),
       keyFactory
     )
-    await assertActiveAssignees(repository, nodes)
+    await assertActiveParticipants(repository, nodes)
     return repository.mutateTemplateDefinition({
       actor,
       templateId: current.template._id,
       expectedVersion,
       expectedStatus: current.template.status,
-      assigneeUserIds: allAssigneeIds(nodes),
+      assigneeUserIds: allParticipantUserIds(nodes),
       definition: {
         template: { ...metadata, nodeCount: nodes.length, updatedBy: actor._id, updatedAt: clock() },
         nodes
@@ -272,8 +272,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     if (!validTransition) throw createError('INVALID_STATUS')
     if (status === 'enabled') {
       requireNodeBudget(current.nodes)
-      const active = await assertActiveAssignees(repository, current.nodes, { requireNodes: true })
-      callTemplateDomain(() => validateTemplateForEnable(current.template, current.nodes, active))
+      await assertActiveParticipants(repository, current.nodes, { requireNodes: true })
       requireSnapshotBudget(current.nodes)
     }
     const timestampField = status === 'enabled' ? 'enabledAt' : 'disabledAt'
@@ -282,7 +281,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       templateId: current.template._id,
       expectedVersion,
       expectedStatus: currentStatus,
-      ...(status === 'enabled' ? { assigneeUserIds: allAssigneeIds(current.nodes) } : {}),
+      ...(status === 'enabled' ? { assigneeUserIds: allParticipantUserIds(current.nodes) } : {}),
       definition: {
         template: { status, [timestampField]: clock(), updatedBy: actor._id, updatedAt: clock() }
       },
@@ -317,17 +316,29 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
   async function listEnabledTemplates({ actor }) {
     requireActiveActor(actor)
     const definitions = await repository.listTemplateDefinitions({ status: 'enabled' })
-    const requested = [...new Set(definitions.flatMap(definition => allAssigneeIds(definition.nodes)))]
+    const definitionsWithParticipants = definitions.map(definition => {
+      try {
+        return { definition, participantUserIds: allParticipantUserIds(definition.nodes) }
+      } catch (error) {
+        return { definition, participantUserIds: null }
+      }
+    })
+    const requested = [...new Set(definitionsWithParticipants.flatMap(item => item.participantUserIds || []))]
     const active = new Set(await repository.listActiveUserIds(requested))
     return {
-      items: definitions.map(definition => {
-        const activeAssignees = definition.nodes.length > 0 && definition.nodes.every(node =>
-          node.assigneeUserIds.length > 0 && node.assigneeUserIds.every(id => active.has(id)))
-        const unavailableReason = !activeAssignees
-          ? 'ASSIGNEE_INACTIVE'
-          : canCreateBusinessSnapshot(definition.nodes)
-            ? ''
-            : 'TEMPLATE_LIMIT_EXCEEDED'
+      items: definitionsWithParticipants.map(({ definition, participantUserIds }) => {
+        let unavailableReason = ''
+        try {
+          if (!participantUserIds) throw createError('TEMPLATE_INVALID')
+          validateTemplateForEnable(definition.template, definition.nodes, [...active])
+          if (!canCreateBusinessSnapshot(definition.nodes)) unavailableReason = 'TEMPLATE_LIMIT_EXCEEDED'
+        } catch (error) {
+          unavailableReason = error.code === 'ASSIGNEE_INACTIVE'
+            ? 'ASSIGNEE_INACTIVE'
+            : ['PROCESSOR_INACTIVE', 'REVIEWER_INACTIVE', 'ROLE_OVERLAP', 'TEMPLATE_INVALID'].includes(error.code)
+              ? error.code
+              : 'TEMPLATE_INVALID'
+        }
         return projectEnabledTemplate(definition, unavailableReason)
       })
     }

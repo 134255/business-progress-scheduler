@@ -10,8 +10,11 @@ function validDefinition(overrides = {}) {
     nodes: [{
       name: '启动',
       description: '',
-      assigneeUserIds: ['account-1'],
-      slaWorkHours: 8,
+      processorUserIds: ['account-1'],
+      reviewerUserIds: ['account-2'],
+      reviewMode: 'any',
+      processingSlaWorkHours: 8,
+      reviewSlaWorkHours: 4,
       requiresEvidence: false,
       allowedEvidenceTypes: ['pdf'],
       fields: [{ name: '说明', type: 'short_text', required: true, constraints: { maxLength: 80 } }]
@@ -28,8 +31,12 @@ function storedNode(templateId = 't1', overrides = {}) {
     sequence: 0,
     name: '启动',
     description: '',
-    assigneeUserIds: ['account-1'],
-    slaWorkHours: 8,
+    workflowMode: 'review',
+    processorUserIds: ['account-1'],
+    reviewerUserIds: ['account-2'],
+    reviewMode: 'any',
+    processingSlaWorkHours: 8,
+    reviewSlaWorkHours: 4,
     requiresEvidence: false,
     allowedEvidenceTypes: ['pdf'],
     fields: [{
@@ -46,6 +53,19 @@ function storedNode(templateId = 't1', overrides = {}) {
   }
 }
 
+function legacyStoredNode(templateId = 't1', overrides = {}) {
+  const {
+    workflowMode, processorUserIds, reviewerUserIds, reviewMode,
+    processingSlaWorkHours, reviewSlaWorkHours, ...legacy
+  } = storedNode(templateId)
+  return {
+    ...legacy,
+    assigneeUserIds: ['account-1'],
+    slaWorkHours: 8,
+    ...overrides
+  }
+}
+
 test('ordinary users cannot mutate template definitions', async () => {
   const harness = createTemplateHarness()
   await assert.rejects(
@@ -55,7 +75,9 @@ test('ordinary users cannot mutate template definitions', async () => {
 })
 
 test('template creation assigns stable keys and creates a draft', async () => {
-  const harness = createTemplateHarness({ users: [{ _id: 'account-1', status: 'active' }] })
+  const harness = createTemplateHarness({ users: [
+    { _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }
+  ] })
   const created = await harness.service.createTemplate({ actor: harness.admin, input: validDefinition() })
 
   assert.equal(created.template.status, 'draft')
@@ -63,15 +85,18 @@ test('template creation assigns stable keys and creates a draft', async () => {
   assert.equal(created.template.nodeCount, 1)
   assert.equal(created.nodes[0].nodeKey, 'node-1')
   assert.equal(created.nodes[0].fields[0].fieldKey, 'field-2')
-  assert.equal(created.nodes[0].assigneeUserIds[0], 'account-1')
+  assert.equal(created.nodes[0].processorUserIds[0], 'account-1')
+  assert.equal(created.nodes[0].reviewerUserIds[0], 'account-2')
   assert.equal(harness.audits[0].action, 'CREATE_TEMPLATE')
 })
 
-test('inactive assignees block template creation', async () => {
-  const harness = createTemplateHarness({ users: [{ _id: 'account-1', status: 'disabled' }] })
+test('inactive processors block template creation with the processor error code', async () => {
+  const harness = createTemplateHarness({ users: [
+    { _id: 'account-1', status: 'disabled' }, { _id: 'account-2', status: 'active' }
+  ] })
   await assert.rejects(
     harness.service.createTemplate({ actor: harness.admin, input: validDefinition() }),
-    error => error.code === 'ASSIGNEE_INACTIVE'
+    error => error.code === 'PROCESSOR_INACTIVE'
   )
 })
 
@@ -80,7 +105,9 @@ test('definition size is rejected before it can exceed the transaction operation
     ...validDefinition().nodes[0],
     name: `节点 ${index + 1}`
   }))
-  const harness = createTemplateHarness({ users: [{ _id: 'account-1', status: 'active' }] })
+  const harness = createTemplateHarness({ users: [
+    { _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }
+  ] })
   await assert.rejects(
     harness.service.createTemplate({ actor: harness.admin, input: validDefinition({ nodes }) }),
     error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' && /at most 48 nodes/.test(error.message)
@@ -108,7 +135,7 @@ test('a template can be disabled, edited with stable keys, and re-enabled', asyn
   const harness = createTemplateHarness({
     templates: [{ _id: 't1', name: '旧模板', description: '', status: 'enabled', version: 4, nodeCount: 1 }],
     nodes: [storedNode()],
-    users: [{ _id: 'account-1', status: 'active' }]
+    users: [{ _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }]
   })
 
   const disabled = await harness.service.changeTemplateStatus({
@@ -141,13 +168,13 @@ test('enabling validates node rules and active assignees', async () => {
   const harness = createTemplateHarness({
     templates: [{ _id: 't1', name: '模板', status: 'draft', version: 1 }],
     nodes: [storedNode()],
-    users: [{ _id: 'account-1', status: 'disabled' }]
+    users: [{ _id: 'account-1', status: 'disabled' }, { _id: 'account-2', status: 'active' }]
   })
   await assert.rejects(
     harness.service.changeTemplateStatus({
       actor: harness.admin, templateId: 't1', expectedVersion: 1, status: 'enabled'
     }),
-    error => error.code === 'ASSIGNEE_INACTIVE'
+    error => error.code === 'PROCESSOR_INACTIVE'
   )
 })
 
@@ -172,8 +199,8 @@ test('enablement rejects legacy definitions above the documented node maximum', 
   assert.equal(harness.audits.length, 0)
 })
 
-test('enablement rejects definitions that cannot fit the business snapshot transaction budget', async () => {
-  const nodes = Array.from({ length: 48 }, (_, index) => storedNode('t1', {
+test('enablement rejects legacy definitions that cannot fit the business snapshot transaction budget', async () => {
+  const nodes = Array.from({ length: 48 }, (_, index) => legacyStoredNode('t1', {
     _id: `t1-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
@@ -236,20 +263,20 @@ test('ordinary template listings expose safe availability projections only', asy
       nodeCount: 1, createdBy: 'admin-1', deletedBy: ''
     }],
     nodes: [storedNode()],
-    users: [{ _id: 'account-1', status: 'disabled' }]
+    users: [{ _id: 'account-1', status: 'disabled' }, { _id: 'account-2', status: 'active' }]
   })
   const result = await harness.service.listEnabledTemplates({ actor: harness.user })
 
   assert.deepEqual(result, {
     items: [{
       _id: 't1', name: '可用模板', description: '说明', nodeCount: 1,
-      available: false, unavailableReason: 'ASSIGNEE_INACTIVE'
+      available: false, unavailableReason: 'PROCESSOR_INACTIVE'
     }]
   })
 })
 
-test('ordinary listings do not advertise enabled templates that exceed the snapshot operation budget', async () => {
-  const nodes = Array.from({ length: 48 }, (_, index) => storedNode('t1', {
+test('ordinary listings do not advertise legacy enabled templates that exceed the snapshot operation budget', async () => {
+  const nodes = Array.from({ length: 48 }, (_, index) => legacyStoredNode('t1', {
     _id: `t1-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,

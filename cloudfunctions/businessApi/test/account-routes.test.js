@@ -555,7 +555,8 @@ test('the deployed legacy route map rejects caller-authored business codes and n
 test('template application errors retain safe codes without logging payload values', async () => {
   for (const code of [
     'TEMPLATE_NOT_EDITABLE', 'TEMPLATE_NOT_ENABLED', 'TEMPLATE_INVALID',
-    'TEMPLATE_LIMIT_EXCEEDED', 'ASSIGNEE_INACTIVE', 'INVALID_FIELD_VALUE'
+    'TEMPLATE_LIMIT_EXCEEDED', 'ASSIGNEE_INACTIVE', 'PROCESSOR_INACTIVE',
+    'REVIEWER_INACTIVE', 'ROLE_OVERLAP', 'INVALID_FIELD_VALUE'
   ]) {
     const harness = createRouteHarness({
       templateService: {

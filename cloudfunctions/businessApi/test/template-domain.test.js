@@ -46,7 +46,7 @@ test('规范化新版节点的处理人、审核人、审核模式和双 SLA，�
     reviewerUserIds: ['reviewer-1'],
     reviewMode: 'any',
     processingSlaWorkHours: 22,
-    reviewSlaWorkHours: 22,
+    reviewSlaWorkHours: 8,
     requiresEvidence: false,
     allowedEvidenceTypes: ['pdf'],
     fields: [
