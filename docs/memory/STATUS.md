@@ -4,7 +4,7 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 
 ## Verified state
 
-- 2026-08-11 节点独立审核流程 Task 1 已完成本地领域实现及修复轮次 1：新增 `review-domain` 固定审核工作流、或签/会签和处理动作的封闭枚举、投票输入校验及轮次/审核人确定性投票编号；新版模板节点固定快照处理人、审核人、审核模式、处理与审核双 SLA，处理默认 22 工时、审核默认 8 工时。模板服务按处理人与审核人的去重参与账号校验并安全映射处理人失效、审核人失效和角色交集；业务服务验证新版定义。仅当所有节点均未声明 `workflowMode` 时，旧 `assigneeUserIds` 节点才走显式兼容边界；声明 `workflowMode: review` 的节点绝不回退到旧字段。完整 `businessApi` 回归为 368/368 通过；CloudBase 仓储持久化、事务预算和业务快照的新版字段迁移仍由后续 Task 2 负责。
+- 2026-08-11 节点独立审核流程 Task 1 已完成本地领域实现及修复轮次 1、2：新增 `review-domain` 固定审核工作流、或签/会签和处理动作的封闭枚举、投票输入校验及轮次/审核人确定性投票编号；新版模板节点固定快照处理人、审核人、审核模式、处理与审核双 SLA，处理默认 22 工时、审核默认 8 工时。模板服务按处理人与审核人的去重参与账号校验并安全映射处理人失效、审核人失效和角色交集；业务服务验证新版定义。仅当所有节点均未声明 `workflowMode` 时，旧 `assigneeUserIds` 节点才走显式兼容边界；声明 `workflowMode: review` 的节点绝不回退到旧字段。草稿模板可创建或更新为显式/隐式空节点集合，但启用仍必须有节点并继续执行新版角色、角色交集和旧模板兼容校验。完整 `businessApi` 回归为 371/371 通过；CloudBase 仓储持久化、事务预算和业务快照的新版字段迁移仍由后续 Task 2 负责。
 
 - 2026-08-11 节点独立审核流程的五部分设计及书面版本均已由项目所有者确认。新版模板节点将分别配置处理人和审核人，支持或签、会签、独立处理/审核 SLA、不可变审核轮次和确定性唯一投票；处理人不再直接完成节点，只有审核通过才自动激活下一节点或完成业务线。完整中文设计为 `docs/superpowers/specs/2026-08-11-node-review-workflow-design.md`，架构决策为 `docs/memory/decisions/ADR-0005-node-review-rounds-and-votes.md`，实施计划为 `docs/superpowers/plans/2026-08-11-node-review-workflow.md`。Task 1 已建立领域契约；后续任务仍须完成仓储、业务快照、审核流转、集合/索引、部署和真实小程序验收。
 
@@ -63,6 +63,17 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 | `node --test cloudfunctions/businessApi/test/business-service.test.js cloudfunctions/businessApi/test/template-service.test.js` | 通过：27 个测试，0 失败。 |
 | `node --test cloudfunctions/businessApi/test/review-domain.test.js cloudfunctions/businessApi/test/template-domain.test.js cloudfunctions/businessApi/test/field-domain.test.js` | 通过：12 个测试，0 失败。 |
 | `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：368 个测试，0 失败；仅保留两条既有 npm 用户配置警告。 |
+| `node tools/test-wxml-structure.mjs` | 通过：2 个测试，0 失败。 |
+| `git diff --check` 与项目记忆校验 | 通过；仅保留既有 LF/CRLF 换行提示。 |
+
+2026-08-11 节点独立审核流程 Task 1 修复轮次 2：
+
+| 命令或边界 | 结果 |
+|---|---|
+| `node --test cloudfunctions/businessApi/test/template-service.test.js`（RED） | 按预期失败：17 个测试中 14 通过、3 失败；显式空节点创建、隐式空节点创建和草稿更新为空节点均错误返回 `TEMPLATE_INVALID`。 |
+| `node --test cloudfunctions/businessApi/test/template-service.test.js`（GREEN） | 通过：17 个测试，0 失败。 |
+| `node --test cloudfunctions/businessApi/test/review-domain.test.js cloudfunctions/businessApi/test/template-domain.test.js cloudfunctions/businessApi/test/field-domain.test.js` | 通过：12 个测试，0 失败。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：371 个测试，0 失败；仅保留两条既有 npm 用户配置警告。 |
 | `node tools/test-wxml-structure.mjs` | 通过：2 个测试，0 失败。 |
 | `git diff --check` 与项目记忆校验 | 通过；仅保留既有 LF/CRLF 换行提示。 |
 

@@ -148,13 +148,17 @@ function assignUpdateKeys(current, inputNodes, keyFactory) {
 }
 
 function allParticipantUserIds(nodes) {
+  if (Array.isArray(nodes) && nodes.length === 0) return []
   return callTemplateDomain(() => collectTemplateParticipantUserIds(nodes))
 }
 
 async function assertActiveParticipants(repository, nodes, { requireNodes = false } = {}) {
+  if (Array.isArray(nodes) && nodes.length === 0) {
+    if (requireNodes) throw createError('TEMPLATE_INVALID')
+    return []
+  }
   const requested = allParticipantUserIds(nodes)
   const active = await repository.listActiveUserIds(requested)
-  if (requireNodes && nodes.length === 0) throw createError('TEMPLATE_INVALID')
   callTemplateDomain(() => validateTemplateForEnable({}, nodes, active))
   return active
 }

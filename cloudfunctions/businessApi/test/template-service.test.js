@@ -90,6 +90,46 @@ test('template creation assigns stable keys and creates a draft', async () => {
   assert.equal(harness.audits[0].action, 'CREATE_TEMPLATE')
 })
 
+test('draft template creation accepts an explicit empty node list', async () => {
+  const harness = createTemplateHarness()
+  const created = await harness.service.createTemplate({
+    actor: harness.admin,
+    input: validDefinition({ nodes: [] })
+  })
+
+  assert.equal(created.template.status, 'draft')
+  assert.equal(created.template.nodeCount, 0)
+  assert.deepEqual(created.nodes, [])
+})
+
+test('draft template creation accepts an omitted node list', async () => {
+  const harness = createTemplateHarness()
+  const created = await harness.service.createTemplate({
+    actor: harness.admin,
+    input: { name: '空模板', description: '' }
+  })
+
+  assert.equal(created.template.status, 'draft')
+  assert.equal(created.template.nodeCount, 0)
+  assert.deepEqual(created.nodes, [])
+})
+
+test('draft template update accepts an empty node list', async () => {
+  const harness = createTemplateHarness({
+    templates: [{ _id: 't1', name: '旧模板', description: '', status: 'draft', version: 1, nodeCount: 1 }],
+    nodes: [storedNode()]
+  })
+  const updated = await harness.service.updateTemplate({
+    actor: harness.admin,
+    templateId: 't1',
+    expectedVersion: 1,
+    input: validDefinition({ nodes: [] })
+  })
+
+  assert.equal(updated.template.nodeCount, 0)
+  assert.deepEqual(updated.nodes, [])
+})
+
 test('inactive processors block template creation with the processor error code', async () => {
   const harness = createTemplateHarness({ users: [
     { _id: 'account-1', status: 'disabled' }, { _id: 'account-2', status: 'active' }
