@@ -4,7 +4,7 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 
 ## Verified state
 
-- 2026-08-11 节点独立审核流程的五部分设计已由项目所有者逐段确认。新版模板节点将分别配置处理人和审核人，支持或签、会签、独立处理/审核 SLA、不可变审核轮次和确定性唯一投票；处理人不再直接完成节点，只有审核通过才自动激活下一节点或完成业务线。完整中文书面设计为 `docs/superpowers/specs/2026-08-11-node-review-workflow-design.md`，架构决策记录为 `docs/memory/decisions/ADR-0005-node-review-rounds-and-votes.md`。当前仅完成设计文档，代码、集合、索引、部署和真实小程序验收均未开始；下一步是项目所有者复核书面设计，批准后再编写实施计划。
+- 2026-08-11 节点独立审核流程的五部分设计及书面版本均已由项目所有者确认。新版模板节点将分别配置处理人和审核人，支持或签、会签、独立处理/审核 SLA、不可变审核轮次和确定性唯一投票；处理人不再直接完成节点，只有审核通过才自动激活下一节点或完成业务线。完整中文设计为 `docs/superpowers/specs/2026-08-11-node-review-workflow-design.md`，架构决策为 `docs/memory/decisions/ADR-0005-node-review-rounds-and-votes.md`，实施计划为 `docs/superpowers/plans/2026-08-11-node-review-workflow.md`。当前只完成设计与计划，代码、集合、索引、部署和真实小程序验收均未开始；下一步由项目所有者选择逐任务代理执行或当前会话分批执行。
 
 - 2026-08-10 真实 CloudBase 部署验收已推进到小程序编译门禁。操作员已脱敏确认相关集合备份、隔离旧测试业务清理、新版集合、客户端不可直读写权限、两个唯一索引及全部必需组合索引已完成；保留审计记录，未记录任何业务编号、身份值或凭证内容。操作期间曾从 `main` 根目录上传旧版 `businessApi`，在发现正确隔离工作区前未继续验收，随后已由 `codex/template-node-fields` 待发布工作区重新覆盖部署并确认原环境变量仍有效。`evidenceRetention` 已上传，入口为 `index.main`、内存 256 MB；目标免费开发环境实际只允许 1—60 秒超时，已按 60 秒保存。当前控制台以内联 JSON 管理触发器且无独立停用开关，已保持 `triggers` 空数组，因此定时清理尚未启用。
 - 正确隔离工作区首次微信开发者工具编译暴露了模板列表的 WXML 组合指令缺陷：循环卡片在同一元素上同时使用 `wx:else` 和 `wx:for`，微信编译器报“`wx:if not found`”。新回归检查先在原页面上精确失败，最小修复改为外层 `<block wx:else>` 与内层卡片 `wx:for`；专项 WXML 检查 2/2 和模板业务客户端测试 12/12 通过。微信开发者工具重新编译仍待操作员验收，不得标记为通过。
@@ -43,6 +43,17 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-11 制定节点独立审核流程实施计划：
+
+| 命令或边界 | 结果 |
+|---|---|
+| 计划结构自检 | 通过：11 个任务、55 个测试驱动步骤、106 个成对代码围栏；覆盖角色分离、或签/会签、处理与审核双时限、不可变轮次和投票、返工、自动流转、通知中心、旧业务兼容、60 天凭证保留、部署与回退。 |
+| 法定节假日接口只读核对 | 通过：2026 全年接口响应顶层为 `code/year/count/data`，每日记录包含 `date` 和 `is_holiday`；计划据此定义完整校验、当前年与下一年同步、旧缓存保护和待计算截止时间补算。 |
+| 未完成标记扫描 | 通过：计划不存在未决占位词或省略实现标记。 |
+| `git diff --check` | 通过：已跟踪文档无空白错误；未跟踪计划以差异检查模式读取时仅返回“存在新增内容”的标准状态，未报告空白错误。 |
+| 项目记忆校验 | 通过。 |
+| 应用测试 | 未执行：本次只确认设计状态并新增实施计划，不修改可执行代码。 |
 
 2026-08-11 执行节点独立审核流程设计记录：
 
