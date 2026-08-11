@@ -90,6 +90,58 @@ test('template creation assigns stable keys and creates a draft', async () => {
   assert.equal(harness.audits[0].action, 'CREATE_TEMPLATE')
 })
 
+test('template persistence passes sorted processor and reviewer participants to the repository', async () => {
+  const harness = createTemplateHarness({ users: [
+    { _id: 'processor-z', status: 'active' }, { _id: 'reviewer-a', status: 'active' }
+  ] })
+  const node = {
+    ...validDefinition().nodes[0],
+    processorUserIds: ['processor-z'],
+    reviewerUserIds: ['reviewer-a']
+  }
+
+  await harness.service.createTemplate({
+    actor: harness.admin,
+    input: validDefinition({ nodes: [node] })
+  })
+
+  assert.deepEqual(harness.audits[0].participantUserIds, ['processor-z', 'reviewer-a'])
+})
+
+test('template updates pass processor and reviewer participants to the repository', async () => {
+  const harness = createTemplateHarness({
+    templates: [{ _id: 't1', name: '模板', status: 'draft', version: 1, nodeCount: 1 }],
+    nodes: [storedNode()],
+    users: [{ _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }]
+  })
+
+  await harness.service.updateTemplate({
+    actor: harness.admin,
+    templateId: 't1',
+    expectedVersion: 1,
+    input: validDefinition({ nodes: [storedNode()] })
+  })
+
+  assert.deepEqual(harness.audits[0].participantUserIds, ['account-1', 'account-2'])
+})
+
+test('template enablement passes processor and reviewer participants to the repository', async () => {
+  const harness = createTemplateHarness({
+    templates: [{ _id: 't1', name: '模板', status: 'draft', version: 1, nodeCount: 1 }],
+    nodes: [storedNode()],
+    users: [{ _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }]
+  })
+
+  await harness.service.changeTemplateStatus({
+    actor: harness.admin,
+    templateId: 't1',
+    expectedVersion: 1,
+    status: 'enabled'
+  })
+
+  assert.deepEqual(harness.audits[0].participantUserIds, ['account-1', 'account-2'])
+})
+
 test('draft template creation accepts an explicit empty node list', async () => {
   const harness = createTemplateHarness()
   const created = await harness.service.createTemplate({
@@ -329,6 +381,32 @@ test('ordinary listings do not advertise legacy enabled templates that exceed th
     }],
     nodes,
     users: nodes.map((node, index) => ({ _id: `account-${index}`, status: 'active' }))
+  })
+
+  const result = await harness.service.listEnabledTemplates({ actor: harness.user })
+  assert.equal(result.items[0].available, false)
+  assert.equal(result.items[0].unavailableReason, 'TEMPLATE_LIMIT_EXCEEDED')
+})
+
+test('ordinary listings hide review templates that exceed the future participant snapshot budget', async () => {
+  const nodes = Array.from({ length: 48 }, (_, index) => storedNode('t1', {
+    _id: `t1-node-${index}`,
+    nodeKey: `node-${index}`,
+    sequence: index,
+    processorUserIds: [`processor-${index % 46}`],
+    reviewerUserIds: ['reviewer-shared']
+  }))
+  const userIds = [...new Set(nodes.flatMap(node => [
+    ...node.processorUserIds,
+    ...node.reviewerUserIds
+  ]))]
+  const harness = createTemplateHarness({
+    templates: [{
+      _id: 't1', name: '审核预算边界模板', description: '', status: 'enabled', version: 3,
+      nodeCount: 48
+    }],
+    nodes,
+    users: userIds.map(_id => ({ _id, status: 'active' }))
   })
 
   const result = await harness.service.listEnabledTemplates({ actor: harness.user })

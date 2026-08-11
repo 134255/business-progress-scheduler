@@ -107,7 +107,7 @@ test('definition reads paginate beyond the CloudBase one-hundred-document query 
   assert.equal(fetched.nodes.at(-1)._id, 'n-100')
 })
 
-test('active assignee reads use account document ids and return only active users', async () => {
+test('active participant reads use account document ids and return only active users', async () => {
   const { fake, repository } = createRepositoryHarness({
     users: [
       { _id: 'account-1', status: 'active', openid: 'must-not-be-required' },
@@ -119,28 +119,31 @@ test('active assignee reads use account document ids and return only active user
   assert.deepEqual(fake.transactionQueries, [])
 })
 
-test('creation revalidates active assignee documents inside the write transaction', async () => {
+test('creation revalidates active participant documents inside the write transaction', async () => {
   const { fake, repository } = createRepositoryHarness({
-    users: [{ _id: 'account-1', status: 'active' }]
+    users: [
+      { _id: 'processor-a', status: 'active' },
+      { _id: 'reviewer-a', status: 'active' }
+    ]
   })
-  fake.beforeNextTransaction(() => fake.replace('users', 'account-1', { status: 'disabled' }))
+  fake.beforeNextTransaction(() => fake.replace('users', 'reviewer-a', { status: 'disabled' }))
 
   await assert.rejects(repository.createTemplateDefinition({
     actor: { _id: 'admin-1' },
-    assigneeUserIds: ['account-1'],
+    participantUserIds: ['processor-a', 'reviewer-a'],
     definition: {
       template: { name: '模板', status: 'draft', nodeCount: 1 },
       nodes: [node()]
     },
     audit: { action: 'CREATE_TEMPLATE', resultCode: 'TEMPLATE_CREATED' }
-  }), error => error.code === 'ASSIGNEE_INACTIVE')
+  }), error => error.code === 'PARTICIPANT_INACTIVE')
 
   assert.equal(fake.documents('templates').length, 0)
   assert.equal(fake.documents('template_nodes').length, 0)
   assert.equal(fake.documents('audit_logs').length, 0)
 })
 
-test('definition updates revalidate active assignee documents inside the mutation transaction', async () => {
+test('definition updates revalidate active participant documents inside the mutation transaction', async () => {
   const { fake, repository } = createRepositoryHarness({
     users: [{ _id: 'account-1', status: 'active' }],
     templates: [{ _id: 't1', name: '旧模板', status: 'disabled', version: 2, nodeCount: 1 }],
@@ -153,33 +156,36 @@ test('definition updates revalidate active assignee documents inside the mutatio
     templateId: 't1',
     expectedVersion: 2,
     expectedStatus: 'disabled',
-    assigneeUserIds: ['account-1'],
+    participantUserIds: ['account-1'],
     definition: { template: { name: '新版模板' }, nodes: [node({ _id: 'n1' })] },
     audit: { action: 'UPDATE_TEMPLATE', resultCode: 'TEMPLATE_UPDATED' }
-  }), error => error.code === 'ASSIGNEE_INACTIVE')
+  }), error => error.code === 'PARTICIPANT_INACTIVE')
 
   assert.equal(fake.documents('templates')[0].name, '旧模板')
   assert.equal(fake.documents('templates')[0].version, 2)
   assert.equal(fake.documents('audit_logs').length, 0)
 })
 
-test('enablement revalidates active assignee documents inside the status transaction', async () => {
+test('enablement revalidates active participant documents inside the status transaction', async () => {
   const { fake, repository } = createRepositoryHarness({
-    users: [{ _id: 'account-1', status: 'active' }],
+    users: [
+      { _id: 'processor-a', status: 'active' },
+      { _id: 'reviewer-a', status: 'active' }
+    ],
     templates: [{ _id: 't1', name: '模板', status: 'disabled', version: 2, nodeCount: 1 }],
     template_nodes: [{ _id: 'n1', templateId: 't1', ...node(), version: 2 }]
   })
-  fake.beforeNextTransaction(() => fake.replace('users', 'account-1', { status: 'disabled' }))
+  fake.beforeNextTransaction(() => fake.replace('users', 'reviewer-a', { status: 'disabled' }))
 
   await assert.rejects(repository.mutateTemplateDefinition({
     actor: { _id: 'admin-1' },
     templateId: 't1',
     expectedVersion: 2,
     expectedStatus: 'disabled',
-    assigneeUserIds: ['account-1'],
+    participantUserIds: ['processor-a', 'reviewer-a'],
     definition: { template: { status: 'enabled' } },
     audit: { action: 'ENABLE_TEMPLATE', resultCode: 'TEMPLATE_ENABLED' }
-  }), error => error.code === 'ASSIGNEE_INACTIVE')
+  }), error => error.code === 'PARTICIPANT_INACTIVE')
 
   assert.equal(fake.documents('templates')[0].status, 'disabled')
   assert.equal(fake.documents('templates')[0].version, 2)
@@ -240,7 +246,34 @@ test('a forty-nine-to-forty-nine replacement is rejected before its transaction 
   assert.equal(fake.documents('template_nodes').length, 49)
 })
 
-test('transaction-budget validation counts fixed assignee reads and exposes the documented limit', async () => {
+test('transaction-budget validation permits exactly one hundred operations with one participant', async () => {
+  const existingNodes = Array.from({ length: 48 }, (_, index) => ({
+    _id: `n-${index}`,
+    templateId: 't1',
+    ...node({ nodeKey: `node-${index}`, sequence: index }),
+    version: 1
+  }))
+  const { fake, repository } = createRepositoryHarness({
+    users: [{ _id: 'account-1', status: 'active' }],
+    templates: [{ _id: 't1', name: '模板', status: 'disabled', version: 1, nodeCount: 48 }],
+    template_nodes: existingNodes
+  })
+
+  const result = await repository.mutateTemplateDefinition({
+    actor: { _id: 'admin-1' },
+    templateId: 't1',
+    expectedVersion: 1,
+    expectedStatus: 'disabled',
+    participantUserIds: ['account-1'],
+    definition: { template: { name: '新版' }, nodes: existingNodes },
+    audit: { action: 'UPDATE_TEMPLATE', resultCode: 'TEMPLATE_UPDATED' }
+  })
+
+  assert.equal(result.template.version, 2)
+  assert.equal(fake.transactionRuns[0].operations, 100)
+})
+
+test('transaction-budget validation counts fixed participant reads and exposes the documented limit', async () => {
   const existingNodes = Array.from({ length: 48 }, (_, index) => ({
     _id: `n-${index}`,
     templateId: 't1',
@@ -261,7 +294,7 @@ test('transaction-budget validation counts fixed assignee reads and exposes the 
     templateId: 't1',
     expectedVersion: 1,
     expectedStatus: 'disabled',
-    assigneeUserIds: ['account-1', 'account-2'],
+    participantUserIds: ['account-1', 'account-2'],
     definition: { template: { name: '新版' }, nodes: existingNodes },
     audit: { action: 'UPDATE_TEMPLATE', resultCode: 'TEMPLATE_UPDATED' }
   }), error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' && /at most 48 nodes/.test(error.message))

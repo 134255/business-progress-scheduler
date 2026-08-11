@@ -71,8 +71,15 @@ function requireNodeBudget(nodes) {
   return nodes
 }
 
-function requireSnapshotBudget(nodes) {
-  if (!canCreateBusinessSnapshot(nodes)) {
+function nodesForSnapshotBudget(nodes, participantUserIds) {
+  return nodes.map((node, index) => ({
+    ...node,
+    assigneeUserIds: index === 0 ? participantUserIds : []
+  }))
+}
+
+function requireSnapshotBudget(nodes, participantUserIds) {
+  if (!canCreateBusinessSnapshot(nodesForSnapshotBudget(nodes, participantUserIds))) {
     throw createError('TEMPLATE_LIMIT_EXCEEDED', SNAPSHOT_LIMIT_MESSAGE)
   }
 }
@@ -149,7 +156,7 @@ function assignUpdateKeys(current, inputNodes, keyFactory) {
 
 function allParticipantUserIds(nodes) {
   if (Array.isArray(nodes) && nodes.length === 0) return []
-  return callTemplateDomain(() => collectTemplateParticipantUserIds(nodes))
+  return callTemplateDomain(() => collectTemplateParticipantUserIds(nodes)).sort()
 }
 
 async function assertActiveParticipants(repository, nodes, { requireNodes = false } = {}) {
@@ -157,10 +164,10 @@ async function assertActiveParticipants(repository, nodes, { requireNodes = fals
     if (requireNodes) throw createError('TEMPLATE_INVALID')
     return []
   }
-  const requested = allParticipantUserIds(nodes)
-  const active = await repository.listActiveUserIds(requested)
+  const participantUserIds = allParticipantUserIds(nodes)
+  const active = await repository.listActiveUserIds(participantUserIds)
   callTemplateDomain(() => validateTemplateForEnable({}, nodes, active))
-  return active
+  return participantUserIds
 }
 
 function requireCurrent(current) {
@@ -217,11 +224,11 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     requireSuperAdmin(actor)
     const metadata = normalizeMetadata(input)
     const nodes = assignCreateKeys(requireNodeBudget(input.nodes === undefined ? [] : input.nodes), keyFactory)
-    await assertActiveParticipants(repository, nodes)
+    const participantUserIds = await assertActiveParticipants(repository, nodes)
     const at = clock()
     return repository.createTemplateDefinition({
       actor,
-      assigneeUserIds: allParticipantUserIds(nodes),
+      participantUserIds,
       definition: {
         template: {
           ...metadata,
@@ -249,13 +256,13 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       requireNodeBudget(input.nodes === undefined ? [] : input.nodes),
       keyFactory
     )
-    await assertActiveParticipants(repository, nodes)
+    const participantUserIds = await assertActiveParticipants(repository, nodes)
     return repository.mutateTemplateDefinition({
       actor,
       templateId: current.template._id,
       expectedVersion,
       expectedStatus: current.template.status,
-      assigneeUserIds: allParticipantUserIds(nodes),
+      participantUserIds,
       definition: {
         template: { ...metadata, nodeCount: nodes.length, updatedBy: actor._id, updatedAt: clock() },
         nodes
@@ -276,22 +283,31 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     if (!validTransition) throw createError('INVALID_STATUS')
     if (status === 'enabled') {
       requireNodeBudget(current.nodes)
-      await assertActiveParticipants(repository, current.nodes, { requireNodes: true })
-      requireSnapshotBudget(current.nodes)
+      const participantUserIds = await assertActiveParticipants(repository, current.nodes, { requireNodes: true })
+      requireSnapshotBudget(current.nodes, participantUserIds)
+      return repository.mutateTemplateDefinition({
+        actor,
+        templateId: current.template._id,
+        expectedVersion,
+        expectedStatus: currentStatus,
+        participantUserIds,
+        definition: {
+          template: { status, enabledAt: clock(), updatedBy: actor._id, updatedAt: clock() }
+        },
+        audit: { action: 'ENABLE_TEMPLATE', resultCode: 'TEMPLATE_ENABLED' }
+      })
     }
-    const timestampField = status === 'enabled' ? 'enabledAt' : 'disabledAt'
     return repository.mutateTemplateDefinition({
       actor,
       templateId: current.template._id,
       expectedVersion,
       expectedStatus: currentStatus,
-      ...(status === 'enabled' ? { assigneeUserIds: allParticipantUserIds(current.nodes) } : {}),
       definition: {
-        template: { status, [timestampField]: clock(), updatedBy: actor._id, updatedAt: clock() }
+        template: { status, disabledAt: clock(), updatedBy: actor._id, updatedAt: clock() }
       },
       audit: {
-        action: status === 'enabled' ? 'ENABLE_TEMPLATE' : 'DISABLE_TEMPLATE',
-        resultCode: status === 'enabled' ? 'TEMPLATE_ENABLED' : 'TEMPLATE_DISABLED'
+        action: 'DISABLE_TEMPLATE',
+        resultCode: 'TEMPLATE_DISABLED'
       }
     })
   }
@@ -327,7 +343,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
         return { definition, participantUserIds: null }
       }
     })
-    const requested = [...new Set(definitionsWithParticipants.flatMap(item => item.participantUserIds || []))]
+    const requested = [...new Set(definitionsWithParticipants.flatMap(item => item.participantUserIds || []))].sort()
     const active = new Set(await repository.listActiveUserIds(requested))
     return {
       items: definitionsWithParticipants.map(({ definition, participantUserIds }) => {
@@ -335,7 +351,9 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
         try {
           if (!participantUserIds) throw createError('TEMPLATE_INVALID')
           validateTemplateForEnable(definition.template, definition.nodes, [...active])
-          if (!canCreateBusinessSnapshot(definition.nodes)) unavailableReason = 'TEMPLATE_LIMIT_EXCEEDED'
+          if (!canCreateBusinessSnapshot(nodesForSnapshotBudget(definition.nodes, participantUserIds))) {
+            unavailableReason = 'TEMPLATE_LIMIT_EXCEEDED'
+          }
         } catch (error) {
           unavailableReason = error.code === 'ASSIGNEE_INACTIVE'
             ? 'ASSIGNEE_INACTIVE'

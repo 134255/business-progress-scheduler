@@ -40,7 +40,7 @@ function createTemplateHarness({ templates = [], nodes = [], users = [] } = {}) 
         .filter(user => requested.has(user._id) && user.status === 'active')
         .map(user => user._id)
     },
-    async createTemplateDefinition({ actor, definition, audit }) {
+    async createTemplateDefinition({ actor, participantUserIds = [], definition, audit }) {
       const templateId = `template-${nextTemplateId++}`
       const stored = {
         template: { _id: templateId, ...clone(definition.template), version: 1 },
@@ -52,10 +52,10 @@ function createTemplateHarness({ templates = [], nodes = [], users = [] } = {}) 
         }))
       }
       definitions.set(templateId, stored)
-      audits.push({ actorId: actor._id, targetId: templateId, ...clone(audit) })
+      audits.push({ actorId: actor._id, targetId: templateId, participantUserIds: clone(participantUserIds), ...clone(audit) })
       return clone(stored)
     },
-    async mutateTemplateDefinition({ actor, templateId, expectedVersion, expectedStatus, definition, audit }) {
+    async mutateTemplateDefinition({ actor, templateId, expectedVersion, expectedStatus, participantUserIds = [], definition, audit }) {
       const current = definitions.get(templateId)
       if (!current || current.template.status === 'deleted') throw createError('NOT_FOUND')
       if (current.template.version !== expectedVersion || current.template.status !== expectedStatus) {
@@ -74,7 +74,7 @@ function createTemplateHarness({ templates = [], nodes = [], users = [] } = {}) 
           }))
       }
       definitions.set(templateId, stored)
-      audits.push({ actorId: actor._id, targetId: templateId, ...clone(audit) })
+      audits.push({ actorId: actor._id, targetId: templateId, participantUserIds: clone(participantUserIds), ...clone(audit) })
       return clone(stored)
     }
   }

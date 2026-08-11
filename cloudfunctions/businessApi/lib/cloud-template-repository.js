@@ -102,10 +102,10 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     return result
   }
 
-  async function assertActiveAssigneeDocuments(database, userIds) {
+  async function assertActiveParticipantDocuments(database, userIds) {
     for (const userId of userIds) {
       const user = await readDocument(database, COLLECTIONS.users, userId)
-      if (!user || user.status !== 'active') throw createError('ASSIGNEE_INACTIVE')
+      if (!user || user.status !== 'active') throw createError('PARTICIPANT_INACTIVE')
     }
   }
 
@@ -155,17 +155,17 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     return { _id: auditId, ...stored }
   }
 
-  async function createTemplateDefinition({ actor, assigneeUserIds = [], definition, audit }) {
-    const assigneeIds = [...new Set(assigneeUserIds)].sort()
+  async function createTemplateDefinition({ actor, participantUserIds = [], definition, audit }) {
+    const participantIds = [...new Set(participantUserIds)].sort()
     if (definition.nodes.length > MAX_TEMPLATE_NODES ||
-        definition.nodes.length + assigneeIds.length + 2 > MAX_TRANSACTION_OPERATIONS) {
+        definition.nodes.length + participantIds.length + 2 > MAX_TRANSACTION_OPERATIONS) {
       throw createTemplateLimitError()
     }
     const templateId = idFactory('template')
     const preparedNodes = definition.nodes.map(node => ({ id: idFactory('template_node'), node }))
     const auditId = idFactory('audit')
     return db.runTransaction(async transaction => {
-      await assertActiveAssigneeDocuments(transaction, assigneeIds)
+      await assertActiveParticipantDocuments(transaction, participantIds)
       const template = {
         ...timestampedTemplate(definition.template, { create: true }),
         version: 1
@@ -188,7 +188,7 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     templateId,
     expectedVersion,
     expectedStatus,
-    assigneeUserIds,
+    participantUserIds,
     definition,
     audit
   }) {
@@ -201,10 +201,10 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
         const existing = initialByKey.get(node.nodeKey)
         return { id: existing ? existing._id : idFactory('template_node'), node, existing }
       })
-    const assigneeIds = assigneeUserIds === undefined ? [] : [...new Set(assigneeUserIds)].sort()
+    const participantIds = participantUserIds === undefined ? [] : [...new Set(participantUserIds)].sort()
     const definitionOperations = preparedNodes === undefined ? 0 : initial.nodes.length + preparedNodes.length
     if ((preparedNodes !== undefined && preparedNodes.length > MAX_TEMPLATE_NODES) ||
-        definitionOperations + assigneeIds.length + 3 > MAX_TRANSACTION_OPERATIONS) {
+        definitionOperations + participantIds.length + 3 > MAX_TRANSACTION_OPERATIONS) {
       throw createTemplateLimitError()
     }
     const auditId = idFactory('audit')
@@ -217,7 +217,7 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
           current.status !== expectedStatus) {
         throw createError('VERSION_CONFLICT')
       }
-      await assertActiveAssigneeDocuments(transaction, assigneeIds)
+      await assertActiveParticipantDocuments(transaction, participantIds)
       const version = current.version + 1
       const changes = { ...timestampedTemplate(definition.template), version }
       const updated = await transaction.collection(COLLECTIONS.templates).doc(templateId).update({ data: changes })
