@@ -14,6 +14,7 @@ const CLAIM_LIFETIME_MS = 15 * 60 * 1000
 const RETENTION_MS = 60 * 24 * 60 * 60 * 1000
 const DEFAULT_CHUNK_SIZE = 40
 const QUERY_PAGE_SIZE = 100
+const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 function createError(code, extra = {}) {
   const error = new Error(code)
@@ -50,8 +51,24 @@ function hasAccountRelationship(value) {
     .some(key => /UserIds?$/.test(key)))
 }
 
+function exactAccountIds(value, { nonEmpty = false } = {}) {
+  if (!Array.isArray(value) || nonEmpty && value.length === 0 ||
+      value.some(id => typeof id !== 'string' || !DOCUMENT_ID.test(id)) ||
+      new Set(value).size !== value.length) return null
+  return value
+}
+
 function accountSchema(line, node) {
-  return hasAccountRelationship(line) || hasAccountRelationship(node)
+  if (!hasAccountRelationship(line) && !hasAccountRelationship(node)) return false
+  const managers = exactAccountIds(line && line.managerUserIds, { nonEmpty: true })
+  const members = exactAccountIds(line && line.memberUserIds, { nonEmpty: true })
+  if (!managers || !members) return false
+  if (node && node.workflowMode === 'review') {
+    const processors = exactAccountIds(node.processorUserIds, { nonEmpty: true })
+    const reviewers = exactAccountIds(node.reviewerUserIds, { nonEmpty: true })
+    return Boolean(processors && reviewers && !processors.some(id => reviewers.includes(id)))
+  }
+  return Boolean(exactAccountIds(node && node.assigneeUserIds, { nonEmpty: true }))
 }
 
 function isAccountMember(line, actorId) {
@@ -68,9 +85,8 @@ function isCurrentNode(line, node) {
 }
 
 function processorIds(node) {
-  return node && node.workflowMode === 'review'
-    ? membership(node.processorUserIds)
-    : membership(node && node.assigneeUserIds)
+  const ids = node && node.workflowMode === 'review' ? node.processorUserIds : node && node.assigneeUserIds
+  return exactAccountIds(ids, { nonEmpty: true }) || []
 }
 
 function parseDeadline(value) {
@@ -202,7 +218,31 @@ function createCloudFeedbackRepository({
     if (expectedVersion && node.version !== input.expectedNodeVersion) throw createError('VERSION_CONFLICT')
   }
 
-  function assertPublishedRetry(actor, line, node, reservation) {
+  function assertReviewProcessingState(line, node, input, reservation = null) {
+    if (!node || node.workflowMode !== 'review') return
+    if (!line || line.status !== 'active' || !isCurrentNode(line, node) ||
+        !ACTIVE_NODE_STATUSES.has(node.status)) throw createError('NODE_NOT_ACTIVE')
+    if (!input || !Number.isSafeInteger(input.expectedNodeVersion) || input.expectedNodeVersion < 1 ||
+        !['save_progress', 'mark_blocked'].includes(input.action) ||
+        !safeInteger(node.processingRoundNumber, { minimum: 1 })) {
+      throw createError('VERSION_CONFLICT')
+    }
+    if (!reservation) {
+      if (node.version !== input.expectedNodeVersion) throw createError('VERSION_CONFLICT')
+      return
+    }
+    if (!safeInteger(reservation.revision, { minimum: 1 }) ||
+        reservation.expectedNodeVersion !== input.expectedNodeVersion ||
+        reservation.processingRoundNumber !== node.processingRoundNumber ||
+        reservation.action !== input.action || reservation.status !== node.status ||
+        node.latestFeedbackId !== reservation._id || node.latestFeedbackRevision !== reservation.revision ||
+        input.expectedNodeVersion === Number.MAX_SAFE_INTEGER ||
+        node.version !== input.expectedNodeVersion + 1) {
+      throw createError('VERSION_CONFLICT')
+    }
+  }
+
+  function assertPublishedRetry(actor, line, node, reservation, value) {
     if (!actor || actor.status !== 'active') throw createError('FORBIDDEN')
     if (!line || line.status === 'creating' || !node || node.businessLineId !== line._id ||
         reservation.businessLineId !== line._id || reservation.nodeId !== node._id) {
@@ -210,6 +250,7 @@ function createCloudFeedbackRepository({
     }
     if (!accountSchema(line, node) || !isAccountMember(line, actor._id) ||
         !processorIds(node).includes(actor._id)) throw createError('FORBIDDEN')
+    assertReviewProcessingState(line, node, value && value.input, reservation)
   }
 
   function assertCurrentActorAuthorization(actor, line, node) {
@@ -221,12 +262,13 @@ function createCloudFeedbackRepository({
         !processorIds(node).includes(actor._id)) throw createError('FORBIDDEN')
   }
 
-  function assertContentionPollAuthorization(actor, line, node) {
+  function assertContentionPollAuthorization(actor, line, node, input) {
     if (!actor || actor.status !== 'active' || !line || line.status === 'creating' || !node ||
         node.businessLineId !== line._id || !accountSchema(line, node) ||
         !isAccountMember(line, actor._id) || !processorIds(node).includes(actor._id)) {
       throw createError('FORBIDDEN')
     }
+    assertReviewProcessingState(line, node, input)
   }
 
   function assertExactReservationRelationship(reservation, { feedbackId, businessLineId, nodeId }) {
@@ -237,7 +279,7 @@ function createCloudFeedbackRepository({
   }
 
   function assertExactPublishedRetry(current, reservation, id, value) {
-    assertPublishedRetry(current.actor, current.line, current.node, reservation)
+    assertPublishedRetry(current.actor, current.line, current.node, reservation, value)
     if (!reservation || reservation.publishState !== 'published' || reservation._id !== id.feedbackId ||
         reservation.requestHash !== id.requestHash || reservation.inputHash !== id.inputHash ||
         reservation.requestFingerprint !== id.requestFingerprint || reservation.submittedBy !== value.actor._id) {
@@ -311,7 +353,7 @@ function createCloudFeedbackRepository({
       }
       const existing = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
       if (!existing || existing.publishState !== 'published') return null
-      assertPublishedRetry(current.actor, current.line, current.node, existing)
+      assertPublishedRetry(current.actor, current.line, current.node, existing, value)
       if (existing.requestHash !== requestHash || existing.requestFingerprint !== requestFingerprint ||
           existing.submittedBy !== actor._id) {
         throw createError('VERSION_CONFLICT')
@@ -334,7 +376,7 @@ function createCloudFeedbackRepository({
           nodeId: value.input.nodeId
         })
         if (existing.publishState === 'published') {
-          assertPublishedRetry(current.actor, current.line, current.node, existing)
+          assertPublishedRetry(current.actor, current.line, current.node, existing, value)
         }
         if (existing.requestHash !== id.requestHash || existing.inputHash !== id.inputHash ||
             existing.requestFingerprint !== id.requestFingerprint ||
@@ -485,9 +527,15 @@ function createCloudFeedbackRepository({
       const ids = value.input.evidenceIds.slice(reservation.claimedCount, reservation.claimedCount + claimChunkSize)
       if (reservation.claimedCount < reservation.evidenceCount && ids.length === 0) throw createError('VERSION_CONFLICT')
       let claimedBytes = reservation.claimedBytes
-      for (const evidenceId of ids) {
+      for (const [chunkIndex, evidenceId] of ids.entries()) {
+        const feedbackEvidenceOrder = reservation.claimedCount + chunkIndex
         const evidence = await readDocument(transaction, COLLECTIONS.evidences, evidenceId)
         validateEvidence(evidence, value, reservation, at)
+        if (evidence.feedbackId === id.feedbackId &&
+            Object.hasOwn(evidence, 'feedbackEvidenceOrder') &&
+            evidence.feedbackEvidenceOrder !== feedbackEvidenceOrder) {
+          throw createError('VERSION_CONFLICT')
+        }
         if (evidence.feedbackId !== id.feedbackId) {
           if (evidence.size > FEEDBACK_TOTAL_LIMIT - claimedBytes) throw createError('FEEDBACK_TOTAL_TOO_LARGE')
           claimedBytes += evidence.size
@@ -498,6 +546,7 @@ function createCloudFeedbackRepository({
           data: {
             feedbackId: id.feedbackId,
             feedbackRevision: reservation.plannedRevision,
+            feedbackEvidenceOrder,
             attachmentState: 'attached',
             attachmentClaimExpiresAt: reservation.claimExpiresAt,
             attachmentPreviousOrphanExpiresAt: evidence.feedbackId === id.feedbackId
@@ -637,12 +686,13 @@ function createCloudFeedbackRepository({
     })
   }
 
-  async function waitForWinner(error, { actorId, businessLineId, nodeId }) {
+  async function waitForWinner(error, value) {
+    const { businessLineId, nodeId } = value.input
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const at = now()
       const outcome = await db.runTransaction(async transaction => {
-        const current = await readSubmissionDocuments(transaction, actorId, { businessLineId, nodeId })
-        assertContentionPollAuthorization(current.actor, current.line, current.node)
+        const current = await readSubmissionDocuments(transaction, value.actor._id, { businessLineId, nodeId })
+        assertContentionPollAuthorization(current.actor, current.line, current.node, value.input)
         const winner = await readDocument(transaction, COLLECTIONS.feedback, error.winnerFeedbackId)
         if (current.node.feedbackClaimId !== error.winnerFeedbackId) return { type: 'retry' }
         if (winner) {
@@ -715,6 +765,7 @@ function createCloudFeedbackRepository({
           await transaction.collection(COLLECTIONS.evidences).doc(item._id).update({ data: {
             feedbackId: null,
             feedbackRevision: null,
+            feedbackEvidenceOrder: db.command.remove(),
             attachmentState: db.command.remove(),
             attachmentClaimExpiresAt: db.command.remove(),
             orphanExpiresAt: evidence.attachmentPreviousOrphanExpiresAt,
@@ -796,11 +847,7 @@ function createCloudFeedbackRepository({
           break
         } catch (error) {
           if (error.code !== 'NODE_COMMIT_IN_PROGRESS') throw error
-          const result = await waitForWinner(error, {
-            actorId: value.actor._id,
-            businessLineId: value.input.businessLineId,
-            nodeId: value.input.nodeId
-          })
+          const result = await waitForWinner(error, value)
           if (result === null) continue
         }
       }
@@ -881,10 +928,26 @@ function createCloudFeedbackRepository({
         throw createError('EVIDENCE_NOT_ATTACHABLE')
       }
       if (retention.effectivePurgeDueAt && retention.effectivePurgeDueAt.getTime() <= at) continue
-      accepted.push({ evidence, revision: ownerFeedback.revision })
+      const order = safeInteger(evidence.feedbackEvidenceOrder)
+        ? evidence.feedbackEvidenceOrder
+        : null
+      accepted.push({ evidence, revision: ownerFeedback.revision, order })
     }
-    accepted.sort((left, right) => left.revision - right.revision ||
-      String(left.evidence._id).localeCompare(String(right.evidence._id)))
+    const orders = new Set()
+    for (const item of accepted) {
+      if (item.order === null) continue
+      const key = `${item.evidence.feedbackId}\0${item.order}`
+      if (orders.has(key)) throw createError('EVIDENCE_NOT_ATTACHABLE')
+      orders.add(key)
+    }
+    accepted.sort((left, right) => {
+      const revisionDifference = left.revision - right.revision
+      if (revisionDifference) return revisionDifference
+      if (left.order !== null && right.order !== null) return left.order - right.order
+      if (left.order !== null) return -1
+      if (right.order !== null) return 1
+      return String(left.evidence._id).localeCompare(String(right.evidence._id))
+    })
     const evidenceIds = []
     const seen = new Set()
     let evidenceTotalBytes = 0
@@ -918,7 +981,10 @@ function createCloudFeedbackRepository({
       if (!line || line.status === 'creating') throw createError('NOT_FOUND')
       const node = await readDocument(transaction, COLLECTIONS.nodes, nodeId)
       if (!node || node.businessLineId !== line._id) throw createError('NOT_FOUND')
-      const allowed = accountSchema(line, node) ? isAccountMember(line, currentActor._id) : isLegacyMember(line, currentActor)
+      const selectedAccountSchema = hasAccountRelationship(line) || hasAccountRelationship(node)
+      const allowed = selectedAccountSchema
+        ? accountSchema(line, node) && isAccountMember(line, currentActor._id)
+        : isLegacyMember(line, currentActor)
       if (!allowed) throw createError('FORBIDDEN')
       return { line, node, actor: currentActor }
     })

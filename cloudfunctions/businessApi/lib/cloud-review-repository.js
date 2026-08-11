@@ -155,6 +155,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     if (!round || round._id !== roundId || round.businessLineId !== value.input.businessLineId ||
         round.nodeId !== value.input.nodeId || round.status !== 'pending' ||
         round.requestKeyHash !== value.requestKeyHash || round.inputHash !== value.inputHash ||
+        round.draftHash !== value.draftHash ||
         round.submittedBy !== value.actor._id ||
         round.submittedNodeVersion !== value.input.expectedNodeVersion ||
         node.status !== 'pending_review' || node.activeReviewRoundId !== roundId ||
@@ -164,12 +165,49 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     }
   }
 
+  async function findReviewRoundRetry(value) {
+    if (!value || !value.actor || !value.input ||
+        typeof value.input.businessLineId !== 'string' || !DOCUMENT_ID.test(value.input.businessLineId) ||
+        typeof value.input.nodeId !== 'string' || !DOCUMENT_ID.test(value.input.nodeId) ||
+        !safeInteger(value.input.expectedNodeVersion, 1) ||
+        !HASH.test(value.requestKeyHash || '') || !HASH.test(value.inputHash || '')) {
+      throw createError('VALIDATION_ERROR')
+    }
+    return db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, 'users', value.actor._id)
+      const line = await readDocument(transaction, 'business_lines', value.input.businessLineId)
+      const node = await readDocument(transaction, 'business_nodes', value.input.nodeId)
+      assertBaseAuthorization(actor, line, node)
+      if (node.status !== 'pending_review') {
+        if (!ACTIVE_NODE_STATUSES.has(node.status) || node.version !== value.input.expectedNodeVersion ||
+            node.activeReviewRoundId !== undefined && node.activeReviewRoundId !== null) {
+          throw createError('VERSION_CONFLICT')
+        }
+        return null
+      }
+      if (typeof node.activeReviewRoundId !== 'string' || !DOCUMENT_ID.test(node.activeReviewRoundId)) {
+        throw createError('VERSION_CONFLICT')
+      }
+      const round = await readDocument(transaction, 'node_review_rounds', node.activeReviewRoundId)
+      if (!round || round.businessLineId !== line._id || round.nodeId !== node._id ||
+          round.status !== 'pending' || round.submittedBy !== actor._id ||
+          round.submittedNodeVersion !== value.input.expectedNodeVersion ||
+          round.lockedNodeVersion !== node.version ||
+          round.processingRoundNumber !== node.processingRoundNumber ||
+          round.requestKeyHash !== value.requestKeyHash || round.inputHash !== value.inputHash) {
+        throw createError('VERSION_CONFLICT')
+      }
+      return publicResult(round)
+    })
+  }
+
   async function createReviewRound(value) {
     if (!value || !value.actor || !value.input || !value.draft ||
         typeof value.input.businessLineId !== 'string' || !DOCUMENT_ID.test(value.input.businessLineId) ||
         typeof value.input.nodeId !== 'string' || !DOCUMENT_ID.test(value.input.nodeId) ||
         !safeInteger(value.input.expectedNodeVersion, 1) ||
-        !HASH.test(value.requestKeyHash || '') || !HASH.test(value.inputHash || '')) {
+        !HASH.test(value.requestKeyHash || '') || !HASH.test(value.inputHash || '') ||
+        !HASH.test(value.draftHash || '')) {
       throw createError('VALIDATION_ERROR')
     }
     const roundId = `review-${value.draft.feedbackId}`
@@ -214,6 +252,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         lockedNodeVersion,
         requestKeyHash: value.requestKeyHash,
         inputHash: value.inputHash,
+        draftHash: value.draftHash,
         reviewSlaWorkHours: node.reviewSlaWorkHours,
         reviewStartedAt: new Date(value.timing.reviewStartedAt),
         reviewRemainingWorkMinutes: value.timing.reviewRemainingWorkMinutes,
@@ -222,6 +261,11 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         reviewDueStatus: value.timing.reviewDueStatus,
         reviewDueAt: value.timing.reviewDueAt === null ? null : new Date(value.timing.reviewDueAt),
         reviewCalendarVersion: value.timing.reviewCalendarVersion || null,
+        processingTimingStatus: value.timing.processingTimingStatus,
+        processingElapsedWorkMinutes: value.timing.processingElapsedWorkMinutes,
+        processingRemainingWorkMinutes: value.timing.processingRemainingWorkMinutes,
+        processingOverdueWorkMinutes: value.timing.processingOverdueWorkMinutes,
+        processingCalendarVersion: value.timing.processingCalendarVersion || null,
         calendarNotificationStatus: value.timing.reviewDueStatus === 'pending_calendar' ? 'pending' : 'not_required',
         version: 1,
         createdAt: db.serverDate(),
@@ -270,7 +314,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     })
   }
 
-  return { createReviewRound }
+  return { findReviewRoundRetry, createReviewRound }
 }
 
 module.exports = { createCloudReviewRepository }

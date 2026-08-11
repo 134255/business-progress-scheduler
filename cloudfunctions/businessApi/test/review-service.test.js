@@ -42,6 +42,10 @@ function harness(overrides = {}) {
     }
   }
   const reviewRepository = {
+    async findReviewRoundRetry(value) {
+      calls.push(['retry', structuredClone(value)])
+      return overrides.retry || null
+    },
     async createReviewRound(value) {
       calls.push(['create', structuredClone(value)])
       return {
@@ -85,6 +89,20 @@ test('提交审核采用当前轮最新字段与全部有效凭证并计算双�
   assert.equal(create.requestKeyHash.length, 64)
   assert.equal(create.inputHash.length, 64)
   assert.equal(JSON.stringify(create).includes('review-request-1'), false)
+})
+
+test('服务入口对已锁定审核轮次执行重新授权的同请求幂等预检', async () => {
+  const existing = {
+    reviewRoundId: 'review-feedback-current', status: 'pending',
+    nodeStatus: 'pending_review', evidenceIds: ['evidence-a', 'evidence-b']
+  }
+  const { calls, service } = harness({ retry: existing })
+
+  assert.deepEqual(await service.submitNodeForReview({ actor: ACTOR, input: input() }), existing)
+  assert.deepEqual(calls.map(call => call[0]), ['retry'])
+  assert.equal(calls[0][1].requestKeyHash.length, 64)
+  assert.equal(calls[0][1].inputHash.length, 64)
+  assert.equal(JSON.stringify(calls[0][1]).includes('review-request-1'), false)
 })
 
 test('日历缺失不阻断审核轮次创建而是保存待补算截止时间', async () => {

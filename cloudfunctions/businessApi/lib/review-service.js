@@ -115,6 +115,9 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
   if (!reviewRepository || typeof reviewRepository.createReviewRound !== 'function') {
     throw new TypeError('reviewRepository.createReviewRound is required')
   }
+  if (typeof reviewRepository.findReviewRoundRetry !== 'function') {
+    throw new TypeError('reviewRepository.findReviewRoundRetry is required')
+  }
   if (!workTimeService || typeof workTimeService.workingMinutesBetween !== 'function' ||
       typeof workTimeService.tryAddWorkMinutes !== 'function') {
     throw new TypeError('workTimeService is required')
@@ -123,6 +126,22 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
   async function submitNodeForReview({ actor, input }) {
     requireActiveActor(actor)
     const normalized = normalizeInput(input)
+    const safeInput = {
+      businessLineId: normalized.businessLineId,
+      nodeId: normalized.nodeId,
+      expectedNodeVersion: normalized.expectedNodeVersion
+    }
+    const requestKeyHash = sha256(`${actor._id}\0${normalized.nodeId}\0${normalized.requestKey}`)
+    const inputHash = sha256(JSON.stringify([
+      actor._id, safeInput.businessLineId, safeInput.nodeId, safeInput.expectedNodeVersion
+    ]))
+    const retried = await reviewRepository.findReviewRoundRetry({
+      actor,
+      input: safeInput,
+      requestKeyHash,
+      inputHash
+    })
+    if (retried) return retried
     const draft = await feedbackRepository.getCurrentProcessingRoundDraft({
       actor,
       businessLineId: normalized.businessLineId,
@@ -139,26 +158,22 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
     const reviewMinutes = draft.node.reviewSlaWorkHours * 60
     if (!Number.isSafeInteger(reviewMinutes) || reviewMinutes <= 0) throw createError('VERSION_CONFLICT')
     const reviewDue = await workTimeService.tryAddWorkMinutes(new Date(at), reviewMinutes)
-    const requestKeyHash = sha256(`${actor._id}\0${normalized.nodeId}\0${normalized.requestKey}`)
-    const inputHash = sha256(JSON.stringify([
+    const draftHash = sha256(JSON.stringify([
       actor._id, normalized.businessLineId, normalized.nodeId, normalized.expectedNodeVersion,
       draft.feedbackId, draft.feedbackRevision, draft.processingRoundNumber,
       draft.fieldSnapshots, draft.evidenceIds, draft.evidenceTotalBytes
     ]))
     return reviewRepository.createReviewRound({
       actor,
-      input: {
-        businessLineId: normalized.businessLineId,
-        nodeId: normalized.nodeId,
-        expectedNodeVersion: normalized.expectedNodeVersion
-      },
+      input: safeInput,
       draft,
       timing: {
         ...buildProcessingTiming(draft.node, processing),
         ...buildReviewTiming(draft.node, at, reviewDue)
       },
       requestKeyHash,
-      inputHash
+      inputHash,
+      draftHash
     })
   }
 

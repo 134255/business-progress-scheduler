@@ -41,6 +41,7 @@ function seed(overrides = {}) {
 function request(overrides = {}) {
   const requestKeyHash = crypto.createHash('sha256').update('request').digest('hex')
   const inputHash = crypto.createHash('sha256').update('input').digest('hex')
+  const draftHash = crypto.createHash('sha256').update('draft').digest('hex')
   return {
     actor: { _id: 'processor-1', status: 'active' },
     input: {
@@ -62,6 +63,7 @@ function request(overrides = {}) {
     },
     requestKeyHash,
     inputHash,
+    draftHash,
     ...overrides
   }
 }
@@ -87,6 +89,11 @@ test('提交审核在一个事务内创建轮次、锁定节点并写确定性�
   assert.deepEqual(round.reviewerUserIds, ['reviewer-1', 'reviewer-2'])
   assert.deepEqual(round.fieldValues, request().draft.fieldSnapshots)
   assert.equal(round.requestKeyHash, request().requestKeyHash)
+  assert.equal(round.processingTimingStatus, 'calculated')
+  assert.equal(round.processingElapsedWorkMinutes, 120)
+  assert.equal(round.processingRemainingWorkMinutes, 1200)
+  assert.equal(round.processingOverdueWorkMinutes, 0)
+  assert.equal(round.processingCalendarVersion, 'calendar-a')
   assert.equal(JSON.stringify(round).includes('must-not-be-stored'), false)
   const [node] = fake.documents('business_nodes')
   assert.equal(node.status, 'pending_review')
@@ -111,6 +118,40 @@ test('同请求同输入幂等，不同输入冲突且不会重复写通知和�
     repository.createReviewRound(request({ inputHash: 'f'.repeat(64) })),
     error => error.code === 'VERSION_CONFLICT'
   )
+})
+
+test('服务入口重试预检在返回审核轮次前重新授权并比较请求摘要', async () => {
+  const { fake, repository } = harness()
+  const value = request()
+  const first = await repository.createReviewRound(value)
+  const { requestKey: ignoredRequestKey, ...safeInput } = value.input
+  const retryInput = {
+    actor: value.actor,
+    input: safeInput,
+    requestKeyHash: value.requestKeyHash,
+    inputHash: value.inputHash
+  }
+
+  assert.deepEqual(await repository.findReviewRoundRetry(retryInput), first)
+  await assert.rejects(
+    repository.findReviewRoundRetry({ ...retryInput, inputHash: 'f'.repeat(64) }),
+    error => error.code === 'VERSION_CONFLICT'
+  )
+
+  fake.replace('users', 'processor-1', { _id: 'processor-1', status: 'disabled' })
+  await assert.rejects(repository.findReviewRoundRetry(retryInput), error => error.code === 'FORBIDDEN')
+  fake.replace('users', 'processor-1', { _id: 'processor-1', status: 'active' })
+  fake.replace('business_lines', 'line-1', {
+    ...fake.documents('business_lines')[0], status: 'cancelled'
+  })
+  await assert.rejects(repository.findReviewRoundRetry(retryInput), error => error.code === 'BUSINESS_FROZEN')
+  fake.replace('business_lines', 'line-1', {
+    ...fake.documents('business_lines')[0], status: 'active'
+  })
+  fake.replace('business_nodes', 'node-1', {
+    ...fake.documents('business_nodes')[0], processorUserIds: ['processor-other']
+  })
+  await assert.rejects(repository.findReviewRoundRetry(retryInput), error => error.code === 'FORBIDDEN')
 })
 
 test('事务内重新校验账号、处理角色、节点版本、当前节点和活动轮次完整性', async () => {

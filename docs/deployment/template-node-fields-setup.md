@@ -97,6 +97,7 @@
 | `template_nodes` | `templateId` 升序、`sequence` 升序 | 否 | 模板节点有序读取 |
 | `business_nodes` | `nodeCode` 升序 | 是 | 节点编号最终防重 |
 | `business_nodes` | `businessLineId` 升序、`sequence` 升序 | 否 | 业务节点时间线 |
+| `business_nodes` | `processingTimingStatus` 升序、`_id` 升序 | 否 | 待审核节点的处理工作分钟待补算扫描 |
 | `node_feedback` | `nodeId` 升序、`revision` 降序 | 否 | 节点反馈历史 |
 | `evidences` | `businessLineId` 升序、`nodeId` 升序、`uploadedAt` 降序 | 否 | 业务节点凭证历史 |
 | `evidences` | `storageStatus` 升序、`purgeDueAt` 升序 | 否 | 到期凭证治理 |

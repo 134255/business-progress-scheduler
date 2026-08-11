@@ -20,7 +20,10 @@ test('同步上海当前年和下一年并分别记录结果', async () => {
       async applyDueCalculation() { throw new Error('unexpected') },
       async ensurePendingCalendarWarning() { throw new Error('unexpected') }
     },
-    workTimeService: { async tryAddWorkMinutes() { throw new Error('unexpected') } }
+    workTimeService: {
+      async tryAddWorkMinutes() { throw new Error('unexpected') },
+      async workingMinutesBetween() { throw new Error('unexpected') }
+    }
   })
   const result = await service.run({ mode: 'manual', now: new Date('2026-12-31T16:30:00.000Z') })
   assert.deepEqual(fetched, [2027, 2028])
@@ -49,7 +52,10 @@ test('单年网络失败保留旧缓存并不阻断下一年同步和补算', as
       async applyDueCalculation() { throw new Error('unexpected') },
       async ensurePendingCalendarWarning() { throw new Error('unexpected') }
     },
-    workTimeService: { async tryAddWorkMinutes() { throw new Error('unexpected') } }
+    workTimeService: {
+      async tryAddWorkMinutes() { throw new Error('unexpected') },
+      async workingMinutesBetween() { throw new Error('unexpected') }
+    }
   })
   const result = await service.run({ mode: 'scheduled', now: new Date('2026-08-11T00:00:00.000Z') })
   assert.equal(oldCache.get(2026), 'old-v2026')
@@ -80,6 +86,8 @@ test('每批最多补算40个并仅提交可计算结果', async () => {
         if (calculations === 1) return { status: 'pending_calendar', dueAt: null, missingDate: '2026-08-11' }
         return { status: 'calculated', dueAt: new Date(startAt.getTime() + 3600000), calendarVersion: 'v2026' }
       }
+      ,
+      async workingMinutesBetween() { throw new Error('unexpected') }
     }
   })
   const result = await service.run({ now: new Date('2026-08-11T00:00:00.000Z') })
@@ -88,4 +96,39 @@ test('每批最多补算40个并仅提交可计算结果', async () => {
   assert.equal(warned[0].candidate.id, 'node-0')
   assert.equal(result.recalculation.pending, 1)
   assert.equal(result.recalculation.updated, 39)
+})
+
+test('待审核处理时长使用区间工作分钟补算且缺日历时保持待补算', async () => {
+  const candidate = {
+    kind: 'review_processing', id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    startAt: new Date('2026-08-11T01:00:00Z'), endAt: new Date('2026-08-11T03:00:00Z')
+  }
+  const applied = []
+  const warned = []
+  let attempts = 0
+  const service = createCalendarSyncService({
+    holidayClient: { async fetchYear(year) { return { year, sourceVersion: `v${year}`, days: [] } } },
+    calendarRepository: {
+      async replaceYear() {},
+      async listPendingDueCandidates() { return [candidate, candidate] },
+      async applyDueCalculation(value) { applied.push(value); return true },
+      async ensurePendingCalendarWarning(value) { warned.push(value); return true }
+    },
+    workTimeService: {
+      async tryAddWorkMinutes() { throw new Error('unexpected') },
+      async workingMinutesBetween(startAt, endAt) {
+        assert.deepEqual([startAt, endAt], [candidate.startAt, candidate.endAt])
+        attempts += 1
+        return attempts === 1
+          ? { status: 'pending_calendar', minutes: null, missingDate: '2026-08-11' }
+          : { status: 'calculated', minutes: 180, calendarVersion: 'v2026' }
+      }
+    }
+  })
+
+  const result = await service.run({ now: new Date('2026-08-11T04:00:00Z') })
+  assert.equal(warned.length, 1)
+  assert.equal(applied.length, 1)
+  assert.equal(applied[0].calculation.minutes, 180)
+  assert.deepEqual(result.recalculation, { examined: 2, updated: 1, skipped: 0, pending: 1, failed: 0 })
 })

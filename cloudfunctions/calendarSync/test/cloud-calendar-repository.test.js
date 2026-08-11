@@ -391,3 +391,79 @@ test('审核补算发现业务当前节点已变化时不覆盖旧活动轮次',
   assert.equal(changed, false)
   assert.equal(fake.documents('node_review_rounds')[0].reviewDueAt, undefined)
 })
+
+test('待审核节点的处理时长待补算候选按活动轮次有界读取', async () => {
+  const fake = createFakeCloudDatabase({
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', status: 'pending_review', version: 7,
+      activeReviewRoundId: 'round-1', processingTimingStatus: 'pending_calendar',
+      processingStartedAt: new Date('2026-08-11T01:00:00Z'), processingElapsedWorkMinutes: 120,
+      processingSlaWorkHours: 22
+    }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending', version: 2,
+      lockedNodeVersion: 7, reviewDueStatus: 'calculated', processingTimingStatus: 'pending_calendar',
+      reviewStartedAt: new Date('2026-08-11T03:00:00Z')
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const candidates = await repository.listPendingDueCandidates({ limit: 40 })
+
+  assert.deepEqual(candidates, [{
+    kind: 'review_processing', id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    status: 'pending', version: 2, nodeVersion: 7,
+    startAt: new Date('2026-08-11T01:00:00Z'), endAt: new Date('2026-08-11T03:00:00Z'),
+    baseElapsedWorkMinutes: 120, totalWorkMinutes: 1320
+  }])
+})
+
+test('待审核处理时长补算原子复核活动轮次并同步节点与轮次版本', async () => {
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-1' }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', status: 'pending_review', version: 7,
+      activeReviewRoundId: 'round-1', processingTimingStatus: 'pending_calendar',
+      processingStartedAt: new Date('2026-08-11T01:00:00Z'), processingElapsedWorkMinutes: 120,
+      processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0,
+      processingSlaWorkHours: 22
+    }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending', version: 2,
+      lockedNodeVersion: 7, reviewStartedAt: new Date('2026-08-11T03:00:00Z'),
+      processingTimingStatus: 'pending_calendar', processingElapsedWorkMinutes: 120,
+      processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const candidate = {
+    kind: 'review_processing', id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    status: 'pending', version: 2, nodeVersion: 7,
+    startAt: new Date('2026-08-11T01:00:00Z'), endAt: new Date('2026-08-11T03:00:00Z'),
+    baseElapsedWorkMinutes: 120, totalWorkMinutes: 1320
+  }
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 180, calendarVersion: 'v1' },
+    now: new Date('2026-08-11T04:00:00Z')
+  }), true)
+
+  const node = fake.documents('business_nodes')[0]
+  const round = fake.documents('node_review_rounds')[0]
+  for (const stored of [node, round]) {
+    assert.equal(stored.processingTimingStatus, 'calculated')
+    assert.equal(stored.processingElapsedWorkMinutes, 300)
+    assert.equal(stored.processingRemainingWorkMinutes, 1020)
+    assert.equal(stored.processingOverdueWorkMinutes, 0)
+    assert.equal(stored.processingCalendarVersion, 'v1')
+  }
+  assert.equal(node.version, 8)
+  assert.equal(round.version, 3)
+  assert.equal(round.lockedNodeVersion, 8)
+  assert.equal(fake.transactionRuns.at(-1).operations <= 100, true)
+
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 180, calendarVersion: 'v1' },
+    now: new Date('2026-08-11T04:00:00Z')
+  }), false)
+})

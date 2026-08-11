@@ -60,6 +60,14 @@ function safeVersion(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
+function sameDate(left, right) {
+  return validDate(left) && validDate(right) && left.getTime() === right.getTime()
+}
+
+function safeNonNegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
 function calendarWarningId(lineId) {
   const digest = crypto.createHash('sha256').update(`${lineId}\0processing`).digest('hex')
   return `work-calendar-missing-${digest.slice(0, 40)}`
@@ -252,6 +260,32 @@ function createCloudCalendarRepository({
       })
     }
     if (result.length >= limit) return result
+    const reviewProcessing = await db.collection('business_nodes')
+      .where({ processingTimingStatus: 'pending_calendar' }).orderBy('_id', 'asc').limit(limit - result.length).get()
+    for (const node of Array.isArray(reviewProcessing && reviewProcessing.data) ? reviewProcessing.data : []) {
+      if (result.length >= limit) break
+      if (node.status !== 'pending_review' || typeof node.businessLineId !== 'string' ||
+          typeof node.activeReviewRoundId !== 'string' || !node.activeReviewRoundId ||
+          !validDate(node.processingStartedAt) || safeVersion(node.version) === null) continue
+      const round = await readDocument(db, 'node_review_rounds', node.activeReviewRoundId)
+      const baseElapsedWorkMinutes = safeNonNegativeInteger(node.processingElapsedWorkMinutes)
+      const totalWorkMinutes = typeof node.processingSlaWorkHours === 'number' &&
+        Number.isFinite(node.processingSlaWorkHours) && node.processingSlaWorkHours > 0
+        ? node.processingSlaWorkHours * 60
+        : null
+      if (!round || round.businessLineId !== node.businessLineId || round.nodeId !== node._id ||
+          round.status !== 'pending' || round.lockedNodeVersion !== node.version ||
+          round.processingTimingStatus !== 'pending_calendar' || !validDate(round.reviewStartedAt) ||
+          safeVersion(round.version) === null || baseElapsedWorkMinutes === null ||
+          !Number.isSafeInteger(totalWorkMinutes) || totalWorkMinutes < baseElapsedWorkMinutes) continue
+      result.push({
+        kind: 'review_processing', id: round._id, businessLineId: node.businessLineId,
+        nodeId: node._id, status: round.status, version: round.version, nodeVersion: node.version,
+        startAt: node.processingStartedAt, endAt: round.reviewStartedAt,
+        baseElapsedWorkMinutes, totalWorkMinutes
+      })
+    }
+    if (result.length >= limit) return result
     const reviews = await db.collection('node_review_rounds')
       .where({ reviewDueStatus: 'pending_calendar' }).orderBy('_id', 'asc').limit(limit - result.length).get()
     for (const round of Array.isArray(reviews && reviews.data) ? reviews.data : []) {
@@ -271,7 +305,11 @@ function createCloudCalendarRepository({
   }
 
   async function applyDueCalculation({ candidate, calculation, now } = {}) {
-    if (!candidate || !calculation || calculation.status !== 'calculated' || !validDate(calculation.dueAt) ||
+    const reviewProcessingCalculation = candidate && candidate.kind === 'review_processing'
+    if (!candidate || !calculation || calculation.status !== 'calculated' ||
+        (reviewProcessingCalculation
+          ? safeNonNegativeInteger(calculation.minutes) === null
+          : !validDate(calculation.dueAt)) ||
         (calculation.calendarVersion !== null &&
           (typeof calculation.calendarVersion !== 'string' || !calculation.calendarVersion)) || !validDate(now)) {
       throw new TypeError('valid calculated due result is required')
@@ -316,21 +354,71 @@ function createCloudCalendarRepository({
         } })
         return true
       }
+      if (candidate.kind === 'review_processing') {
+        const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
+        const round = await readDocument(transaction, 'node_review_rounds', candidate.id)
+        if (!node || !round || node.businessLineId !== line._id || round.businessLineId !== line._id ||
+            round.nodeId !== node._id || line.currentNodeId !== node._id || node.status !== 'pending_review' ||
+            node.activeReviewRoundId !== round._id || node.version !== candidate.nodeVersion ||
+            round.status !== candidate.status || round.status !== 'pending' || round.version !== candidate.version ||
+            round.lockedNodeVersion !== node.version || node.processingTimingStatus !== 'pending_calendar' ||
+            round.processingTimingStatus !== 'pending_calendar' ||
+            !sameDate(node.processingStartedAt, candidate.startAt) ||
+            !sameDate(round.reviewStartedAt, candidate.endAt) ||
+            node.processingElapsedWorkMinutes !== candidate.baseElapsedWorkMinutes ||
+            node.processingSlaWorkHours * 60 !== candidate.totalWorkMinutes ||
+            node.version === Number.MAX_SAFE_INTEGER || round.version === Number.MAX_SAFE_INTEGER) return false
+        const elapsed = candidate.baseElapsedWorkMinutes + calculation.minutes
+        if (!Number.isSafeInteger(elapsed)) return false
+        const remaining = Math.max(0, candidate.totalWorkMinutes - elapsed)
+        const overdue = Math.max(0, elapsed - candidate.totalWorkMinutes)
+        const timing = {
+          processingTimingStatus: 'calculated',
+          processingElapsedWorkMinutes: elapsed,
+          processingRemainingWorkMinutes: remaining,
+          processingOverdueWorkMinutes: overdue,
+          processingCalendarVersion: calculation.calendarVersion,
+          calendarRecalculatedAt: new Date(now),
+          updatedAt: db.serverDate()
+        }
+        const lockedNodeVersion = node.version + 1
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          ...timing,
+          version: lockedNodeVersion
+        } })
+        await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
+          ...timing,
+          lockedNodeVersion,
+          version: round.version + 1
+        } })
+        return true
+      }
       return false
     })
   }
 
   async function ensurePendingCalendarWarning({ candidate } = {}) {
-    if (!candidate || candidate.kind !== 'processing' || typeof candidate.id !== 'string' ||
+    if (!candidate || !['processing', 'review_processing'].includes(candidate.kind) || typeof candidate.id !== 'string' ||
         typeof candidate.businessLineId !== 'string' || typeof candidate.status !== 'string' ||
         safeVersion(candidate.version) === null) return false
     return db.runTransaction(async transaction => {
       const line = await readDocument(transaction, 'business_lines', candidate.businessLineId)
-      const node = await readDocument(transaction, 'business_nodes', candidate.id)
-      if (!line || line.status !== 'active' || line.currentNodeId !== candidate.id || !node ||
-          node.businessLineId !== line._id || node.status !== candidate.status ||
-          node.version !== candidate.version || !PROCESSING_STATUSES.has(node.status) ||
-          node.processingDueStatus !== 'pending_calendar') return false
+      const nodeId = candidate.kind === 'processing' ? candidate.id : candidate.nodeId
+      const node = await readDocument(transaction, 'business_nodes', nodeId)
+      if (!line || line.status !== 'active' || line.currentNodeId !== nodeId || !node ||
+          node.businessLineId !== line._id) return false
+      if (candidate.kind === 'processing') {
+        if (node.status !== candidate.status || node.version !== candidate.version ||
+            !PROCESSING_STATUSES.has(node.status) || node.processingDueStatus !== 'pending_calendar') return false
+      } else {
+        const round = await readDocument(transaction, 'node_review_rounds', candidate.id)
+        if (!round || node.status !== 'pending_review' || node.activeReviewRoundId !== round._id ||
+            node.version !== candidate.nodeVersion || round.businessLineId !== line._id ||
+            round.nodeId !== node._id || round.status !== candidate.status || round.status !== 'pending' ||
+            round.version !== candidate.version || round.lockedNodeVersion !== node.version ||
+            node.processingTimingStatus !== 'pending_calendar' ||
+            round.processingTimingStatus !== 'pending_calendar') return false
+      }
       const warningId = calendarWarningId(line._id)
       const existing = await readDocument(transaction, 'notifications', warningId)
       if (!existing) {
@@ -341,7 +429,7 @@ function createCloudCalendarRepository({
           createdAt: db.serverDate()
         } })
       }
-      if (node.calendarNotificationStatus !== 'notified') {
+      if (candidate.kind === 'processing' && node.calendarNotificationStatus !== 'notified') {
         await transaction.collection('business_nodes').doc(node._id).update({ data: {
           calendarNotificationStatus: 'notified',
           updatedAt: db.serverDate()

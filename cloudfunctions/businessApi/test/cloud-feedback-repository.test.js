@@ -14,7 +14,7 @@ function stateSnapshot(fake) {
 }
 
 test('completion claims more than one transaction of tiny evidence without a count cap', async () => {
-  const evidenceIds = Array.from({ length: 105 }, (_, index) => `evidence-${index + 1}`)
+  const evidenceIds = Array.from({ length: 105 }, (_, index) => `evidence-${105 - index}`)
   const { fake, repository } = createFeedbackHarness({ evidenceCount: 105 })
   const result = await repository.commitFeedback(submission({ evidenceIds, evidenceTotalBytes: 105 }))
 
@@ -25,6 +25,10 @@ test('completion claims more than one transaction of tiny evidence without a cou
   assert.equal(feedback.evidenceTotalBytes, 105)
   assert.equal(Object.hasOwn(feedback, 'evidenceIds'), false)
   assert.equal(fake.documents('evidences').every(item => item.feedbackId === feedback._id && item.attachmentState === 'attached'), true)
+  assert.deepEqual(evidenceIds.map(evidenceId => {
+    const evidence = fake.documents('evidences').find(item => item._id === evidenceId)
+    return evidence.feedbackEvidenceOrder
+  }), Array.from({ length: 105 }, (_, index) => index))
   assert.equal(fake.documents('evidences').every(item => item.orphanExpiresAt === null), true)
   assert.deepEqual(fake.documents('business_nodes').sort((a, b) => a.sequence - b.sequence).map(item => item.status), ['completed', 'ready'])
   assert.equal(fake.documents('business_lines')[0].currentNodeId, 'line-1-node-002')
@@ -1211,6 +1215,125 @@ test('新版节点保存进度复用分块预约并持久化处理动作与轮�
   assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
 })
 
+test('新版进度的已发布早返回和迟到路径必须仍匹配当前处理语义', async () => {
+  const data = reviewWorkflowSeed()
+  data.evidences = []
+  const { fake, repository } = createFeedbackHarness({ seed: data })
+  const value = submission({
+    evidenceIds: [],
+    input: { status: 'in_progress', action: 'save_progress', requestKey: 'review-progress-retry' },
+    evidenceTotalBytes: 0
+  })
+  const reservation = await repository.beginFeedback(value)
+  await repository.claimEvidenceChunk(value, reservation)
+  await repository.finalizeFeedback(value, reservation)
+  const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+  fake.replace('business_nodes', 'node-1', {
+    ...node, status: 'pending_review', activeReviewRoundId: 'review-round-1'
+  })
+
+  for (const operation of [
+    () => repository.findPublishedFeedback(value),
+    () => repository.beginFeedback(value),
+    () => repository.claimEvidenceChunk(value, reservation),
+    () => repository.finalizeFeedback(value, reservation)
+  ]) {
+    await assert.rejects(operation(), error => error.code === 'NODE_NOT_ACTIVE')
+  }
+})
+
+test('新版进度精确重试拒绝过期节点版本、处理轮次和最新反馈关系', async () => {
+  for (const mutate of [
+    node => ({ ...node, version: node.version + 1 }),
+    node => ({ ...node, processingRoundNumber: 2 }),
+    node => ({ ...node, latestFeedbackId: 'feedback-later', latestFeedbackRevision: node.latestFeedbackRevision + 1 })
+  ]) {
+    const data = reviewWorkflowSeed()
+    data.evidences = []
+    const { fake, repository } = createFeedbackHarness({ seed: data })
+    const value = submission({
+      evidenceIds: [],
+      input: { status: 'in_progress', action: 'save_progress', requestKey: 'stale-review-progress' },
+      evidenceTotalBytes: 0
+    })
+    await repository.commitFeedback(value)
+    const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+    fake.replace('business_nodes', 'node-1', mutate(node))
+    await assert.rejects(repository.findPublishedFeedback(value), error => error.code === 'VERSION_CONFLICT')
+  }
+})
+
+test('新版处理竞争等待期间进入待审核后立即停止解释旧预约', async () => {
+  const data = reviewWorkflowSeed()
+  data.evidences = []
+  data.node_feedback = [{
+    _id: 'held-review-progress', businessLineId: 'line-1', nodeId: 'node-1',
+    publishState: 'reserved', status: 'in_progress', action: 'save_progress',
+    processingRoundNumber: 1, submittedBy: 'account-a',
+    claimExpiresAt: new Date(NOW.getTime() + 60_000)
+  }]
+  Object.assign(data.business_nodes[0], {
+    feedbackClaimId: 'held-review-progress', feedbackClaimExpiresAt: new Date(NOW.getTime() + 60_000)
+  })
+  let fake
+  let changed = false
+  const harness = createFeedbackHarness({
+    seed: data,
+    wait: async () => {
+      if (changed) return
+      changed = true
+      const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+      fake.replace('business_nodes', 'node-1', {
+        ...node, status: 'pending_review', activeReviewRoundId: 'review-held'
+      })
+    }
+  })
+  fake = harness.fake
+
+  await assert.rejects(
+    harness.repository.commitFeedback(submission({
+      actor: { _id: 'account-b', status: 'active' }, evidenceIds: [],
+      input: { status: 'in_progress', action: 'save_progress', requestKey: 'waiting-review-progress' },
+      evidenceTotalBytes: 0
+    })),
+    error => error.code === 'NODE_NOT_ACTIVE'
+  )
+})
+
+test('新版账号关系数组含空值、非法编号、重复值或混合旧字段时完整拒绝', async () => {
+  const mutations = [
+    data => { data.business_lines[0].memberUserIds = ['account-a', null] },
+    data => { data.business_lines[0].memberUserIds = ['account-a', 'account-a'] },
+    data => { data.business_lines[0].managerUserIds = ['manager', 'bad id'] },
+    data => { data.business_nodes[0].processorUserIds = ['account-a', null] },
+    data => { data.business_nodes[0].processorUserIds = ['account-a', 'account-a'] },
+    data => {
+      data.business_lines[0].memberUserIds = null
+      data.business_lines[0].memberIds = ['wx-a']
+      data.business_nodes[0].assigneeIds = ['wx-a']
+      data.users.find(item => item._id === 'account-a').openid = 'wx-a'
+    }
+  ]
+  for (const [index, mutate] of mutations.entries()) {
+    const data = reviewWorkflowSeed()
+    data.evidences = []
+    mutate(data)
+    const { fake, repository } = createFeedbackHarness({ seed: data })
+    await assert.rejects(
+      repository.commitFeedback(submission({
+        actor: { _id: 'account-a', status: 'active', openid: 'wx-a' }, evidenceIds: [],
+        input: {
+          status: 'in_progress', action: 'save_progress',
+          requestKey: `strict-account-schema-${index}`
+        },
+        evidenceTotalBytes: 0
+      })),
+      error => error.code === 'FORBIDDEN'
+    )
+    assert.equal(fake.documents('node_feedback').length, 0)
+  }
+})
+
 test('当前处理轮草稿分页采用最新字段并按首次版本顺序聚合全部有效凭证', async () => {
   const data = reviewWorkflowSeed()
   data.node_feedback = []
@@ -1247,6 +1370,35 @@ test('当前处理轮草稿分页采用最新字段并按首次版本顺序聚�
   assert.equal(result.evidenceIds.length, 101)
   assert.deepEqual(result.evidenceIds.slice(0, 2), ['evidence-001', 'evidence-002'])
   assert.equal(result.evidenceTotalBytes, 101)
+})
+
+test('当前处理轮草稿保留同一反馈内凭证的首次选择顺序', async () => {
+  const data = reviewWorkflowSeed()
+  data.node_feedback = [{
+    _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
+    revision: 1, status: 'in_progress', action: 'save_progress', processingRoundNumber: 1,
+    submittedBy: 'account-a', submittedAt: NOW, fieldValues: []
+  }]
+  data.business_nodes[0].latestFeedbackId = 'feedback-current'
+  data.business_nodes[0].latestFeedbackRevision = 1
+  const common = {
+    businessLineId: 'line-1', nodeId: 'node-1', feedbackId: 'feedback-current',
+    feedbackRevision: 1, processingRoundNumber: 1, attachmentState: 'attached',
+    retentionScope: 'business_line', retentionSource: 'node_feedback', storageStatus: 'available',
+    size: 1, purgedAt: null, purgeDueAt: null
+  }
+  data.evidences = [
+    { _id: 'evidence-a', ...common, feedbackEvidenceOrder: 1 },
+    { _id: 'evidence-b', ...common, feedbackEvidenceOrder: 0 }
+  ]
+  const { repository } = createFeedbackHarness({ seed: data })
+
+  const result = await repository.getCurrentProcessingRoundDraft({
+    actor: { _id: 'account-a', status: 'active' },
+    businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4
+  })
+
+  assert.deepEqual(result.evidenceIds, ['evidence-b', 'evidence-a'])
 })
 
 test('当前处理轮草稿拒绝跨轮次、错误归属和超过20MB的凭证集合', async () => {

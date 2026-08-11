@@ -24,6 +24,7 @@ function createCalendarSyncService({ holidayClient, calendarRepository, workTime
   const applyCalculation = requireMethod(calendarRepository, 'applyDueCalculation')
   const ensureWarning = requireMethod(calendarRepository, 'ensurePendingCalendarWarning')
   const tryAddWorkMinutes = requireMethod(workTimeService, 'tryAddWorkMinutes')
+  const workingMinutesBetween = requireMethod(workTimeService, 'workingMinutesBetween')
   if (typeof clock !== 'function') throw new TypeError('clock is required')
 
   async function run({ mode = 'scheduled', now = clock() } = {}) {
@@ -58,7 +59,9 @@ function createCalendarSyncService({ holidayClient, calendarRepository, workTime
     const recalculation = { examined: candidates.length, updated: 0, skipped: 0, pending: 0, failed: 0 }
     for (const candidate of candidates) {
       try {
-        const calculation = await tryAddWorkMinutes(candidate.startAt, candidate.minutes)
+        const calculation = candidate.kind === 'review_processing'
+          ? await workingMinutesBetween(candidate.startAt, candidate.endAt)
+          : await tryAddWorkMinutes(candidate.startAt, candidate.minutes)
         if (!calculation || calculation.status !== 'calculated') {
           recalculation.pending += 1
           await ensureWarning({ candidate, now: new Date(now) })
