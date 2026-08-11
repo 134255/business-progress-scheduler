@@ -4,6 +4,8 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 
 ## Verified state
 
+- 2026-08-11 节点独立审核流程 Task 4 已完成中国工作时间、日历同步和双 SLA 待补算基础设施：`businessApi` 新增固定上海时区 09:00—20:00、无午休的分钟级服务，支持跨日、法定休息日、下一工作时刻和区间工作分钟；任何所需日期缺失或文档编号、日期、严格布尔工作日标记损坏时均返回 `pending_calendar`，不猜测周末。独立 `calendarSync` 只用 Node 内置 HTTPS 请求 AILCC，执行超时、状态码、响应大小、JSON、年份、计数、日期唯一性、全年自然日覆盖和严格 `is_holiday` 校验。完整年份以主/影子日期代际分批暂存，全部成功后用年份指针原子发布；10 分钟同步租约阻止手工与计划任务交叉写入，失败保留旧活动缓存。每次最多读取 40 个处理/审核待补算候选，并逐条事务复核活动业务、节点/审核轮次、版本和当前状态后写回截止时间、日历版本及管理员日历通知处理状态。新函数入口已实现但未配置真实触发器；真实 AILCC 网络、CloudBase 部署/权限/索引/并发和目标环境依赖安装仍未验证。
+
 - 2026-08-11 节点独立审核流程 Task 3 已完成超级管理员模板节点编辑页升级：节点页以明确 `workflowMode: 'review'` 输出处理人、审核人、或签/会签和处理/审核双 SLA（默认 22/8），保存对象不再携带旧 `assigneeUserIds` 或单一 `slaWorkHours`。纯旧节点仅在缺少 `workflowMode` 时将旧负责人映射为处理人初值；任何已声明的模式均不读取旧负责人。重新保存和模板定义清理均写入显式新版字段。处理人与审核人用同一受控账号选项分别勾选，保存前拒绝交集和空角色；启用模板的节点页继续只读。节点摘要显示两类人数、或签/会签及双时限；异步保存返回处理人/审核人失效码时保留页面并显示安全提示。导航仅携带节点索引，账号选择的 WXML dataset 仅携带内部账号编号，新增 WXML 门禁防止整条账号对象进入 dataset。真实微信开发者工具交互验收仍未执行。
 
 - 2026-08-11 节点独立审核流程 Task 2 已完成模板审核配置持久化：模板服务以一个排序去重的参与账号集合统一覆盖处理人与审核人；创建、更新、启用均先验证角色规则并将该集合交给仓储事务复核，启用模板的可用性投影也读取全量参与账号。CloudBase 模板仓储参数已从 `assigneeUserIds` 迁移为 `participantUserIds`，并在同一事务中逐个固定读取活跃账号；创建预算为节点数加不同参与账号数加 2，更新/状态变更预算在既有固定操作数上同样计入所有参与账号，超过 100 次操作失败关闭。为衔接后续业务快照迁移，模板服务按相同参与账号集合预演快照预算，48 节点、47 个不同参与账号的 101 次预算模板不会向普通用户显示为可用；旧版纯 `assigneeUserIds` 模板兼容边界与空节点草稿仍保持。2026-08-11 本地验证：聚焦 RED 命令 `node --test cloudfunctions/businessApi/test/template-service.test.js cloudfunctions/businessApi/test/cloud-template-repository.test.js` 如预期 6 项失败（旧仓储忽略新参数且旧快照预算未计审核人）；独立复审补强更新/启用传参和精确 100 次操作边界后，同命令为 35/35 通过；`node --test cloudfunctions/businessApi/test/template-domain.test.js cloudfunctions/businessApi/test/template-service.test.js cloudfunctions/businessApi/test/cloud-template-repository.test.js` 为 39/39 通过；最终 `npm.cmd test --prefix cloudfunctions/businessApi` 为 376/376 通过（仅有两项既存 malformed npm user-config 警告），`node tools/test-wxml-structure.mjs` 为 2/2 通过。
@@ -49,6 +51,23 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-11 节点独立审核流程 Task 4：
+
+| 命令或边界 | 结果 |
+|---|---|
+| `node --test cloudfunctions/businessApi/test/work-time-service.test.js cloudfunctions/businessApi/test/cloud-work-calendar-repository.test.js`（初始 RED） | 按预期失败：2 个测试文件均因目标模块不存在而失败。 |
+| `npm.cmd test --prefix cloudfunctions/calendarSync`（初始 RED） | 按预期失败：`calendarSync/package.json` 不存在。 |
+| `node --test cloudfunctions/calendarSync/test/cloud-calendar-repository.test.js`（审核补算 RED） | 按预期 6 项中 5 通过、1 失败：审核轮次待补算尚未写回。 |
+| `node --test cloudfunctions/calendarSync/test/cloud-calendar-repository.test.js`（并发同步 RED） | 按预期 7 项中 6 通过、1 失败：同年并发发布可使元数据版本与日期记录版本不一致。 |
+| `node --test cloudfunctions/calendarSync/test/cloud-calendar-repository.test.js`（提交后自审 RED） | 按预期 9 项中 7 通过、2 失败：零剩余分钟的空日历版本被错误拒绝，且审核补算未复核业务当前节点指针。 |
+| 工作时间与日历读取聚焦 GREEN | 通过：12 个测试，0 失败。 |
+| `npm.cmd test --prefix cloudfunctions/calendarSync` | 通过：19 个测试，0 失败；仅有两条既有 malformed npm user-config 警告。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：388 个测试，0 失败；仅有两条既有 malformed npm user-config 警告。 |
+| `node tools/test-wxml-structure.mjs` | 通过：3 个测试，0 失败。 |
+| 新增 JavaScript 语法检查 | 通过：7 个文件，0 语法错误。 |
+| `npm.cmd ci --ignore-scripts --prefer-offline`（额外依赖安装检查） | 未通过：本机 npm cache 文件发生 `EPERM`，并伴随部分 `node_modules` 清理警告；不作为代码或锁文件通过证据，目标环境安装仍未验证。 |
+| 真实 AILCC、CloudBase 与触发器 | 未验证：单元测试未访问网络；未部署新集合、权限、索引或函数，触发器保持未启用。 |
 
 2026-08-11 节点独立审核流程 Task 3：
 
@@ -707,5 +726,5 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 1. 由目标环境操作员按 `docs/deployment/template-node-fields-setup.md` 从备份可读性开始，依次完成唯一值检查、索引、`businessApi` 和 `evidenceRetention` 上传；每日触发器先保持停用。
 2. 使用隔离测试业务、测试账号和无敏感测试文件完成手册验收矩阵，确认重复调用幂等后再启用每日触发器；逐项把未验证结果更新为通过或失败。
-3. 继续 SLA/中国工作日历同步、每工作小时提醒和企业微信适配器阶段。
+3. 继续节点独立审核流程 Task 5，把新版处理/审核快照和首节点处理截止状态接入业务创建；随后再实现审核轮次与提醒。
 4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。

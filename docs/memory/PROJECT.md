@@ -28,9 +28,10 @@ The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-bus
 - Current entry point: `cloudfunctions/businessApi/index.js`, with pure domain helpers under `cloudfunctions/businessApi/lib/`.
 - Target modular shape: retain a unified API entry for ordinary domain calls, extract account/template/business/evidence/notification modules, and use separate scheduled functions for calendar synchronization, hourly reminders, and orphan-file cleanup.
 - External holiday source is isolated behind an adapter. The approved endpoint is `https://holiday.ailcc.com/api/holiday/allyear/{year}`; production use requires renewed terms and availability verification.
+- `calendarSync` uses Node's built-in HTTPS client and publishes a fully validated AILCC year through two date-keyed calendar generations (`work_calendar` and `work_calendar_shadow`). `work_calendar_years` atomically selects the active generation only after every natural day is staged; a short per-year lease prevents manual and scheduled synchronization from interleaving. Ordinary SLA reads never use an unselected or partially staged generation.
 - Enterprise WeChat sending must remain behind an adapter and disabled until approved secure configuration is supplied.
 
-Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `evidences`, `work_calendar`, `notifications`, notification-delivery records, and `audit_logs`.
+Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `evidences`, `work_calendar`, `work_calendar_shadow`, `work_calendar_years`, `notifications`, notification-delivery records, and `audit_logs`.
 
 Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 Unbounded-count feedback evidence attachment uses hidden, deterministic, chunked reservations under the existing `node_feedback` and `evidences` collections; the invariant and Task 11 recovery obligation are recorded in `docs/memory/decisions/ADR-0003-feedback-evidence-reservations.md`.
@@ -47,7 +48,7 @@ Account deployment requires the `system_settings/account_admin_state` guard, det
 - CloudBase environment identifier: `cloud1-d5gxt99rh492670d9`.
 - Mini Program root: `miniprogram/`.
 - Cloud-function root: `cloudfunctions/`.
-- Cloud function names: ordinary authenticated API `businessApi`; scheduled retention worker `evidenceRetention`.
+- Cloud function names: ordinary authenticated API `businessApi`; calendar synchronization and pending-deadline worker `calendarSync`; scheduled retention worker `evidenceRetention`.
 - Default Git integration branch: `main`; remote tracking branch: `origin/main`.
 
 These identifiers are not credentials. Secret values, administrator passwords, recovery codes, account identity values, and customer records must be supplied through approved secure channels and never stored here.
