@@ -17,7 +17,8 @@ test('同步上海当前年和下一年并分别记录结果', async () => {
     calendarRepository: {
       async replaceYear(input) { replaced.push(input) },
       async listPendingDueCandidates() { return [] },
-      async applyDueCalculation() { throw new Error('unexpected') }
+      async applyDueCalculation() { throw new Error('unexpected') },
+      async ensurePendingCalendarWarning() { throw new Error('unexpected') }
     },
     workTimeService: { async tryAddWorkMinutes() { throw new Error('unexpected') } }
   })
@@ -45,7 +46,8 @@ test('单年网络失败保留旧缓存并不阻断下一年同步和补算', as
         assert.equal(limit, 40)
         return []
       },
-      async applyDueCalculation() { throw new Error('unexpected') }
+      async applyDueCalculation() { throw new Error('unexpected') },
+      async ensurePendingCalendarWarning() { throw new Error('unexpected') }
     },
     workTimeService: { async tryAddWorkMinutes() { throw new Error('unexpected') } }
   })
@@ -61,13 +63,15 @@ test('每批最多补算40个并仅提交可计算结果', async () => {
     startAt: new Date('2026-08-11T09:00:00+08:00'), minutes: 60
   }))
   const applied = []
+  const warned = []
   let calculations = 0
   const service = createCalendarSyncService({
     holidayClient: { async fetchYear(year) { return { year, sourceVersion: `v${year}`, days: [] } } },
     calendarRepository: {
       async replaceYear() {},
       async listPendingDueCandidates({ limit }) { assert.equal(limit, 40); return candidates },
-      async applyDueCalculation(value) { applied.push(value); return true }
+      async applyDueCalculation(value) { applied.push(value); return true },
+      async ensurePendingCalendarWarning(value) { warned.push(value); return true }
     },
     workTimeService: {
       async tryAddWorkMinutes(startAt, minutes) {
@@ -80,6 +84,8 @@ test('每批最多补算40个并仅提交可计算结果', async () => {
   })
   const result = await service.run({ now: new Date('2026-08-11T00:00:00.000Z') })
   assert.equal(applied.length, 39)
+  assert.equal(warned.length, 1)
+  assert.equal(warned[0].candidate.id, 'node-0')
   assert.equal(result.recalculation.pending, 1)
   assert.equal(result.recalculation.updated, 39)
 })

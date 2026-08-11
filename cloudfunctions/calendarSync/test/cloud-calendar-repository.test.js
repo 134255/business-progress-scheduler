@@ -273,6 +273,41 @@ test('补算事务仅更新仍活动且版本匹配的处理节点', async () =>
   assert.equal(stored.version, 4)
 })
 
+test('日历仍缺失时以确定性编号补建不含业务内容的管理员告警', async () => {
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-1' }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', status: 'ready', version: 3,
+      processingDueStatus: 'pending_calendar', processingStartedAt: new Date('2026-08-11T01:00:00Z'),
+      processingSlaWorkHours: 22, calendarNotificationStatus: 'pending'
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const input = {
+    candidate: {
+      kind: 'processing', id: 'node-1', businessLineId: 'line-1', status: 'ready', version: 3
+    },
+    now: new Date('2026-08-11T02:00:00Z')
+  }
+
+  assert.equal(await repository.ensurePendingCalendarWarning(input), true)
+  assert.equal(await repository.ensurePendingCalendarWarning(input), true)
+
+  const warnings = fake.documents('notifications')
+  assert.equal(warnings.length, 1)
+  assert.equal(
+    warnings[0]._id,
+    'work-calendar-missing-2264f7e3fe33a7bafae65ffddae269de41a94741'
+  )
+  assert.deepEqual(Object.keys(warnings[0]).sort(), [
+    '_id', 'audienceRole', 'createdAt', 'status', 'type'
+  ])
+  assert.equal(warnings[0].type, 'work_calendar_missing')
+  assert.equal(warnings[0].audienceRole, 'super_admin')
+  assert.equal(warnings[0].status, 'pending')
+  assert.equal(fake.documents('business_nodes')[0].calendarNotificationStatus, 'notified')
+})
+
 test('剩余零分钟可写回不依赖日历版本的已计算截止时间', async () => {
   const fake = createFakeCloudDatabase({
     business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-1' }],

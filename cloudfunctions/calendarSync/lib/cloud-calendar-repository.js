@@ -60,6 +60,11 @@ function safeVersion(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
+function calendarWarningId(lineId) {
+  const digest = crypto.createHash('sha256').update(`${lineId}\0processing`).digest('hex')
+  return `work-calendar-missing-${digest.slice(0, 40)}`
+}
+
 async function readGenerationRecords(source, year, generationId, expectedLength) {
   const pageSize = 100
   const pages = Math.ceil((expectedLength + 1) / pageSize)
@@ -315,7 +320,44 @@ function createCloudCalendarRepository({
     })
   }
 
-  return { replaceYear, getDayRule, listPendingDueCandidates, applyDueCalculation }
+  async function ensurePendingCalendarWarning({ candidate } = {}) {
+    if (!candidate || candidate.kind !== 'processing' || typeof candidate.id !== 'string' ||
+        typeof candidate.businessLineId !== 'string' || typeof candidate.status !== 'string' ||
+        safeVersion(candidate.version) === null) return false
+    return db.runTransaction(async transaction => {
+      const line = await readDocument(transaction, 'business_lines', candidate.businessLineId)
+      const node = await readDocument(transaction, 'business_nodes', candidate.id)
+      if (!line || line.status !== 'active' || line.currentNodeId !== candidate.id || !node ||
+          node.businessLineId !== line._id || node.status !== candidate.status ||
+          node.version !== candidate.version || !PROCESSING_STATUSES.has(node.status) ||
+          node.processingDueStatus !== 'pending_calendar') return false
+      const warningId = calendarWarningId(line._id)
+      const existing = await readDocument(transaction, 'notifications', warningId)
+      if (!existing) {
+        await transaction.collection('notifications').doc(warningId).set({ data: {
+          type: 'work_calendar_missing',
+          audienceRole: 'super_admin',
+          status: 'pending',
+          createdAt: db.serverDate()
+        } })
+      }
+      if (node.calendarNotificationStatus !== 'notified') {
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          calendarNotificationStatus: 'notified',
+          updatedAt: db.serverDate()
+        } })
+      }
+      return true
+    })
+  }
+
+  return {
+    replaceYear,
+    getDayRule,
+    listPendingDueCandidates,
+    applyDueCalculation,
+    ensurePendingCalendarWarning
+  }
 }
 
 module.exports = {

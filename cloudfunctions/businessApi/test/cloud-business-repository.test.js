@@ -13,8 +13,12 @@ function sourceNode(overrides = {}) {
     sequence: 0,
     name: '启动',
     description: '启动说明',
-    assigneeUserIds: ['user-2'],
-    slaWorkHours: 8,
+    workflowMode: 'review',
+    processorUserIds: ['user-2'],
+    reviewerUserIds: ['user-3'],
+    reviewMode: 'any',
+    processingSlaWorkHours: 8,
+    reviewSlaWorkHours: 4,
     requiresEvidence: false,
     allowedEvidenceTypes: ['pdf'],
     fields: [{
@@ -30,7 +34,8 @@ function seedDefinition(overrides = {}) {
     sourceNode(),
     sourceNode({
       _id: 'template-node-2', nodeKey: 'node-b', sequence: 1, name: '交付',
-      assigneeUserIds: ['user-3'], requiresEvidence: true,
+      processorUserIds: ['user-3'], reviewerUserIds: ['user-4'], reviewMode: 'all',
+      processingSlaWorkHours: 22, reviewSlaWorkHours: 8, requiresEvidence: true,
       allowedEvidenceTypes: ['pdf', 'mp4']
     })
   ]
@@ -38,7 +43,8 @@ function seedDefinition(overrides = {}) {
     users: overrides.users || [
       { _id: 'user-1', status: 'active' },
       { _id: 'user-2', status: 'active' },
-      { _id: 'user-3', status: 'active' }
+      { _id: 'user-3', status: 'active' },
+      { _id: 'user-4', status: 'active' }
     ],
     templates: [{
       _id: 'template-1', name: '交付模板', status: 'enabled', version: 4,
@@ -54,6 +60,15 @@ function createRepositoryHarness(seed = seedDefinition(), options = {}) {
   const repository = createCloudBusinessRepository({
     db: fake.db,
     clock: () => new Date('2026-08-07T02:30:00.000Z'),
+    workTimeService: {
+      async tryAddWorkMinutes(startAt, minutes) {
+        return {
+          status: 'calculated',
+          dueAt: new Date(startAt.getTime() + minutes * 60 * 1000),
+          calendarVersion: 'calendar-v1'
+        }
+      }
+    },
     ...options
   })
   return { fake, repository }
@@ -90,7 +105,7 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(line.sourceTemplateId, 'template-1')
   assert.equal(line.sourceTemplateVersion, 4)
   assert.deepEqual(line.managerUserIds, ['user-1'])
-  assert.deepEqual(line.memberUserIds, ['user-1', 'user-2', 'user-3'])
+  assert.deepEqual(line.memberUserIds, ['user-1', 'user-2', 'user-3', 'user-4'])
   assert.equal(line.currentNodeId, nodes[0]._id)
   assert.equal(line.currentNodeName, '启动')
   assert.equal(line.nodeCount, 2)
@@ -99,11 +114,31 @@ test('creation allocates a generated code and publishes a complete immutable tem
     'BL-20260807-0001-N001', 'BL-20260807-0001-N002'
   ])
   assert.deepEqual(nodes.map(node => node.status), ['ready', 'waiting'])
+  assert.equal(nodes[0].workflowMode, 'review')
+  assert.deepEqual(nodes[0].processorUserIds, ['user-2'])
+  assert.deepEqual(nodes[0].reviewerUserIds, ['user-3'])
+  assert.equal(nodes[0].reviewMode, 'any')
+  assert.equal(nodes[0].processingSlaWorkHours, 8)
+  assert.equal(nodes[0].reviewSlaWorkHours, 4)
+  assert.equal(nodes[0].processingRoundNumber, 1)
+  assert.equal(nodes[0].processingDueStatus, 'calculated')
+  assert.equal(nodes[0].processingDueAt.toISOString(), '2026-08-07T10:30:00.000Z')
+  assert.equal(nodes[0].processingCalendarVersion, 'calendar-v1')
+  assert.equal(nodes[0].processingStartedAt.toISOString(), '2026-08-07T02:30:00.000Z')
+  assert.equal(Object.hasOwn(nodes[0], 'assigneeUserIds'), false)
+  assert.equal(Object.hasOwn(nodes[0], 'slaWorkHours'), false)
+  for (const field of ['processingDueStatus', 'processingDueAt', 'processingCalendarVersion', 'processingStartedAt']) {
+    assert.equal(Object.hasOwn(nodes[1], field), false)
+  }
   assert.equal(nodes[0].sourceTemplateNodeKey, 'node-a')
   assert.deepEqual(nodes[0].fieldDefinitions, source.nodes[0].fields)
   assert.notEqual(nodes[0].fieldDefinitions, source.nodes[0].fields)
   source.nodes[0].fields[0].name = '后续模板变化'
+  source.nodes[0].processorUserIds[0] = '后续处理人'
+  source.nodes[0].reviewerUserIds[0] = '后续审核人'
   assert.equal(fake.documents('business_nodes')[0].fieldDefinitions[0].name, '摘要')
+  assert.deepEqual(fake.documents('business_nodes')[0].processorUserIds, ['user-2'])
+  assert.deepEqual(fake.documents('business_nodes')[0].reviewerUserIds, ['user-3'])
   assert.equal(fake.documents('sequence_counters')[0].sequence, 1)
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.deepEqual(fake.transactionQueries, [])
@@ -129,7 +164,7 @@ test('snapshot creation and publication roll back safely and resume through the 
   assert.equal(fake.documents('sequence_counters')[0].sequence, 1)
 })
 
-test('snapshot transaction revalidates enabled template and active assignees and leaves no partial data', async t => {
+test('snapshot transaction revalidates enabled template and active processor/reviewer accounts and leaves no partial data', async t => {
   await t.test('template disabled after the service read', async () => {
     const { fake, repository } = createRepositoryHarness()
     const source = await definition(repository)
@@ -143,13 +178,24 @@ test('snapshot transaction revalidates enabled template and active assignees and
     assert.equal(fake.documents('business_nodes').length, 0)
   })
 
-  await t.test('assignee disabled after the service read', async () => {
+  await t.test('processor disabled after the service read', async () => {
     const { fake, repository } = createRepositoryHarness()
     const source = await definition(repository)
     fake.beforeNextTransaction(() => fake.replace('users', 'user-2', { status: 'disabled' }))
     await assert.rejects(repository.createBusinessSnapshot({
       actor: { _id: 'user-1' }, input: input(), definition: source
-    }), error => error.code === 'ASSIGNEE_INACTIVE')
+    }), error => error.code === 'PROCESSOR_INACTIVE')
+    assert.equal(fake.documents('business_lines').length, 0)
+    assert.equal(fake.documents('sequence_counters').length, 0)
+  })
+
+  await t.test('reviewer disabled after the service read', async () => {
+    const { fake, repository } = createRepositoryHarness()
+    const source = await definition(repository)
+    fake.beforeNextTransaction(() => fake.replace('users', 'user-4', { status: 'disabled' }))
+    await assert.rejects(repository.createBusinessSnapshot({
+      actor: { _id: 'user-1' }, input: input(), definition: source
+    }), error => error.code === 'REVIEWER_INACTIVE')
     assert.equal(fake.documents('business_lines').length, 0)
     assert.equal(fake.documents('sequence_counters').length, 0)
   })
@@ -234,10 +280,11 @@ test('snapshot creation rejects creator-aware operation budget overflow before s
     _id: `template-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
-    assigneeUserIds: [`assignee-${index % 47}`]
+    processorUserIds: [`participant-${index % 24}`],
+    reviewerUserIds: [`participant-${24 + (index % 23)}`]
   }))
-  const users = [{ _id: 'user-1', status: 'active' }].concat(nodes.map((node, index) => ({
-    _id: `assignee-${index}`, status: 'active'
+  const users = [{ _id: 'user-1', status: 'active' }].concat(Array.from({ length: 47 }, (_, index) => ({
+    _id: `participant-${index}`, status: 'active'
   })))
   const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes, users }))
 
@@ -247,6 +294,82 @@ test('snapshot creation rejects creator-aware operation budget overflow before s
     /snapshot transaction operation budget/i.test(error.message) &&
     !/at most 48 nodes/i.test(error.message))
   assert.equal(fake.transactionRuns.length, 0)
+})
+
+test('snapshot transaction budget permits exactly one hundred operations with deduplicated review participants', async () => {
+  const nodes = Array.from({ length: 48 }, (_, index) => sourceNode({
+    _id: `template-node-${index}`,
+    nodeKey: `node-${index}`,
+    sequence: index,
+    processorUserIds: [`participant-${index % 23}`],
+    reviewerUserIds: [`participant-${23 + (index % 23)}`]
+  }))
+  const users = [{ _id: 'user-1', status: 'active' }].concat(Array.from({ length: 46 }, (_, index) => ({
+    _id: `participant-${index}`, status: 'active'
+  })))
+  const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes, users }))
+
+  await repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  })
+
+  assert.equal(fake.transactionRuns[0].operations, 100)
+  assert.equal(fake.documents('business_lines').length, 1)
+})
+
+test('missing work calendar publishes the business with a deterministic safe administrator warning', async () => {
+  const { fake, repository } = createRepositoryHarness(seedDefinition(), {
+    workTimeService: {
+      async tryAddWorkMinutes() {
+        return { status: 'pending_calendar', dueAt: null, missingDate: '2026-08-07' }
+      }
+    }
+  })
+  const request = {
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  }
+
+  const first = await repository.createBusinessSnapshot(request)
+  const retry = await repository.createBusinessSnapshot(request)
+
+  assert.deepEqual(retry, first)
+  assert.equal(fake.documents('business_lines')[0].status, 'active')
+  const firstNode = fake.documents('business_nodes').sort((a, b) => a.sequence - b.sequence)[0]
+  assert.equal(firstNode.processingDueStatus, 'pending_calendar')
+  assert.equal(firstNode.processingDueAt, null)
+  assert.equal(firstNode.processingStartedAt.toISOString(), '2026-08-07T02:30:00.000Z')
+  assert.equal(firstNode.calendarNotificationStatus, 'notified')
+  const warnings = fake.documents('notifications')
+  assert.equal(warnings.length, 1)
+  assert.deepEqual(Object.keys(warnings[0]).sort(), [
+    '_id', 'audienceRole', 'createdAt', 'status', 'type'
+  ])
+  assert.equal(warnings[0].audienceRole, 'super_admin')
+  assert.equal(warnings[0].type, 'work_calendar_missing')
+  assert.equal(warnings[0].status, 'pending')
+})
+
+test('administrator warning failure does not roll back publication and a retry creates it once', async () => {
+  const { fake, repository } = createRepositoryHarness(seedDefinition(), {
+    workTimeService: {
+      async tryAddWorkMinutes() {
+        return { status: 'pending_calendar', dueAt: null, missingDate: '2026-08-07' }
+      }
+    }
+  })
+  const request = {
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  }
+  fake.failNextWrite({ collection: 'notifications', operation: 'set', error: new Error('notification unavailable') })
+
+  const created = await repository.createBusinessSnapshot(request)
+  assert.equal(fake.documents('business_lines')[0].status, 'active')
+  assert.equal(fake.documents('notifications').length, 0)
+  assert.equal(fake.documents('business_nodes').find(node => node.sequence === 0).calendarNotificationStatus, 'pending')
+
+  assert.deepEqual(await repository.findCreationResult({ actorId: 'user-1', input: input() }), created)
+  assert.equal(fake.documents('notifications').length, 1)
+  assert.equal(fake.documents('business_nodes').find(node => node.sequence === 0).calendarNotificationStatus, 'notified')
 })
 
 test('failed snapshot writes roll back the counter, line, nodes, and audit together', async () => {

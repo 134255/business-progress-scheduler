@@ -31,8 +31,18 @@ function businessTemplate(overrides = {}) {
   }
 }
 
-function createBusinessHarness({ definition = businessTemplate(), existing = null, createError } = {}) {
+function createBusinessHarness({
+  definition = businessTemplate(),
+  existing = null,
+  createError,
+  dueResult = {
+    status: 'calculated',
+    dueAt: new Date('2026-08-07T10:30:00.000Z'),
+    calendarVersion: 'calendar-v1'
+  }
+} = {}) {
   const calls = []
+  const workTimeCalls = []
   const repository = {
     async findCreationResult(input) {
       calls.push(['findCreationResult', clone(input)])
@@ -56,11 +66,21 @@ function createBusinessHarness({ definition = businessTemplate(), existing = nul
       return { line: { _id: input.lineId }, nodes: [] }
     }
   }
-  const service = createBusinessService({ repository })
+  const service = createBusinessService({
+    repository,
+    clock: () => new Date('2026-08-07T02:30:00.000Z'),
+    workTimeService: {
+      async tryAddWorkMinutes(startAt, minutes) {
+        workTimeCalls.push([new Date(startAt), minutes])
+        return clone(dueResult)
+      }
+    }
+  })
   return {
     service,
     repository,
     calls,
+    workTimeCalls,
     actor: { _id: 'user-1', role: 'user', status: 'active' }
   }
 }

@@ -22,6 +22,7 @@ function createCalendarSyncService({ holidayClient, calendarRepository, workTime
   const replaceYear = requireMethod(calendarRepository, 'replaceYear')
   const listCandidates = requireMethod(calendarRepository, 'listPendingDueCandidates')
   const applyCalculation = requireMethod(calendarRepository, 'applyDueCalculation')
+  const ensureWarning = requireMethod(calendarRepository, 'ensurePendingCalendarWarning')
   const tryAddWorkMinutes = requireMethod(workTimeService, 'tryAddWorkMinutes')
   if (typeof clock !== 'function') throw new TypeError('clock is required')
 
@@ -60,6 +61,7 @@ function createCalendarSyncService({ holidayClient, calendarRepository, workTime
         const calculation = await tryAddWorkMinutes(candidate.startAt, candidate.minutes)
         if (!calculation || calculation.status !== 'calculated') {
           recalculation.pending += 1
+          await ensureWarning({ candidate, now: new Date(now) })
           continue
         }
         const changed = await applyCalculation({ candidate, calculation, now: new Date(now) })

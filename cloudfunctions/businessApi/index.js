@@ -25,6 +25,8 @@ const {
   createCloudTemplateRepository
 } = require('./lib/cloud-template-repository')
 const { createCloudBusinessRepository } = require('./lib/cloud-business-repository')
+const { createCloudWorkCalendarRepository } = require('./lib/cloud-work-calendar-repository')
+const { createWorkTimeService } = require('./lib/work-time-service')
 const { createEvidenceService } = require('./lib/evidence-service')
 const { createCloudEvidenceRepository } = require('./lib/cloud-evidence-repository')
 const { createFeedbackService } = require('./lib/feedback-service')
@@ -613,6 +615,9 @@ function createDefaultBusinessApi() {
   const repository = createCloudAccountRepository({ db, clock: () => new Date() })
   const templateRepository = createCloudTemplateRepository({ db })
   const businessRepository = createCloudBusinessRepository({ db, clock: () => new Date() })
+  const workTimeService = createWorkTimeService({
+    calendarRepository: createCloudWorkCalendarRepository({ db })
+  })
   const evidenceRepository = createCloudEvidenceRepository({ db, cloud, clock: () => new Date() })
   const feedbackRepository = createCloudFeedbackRepository({ db, clock: () => new Date() })
   const clock = Date.now
@@ -629,7 +634,11 @@ function createDefaultBusinessApi() {
     clock: () => new Date(),
     keyFactory: prefix => `${prefix}_${crypto.randomBytes(16).toString('hex')}`
   })
-  const businessService = createBusinessService({ repository: businessRepository })
+  const businessService = createBusinessService({
+    repository: businessRepository,
+    workTimeService,
+    clock: () => new Date()
+  })
   const businessLifecycleService = createBusinessLifecycleService({ repository: businessRepository })
   const evidenceService = createEvidenceService({ repository: evidenceRepository })
   const feedbackService = createFeedbackService({ repository: feedbackRepository })

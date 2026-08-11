@@ -105,8 +105,36 @@ function requireEnabledDefinition(definition) {
   return definition
 }
 
-function createBusinessService({ repository }) {
+function firstProcessingDue(startedAt, result) {
+  if (result && result.status === 'calculated' && result.dueAt instanceof Date &&
+      !Number.isNaN(result.dueAt.getTime()) &&
+      (result.calendarVersion === null ||
+        (typeof result.calendarVersion === 'string' && result.calendarVersion))) {
+    return {
+      processingStartedAt: new Date(startedAt),
+      processingDueStatus: 'calculated',
+      processingDueAt: new Date(result.dueAt),
+      processingCalendarVersion: result.calendarVersion,
+      calendarNotificationStatus: 'not_required'
+    }
+  }
+  if (result && result.status === 'pending_calendar' && result.dueAt === null) {
+    return {
+      processingStartedAt: new Date(startedAt),
+      processingDueStatus: 'pending_calendar',
+      processingDueAt: null,
+      calendarNotificationStatus: 'pending'
+    }
+  }
+  throw createError('BUSINESS_ERROR')
+}
+
+function createBusinessService({ repository, workTimeService, clock = () => new Date() }) {
   if (!repository) throw new TypeError('repository is required')
+  if (!workTimeService || typeof workTimeService.tryAddWorkMinutes !== 'function') {
+    throw new TypeError('workTimeService.tryAddWorkMinutes is required')
+  }
+  if (typeof clock !== 'function') throw new TypeError('clock is required')
 
   async function createFromTemplate({ actor, input }) {
     requireActiveActor(actor)
@@ -116,7 +144,20 @@ function createBusinessService({ repository }) {
     const definition = requireEnabledDefinition(
       await repository.getTemplateDefinition(normalized.templateId)
     )
-    return repository.createBusinessSnapshot({ actor, input: normalized, definition })
+    const snapshotInput = { actor, input: normalized, definition }
+    if (definition.nodes[0].workflowMode === 'review') {
+      const startedAt = clock()
+      if (!(startedAt instanceof Date) || Number.isNaN(startedAt.getTime())) {
+        throw new TypeError('clock must return a Date')
+      }
+      const minutes = definition.nodes[0].processingSlaWorkHours * 60
+      if (!Number.isSafeInteger(minutes) || minutes <= 0) throw createError('TEMPLATE_INVALID')
+      snapshotInput.firstProcessingDue = firstProcessingDue(
+        startedAt,
+        await workTimeService.tryAddWorkMinutes(new Date(startedAt), minutes)
+      )
+    }
+    return repository.createBusinessSnapshot(snapshotInput)
   }
 
   async function listBusinessLines({ actor, query = {} }) {

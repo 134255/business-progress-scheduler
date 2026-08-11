@@ -1,6 +1,8 @@
 const crypto = require('node:crypto')
 
 const { formatBusinessCode, formatNodeCode } = require('./business-numbering')
+const { createCloudWorkCalendarRepository } = require('./cloud-work-calendar-repository')
+const { createWorkTimeService } = require('./work-time-service')
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { parseStrictTimestamp } = require('./evidence-retention')
 const {
@@ -16,6 +18,7 @@ const COLLECTIONS = Object.freeze({
   counters: 'sequence_counters',
   lines: 'business_lines',
   nodes: 'business_nodes',
+  notifications: 'notifications',
   audit: 'audit_logs'
 })
 const QUERY_PAGE_SIZE = 100
@@ -86,12 +89,22 @@ function compareNodes(left, right) {
   return Number(left.sequence) - Number(right.sequence) || String(left._id).localeCompare(String(right._id))
 }
 
+function snapshotParticipantUserIds(nodes) {
+  if (!Array.isArray(nodes)) return []
+  return [...new Set(nodes.flatMap(node => {
+    if (node && node.workflowMode === 'review') {
+      return [
+        ...(Array.isArray(node.processorUserIds) ? node.processorUserIds : []),
+        ...(Array.isArray(node.reviewerUserIds) ? node.reviewerUserIds : [])
+      ]
+    }
+    return Array.isArray(node && node.assigneeUserIds) ? node.assigneeUserIds : []
+  }))].sort()
+}
+
 function snapshotReservationOperationCount(nodes) {
   if (!Array.isArray(nodes)) return Number.POSITIVE_INFINITY
-  const assigneeIds = new Set(nodes.flatMap(node => Array.isArray(node && node.assigneeUserIds)
-    ? node.assigneeUserIds
-    : []))
-  return nodes.length + assigneeIds.size + 6
+  return nodes.length + snapshotParticipantUserIds(nodes).length + 6
 }
 
 function canCreateBusinessSnapshot(nodes) {
@@ -99,8 +112,19 @@ function canCreateBusinessSnapshot(nodes) {
     snapshotReservationOperationCount(nodes) <= MAX_TRANSACTION_OPERATIONS
 }
 
-function createCloudBusinessRepository({ db, clock = () => new Date(), duplicateRetries = MAX_DUPLICATE_RETRIES }) {
+function createCloudBusinessRepository({
+  db,
+  clock = () => new Date(),
+  duplicateRetries = MAX_DUPLICATE_RETRIES,
+  workTimeService
+}) {
   if (!db) throw new TypeError('db is required')
+  const dueTimeService = workTimeService || createWorkTimeService({
+    calendarRepository: createCloudWorkCalendarRepository({ db })
+  })
+  if (!dueTimeService || typeof dueTimeService.tryAddWorkMinutes !== 'function') {
+    throw new TypeError('workTimeService.tryAddWorkMinutes is required')
+  }
 
   async function readDocument(database, collectionName, id) {
     try {
@@ -836,7 +860,7 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     return `${lineId}-node-${String(sequence + 1).padStart(3, '0')}`
   }
 
-  function preparedSnapshot(lineId, code, sourceNodes) {
+  function preparedSnapshot(lineId, code, sourceNodes, firstProcessingDue) {
     return sourceNodes.slice().sort(compareNodes).map((source, index) => ({
       id: nodeId(lineId, index),
       data: {
@@ -846,8 +870,23 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
         sequence: index,
         name: source.name,
         description: source.description || '',
-        assigneeUserIds: clone(source.assigneeUserIds),
-        slaWorkHours: source.slaWorkHours,
+        ...(source.workflowMode === 'review'
+          ? {
+              workflowMode: 'review',
+              processorUserIds: clone(source.processorUserIds),
+              reviewerUserIds: clone(source.reviewerUserIds),
+              reviewMode: source.reviewMode,
+              processingSlaWorkHours: source.processingSlaWorkHours,
+              reviewSlaWorkHours: source.reviewSlaWorkHours,
+              processingRoundNumber: 1,
+              processingElapsedWorkMinutes: 0,
+              processingOverdueWorkMinutes: 0,
+              ...(index === 0 ? clone(firstProcessingDue) : {})
+            }
+          : {
+              assigneeUserIds: clone(source.assigneeUserIds),
+              slaWorkHours: source.slaWorkHours
+            }),
         requiresEvidence: source.requiresEvidence,
         allowedEvidenceTypes: clone(source.allowedEvidenceTypes),
         fieldDefinitions: clone(source.fields),
@@ -857,6 +896,41 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
         updatedAt: db.serverDate()
       }
     }))
+  }
+
+  function calendarWarningId(lineId) {
+    return `work-calendar-missing-${hash(`${lineId}\0processing`).slice(0, 40)}`
+  }
+
+  async function ensurePendingCalendarWarning(lineId) {
+    try {
+      return await db.runTransaction(async transaction => {
+        const line = await readDocument(transaction, COLLECTIONS.lines, lineId)
+        if (!line || line.status !== 'active' || typeof line.currentNodeId !== 'string') return false
+        const node = await readDocument(transaction, COLLECTIONS.nodes, line.currentNodeId)
+        if (!node || node.businessLineId !== lineId || node.sequence !== 0 ||
+            node.workflowMode !== 'review' || node.processingDueStatus !== 'pending_calendar') return false
+        const warningId = calendarWarningId(lineId)
+        const existing = await readDocument(transaction, COLLECTIONS.notifications, warningId)
+        if (!existing) {
+          await transaction.collection(COLLECTIONS.notifications).doc(warningId).set({ data: {
+            type: 'work_calendar_missing',
+            audienceRole: 'super_admin',
+            status: 'pending',
+            createdAt: db.serverDate()
+          } })
+        }
+        if (node.calendarNotificationStatus !== 'notified') {
+          await transaction.collection(COLLECTIONS.nodes).doc(node._id).update({ data: {
+            calendarNotificationStatus: 'notified',
+            updatedAt: db.serverDate()
+          } })
+        }
+        return true
+      })
+    } catch (_) {
+      return false
+    }
   }
 
   async function publishCreation(actorId, input, lineId, expectedNodes) {
@@ -896,12 +970,17 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     const line = await readDocument(db, COLLECTIONS.lines, identity.lineId)
     if (!line) return null
     assertMatchingReservation(line, actorId, identity)
-    if (line.status !== 'creating') return { id: line._id, code: line.code }
+    if (line.status !== 'creating') {
+      await ensurePendingCalendarWarning(line._id)
+      return { id: line._id, code: line.code }
+    }
     const nodes = Array.from({ length: line.nodeCount }, (_, index) => ({
       id: nodeId(line._id, index),
       data: { nodeCode: formatNodeCode(line.code, index + 1), sequence: index }
     }))
-    return publishCreation(actorId, input, line._id, nodes)
+    const result = await publishCreation(actorId, input, line._id, nodes)
+    await ensurePendingCalendarWarning(line._id)
+    return result
   }
 
   function assertDefinitionBudget(definition) {
@@ -915,16 +994,63 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
     }
   }
 
-  async function createBusinessSnapshot({ actor, input, definition }) {
+  async function createBusinessSnapshot({ actor, input, definition, firstProcessingDue: suppliedFirstDue }) {
     const identity = creationIdentity(actor && actor._id, input)
     const existing = await findCreationResult({ actorId: actor._id, input })
     if (existing) return existing
 
     const sourceNodes = clone(definition.nodes).sort(compareNodes)
-    const assigneeIds = [...new Set(sourceNodes.flatMap(node => node.assigneeUserIds))].sort()
+    const processorIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
+      Array.isArray(node.processorUserIds) ? node.processorUserIds : []))].sort()
+    const reviewerIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
+      Array.isArray(node.reviewerUserIds) ? node.reviewerUserIds : []))].sort()
+    const legacyAssigneeIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode !== 'review' &&
+      Array.isArray(node.assigneeUserIds) ? node.assigneeUserIds : []))].sort()
+    const participantIds = snapshotParticipantUserIds(sourceNodes)
     assertDefinitionBudget(definition)
-    const memberUserIds = [...new Set([actor._id, ...assigneeIds])].sort()
+    const memberUserIds = [...new Set([actor._id, ...participantIds])].sort()
     const at = clock()
+    if (!(at instanceof Date) || Number.isNaN(at.getTime())) throw new TypeError('clock must return a Date')
+    let firstProcessingDue = suppliedFirstDue ? clone(suppliedFirstDue) : null
+    if (sourceNodes[0].workflowMode === 'review') {
+      if (!firstProcessingDue) {
+        const minutes = sourceNodes[0].processingSlaWorkHours * 60
+        if (!Number.isSafeInteger(minutes) || minutes <= 0) throw createError('TEMPLATE_INVALID')
+        const calculated = await dueTimeService.tryAddWorkMinutes(new Date(at), minutes)
+        if (calculated && calculated.status === 'calculated' && calculated.dueAt instanceof Date &&
+            !Number.isNaN(calculated.dueAt.getTime()) &&
+            (calculated.calendarVersion === null ||
+              (typeof calculated.calendarVersion === 'string' && calculated.calendarVersion))) {
+          firstProcessingDue = {
+            processingStartedAt: new Date(at),
+            processingDueStatus: 'calculated',
+            processingDueAt: new Date(calculated.dueAt),
+            processingCalendarVersion: calculated.calendarVersion,
+            calendarNotificationStatus: 'not_required'
+          }
+        } else if (calculated && calculated.status === 'pending_calendar' && calculated.dueAt === null) {
+          firstProcessingDue = {
+            processingStartedAt: new Date(at),
+            processingDueStatus: 'pending_calendar',
+            processingDueAt: null,
+            calendarNotificationStatus: 'pending'
+          }
+        } else {
+          throw createError('BUSINESS_ERROR')
+        }
+      }
+      const calculatedDue = firstProcessingDue.processingDueStatus === 'calculated'
+      const pendingDue = firstProcessingDue.processingDueStatus === 'pending_calendar'
+      if (!(firstProcessingDue.processingStartedAt instanceof Date) ||
+          Number.isNaN(firstProcessingDue.processingStartedAt.getTime()) ||
+          (calculatedDue && (!(firstProcessingDue.processingDueAt instanceof Date) ||
+            Number.isNaN(firstProcessingDue.processingDueAt.getTime()) ||
+            (firstProcessingDue.processingCalendarVersion !== null &&
+              (typeof firstProcessingDue.processingCalendarVersion !== 'string' ||
+                !firstProcessingDue.processingCalendarVersion)))) ||
+          (pendingDue && firstProcessingDue.processingDueAt !== null) ||
+          (!calculatedDue && !pendingDue)) throw createError('BUSINESS_ERROR')
+    }
     const dayKey = formatBusinessCode(at, 1).slice(3, 11)
     const counterId = `business-line-${dayKey}`
     let minimumSequence = 1
@@ -947,7 +1073,18 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
           }
           const creator = await readDocument(transaction, COLLECTIONS.users, actor._id)
           if (!creator || creator.status !== 'active') throw createError('FORBIDDEN')
-          for (const userId of assigneeIds) {
+          for (const userId of processorIds) {
+            if (userId === actor._id) continue
+            const user = await readDocument(transaction, COLLECTIONS.users, userId)
+            if (!user || user.status !== 'active') throw createError('PROCESSOR_INACTIVE')
+          }
+          for (const userId of reviewerIds.filter(userId => !processorIds.includes(userId))) {
+            if (userId === actor._id) continue
+            const user = await readDocument(transaction, COLLECTIONS.users, userId)
+            if (!user || user.status !== 'active') throw createError('REVIEWER_INACTIVE')
+          }
+          for (const userId of legacyAssigneeIds.filter(userId =>
+            !processorIds.includes(userId) && !reviewerIds.includes(userId))) {
             if (userId === actor._id) continue
             const user = await readDocument(transaction, COLLECTIONS.users, userId)
             if (!user || user.status !== 'active') throw createError('ASSIGNEE_INACTIVE')
@@ -961,7 +1098,7 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
           }
           attemptedSequence = Math.max(currentSequence + 1, minimumSequence)
           const code = formatBusinessCode(at, attemptedSequence)
-          prepared = preparedSnapshot(identity.lineId, code, sourceNodes)
+          prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue)
           await transaction.collection(COLLECTIONS.counters).doc(counterId).set({
             data: { sequence: attemptedSequence, dateKey: dayKey, updatedAt: db.serverDate() }
           })
@@ -1010,7 +1147,9 @@ function createCloudBusinessRepository({ db, clock = () => new Date(), duplicate
         data: { nodeCode: formatNodeCode(reserved.line.code, index + 1), sequence: index }
       }))
     }
-    return publishCreation(actor._id, input, identity.lineId, prepared)
+    const result = await publishCreation(actor._id, input, identity.lineId, prepared)
+    await ensurePendingCalendarWarning(identity.lineId)
+    return result
   }
 
   return {
