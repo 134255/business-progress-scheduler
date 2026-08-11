@@ -4,6 +4,8 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 
 ## Verified state
 
+- 2026-08-11 节点独立审核流程 Task 7 已完成本地实现与回归。新增 `submitReviewVote` 服务与 CloudBase 仓储，投票输入固定为审核轮次、期望轮次版本、`approve/reject`、意见和请求键；请求键只保存 SHA-256 摘要，投票编号由轮次与审核人确定性生成。最终投票事务按账号、业务线、当前节点、审核轮次顺序重读并在读取既有投票前重新校验活动状态、当前关系、审核人快照、双向轮次锁和版本；或签首个有效通过只推进一次，会签全部快照审核人通过才推进，任一驳回立即结束本轮并恢复剩余处理分钟进入新处理轮。通过会完成并冻结当前节点，激活下一节点并计算处理截止，或在末节点完成业务线并建立统一 60 天凭证保留期。两轮独立复审发现的重要边界均已用补强 RED 修复：最终投票响应丢失后的重试仍先完成当前授权再读取确定性投票，终态固化锁版本、节点版本、轮次版本、审核模式和双轮次语义，只接受原终态或该轮待补算处理段明确解决后各提升一次的唯一版本链；处理时间仍为 `pending_calendar` 就立即通过或驳回时，补算边界绑定不可变审核轮次而非节点即时状态，`calendarSync` 使用独立持久游标有界扫描，因此再次提交审核或下游继续推进后仍可补算。补算事务直接返工为 3 次读取和 2 次写入，再次待审核时最多 4 次读取和 3 次写入并同步活动轮次累计值及双向锁；通过后只修正历史与累计值，不回滚流转。日历仍缺失时保留待补算状态并写安全管理员告警。测试用 CloudBase 数据库改为真实重叠的乐观事务模型，可观测冲突与回调重试，确定性投票、审计和通知保证唯一提交；事务操作数门禁保持不超过 100。初始 TDD RED 为 30 项中 19 通过、11 项按预期失败；两轮复审补强 RED 均精确失败后转绿，第三轮独立终审未发现核心流转的 Critical/Important，其发现的新游标索引手册漏项已补入正式部署手册。最终审核/反馈/fake 聚焦 90/90、`businessApi` 446/446、`calendarSync` 40/40、小程序 109/109、WXML 3/3。真实 CloudBase 并发重试、部署、索引与微信开发者工具交互仍未验证；部署前需按手册新增并验证 `node_review_rounds(processingCarryoverStatus ASC, _id ASC)` 组合索引；Task 8 负责路由和客户端接入。
+
 - 2026-08-11 节点独立审核流程 Task 6 正式复审修复轮次 4 已完成本地实现与回归。审核仓储现在要求业务线 `managerUserIds` 与 `memberUserIds` 都是自有数据属性、严格合法且非空的内部账号数组；即使当前处理人在另一数组中，只要任一关系数组为空、缺失或非法，审核轮次创建、幂等预检和最终重试都会失败关闭。TDD RED 精确复现空管理人和空成员两项错误放行；GREEN 后反馈与审核聚焦 69/69、`businessApi` 430/430、`calendarSync` 34/34、小程序 109/109、WXML 3/3。真实 CloudBase 事务和部署联动仍未验证。
 
 - 2026-08-11 节点独立审核流程 Task 6 正式复审修复轮次 3 已完成本地实现与回归。审核提交的原始节点版本固定保存在 `submittedNodeVersion`，当前锁一致性改由 `business_nodes.version === node_review_rounds.lockedNodeVersion` 与双向活动轮次关系验证；因此日历补算原子同步提升节点和轮次锁版本后，同请求仍可幂等返回，而任一侧版本、原提交版本或活动轮次被单独改变都会失败关闭。反馈与审核仓储共享账号关系结构检查：沿对象及原型链只读取属性描述符，不触发访问器；只要管理人、成员、处理人、审核人或旧流程负责人任一新结构标记存在，就禁止回退 OpenID，且实际授权数组仍必须是自有数据属性和严格内部账号数组。TDD RED 精确复现 3 项失败；GREEN 后反馈与审核聚焦 67/67、`businessApi` 428/428、`calendarSync` 34/34、小程序 109/109、WXML 3/3。真实 CloudBase 事务和部署联动仍未验证。
@@ -64,6 +66,20 @@ Status captured: 2026-08-11 (Asia/Shanghai)
 - Task 7 adds `docs/deployment/account-admin-setup.md` and README guidance for collection/index setup, guarded migration order, initial administrator setup, recovery rotation, and local verification. It documents the implemented `INVALID_RECOVERY_CODE` result for consumed or mismatched recovery state rather than the stale-plan `RECOVERY_CODE_USED` value. Formal-review round one adds an explicit post-index-removal rollback sequence and a password-manager-only recovery-hash workflow.
 
 ## Verification
+
+2026-08-11 节点独立审核流程 Task 7：
+
+| 命令或边界 | 结果 |
+|---|---|
+| 审核投票与乐观并发初始 RED | 按预期：30 项中 19 通过、11 失败；10 项缺少投票服务/仓储实现，1 项证明旧 fake DB 事务回调被全局串行化。 |
+| 两轮独立复审补强 RED | 第一轮按预期审核 3 项、日历 3 项精确失败；第二轮按预期审核 2 项、日历 3 项精确失败，暴露宽松终态版本链及绑定节点即时状态的历史补算在再次审核或下游推进后不可达。 |
+| `node --test test/review-service.test.js test/cloud-review-repository.test.js test/cloud-feedback-repository.test.js test/fake-cloud-database.test.js`（在 `cloudfunctions/businessApi` 下） | 通过：90 个测试，0 失败；覆盖唯一合法终态版本链、历史补算后幂等重试、真实并发重叠、冲突重试与唯一流转。 |
+| `npm.cmd test --prefix cloudfunctions/businessApi` | 通过：446 个测试，0 失败；仅有两条既有 malformed npm user-config 警告。 |
+| `npm.cmd test --prefix cloudfunctions/calendarSync` | 通过：40 个测试，0 失败；覆盖直接返工、再次待审核、通过后下游推进、历史游标失效页越过与损坏失败关闭。 |
+| `node --test miniprogram/test/*.test.js` | 通过：109 个测试，0 失败。 |
+| `node tools/test-wxml-structure.mjs` | 通过：3 个测试，0 失败。 |
+| Task 7 JavaScript 语法检查 | 通过：审核服务、审核仓储、日历同步服务和日历仓储无语法错误。 |
+| 真实 CloudBase 与微信开发者工具 | 未验证：本任务未部署函数、未接入 Task 8 路由或页面，也未在真实云事务中制造审核并发；部署前需新增并验证 `node_review_rounds(processingCarryoverStatus ASC, _id ASC)` 组合索引。 |
 
 2026-08-11 节点独立审核流程 Task 4：
 
@@ -739,5 +755,5 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 1. 由目标环境操作员按 `docs/deployment/template-node-fields-setup.md` 从备份可读性开始，依次完成唯一值检查、索引、`businessApi` 和 `evidenceRetention` 上传；每日触发器先保持停用。
 2. 使用隔离测试业务、测试账号和无敏感测试文件完成手册验收矩阵，确认重复调用幂等后再启用每日触发器；逐项把未验证结果更新为通过或失败。
-3. 继续节点独立审核流程 Task 6，保存不可变处理版本并原子创建审核轮次；随后再实现审核投票、自动流转与提醒。
+3. 继续节点独立审核流程 Task 8，将已完成的提交审核与投票流转接入受保护路由、审核待办和审核页面；提醒工作器仍按后续任务推进。
 4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。

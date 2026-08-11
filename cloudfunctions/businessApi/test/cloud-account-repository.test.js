@@ -276,7 +276,7 @@ test('credential updates are atomic, date fields are concrete Dates, and audit t
   assert.deepEqual(fake.transactionQueries, [])
 })
 
-test('challenge creation stores concrete dates and concurrent consumption invokes the callback once', async () => {
+test('challenge creation stores concrete dates and concurrent consumption commits callback writes once', async () => {
   const { fake, repository } = createRepository({
     users: [{ _id: 'u-1', username: 'user01', usernameNormalized: 'user01', role: 'user', status: 'active' }],
     user_credentials: [{ _id: 'u-1', userId: 'u-1', challengeEpoch: 0, credentialVersion: 0 }]
@@ -302,6 +302,7 @@ test('challenge creation stores concrete dates and concurrent consumption invoke
       callbackCount += 1
       assert.equal(challenge._id, 'challenge-1')
       assert.equal((await transactionRepository.findUserByUsername('user01'))._id, 'u-1')
+      await transactionRepository.writeAudit({ action: 'CHALLENGE_CONSUMED' })
       return 'consumed'
     }
   })
@@ -309,7 +310,8 @@ test('challenge creation stores concrete dates and concurrent consumption invoke
   const attempts = await Promise.allSettled([consume(), consume()])
   assert.equal(attempts.filter(result => result.status === 'fulfilled').length, 1)
   assert.equal(attempts.filter(result => result.status === 'rejected' && result.reason.code === 'INVALID_CHALLENGE').length, 1)
-  assert.equal(callbackCount, 1)
+  assert.equal(callbackCount >= 1, true)
+  assert.equal(fake.documents('audit_logs').filter(entry => entry.action === 'CHALLENGE_CONSUMED').length, 1)
   assert.equal(fake.documents('auth_challenges')[0].consumedAt instanceof Date, true)
   assert.deepEqual(fake.transactionQueries, [])
 })

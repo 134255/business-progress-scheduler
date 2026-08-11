@@ -3,12 +3,14 @@ const crypto = require('node:crypto')
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { ownExactAccountIds } = require('./account-relationship-schema')
+const { deterministicVoteId } = require('./review-domain')
 
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_LINE_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const REVIEW_MODES = new Set(['any', 'all'])
 const HASH = /^[a-f0-9]{64}$/
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
+const RETENTION_MS = 60 * 24 * 60 * 60 * 1000
 
 function createError(code) {
   const error = new Error(code)
@@ -68,6 +70,24 @@ function publicResult(round) {
   }
 }
 
+function sameIds(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function voteResult(round, nodeStatus, lineStatus, nextNodeId = null) {
+  return {
+    reviewRoundId: round._id,
+    status: round.status,
+    nodeStatus,
+    lineStatus,
+    nextNodeId
+  }
+}
+
+function instanceNodeId(lineId, sequence) {
+  return `${lineId}-node-${String(sequence + 1).padStart(3, '0')}`
+}
+
 function createCloudReviewRepository({ db, clock = () => new Date() }) {
   if (!db) throw new TypeError('db is required')
 
@@ -103,6 +123,162 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       throw createError('VERSION_CONFLICT')
     }
     return { processors, reviewers }
+  }
+
+  function assertVoteRelationships(actor, line, node, round) {
+    if (!actor || actor.status !== 'active' || typeof actor._id !== 'string' ||
+        !DOCUMENT_ID.test(actor._id)) throw createError('FORBIDDEN')
+    if (!line || !node || !round || node.businessLineId !== line._id ||
+        round.businessLineId !== line._id || round.nodeId !== node._id) throw createError('FORBIDDEN')
+    const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
+    const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
+    const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
+    const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+    const roundReviewers = ownExactAccountIds(round, 'reviewerUserIds', { nonEmpty: true })
+    if (!managers || !members || !processors || !reviewers || !roundReviewers ||
+        !sameIds(reviewers, roundReviewers) || processors.some(id => reviewers.includes(id)) ||
+        !members.includes(actor._id) && !managers.includes(actor._id) ||
+        !reviewers.includes(actor._id) || !roundReviewers.includes(actor._id)) {
+      throw createError('FORBIDDEN')
+    }
+    return { processors, reviewers }
+  }
+
+  function assertVoteAuthorization(actor, line, node, round, input) {
+    const relationships = assertVoteRelationships(actor, line, node, round)
+    if (FROZEN_LINE_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
+    if (line.status !== 'active') throw createError('NODE_NOT_ACTIVE')
+    if (!isCurrentNode(line, node)) throw createError('NODE_NOT_ACTIVE')
+    if (node.workflowMode !== 'review' || node.status !== 'pending_review' ||
+        node.activeReviewRoundId !== round._id || round.status !== 'pending' ||
+        !REVIEW_MODES.has(node.reviewMode) || round.reviewMode !== node.reviewMode ||
+        !safeInteger(node.processingRoundNumber, 1) ||
+        round.processingRoundNumber !== node.processingRoundNumber ||
+        !safeInteger(node.reviewRoundNumber, 1) || round.reviewRoundNumber !== node.reviewRoundNumber ||
+        node.version !== round.lockedNodeVersion || round.version !== input.expectedRoundVersion ||
+        input.reviewRoundId !== round._id) {
+      throw createError('VERSION_CONFLICT')
+    }
+    return relationships
+  }
+
+  function assertMatchingVote(vote, actor, round, value) {
+    if (!vote || vote.reviewRoundId !== round._id || vote.reviewerUserId !== actor._id ||
+        vote.requestKeyHash !== value.requestKeyHash || vote.inputHash !== value.inputHash ||
+        vote.expectedRoundVersion !== value.input.expectedRoundVersion ||
+        vote.decision !== value.input.decision || vote.comment !== value.input.comment) {
+      throw createError(vote ? 'VOTE_CONFLICT' : 'VERSION_CONFLICT')
+    }
+  }
+
+  function assertFinalRetryAuthorization(actor, line, node, round, input) {
+    assertVoteRelationships(actor, line, node, round)
+    const baseRoundVersion = input.expectedRoundVersion + 1
+    const baseNodeVersion = round.lockedNodeVersion + 1
+    const carryoverResolved = round.resultProcessingCarryoverPending === true &&
+      round.processingCarryoverStatus === 'resolved' &&
+      round.version === baseRoundVersion + 1 && node.version === baseNodeVersion + 1
+    const exactFinalVersion = round.version === baseRoundVersion && node.version === baseNodeVersion
+    if (!['approved', 'rejected'].includes(round.status) ||
+        input.reviewRoundId !== round._id || !exactFinalVersion && !carryoverResolved ||
+        round.resultRoundVersion !== baseRoundVersion || round.resultNodeVersion !== baseNodeVersion ||
+        round.resultLockedNodeVersion !== round.lockedNodeVersion ||
+        round.resultReviewMode !== round.reviewMode || round.resultReviewMode !== node.reviewMode ||
+        round.resultProcessingRoundNumber !== round.processingRoundNumber ||
+        round.resultReviewRoundNumber !== round.reviewRoundNumber ||
+        node.workflowMode !== 'review' || node.activeReviewRoundId !== undefined &&
+        node.activeReviewRoundId !== null ||
+        !['completed', 'in_progress'].includes(round.resultNodeStatus) ||
+        !['active', 'completed'].includes(round.resultLineStatus) ||
+        round.status === 'rejected' && (round.resultNodeStatus !== 'in_progress' ||
+          round.resultLineStatus !== 'active' || round.resultNextNodeId !== null ||
+          line.status !== 'active' || !isCurrentNode(line, node) || node.status !== 'in_progress' ||
+          node.processingRoundNumber !== round.processingRoundNumber + 1) ||
+        round.status === 'approved' && (round.resultNodeStatus !== 'completed' ||
+          node.status !== 'completed' || round.resultLineStatus === 'completed' &&
+          (line.status !== 'completed' || round.resultNextNodeId !== null) ||
+          round.resultLineStatus === 'active' &&
+          (line.status !== 'active' || typeof round.resultNextNodeId !== 'string' ||
+            line.currentNodeId !== round.resultNextNodeId || line.currentNodeIndex !== node.sequence + 1))) {
+      throw createError('VERSION_CONFLICT')
+    }
+    return voteResult(round, round.resultNodeStatus, round.resultLineStatus, round.resultNextNodeId)
+  }
+
+  function validateVoteInput(value, requireContext = false) {
+    if (!value || !value.actor || !value.input ||
+        typeof value.actor._id !== 'string' || !DOCUMENT_ID.test(value.actor._id) ||
+        typeof value.input.reviewRoundId !== 'string' || !DOCUMENT_ID.test(value.input.reviewRoundId) ||
+        !safeInteger(value.input.expectedRoundVersion, 1) ||
+        !['approve', 'reject'].includes(value.input.decision) ||
+        typeof value.input.comment !== 'string' || value.input.comment.length > 1000 ||
+        value.input.decision === 'reject' && !value.input.comment.trim() || requireContext &&
+        (!value.context || !value.timing || !HASH.test(value.requestKeyHash || '') ||
+          !HASH.test(value.inputHash || ''))) {
+      throw createError('VALIDATION_ERROR')
+    }
+  }
+
+  function safeVoteCounts(round, reviewerCount) {
+    const approvedVoteCount = round.approvedVoteCount === undefined ? 0 : round.approvedVoteCount
+    const voteCount = round.voteCount === undefined ? 0 : round.voteCount
+    if (!safeInteger(approvedVoteCount) || !safeInteger(voteCount) ||
+        approvedVoteCount > voteCount || voteCount > reviewerCount) {
+      throw createError('VERSION_CONFLICT')
+    }
+    return { approvedVoteCount, voteCount }
+  }
+
+  function validateDueTiming(timing, transition, expectedMinutes) {
+    if (!timing || !validDate(timing.transitionAt)) throw createError('VERSION_CONFLICT')
+    if (transition === 'complete_line') return
+    if (!safeInteger(expectedMinutes) ||
+        !['calculated', 'pending_calendar'].includes(timing.processingDueStatus)) {
+      throw createError('VERSION_CONFLICT')
+    }
+    if (timing.processingDueStatus === 'calculated') {
+      if (!validDate(timing.processingDueAt) ||
+          timing.processingCalendarVersion !== null &&
+          (typeof timing.processingCalendarVersion !== 'string' || !timing.processingCalendarVersion)) {
+        throw createError('VERSION_CONFLICT')
+      }
+    } else if (timing.processingDueAt !== null || timing.processingCalendarVersion !== null) {
+      throw createError('VERSION_CONFLICT')
+    }
+  }
+
+  function processingCarryover(node, round) {
+    const fields = [
+      'processingCarryoverStatus', 'processingCarryoverStartedAt',
+      'processingCarryoverEndedAt', 'processingCarryoverBaseElapsedWorkMinutes',
+      'processingCarryoverTotalWorkMinutes'
+    ]
+    if (round.processingTimingStatus === 'calculated') {
+      if (node.processingTimingStatus !== 'calculated' || fields.some(key =>
+        round[key] !== undefined && round[key] !== null)) throw createError('VERSION_CONFLICT')
+      return null
+    }
+    const total = node.processingSlaWorkHours * 60
+    if (round.processingTimingStatus !== 'pending_calendar' ||
+        node.processingTimingStatus !== 'pending_calendar' ||
+        !validDate(node.processingStartedAt) || !validDate(round.reviewStartedAt) ||
+        node.processingStartedAt.getTime() > round.reviewStartedAt.getTime() ||
+        !safeInteger(total, 1) ||
+        !safeInteger(round.processingElapsedWorkMinutes) ||
+        round.processingElapsedWorkMinutes !== node.processingElapsedWorkMinutes ||
+        round.processingRemainingWorkMinutes !== node.processingRemainingWorkMinutes ||
+        round.processingOverdueWorkMinutes !== node.processingOverdueWorkMinutes ||
+        round.processingCalendarVersion !== null || node.processingCalendarVersion !== null ||
+        fields.some(key => round[key] !== undefined && round[key] !== null)) {
+      throw createError('VERSION_CONFLICT')
+    }
+    return {
+      processingCarryoverStatus: 'pending',
+      processingCarryoverStartedAt: new Date(node.processingStartedAt),
+      processingCarryoverEndedAt: new Date(round.reviewStartedAt),
+      processingCarryoverBaseElapsedWorkMinutes: round.processingElapsedWorkMinutes,
+      processingCarryoverTotalWorkMinutes: total
+    }
   }
 
   function validateDraft(value, node, feedback) {
@@ -347,7 +523,352 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     })
   }
 
-  return { inspectReviewRoundRetry, findReviewRoundRetry, createReviewRound }
+  async function prepareReviewVote(value) {
+    validateVoteInput(value)
+    return db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, 'users', value.actor._id)
+      const hintedRound = await readDocument(transaction, 'node_review_rounds', value.input.reviewRoundId)
+      if (!hintedRound || typeof hintedRound.businessLineId !== 'string' ||
+          typeof hintedRound.nodeId !== 'string') throw createError('FORBIDDEN')
+      const line = await readDocument(transaction, 'business_lines', hintedRound.businessLineId)
+      const node = await readDocument(transaction, 'business_nodes', hintedRound.nodeId)
+      const round = await readDocument(transaction, 'node_review_rounds', value.input.reviewRoundId)
+      if (round && ['approved', 'rejected'].includes(round.status)) {
+        assertFinalRetryAuthorization(actor, line, node, round, value.input)
+        if (!HASH.test(value.requestKeyHash || '') || !HASH.test(value.inputHash || '')) {
+          throw createError('VALIDATION_ERROR')
+        }
+        const vote = await readDocument(
+          transaction, 'node_review_votes', deterministicVoteId(round._id, actor._id)
+        )
+        assertMatchingVote(vote, actor, round, value)
+        return {
+          businessLineId: line._id, nodeId: node._id,
+          nodeVersion: node.version, roundVersion: round.version,
+          transition: 'finalized_retry', processingWorkMinutes: null
+        }
+      }
+      assertVoteAuthorization(actor, line, node, round, value.input)
+      if (!safeInteger(line.nodeCount, 1) || !safeInteger(node.sequence) ||
+          node.sequence >= line.nodeCount) throw createError('VERSION_CONFLICT')
+      if (value.input.decision === 'reject') {
+        if (!safeInteger(round.processingRemainingWorkMinutes)) throw createError('VERSION_CONFLICT')
+        return {
+          businessLineId: line._id,
+          nodeId: node._id,
+          nodeVersion: node.version,
+          roundVersion: round.version,
+          transition: 'rework',
+          processingWorkMinutes: round.processingRemainingWorkMinutes,
+          processingCarryoverPending: round.processingTimingStatus === 'pending_calendar'
+        }
+      }
+      if (node.sequence + 1 === line.nodeCount) {
+        return {
+          businessLineId: line._id,
+          nodeId: node._id,
+          nodeVersion: node.version,
+          roundVersion: round.version,
+          transition: 'complete_line',
+          processingWorkMinutes: null
+        }
+      }
+      const nextId = instanceNodeId(line._id, node.sequence + 1)
+      const next = await readDocument(transaction, 'business_nodes', nextId)
+      const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
+      const nextReviewers = ownExactAccountIds(next, 'reviewerUserIds', { nonEmpty: true })
+      const minutes = next && next.processingSlaWorkHours * 60
+      if (!next || next.businessLineId !== line._id || next.sequence !== node.sequence + 1 ||
+          next.status !== 'waiting' || next.workflowMode !== 'review' ||
+          !nextProcessors || !nextReviewers || nextProcessors.some(id => nextReviewers.includes(id)) ||
+          !safeInteger(next.version, 1) || !safeInteger(minutes, 1)) {
+        throw createError('VERSION_CONFLICT')
+      }
+      return {
+        businessLineId: line._id,
+        nodeId: node._id,
+        nodeVersion: node.version,
+        roundVersion: round.version,
+        transition: 'next_node',
+        nextNodeId: next._id,
+        nextNodeVersion: next.version,
+        processingWorkMinutes: minutes
+      }
+    })
+  }
+
+  async function submitReviewVote(value) {
+    validateVoteInput(value, true)
+    const context = value.context
+    if (typeof context.businessLineId !== 'string' || !DOCUMENT_ID.test(context.businessLineId) ||
+        typeof context.nodeId !== 'string' || !DOCUMENT_ID.test(context.nodeId) ||
+        !safeInteger(context.nodeVersion, 1) || !safeInteger(context.roundVersion, 1) ||
+        !['rework', 'next_node', 'complete_line', 'finalized_retry'].includes(context.transition)) {
+      throw createError('VALIDATION_ERROR')
+    }
+    return db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, 'users', value.actor._id)
+      const line = await readDocument(transaction, 'business_lines', context.businessLineId)
+      const node = await readDocument(transaction, 'business_nodes', context.nodeId)
+      const round = await readDocument(transaction, 'node_review_rounds', value.input.reviewRoundId)
+      if (context.transition === 'finalized_retry') {
+        const result = assertFinalRetryAuthorization(actor, line, node, round, value.input)
+        if (node.version !== context.nodeVersion || round.version !== context.roundVersion) {
+          throw createError('VERSION_CONFLICT')
+        }
+        const vote = await readDocument(
+          transaction, 'node_review_votes', deterministicVoteId(round._id, actor._id)
+        )
+        assertMatchingVote(vote, actor, round, value)
+        return result
+      }
+      const { processors, reviewers } = assertVoteAuthorization(actor, line, node, round, value.input)
+      if (node.version !== context.nodeVersion || round.version !== context.roundVersion) {
+        throw createError('VERSION_CONFLICT')
+      }
+      const voteId = deterministicVoteId(round._id, actor._id)
+      const counts = safeVoteCounts(round, reviewers.length)
+      const existingVote = await readDocument(transaction, 'node_review_votes', voteId)
+      if (existingVote) {
+        assertMatchingVote(existingVote, actor, round, value)
+        return voteResult(round, node.status, line.status)
+      }
+
+      if (!safeInteger(line.nodeCount, 1) || !safeInteger(node.sequence) ||
+          node.sequence >= line.nodeCount) throw createError('VERSION_CONFLICT')
+      let next = null
+      let expectedTransition
+      let expectedMinutes = null
+      if (value.input.decision === 'reject') {
+        expectedTransition = 'rework'
+        expectedMinutes = round.processingRemainingWorkMinutes
+      } else if (node.sequence + 1 === line.nodeCount) {
+        expectedTransition = 'complete_line'
+      } else {
+        expectedTransition = 'next_node'
+        const nextId = instanceNodeId(line._id, node.sequence + 1)
+        next = await readDocument(transaction, 'business_nodes', nextId)
+        const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
+        const nextReviewers = ownExactAccountIds(next, 'reviewerUserIds', { nonEmpty: true })
+        expectedMinutes = next && next.processingSlaWorkHours * 60
+        if (!next || next._id !== context.nextNodeId || next.businessLineId !== line._id ||
+            next.sequence !== node.sequence + 1 || next.status !== 'waiting' ||
+            next.workflowMode !== 'review' || !nextProcessors || !nextReviewers ||
+            nextProcessors.some(id => nextReviewers.includes(id)) ||
+            !safeInteger(next.version, 1) || next.version !== context.nextNodeVersion ||
+            !safeInteger(expectedMinutes, 1)) throw createError('VERSION_CONFLICT')
+      }
+      if (context.transition !== expectedTransition ||
+          context.processingWorkMinutes !== expectedMinutes ||
+          expectedTransition === 'rework' && (context.processingCarryoverPending === true) !==
+          (round.processingTimingStatus === 'pending_calendar') ||
+          expectedTransition === 'rework' && !safeInteger(expectedMinutes)) {
+        throw createError('VERSION_CONFLICT')
+      }
+      validateDueTiming(value.timing, expectedTransition, expectedMinutes)
+      const carryover = processingCarryover(node, round)
+      if (expectedTransition === 'rework' && carryover &&
+          value.timing.processingDueStatus !== 'pending_calendar') throw createError('VERSION_CONFLICT')
+
+      const voteCount = increment(counts.voteCount)
+      const approvedVoteCount = value.input.decision === 'approve'
+        ? increment(counts.approvedVoteCount)
+        : counts.approvedVoteCount
+      if (voteCount > reviewers.length || approvedVoteCount > reviewers.length) {
+        throw createError('VERSION_CONFLICT')
+      }
+      const finalStatus = value.input.decision === 'reject'
+        ? 'rejected'
+        : round.reviewMode === 'any' || approvedVoteCount === reviewers.length
+          ? 'approved'
+          : 'pending'
+      const at = new Date(value.timing.transitionAt)
+      await transaction.collection('node_review_votes').doc(voteId).set({ data: {
+        reviewRoundId: round._id,
+        businessLineId: line._id,
+        nodeId: node._id,
+        reviewerUserId: actor._id,
+        decision: value.input.decision,
+        comment: value.input.comment,
+        expectedRoundVersion: value.input.expectedRoundVersion,
+        requestKeyHash: value.requestKeyHash,
+        inputHash: value.inputHash,
+        createdAt: db.serverDate()
+      } })
+
+      const auditId = `${voteId}-audit`
+      await transaction.collection('audit_logs').doc(auditId).set({ data: {
+        actorId: actor._id,
+        action: 'SUBMIT_REVIEW_VOTE',
+        targetType: 'node_review_round',
+        targetId: round._id,
+        businessLineId: line._id,
+        nodeId: node._id,
+        decision: value.input.decision,
+        resultStatus: finalStatus,
+        createdAt: db.serverDate()
+      } })
+
+      if (finalStatus === 'pending') {
+        await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
+          approvedVoteCount,
+          voteCount,
+          updatedAt: db.serverDate()
+        } })
+        return voteResult({ ...round, status: 'pending' }, node.status, line.status)
+      }
+
+      await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
+        status: finalStatus,
+        finalDecision: value.input.decision,
+        finalActorId: actor._id,
+        rejectionComment: finalStatus === 'rejected' ? value.input.comment : '',
+        approvedVoteCount,
+        voteCount,
+        resultNodeStatus: finalStatus === 'rejected' ? 'in_progress' : 'completed',
+        resultLineStatus: finalStatus === 'approved' && expectedTransition === 'complete_line'
+          ? 'completed'
+          : 'active',
+        resultNextNodeId: finalStatus === 'approved' && expectedTransition === 'next_node'
+          ? next._id
+          : null,
+        resultLockedNodeVersion: round.lockedNodeVersion,
+        resultNodeVersion: increment(node.version),
+        resultRoundVersion: increment(round.version),
+        resultReviewMode: round.reviewMode,
+        resultProcessingRoundNumber: round.processingRoundNumber,
+        resultReviewRoundNumber: round.reviewRoundNumber,
+        resultProcessingCarryoverPending: Boolean(carryover),
+        ...(carryover || {}),
+        decidedAt: at,
+        version: increment(round.version),
+        updatedAt: db.serverDate()
+      } })
+
+      let nodeStatus
+      let lineStatus = 'active'
+      let nextNodeId = null
+      let recipients
+      let notificationType
+      if (finalStatus === 'rejected') {
+        nodeStatus = 'in_progress'
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          status: nodeStatus,
+          processingRoundNumber: increment(node.processingRoundNumber),
+          processingStartedAt: at,
+          processingDueStatus: value.timing.processingDueStatus,
+          processingDueAt: value.timing.processingDueAt === null
+            ? null
+            : new Date(value.timing.processingDueAt),
+          processingCalendarVersion: value.timing.processingCalendarVersion,
+          calendarNotificationStatus: value.timing.processingDueStatus === 'pending_calendar'
+            ? 'pending'
+            : 'not_required',
+          activeReviewRoundId: db.command.remove(),
+          reviewStartedAt: db.command.remove(),
+          reviewDueStatus: db.command.remove(),
+          reviewDueAt: db.command.remove(),
+          reviewCalendarVersion: db.command.remove(),
+          version: increment(node.version),
+          updatedAt: db.serverDate()
+        } })
+        await transaction.collection('business_lines').doc(line._id).update({ data: {
+          version: increment(line.version),
+          updatedAt: db.serverDate()
+        } })
+        recipients = processors
+        notificationType = 'node_review_rejected'
+      } else {
+        nodeStatus = 'completed'
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          status: nodeStatus,
+          completedAt: at,
+          activeReviewRoundId: db.command.remove(),
+          version: increment(node.version),
+          updatedAt: db.serverDate()
+        } })
+        if (expectedTransition === 'complete_line') {
+          lineStatus = 'completed'
+          const purgeDueAt = new Date(at.getTime() + RETENTION_MS)
+          await transaction.collection('business_lines').doc(line._id).update({ data: {
+            status: lineStatus,
+            progress: 100,
+            completedAt: at,
+            frozenAt: at,
+            retentionStartedAt: at,
+            purgeDueAt,
+            version: increment(line.version),
+            updatedAt: db.serverDate()
+          } })
+          recipients = [...new Set([...processors, ...reviewers])].sort()
+          notificationType = 'business_completed'
+        } else {
+          nextNodeId = next._id
+          const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
+          await transaction.collection('business_nodes').doc(next._id).update({ data: {
+            status: 'ready',
+            processingStartedAt: at,
+            processingDueStatus: value.timing.processingDueStatus,
+            processingDueAt: value.timing.processingDueAt === null
+              ? null
+              : new Date(value.timing.processingDueAt),
+            processingCalendarVersion: value.timing.processingCalendarVersion,
+            calendarNotificationStatus: value.timing.processingDueStatus === 'pending_calendar'
+              ? 'pending'
+              : 'not_required',
+            version: increment(next.version),
+            updatedAt: db.serverDate()
+          } })
+          const progress = Math.floor(((node.sequence + 1) / line.nodeCount) * 100)
+          await transaction.collection('business_lines').doc(line._id).update({ data: {
+            currentNodeId: next._id,
+            currentNodeIndex: next.sequence,
+            currentNodeName: next.name,
+            progress,
+            version: increment(line.version),
+            updatedAt: db.serverDate()
+          } })
+          recipients = nextProcessors
+          notificationType = 'node_processing_started'
+        }
+      }
+
+      const notificationId = `review-result-${hash(`${round._id}\0${finalStatus}`).slice(0, 40)}`
+      await transaction.collection('notifications').doc(notificationId).set({ data: {
+        type: notificationType,
+        recipientUserIds: clone(recipients),
+        businessLineId: line._id,
+        nodeId: node._id,
+        reviewRoundId: round._id,
+        status: 'unread',
+        createdAt: db.serverDate()
+      } })
+      if (expectedTransition !== 'complete_line' &&
+          value.timing.processingDueStatus === 'pending_calendar') {
+        const calendarNotificationId = `work-calendar-missing-${hash(`${line._id}\0processing`).slice(0, 40)}`
+        const existingWarning = await readDocument(transaction, 'notifications', calendarNotificationId)
+        if (!existingWarning) {
+          await transaction.collection('notifications').doc(calendarNotificationId).set({ data: {
+            type: 'work_calendar_missing',
+            audienceRole: 'super_admin',
+            status: 'pending',
+            createdAt: db.serverDate()
+          } })
+        }
+      }
+      return voteResult(
+        { ...round, status: finalStatus }, nodeStatus, lineStatus, nextNodeId
+      )
+    })
+  }
+
+  return {
+    inspectReviewRoundRetry,
+    findReviewRoundRetry,
+    createReviewRound,
+    prepareReviewVote,
+    submitReviewVote
+  }
 }
 
 module.exports = { createCloudReviewRepository }

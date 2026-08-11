@@ -99,6 +99,7 @@
 | `business_nodes` | `nodeCode` 升序 | 是 | 节点编号最终防重 |
 | `business_nodes` | `businessLineId` 升序、`sequence` 升序 | 否 | 业务节点时间线 |
 | `business_nodes` | `processingTimingStatus` 升序、`_id` 升序 | 否 | 待审核节点的处理工作分钟待补算扫描 |
+| `node_review_rounds` | `processingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的处理时长补算扫描 |
 | `node_feedback` | `nodeId` 升序、`revision` 降序 | 否 | 节点反馈历史 |
 | `evidences` | `businessLineId` 升序、`nodeId` 升序、`uploadedAt` 降序 | 否 | 业务节点凭证历史 |
 | `evidences` | `storageStatus` 升序、`purgeDueAt` 升序 | 否 | 到期凭证治理 |
@@ -112,6 +113,8 @@
 `work_calendar_entries` 索引未在真实 CloudBase 验证前，不得将日历同步标记为可部署通过；索引错误应保留旧活动代际并返回安全失败。
 
 `calendarSync` 会自动创建或更新固定文档 `system_settings/calendar-review-processing-cursor`，其中只保存 `kind`、`cursorId`、`version` 和更新时间，不含业务正文或账号信息。部署前不要手工伪造该文档；若已有同编号但结构不符的文档，函数会失败关闭，应先停止触发器并按审计流程核查，不能直接删除或覆盖。该游标沿用上表的 `business_nodes(processingTimingStatus ASC, _id ASC)` 索引，不需要新增游标集合索引。
+
+`calendarSync` 还会自动创建或更新 `system_settings/calendar-review-carryover-cursor`，用于有界、可回绕地扫描审核轮次的处理时长补算。该文档仅保存 `kind`、`cursorId`、`version` 和更新时间，同样不得手工伪造、删除或覆盖。该扫描依赖上表的 `node_review_rounds(processingCarryoverStatus ASC, _id ASC)` 组合索引；索引未在目标环境创建且生效前，不得启用 `calendarSync` 定时触发器。
 
 ### 5.2 旧业务兼容索引
 

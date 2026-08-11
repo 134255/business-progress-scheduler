@@ -9,8 +9,10 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   const transactionRuns = []
   const beforeTransactionHooks = []
   const pendingWriteFailures = []
+  const metrics = { activeCallbacks: 0, maxActiveCallbacks: 0, conflicts: 0, retries: 0 }
   let serverDateSequence = 0
-  let transactionQueue = Promise.resolve()
+  let stateVersion = 0
+  let commitQueue = Promise.resolve()
 
   function readClone(name, document) {
     const value = clone(document)
@@ -23,9 +25,9 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     state[name] = new Map(documents.map(document => [document._id, clone(document)]))
   }
 
-  function documents(name) {
-    if (!state[name]) state[name] = new Map()
-    return state[name]
+  function documents(name, targetState = state) {
+    if (!targetState[name]) targetState[name] = new Map()
+    return targetState[name]
   }
 
   function materialize(data, id) {
@@ -52,8 +54,8 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     return error
   }
 
-  function enforceUserIndexes(candidate, id) {
-    for (const user of documents('users').values()) {
+  function enforceUserIndexes(candidate, id, targetState) {
+    for (const user of documents('users', targetState).values()) {
       if (user._id === id) continue
       if (candidate.usernameNormalized && user.usernameNormalized === candidate.usernameNormalized) {
         throw duplicateError('username_normalized_unique')
@@ -61,14 +63,14 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     }
   }
 
-  function enforceBusinessIndexes(name, candidate, id) {
+  function enforceBusinessIndexes(name, candidate, id, targetState) {
     const uniqueField = name === 'business_lines'
       ? 'code'
       : name === 'business_nodes'
         ? 'nodeCode'
         : null
     if (!uniqueField || !candidate[uniqueField]) return
-    for (const document of documents(name).values()) {
+    for (const document of documents(name, targetState).values()) {
       if (document._id !== id && document[uniqueField] === candidate[uniqueField]) {
         throw duplicateError(`${name}_${uniqueField}_unique`)
       }
@@ -83,14 +85,14 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     throw failure.error
   }
 
-  function createDocument(name, id, transactionRecord = null) {
+  function createDocument(name, id, transactionRecord = null, targetState = state) {
     function countOperation() {
       if (transactionRecord) transactionRecord.operations += 1
     }
     return {
       async get() {
         countOperation()
-        const document = documents(name).get(id)
+        const document = documents(name, targetState).get(id)
         if (!document) {
           throw new Error(`document.get:fail document with _id ${id} does not exist`)
         }
@@ -98,32 +100,38 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       },
       async set({ data }) {
         countOperation()
+        if (transactionRecord) transactionRecord.writes += 1
         maybeFailWrite(name, 'set')
         const stored = materialize(data, id)
-        if (name === 'users') enforceUserIndexes(stored, id)
-        enforceBusinessIndexes(name, stored, id)
+        if (name === 'users') enforceUserIndexes(stored, id, targetState)
+        enforceBusinessIndexes(name, stored, id, targetState)
         if (name === 'wechat_bindings') {
-          const current = documents(name).get(id)
+          const current = documents(name, targetState).get(id)
           if (current && current.userId !== stored.userId) throw duplicateError('wechat_binding_primary')
         }
-        documents(name).set(id, stored)
+        documents(name, targetState).set(id, stored)
+        if (targetState === state) stateVersion += 1
         return { stats: { created: 1, updated: 0 } }
       },
       async update({ data }) {
         countOperation()
+        if (transactionRecord) transactionRecord.writes += 1
         maybeFailWrite(name, 'update')
-        const current = documents(name).get(id)
+        const current = documents(name, targetState).get(id)
         if (!current) return { stats: { updated: 0 } }
         const updated = merge(current, data)
-        if (name === 'users') enforceUserIndexes(updated, id)
-        enforceBusinessIndexes(name, updated, id)
-        documents(name).set(id, updated)
+        if (name === 'users') enforceUserIndexes(updated, id, targetState)
+        enforceBusinessIndexes(name, updated, id, targetState)
+        documents(name, targetState).set(id, updated)
+        if (targetState === state) stateVersion += 1
         return { stats: { updated: 1 } }
       },
       async remove() {
         countOperation()
+        if (transactionRecord) transactionRecord.writes += 1
         maybeFailWrite(name, 'remove')
-        const removed = documents(name).delete(id)
+        const removed = documents(name, targetState).delete(id)
+        if (removed && targetState === state) stateVersion += 1
         return { stats: { removed: removed ? 1 : 0 } }
       }
     }
@@ -136,7 +144,8 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     })
   }
 
-  function createQuery(name, transaction, criteria = null, order = [], offset = 0, maximum = 100) {
+  function createQuery(name, transaction, criteria = null, order = [], offset = 0, maximum = 100,
+    targetState = state) {
     function rejectTransactionQuery(operation) {
       if (!transaction) return
       transactionQueries.push({ collection: name, operation })
@@ -145,27 +154,29 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
 
     return {
       doc(id) {
-        return createDocument(name, id, transaction && typeof transaction === 'object' ? transaction : null)
+        return createDocument(name, id, transaction && typeof transaction === 'object' ? transaction : null,
+          targetState)
       },
       where(nextCriteria) {
         rejectTransactionQuery('where')
-        return createQuery(name, transaction, nextCriteria, order, offset, maximum)
+        return createQuery(name, transaction, nextCriteria, order, offset, maximum, targetState)
       },
       orderBy(field, direction) {
         rejectTransactionQuery('orderBy')
-        return createQuery(name, transaction, criteria, [...order, [field, direction]], offset, maximum)
+        return createQuery(name, transaction, criteria, [...order, [field, direction]], offset, maximum,
+          targetState)
       },
       skip(nextOffset) {
         rejectTransactionQuery('skip')
-        return createQuery(name, transaction, criteria, order, nextOffset, maximum)
+        return createQuery(name, transaction, criteria, order, nextOffset, maximum, targetState)
       },
       limit(nextMaximum) {
         rejectTransactionQuery('limit')
-        return createQuery(name, transaction, criteria, order, offset, nextMaximum)
+        return createQuery(name, transaction, criteria, order, offset, nextMaximum, targetState)
       },
       async get() {
         rejectTransactionQuery('get')
-        let result = [...documents(name).values()].filter(document => matches(document, criteria))
+        let result = [...documents(name, targetState).values()].filter(document => matches(document, criteria))
         for (const [field, direction] of order.slice().reverse()) {
           result.sort((left, right) => {
             const comparison = String(left[field] || '').localeCompare(String(right[field] || ''))
@@ -176,21 +187,22 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       },
       async count() {
         rejectTransactionQuery('count')
-        return { total: [...documents(name).values()].filter(document => matches(document, criteria)).length }
+        return { total: [...documents(name, targetState).values()].filter(document =>
+          matches(document, criteria)).length }
       },
       async add({ data }) {
         rejectTransactionQuery('add')
-        const id = `generated-${documents(name).size + 1}`
-        await createDocument(name, id).set({ data })
+        const id = `generated-${documents(name, targetState).size + 1}`
+        await createDocument(name, id, null, targetState).set({ data })
         return { _id: id }
       }
     }
   }
 
-  function snapshot() {
+  function snapshot(source = state) {
     const result = {}
-    for (const [name, collection] of Object.entries(state)) {
-      result[name] = [...collection.values()].map(clone)
+    for (const [name, collection] of Object.entries(source)) {
+      result[name] = new Map([...collection.entries()].map(([id, document]) => [id, clone(document)]))
     }
     return result
   }
@@ -198,7 +210,19 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   function restore(saved) {
     for (const name of Object.keys(state)) delete state[name]
     for (const [name, collection] of Object.entries(saved)) {
-      state[name] = new Map(collection.map(document => [document._id, clone(document)]))
+      state[name] = new Map([...collection.entries()].map(([id, document]) => [id, clone(document)]))
+    }
+  }
+
+  async function withCommitLock(callback) {
+    const previous = commitQueue
+    let release
+    commitQueue = new Promise(resolve => { release = resolve })
+    await previous
+    try {
+      return callback()
+    } finally {
+      release()
     }
   }
 
@@ -215,40 +239,59 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       return { __serverDate: serverDateSequence }
     },
     async runTransaction(callback) {
-      const previous = transactionQueue
-      let release
-      transactionQueue = new Promise(resolve => {
-        release = resolve
-      })
-      await previous
-      try {
-        const hook = beforeTransactionHooks.shift()
-        if (hook) await hook()
-        const saved = snapshot()
-        const record = { callbacks: 0, operations: 0 }
-        transactionRuns.push(record)
+      const hook = beforeTransactionHooks.shift()
+      if (hook) await hook()
+      const record = { callbacks: 0, operations: 0, conflicts: 0 }
+      transactionRuns.push(record)
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const baseVersion = stateVersion
+        const localState = snapshot()
+        const attemptRecord = { operations: 0, writes: 0 }
+        record.callbacks += 1
+        metrics.activeCallbacks += 1
+        metrics.maxActiveCallbacks = Math.max(metrics.maxActiveCallbacks, metrics.activeCallbacks)
         let result
         try {
-          record.callbacks += 1
           result = await callback({
             collection(name) {
-              return createQuery(name, record)
+              return createQuery(name, attemptRecord, null, [], 0, 100, localState)
             }
           })
         } catch (error) {
-          restore(saved)
+          record.operations = Math.max(record.operations, attemptRecord.operations)
           if (options.afterTransactionError) {
             await options.afterTransactionError({ error, record: clone(record) })
           }
           throw error
+        } finally {
+          metrics.activeCallbacks -= 1
+        }
+        record.operations = Math.max(record.operations, attemptRecord.operations)
+        const committed = await withCommitLock(() => {
+          if (stateVersion !== baseVersion) return false
+          if (attemptRecord.writes > 0) {
+            restore(localState)
+            stateVersion += 1
+          }
+          return true
+        })
+        if (!committed) {
+          record.conflicts += 1
+          metrics.conflicts += 1
+          metrics.retries += 1
+          continue
         }
         if (options.afterTransaction) {
           await options.afterTransaction({ result: clone(result), record: clone(record) })
         }
         return result
-      } finally {
-        release()
       }
+      const error = new Error('transaction conflict retry exhausted')
+      error.code = 'TRANSACTION_CONFLICT'
+      if (options.afterTransactionError) {
+        await options.afterTransactionError({ error, record: clone(record) })
+      }
+      throw error
     }
   }
 
@@ -257,11 +300,13 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     state,
     transactionQueries,
     transactionRuns,
+    metrics,
     documents(name) {
       return [...documents(name).values()].map(clone)
     },
     replace(name, id, document) {
       documents(name).set(id, { _id: id, ...clone(document) })
+      stateVersion += 1
     },
     beforeNextTransaction(hook) {
       beforeTransactionHooks.push(hook)

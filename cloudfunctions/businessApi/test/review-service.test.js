@@ -61,6 +61,23 @@ function harness(overrides = {}) {
         status: 'pending', nodeStatus: 'pending_review',
         evidenceIds: value.draft.evidenceIds
       }
+    },
+    async prepareReviewVote(value) {
+      calls.push(['prepare-vote', structuredClone(value)])
+      return overrides.voteContext || {
+        transition: 'next_node',
+        processingWorkMinutes: 1320
+      }
+    },
+    async submitReviewVote(value) {
+      calls.push(['submit-vote', structuredClone(value)])
+      return overrides.voteResult || {
+        reviewRoundId: value.input.reviewRoundId,
+        status: 'approved',
+        nodeStatus: 'completed',
+        lineStatus: 'active',
+        nextNodeId: 'line-1-node-002'
+      }
     }
   }
   const workTimeService = {
@@ -137,4 +154,92 @@ test('提交审核输入和账号必须采用严格自有属性结构', async ()
     service.submitNodeForReview({ actor: ACTOR, input: inherited }),
     error => error.code === 'VALIDATION_ERROR'
   )
+})
+
+test('审核投票只接受 approve/reject 且驳回原因必填', async () => {
+  const { service } = harness()
+  const base = {
+    reviewRoundId: 'review-feedback-current', expectedRoundVersion: 1,
+    decision: 'reject', comment: '   ', requestKey: 'vote-request-1'
+  }
+  await assert.rejects(
+    service.submitReviewVote({ actor: { _id: 'reviewer-1', status: 'active' }, input: base }),
+    error => error.code === 'REVIEW_COMMENT_REQUIRED'
+  )
+  await assert.rejects(
+    service.submitReviewVote({
+      actor: { _id: 'reviewer-1', status: 'active' },
+      input: { ...base, decision: 'approved', comment: '完整' }
+    }),
+    error => error.code === 'VOTE_DECISION_INVALID'
+  )
+})
+
+test('审核通过为下一节点计算处理截止且请求键只传递摘要', async () => {
+  const { calls, service } = harness()
+  const result = await service.submitReviewVote({
+    actor: { _id: 'reviewer-1', status: 'active' },
+    input: {
+      reviewRoundId: 'review-feedback-current', expectedRoundVersion: 1,
+      decision: 'approve', comment: '确认', requestKey: 'vote-request-1'
+    }
+  })
+
+  assert.equal(result.status, 'approved')
+  assert.deepEqual(calls.map(call => call[0]).slice(-2), ['prepare-vote', 'submit-vote'])
+  const submitted = calls.at(-1)[1]
+  assert.equal(submitted.timing.processingDueStatus, 'calculated')
+  assert.equal(submitted.timing.processingDueAt.toISOString(), '2026-08-12T06:00:00.000Z')
+  assert.equal(submitted.requestKeyHash.length, 64)
+  assert.equal(submitted.inputHash.length, 64)
+  assert.equal(JSON.stringify(submitted).includes('vote-request-1'), false)
+})
+
+test('驳回返工继承剩余处理分钟且日历缺失不阻断投票', async () => {
+  const { calls, service } = harness({
+    voteContext: { transition: 'rework', processingWorkMinutes: 1200 },
+    reviewDue: { status: 'pending_calendar', dueAt: null, missingDate: '2026-08-12' },
+    voteResult: {
+      reviewRoundId: 'review-feedback-current', status: 'rejected',
+      nodeStatus: 'in_progress', lineStatus: 'active', nextNodeId: null
+    }
+  })
+  const result = await service.submitReviewVote({
+    actor: { _id: 'reviewer-1', status: 'active' },
+    input: {
+      reviewRoundId: 'review-feedback-current', expectedRoundVersion: 1,
+      decision: 'reject', comment: '字段不完整', requestKey: 'vote-reject-1'
+    }
+  })
+
+  assert.equal(result.status, 'rejected')
+  const submitted = calls.at(-1)[1]
+  assert.equal(submitted.timing.processingDueStatus, 'pending_calendar')
+  assert.equal(submitted.timing.processingDueAt, null)
+})
+
+test('终态投票同请求重试不再计算截止时间并只向仓储传递摘要', async () => {
+  const { calls, service } = harness({
+    voteContext: { transition: 'finalized_retry' },
+    reviewDue: null,
+    voteResult: {
+      reviewRoundId: 'review-feedback-current', status: 'approved',
+      nodeStatus: 'completed', lineStatus: 'active', nextNodeId: 'line-1-node-002'
+    }
+  })
+  const result = await service.submitReviewVote({
+    actor: { _id: 'reviewer-1', status: 'active' },
+    input: {
+      reviewRoundId: 'review-feedback-current', expectedRoundVersion: 1,
+      decision: 'approve', comment: '', requestKey: 'vote-final-retry'
+    }
+  })
+
+  assert.equal(result.status, 'approved')
+  const prepared = calls.find(call => call[0] === 'prepare-vote')[1]
+  assert.equal(prepared.requestKeyHash.length, 64)
+  assert.equal(prepared.inputHash.length, 64)
+  const submitted = calls.at(-1)[1]
+  assert.deepEqual(Object.keys(submitted.timing), ['transitionAt'])
+  assert.equal(JSON.stringify([prepared, submitted]).includes('vote-final-retry'), false)
 })

@@ -132,3 +132,42 @@ test('待审核处理时长使用区间工作分钟补算且缺日历时保持�
   assert.equal(applied[0].calculation.minutes, 180)
   assert.deepEqual(result.recalculation, { examined: 2, updated: 1, skipped: 0, pending: 1, failed: 0 })
 })
+
+test('驳回后的待补算旧处理段先修正剩余分钟再计算返工截止时间', async () => {
+  const candidate = {
+    kind: 'review_processing_carryover', id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    startAt: new Date('2026-08-11T01:00:00Z'), endAt: new Date('2026-08-11T03:00:00Z'),
+    resumeAt: new Date('2026-08-11T04:00:00Z'), baseElapsedWorkMinutes: 120,
+    currentElapsedWorkMinutes: 120,
+    totalWorkMinutes: 1320
+  }
+  const applied = []
+  const service = createCalendarSyncService({
+    holidayClient: { async fetchYear(year) { return { year, sourceVersion: `v${year}`, days: [] } } },
+    calendarRepository: {
+      async replaceYear() {},
+      async listPendingDueCandidates() { return [candidate] },
+      async applyDueCalculation(value) { applied.push(value); return true },
+      async ensurePendingCalendarWarning() { throw new Error('unexpected') }
+    },
+    workTimeService: {
+      async workingMinutesBetween(startAt, endAt) {
+        assert.deepEqual([startAt, endAt], [candidate.startAt, candidate.endAt])
+        return { status: 'calculated', minutes: 180, calendarVersion: 'calendar-a' }
+      },
+      async tryAddWorkMinutes(startAt, minutes) {
+        assert.deepEqual(startAt, candidate.resumeAt)
+        assert.equal(minutes, 1020)
+        return {
+          status: 'calculated', dueAt: new Date('2026-08-13T03:00:00Z'),
+          calendarVersion: 'calendar-a'
+        }
+      }
+    }
+  })
+
+  const result = await service.run({ now: new Date('2026-08-11T04:30:00Z') })
+  assert.equal(result.recalculation.updated, 1)
+  assert.equal(applied[0].calculation.minutes, 180)
+  assert.deepEqual(applied[0].calculation.dueAt, new Date('2026-08-13T03:00:00Z'))
+})

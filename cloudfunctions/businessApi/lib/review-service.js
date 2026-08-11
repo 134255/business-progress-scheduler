@@ -5,6 +5,9 @@ const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const REQUEST_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const INPUT_KEYS = new Set(['businessLineId', 'nodeId', 'expectedNodeVersion', 'requestKey'])
+const VOTE_INPUT_KEYS = new Set([
+  'reviewRoundId', 'expectedRoundVersion', 'decision', 'comment', 'requestKey'
+])
 
 function createError(code) {
   const error = new Error(code)
@@ -38,6 +41,31 @@ function normalizeInput(input) {
     throw createError('VALIDATION_ERROR')
   }
   return { ...input }
+}
+
+function normalizeVote(input) {
+  if (!isPlainOwnObject(input) || Reflect.ownKeys(input).some(key =>
+    typeof key !== 'string' || !VOTE_INPUT_KEYS.has(key)) || [...VOTE_INPUT_KEYS].some(key => {
+    const descriptor = Object.getOwnPropertyDescriptor(input, key)
+    return !descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+  })) throw createError('VALIDATION_ERROR')
+  const comment = typeof input.comment === 'string' ? input.comment.trim() : null
+  if (typeof input.reviewRoundId !== 'string' || !DOCUMENT_ID.test(input.reviewRoundId) ||
+      !Number.isSafeInteger(input.expectedRoundVersion) || input.expectedRoundVersion < 1 ||
+      !['approve', 'reject'].includes(input.decision) || comment === null || comment.length > 1000 ||
+      typeof input.requestKey !== 'string' || !REQUEST_KEY.test(input.requestKey)) {
+    throw createError(input && !['approve', 'reject'].includes(input.decision)
+      ? 'VOTE_DECISION_INVALID'
+      : 'VALIDATION_ERROR')
+  }
+  if (input.decision === 'reject' && !comment) throw createError('REVIEW_COMMENT_REQUIRED')
+  return {
+    reviewRoundId: input.reviewRoundId,
+    expectedRoundVersion: input.expectedRoundVersion,
+    decision: input.decision,
+    comment,
+    requestKey: input.requestKey
+  }
 }
 
 function sha256(value) {
@@ -132,6 +160,10 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
   if (typeof reviewRepository.inspectReviewRoundRetry !== 'function') {
     throw new TypeError('reviewRepository.inspectReviewRoundRetry is required')
   }
+  if (typeof reviewRepository.prepareReviewVote !== 'function' ||
+      typeof reviewRepository.submitReviewVote !== 'function') {
+    throw new TypeError('reviewRepository vote methods are required')
+  }
   if (!workTimeService || typeof workTimeService.workingMinutesBetween !== 'function' ||
       typeof workTimeService.tryAddWorkMinutes !== 'function') {
     throw new TypeError('workTimeService is required')
@@ -201,7 +233,71 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
     })
   }
 
-  return { submitNodeForReview }
+  async function submitReviewVote({ actor, input }) {
+    requireActiveActor(actor)
+    const normalized = normalizeVote(input)
+    const safeInput = {
+      reviewRoundId: normalized.reviewRoundId,
+      expectedRoundVersion: normalized.expectedRoundVersion,
+      decision: normalized.decision,
+      comment: normalized.comment
+    }
+    const requestKeyHash = sha256(
+      `${actor._id}\0${normalized.reviewRoundId}\0${normalized.requestKey}`
+    )
+    const inputHash = sha256(JSON.stringify([
+      actor._id, safeInput.reviewRoundId, safeInput.expectedRoundVersion,
+      safeInput.decision, safeInput.comment
+    ]))
+    const context = await reviewRepository.prepareReviewVote({
+      actor, input: safeInput, requestKeyHash, inputHash
+    })
+    const at = clock()
+    if (!validDate(at) || !context ||
+        !['rework', 'next_node', 'complete_line', 'finalized_retry'].includes(context.transition)) {
+      throw createError('VERSION_CONFLICT')
+    }
+    const timing = { transitionAt: new Date(at) }
+    if (context.transition === 'rework' && context.processingCarryoverPending === true) {
+      Object.assign(timing, {
+        processingDueStatus: 'pending_calendar',
+        processingDueAt: null,
+        processingCalendarVersion: null
+      })
+    } else if (!['complete_line', 'finalized_retry'].includes(context.transition)) {
+      if (!Number.isSafeInteger(context.processingWorkMinutes) || context.processingWorkMinutes < 0) {
+        throw createError('VERSION_CONFLICT')
+      }
+      const due = await workTimeService.tryAddWorkMinutes(
+        new Date(at), context.processingWorkMinutes
+      )
+      if (due && due.status === 'calculated' && validDate(due.dueAt)) {
+        Object.assign(timing, {
+          processingDueStatus: 'calculated',
+          processingDueAt: new Date(due.dueAt),
+          processingCalendarVersion: due.calendarVersion || null
+        })
+      } else if (due && due.status === 'pending_calendar' && due.dueAt === null) {
+        Object.assign(timing, {
+          processingDueStatus: 'pending_calendar',
+          processingDueAt: null,
+          processingCalendarVersion: null
+        })
+      } else {
+        throw createError('VERSION_CONFLICT')
+      }
+    }
+    return reviewRepository.submitReviewVote({
+      actor,
+      input: safeInput,
+      context,
+      timing,
+      requestKeyHash,
+      inputHash
+    })
+  }
+
+  return { submitNodeForReview, submitReviewVote }
 }
 
 module.exports = { createReviewService }
