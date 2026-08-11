@@ -186,6 +186,48 @@ test('服务入口重试预检在返回审核轮次前重新授权并比较请�
   await assert.rejects(repository.findReviewRoundRetry(retryInput), error => error.code === 'FORBIDDEN')
 })
 
+test('日历补算同步提升节点与审核轮锁版本后，同一提交仍可幂等重试', async () => {
+  const { fake, repository } = harness()
+  const value = request()
+  value.draftHash = retryValue(value).draftHash
+  const first = await repository.createReviewRound(value)
+  const node = fake.documents('business_nodes')[0]
+  const round = fake.documents('node_review_rounds')[0]
+  fake.replace('business_nodes', node._id, { ...node, version: 6 })
+  fake.replace('node_review_rounds', round._id, { ...round, version: 2, lockedNodeVersion: 6 })
+
+  const retryInput = retryValue(value)
+  assert.deepEqual(await repository.inspectReviewRoundRetry(retryInput), {
+    reviewRoundId: 'review-feedback-current'
+  })
+  assert.deepEqual(await repository.findReviewRoundRetry(retryInput), first)
+})
+
+test('审核幂等重试拒绝任一侧锁版本、提交版本或活动轮次被单独篡改', async () => {
+  const mutations = [
+    ({ node }) => ({ node: { ...node, version: 6 } }),
+    ({ round }) => ({ round: { ...round, lockedNodeVersion: 6 } }),
+    ({ round }) => ({ round: { ...round, submittedNodeVersion: 3 } }),
+    ({ node }) => ({ node: { ...node, activeReviewRoundId: 'review-other' } })
+  ]
+  for (const mutate of mutations) {
+    const { fake, repository } = harness()
+    const value = request()
+    value.draftHash = retryValue(value).draftHash
+    await repository.createReviewRound(value)
+    const node = fake.documents('business_nodes')[0]
+    const round = fake.documents('node_review_rounds')[0]
+    const changed = mutate({ node, round })
+    if (changed.node) fake.replace('business_nodes', node._id, changed.node)
+    if (changed.round) fake.replace('node_review_rounds', round._id, changed.round)
+    const retryInput = retryValue(value)
+    await assert.rejects(repository.inspectReviewRoundRetry(retryInput), error =>
+      error.code === 'VERSION_CONFLICT')
+    await assert.rejects(repository.findReviewRoundRetry(retryInput), error =>
+      error.code === 'VERSION_CONFLICT')
+  }
+})
+
 test('幂等重试必须用重新构建的完整草稿拒绝审核轮次摘要篡改', async () => {
   for (const mutate of [
     round => { round.draftHash = 'f'.repeat(64) },

@@ -2,6 +2,7 @@ const crypto = require('node:crypto')
 
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
+const { ownExactAccountIds } = require('./account-relationship-schema')
 
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_LINE_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
@@ -45,16 +46,6 @@ function increment(value) {
 
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
-}
-
-function ownExactAccountIds(value, key) {
-  if (!value || typeof value !== 'object') return null
-  const descriptor = Object.getOwnPropertyDescriptor(value, key)
-  if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return null
-  value = descriptor.value
-  if (!Array.isArray(value) || value.some(id => typeof id !== 'string' || !DOCUMENT_ID.test(id)) ||
-      new Set(value).size !== value.length) return null
-  return value
 }
 
 function lineMember(line, actorId) {
@@ -224,8 +215,9 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       const line = await readDocument(transaction, 'business_lines', value.input.businessLineId)
       const node = await readDocument(transaction, 'business_nodes', value.input.nodeId)
       assertBaseAuthorization(actor, line, node)
-      if (node.status !== 'pending_review' || node.activeReviewRoundId !== value.reviewRoundId ||
-          node.version !== value.input.expectedNodeVersion + 1) throw createError('VERSION_CONFLICT')
+      if (node.status !== 'pending_review' || node.activeReviewRoundId !== value.reviewRoundId) {
+        throw createError('VERSION_CONFLICT')
+      }
       const round = await readDocument(transaction, 'node_review_rounds', value.reviewRoundId)
       const feedback = await readDocument(transaction, 'node_feedback', value.draft.feedbackId)
       validateDraft(value, node, feedback)

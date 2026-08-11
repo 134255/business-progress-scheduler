@@ -3,6 +3,11 @@ const crypto = require('node:crypto')
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { classifyEvidenceRetention } = require('./evidence-retention')
+const {
+  exactAccountIds,
+  hasAccountRelationshipMarker,
+  ownDataValue
+} = require('./account-relationship-schema')
 
 const COLLECTIONS = Object.freeze({
   users: 'users', lines: 'business_lines', nodes: 'business_nodes',
@@ -46,32 +51,8 @@ function membership(value) {
   return Array.isArray(value) ? value : []
 }
 
-function ownDataValue(value, key) {
-  if (!value || typeof value !== 'object') return { present: false, valid: false, value: undefined }
-  const descriptor = Object.getOwnPropertyDescriptor(value, key)
-  if (!descriptor) return { present: false, valid: false, value: undefined }
-  return {
-    present: true,
-    valid: Object.prototype.hasOwnProperty.call(descriptor, 'value'),
-    value: descriptor.value
-  }
-}
-
-function hasAccountRelationship(value) {
-  return Boolean(value && typeof value === 'object' && [
-    'managerUserIds', 'memberUserIds', 'processorUserIds', 'reviewerUserIds', 'assigneeUserIds'
-  ].some(key => Object.getOwnPropertyDescriptor(value, key)))
-}
-
-function exactAccountIds(value, { nonEmpty = false } = {}) {
-  if (!Array.isArray(value) || nonEmpty && value.length === 0 ||
-      value.some(id => typeof id !== 'string' || !DOCUMENT_ID.test(id)) ||
-      new Set(value).size !== value.length) return null
-  return value
-}
-
 function accountSchema(line, node) {
-  if (!hasAccountRelationship(line) && !hasAccountRelationship(node)) return false
+  if (!hasAccountRelationshipMarker(line) && !hasAccountRelationshipMarker(node)) return false
   const managerField = ownDataValue(line, 'managerUserIds')
   const memberField = ownDataValue(line, 'memberUserIds')
   const managers = managerField.valid && exactAccountIds(managerField.value, { nonEmpty: true })
@@ -1001,7 +982,6 @@ function createCloudFeedbackRepository({
       if (documents.line.status !== 'active' || !isCurrentNode(documents.line, documents.node) ||
           documents.node.workflowMode !== 'review' || documents.node.status !== 'pending_review' ||
           documents.node.activeReviewRoundId !== reviewRoundId ||
-          documents.node.version !== expectedNodeVersion + 1 ||
           !safeInteger(documents.node.processingRoundNumber, { minimum: 1 })) {
         throw createError('VERSION_CONFLICT')
       }
@@ -1023,7 +1003,7 @@ function createCloudFeedbackRepository({
       if (!line || line.status === 'creating') throw createError('NOT_FOUND')
       const node = await readDocument(transaction, COLLECTIONS.nodes, nodeId)
       if (!node || node.businessLineId !== line._id) throw createError('NOT_FOUND')
-      const selectedAccountSchema = hasAccountRelationship(line) || hasAccountRelationship(node)
+      const selectedAccountSchema = hasAccountRelationshipMarker(line) || hasAccountRelationshipMarker(node)
       const allowed = selectedAccountSchema
         ? accountSchema(line, node) && isAccountMember(line, currentActor._id)
         : isLegacyMember(line, currentActor)

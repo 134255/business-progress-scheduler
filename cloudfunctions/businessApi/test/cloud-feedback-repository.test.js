@@ -1492,16 +1492,90 @@ test('待审核节点只能按活动轮次重建已锁定处理草稿', async ()
     submittedBy: 'account-a', submittedNodeVersion: 4, lockedNodeVersion: 5, processingRoundNumber: 1
   }]
   data.evidences = []
-  const { repository } = createFeedbackHarness({ seed: data })
+  const { fake, repository } = createFeedbackHarness({ seed: data })
   const result = await repository.getLockedProcessingRoundDraft({
     actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
     expectedNodeVersion: 4, reviewRoundId: 'review-feedback-current'
   })
   assert.equal(result.feedbackId, 'feedback-current')
+
+  const node = fake.documents('business_nodes')[0]
+  const round = fake.documents('node_review_rounds')[0]
+  fake.replace('business_nodes', node._id, { ...node, version: 6 })
+  fake.replace('node_review_rounds', round._id, { ...round, version: 2, lockedNodeVersion: 6 })
+  const recalculated = await repository.getLockedProcessingRoundDraft({
+    actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    expectedNodeVersion: 4, reviewRoundId: 'review-feedback-current'
+  })
+  assert.equal(recalculated.feedbackId, 'feedback-current')
+
   await assert.rejects(repository.getLockedProcessingRoundDraft({
     actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
     expectedNodeVersion: 4, reviewRoundId: 'review-other'
   }), error => error.code === 'VERSION_CONFLICT')
+})
+
+test('节点历史只在对象及原型链都没有账号关系标记时兼容旧 OpenID', async () => {
+  const legacy = seed({ evidenceCount: 0 })
+  legacy.users = legacy.users.map(user => user._id === 'account-a'
+    ? { ...user, openid: 'wx-a' }
+    : user)
+  delete legacy.business_lines[0].managerUserIds
+  delete legacy.business_lines[0].memberUserIds
+  legacy.business_lines[0].managerIds = []
+  legacy.business_lines[0].memberIds = ['wx-a']
+  delete legacy.business_nodes[0].assigneeUserIds
+  legacy.business_nodes[0].assigneeIds = ['wx-a']
+
+  const pureLegacy = createFeedbackHarness({ seed: legacy }).repository
+  const result = await pureLegacy.getNodeHistory({
+    actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1'
+  })
+  assert.deepEqual(result.history, [])
+
+  let getterCalls = 0
+  const cases = [
+    ({ collection, data }) => {
+      if (collection === 'business_lines') data.memberUserIds = ['account-a']
+      return data
+    },
+    ({ collection, data }) => {
+      if (collection === 'business_lines') Object.setPrototypeOf(data, { memberUserIds: ['account-a'] })
+      return data
+    },
+    ({ collection, data }) => {
+      if (collection === 'business_nodes') Object.setPrototypeOf(data, { assigneeUserIds: ['account-a'] })
+      return data
+    },
+    ({ collection, data }) => {
+      if (collection === 'business_lines') {
+        const prototype = {}
+        Object.defineProperty(prototype, 'memberUserIds', {
+          get() { getterCalls += 1; return ['account-a'] }
+        })
+        Object.setPrototypeOf(data, prototype)
+      }
+      return data
+    },
+    ({ collection, data }) => {
+      if (collection === 'business_lines') {
+        Object.setPrototypeOf(data, { managerUserIds: [], memberUserIds: ['account-a'] })
+      }
+      if (collection === 'business_nodes') {
+        Object.setPrototypeOf(data, {
+          processorUserIds: ['account-a'], reviewerUserIds: ['account-b'], assigneeUserIds: ['account-a']
+        })
+      }
+      return data
+    }
+  ]
+  for (const transformRead of cases) {
+    const { repository } = createFeedbackHarness({ seed: legacy, transformRead })
+    await assert.rejects(repository.getNodeHistory({
+      actor: { _id: 'account-a', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1'
+    }), error => error.code === 'FORBIDDEN')
+  }
+  assert.equal(getterCalls, 0)
 })
 
 test('当前处理轮草稿拒绝跨轮次、错误归属和超过20MB的凭证集合', async () => {
