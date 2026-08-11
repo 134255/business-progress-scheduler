@@ -85,7 +85,8 @@ function retryValue(value) {
 
 function harness(overrides = {}) {
   const fake = createFakeCloudDatabase(overrides.seed || seed(overrides), {
-    transformRead: overrides.transformRead
+    transformRead: overrides.transformRead,
+    afterTransaction: overrides.afterTransaction
   })
   const repository = createCloudReviewRepository({ db: fake.db, clock: () => new Date(NOW) })
   return { fake, repository }
@@ -237,6 +238,32 @@ test('待我审核列表只返回当前审核人真实待办并稳定投影已�
   })
 })
 
+test('待办候选初验后撤销成员或审核人关系时最终结果不再返回', async () => {
+  for (const field of ['memberUserIds', 'reviewerUserIds']) {
+    const data = votingSeed({ mode: 'all' })
+    let fake
+    let mutated = false
+    const built = harness({
+      seed: data,
+      afterTransaction() {
+        if (mutated) return
+        mutated = true
+        const collection = field === 'memberUserIds' ? 'business_lines' : 'business_nodes'
+        const id = field === 'memberUserIds' ? 'line-1' : 'node-1'
+        const current = fake.documents(collection).find(item => item._id === id)
+        fake.replace(collection, id, { ...current, [field]: current[field].filter(value => value !== 'reviewer-1') })
+      }
+    })
+    fake = built.fake
+
+    const result = await built.repository.listPendingReviews({
+      actor: { _id: 'reviewer-1' }, query: { page: 1, pageSize: 20 }
+    })
+
+    assert.deepEqual(result.items, [], field)
+  }
+})
+
 test('审核详情只允许当前审核人、业务管理员或超级管理员并返回最小安全投影', async () => {
   const data = votingSeed({ mode: 'all' })
   data.users.push({ _id: 'root-1', status: 'active', role: 'super_admin', displayName: '总管理员' })
@@ -350,6 +377,91 @@ test('通知查询和已读只作用于当前活动账号并隔离角色告警',
   await assert.rejects(repository.markNotificationRead({
     actor: { _id: 'member-1', status: 'active', role: 'user' }, notificationId: 'role-warning'
   }), error => error.code === 'FORBIDDEN')
+})
+
+test('处理与审核提醒按受众可见且未知通知类型保持隐藏', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.users.push(
+    { _id: 'root-1', status: 'active', role: 'super_admin' },
+    { _id: 'member-1', status: 'active', role: 'user' }
+  )
+  data.notifications = [
+    {
+      _id: 'processing-reminder', type: 'processing_reminder', recipientUserIds: ['processor-1'],
+      businessLineId: 'line-1', nodeId: 'node-1', createdAt: new Date('2026-08-11T03:00:00.000Z')
+    },
+    {
+      _id: 'review-reminder', type: 'review_reminder', recipientUserIds: ['reviewer-1'],
+      businessLineId: 'line-1', nodeId: 'node-1', reviewRoundId: 'review-feedback-current',
+      createdAt: new Date('2026-08-11T04:00:00.000Z')
+    },
+    {
+      _id: 'role-review-reminder', type: 'review_reminder', audienceRole: 'super_admin',
+      createdAt: new Date('2026-08-11T05:00:00.000Z')
+    },
+    {
+      _id: 'unknown-reminder', type: 'credential_rotation', recipientUserIds: ['reviewer-1'],
+      createdAt: new Date('2026-08-11T06:00:00.000Z')
+    }
+  ]
+  const { repository } = harness({ seed: data })
+
+  const processor = await repository.listNotifications({
+    actor: { _id: 'processor-1' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(processor.items.map(item => item.notificationId), ['processing-reminder'])
+  const reviewer = await repository.listNotifications({
+    actor: { _id: 'reviewer-1' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(reviewer.items.map(item => item.notificationId), ['review-reminder'])
+  const member = await repository.listNotifications({
+    actor: { _id: 'member-1' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(member.items, [])
+  const root = await repository.listNotifications({
+    actor: { _id: 'root-1' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(root.items.map(item => item.notificationId), ['role-review-reminder'])
+})
+
+test('通知候选初验后撤销定向受众或超级管理员角色时最终结果不再返回', async () => {
+  for (const variant of ['direct', 'role']) {
+    const data = votingSeed({ mode: 'all' })
+    const actorId = variant === 'direct' ? 'reviewer-1' : 'root-1'
+    if (variant === 'role') data.users.push({ _id: actorId, status: 'active', role: 'super_admin' })
+    data.notifications = [variant === 'direct'
+      ? {
+          _id: 'revoked-note', type: 'review_started', recipientUserIds: [actorId],
+          createdAt: NOW
+        }
+      : {
+          _id: 'revoked-note', type: 'work_calendar_missing', audienceRole: 'super_admin',
+          createdAt: NOW
+        }]
+    let fake
+    let mutated = false
+    const built = harness({
+      seed: data,
+      afterTransaction() {
+        if (mutated) return
+        mutated = true
+        if (variant === 'direct') {
+          const note = fake.documents('notifications').find(item => item._id === 'revoked-note')
+          fake.replace('notifications', 'revoked-note', { ...note, recipientUserIds: ['reviewer-2'] })
+        } else {
+          const account = fake.documents('users').find(item => item._id === actorId)
+          fake.replace('users', actorId, { ...account, role: 'user' })
+        }
+      }
+    })
+    fake = built.fake
+
+    const result = await built.repository.listNotifications({
+      actor: { _id: actorId }, query: { page: 1, pageSize: 20 }
+    })
+
+    assert.deepEqual(result.items, [], variant)
+  }
 })
 
 test('角色通知使用每账号确定性已读回执且第51个管理员仍可正常标记', async () => {

@@ -6,6 +6,8 @@ const { createWorkTimeService } = require('./work-time-service')
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { parseStrictTimestamp } = require('./evidence-retention')
 const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
+const { normalizeFieldDefinition } = require('./field-domain')
+const { ALLOWED_EVIDENCE_TYPES } = require('./template-domain')
 const {
   APPLICATION_ERROR_MARKER,
   MAX_TEMPLATE_NODES,
@@ -236,18 +238,90 @@ function createCloudBusinessRepository({
     }
   }
 
-  async function accountDisplayNames(ids) {
+  function exactDisplayAccountIds(nodes, accountSchema) {
+    const ids = new Set()
+    for (const node of nodes) {
+      if (node.workflowMode === 'review') {
+        const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
+        const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+        if (!processors || !reviewers || processors.some(id => reviewers.includes(id))) {
+          throw createError('FORBIDDEN')
+        }
+        for (const id of [...processors, ...reviewers]) ids.add(id)
+      } else if (accountSchema) {
+        const assignees = ownExactAccountIds(node, 'assigneeUserIds')
+        if (!assignees) throw createError('FORBIDDEN')
+        for (const id of assignees) ids.add(id)
+      }
+    }
+    return [...ids]
+  }
+
+  async function createDisplayNameCache(nodes, actor, accountSchema) {
+    const ids = exactDisplayAccountIds(nodes, accountSchema)
+    const pairs = await Promise.all(ids.map(async id => {
+      const account = id === actor._id ? actor : await readDocument(db, COLLECTIONS.users, id)
+      if (!account || account._id !== id || account.status !== 'active') throw createError('FORBIDDEN')
+      return [id, safeDisplayName(account)]
+    }))
+    return new Map(pairs)
+  }
+
+  function accountDisplayNames(ids, displayNames) {
     const exact = Array.isArray(ids) && ids.length <= MAX_TEMPLATE_NODES * 2 &&
       ids.every(id => typeof id === 'string') && new Set(ids).size === ids.length
     if (!exact) throw createError('FORBIDDEN')
-    const accounts = await Promise.all(ids.map(id => readDocument(db, COLLECTIONS.users, id)))
-    return accounts.map((account, index) => {
-      if (!account || account._id !== ids[index] || account.status !== 'active') throw createError('FORBIDDEN')
-      return safeDisplayName(account)
+    return ids.map(id => {
+      if (!displayNames.has(id)) throw createError('FORBIDDEN')
+      return displayNames.get(id)
     })
   }
 
-  async function publicNodeProjection(node, actor, canManage, accountSchema) {
+  function safeFieldDefinitions(value) {
+    if (!Array.isArray(value)) throw createError('FORBIDDEN')
+    const allowed = [
+      'fieldKey', 'sequence', 'name', 'description', 'type', 'required', 'constraints'
+    ]
+    let definitions
+    try {
+      definitions = value.map(field => {
+        if (!field || typeof field !== 'object' || Array.isArray(field)) throw createError('FORBIDDEN')
+        const input = {}
+        for (const key of allowed) {
+          const property = ownDataValue(field, key)
+          if (property.present && !property.valid) throw createError('FORBIDDEN')
+          if (property.valid) input[key] = property.value
+        }
+        return normalizeFieldDefinition(input)
+      })
+    } catch (error) {
+      throw createError('FORBIDDEN')
+    }
+    if (new Set(definitions.map(field => field.fieldKey)).size !== definitions.length) {
+      throw createError('FORBIDDEN')
+    }
+    return definitions.map(field => clone(field))
+  }
+
+  function safeEvidencePolicy(node) {
+    const requiredField = ownDataValue(node, 'requiresEvidence')
+    const allowedField = ownDataValue(node, 'allowedEvidenceTypes')
+    if (requiredField.present && (!requiredField.valid || typeof requiredField.value !== 'boolean') ||
+        allowedField.present && !allowedField.valid) throw createError('FORBIDDEN')
+    const requiresEvidence = requiredField.present ? requiredField.value : false
+    const allowedEvidenceTypes = allowedField.present ? allowedField.value : []
+    if (!Array.isArray(allowedEvidenceTypes) || allowedEvidenceTypes.some(type =>
+      typeof type !== 'string' || !ALLOWED_EVIDENCE_TYPES.includes(type)) ||
+      new Set(allowedEvidenceTypes).size !== allowedEvidenceTypes.length ||
+      requiresEvidence && allowedEvidenceTypes.length === 0) throw createError('FORBIDDEN')
+    return { requiresEvidence, allowedEvidenceTypes: allowedEvidenceTypes.slice() }
+  }
+
+  function publicNodeProjection(node, actor, canManage, accountSchema, displayNames) {
+    const evidencePolicy = safeEvidencePolicy(node)
+    const fieldDefinitions = safeFieldDefinitions(
+      Object.prototype.hasOwnProperty.call(node, 'fieldDefinitions') ? node.fieldDefinitions : []
+    )
     const base = {
       _id: node._id,
       nodeCode: node.nodeCode || '',
@@ -266,8 +340,8 @@ function createCloudBusinessRepository({
       return {
         ...base,
         workflowMode: 'review',
-        processorDisplayNames: await accountDisplayNames(processors),
-        reviewerDisplayNames: await accountDisplayNames(reviewers),
+        processorDisplayNames: accountDisplayNames(processors, displayNames),
+        reviewerDisplayNames: accountDisplayNames(reviewers, displayNames),
         reviewMode: node.reviewMode,
         processingRoundNumber: node.processingRoundNumber,
         reviewRoundNumber: node.reviewRoundNumber,
@@ -278,7 +352,9 @@ function createCloudBusinessRepository({
         reviewDueAt: clone(node.reviewDueAt || null),
         reviewOverdueWorkMinutes: Number(node.reviewOverdueWorkMinutes || 0),
         activeReviewRoundId: node.activeReviewRoundId || '',
-        canFeedback: processors.includes(actor._id)
+        canFeedback: processors.includes(actor._id),
+        ...evidencePolicy,
+        fieldDefinitions
       }
     }
     const assigneeIds = accountSchema
@@ -287,14 +363,16 @@ function createCloudBusinessRepository({
     if (accountSchema && !assigneeIds) throw createError('FORBIDDEN')
     return {
       ...base,
-      requiresEvidence: Boolean(node.requiresEvidence),
-      allowedEvidenceTypes: Array.isArray(node.allowedEvidenceTypes) ? clone(node.allowedEvidenceTypes) : [],
+      ...evidencePolicy,
+      fieldDefinitions,
       dueAt: clone(node.dueAt || null),
       completedAt: clone(node.completedAt || null),
       canFeedback: canManage || (accountSchema
         ? assigneeIds.includes(actor._id)
         : Boolean(actor.openid) && assigneeIds.includes(actor.openid)),
-      assigneeNamesText: Array.isArray(node.assigneeNames) ? node.assigneeNames.join('、') : ''
+      assigneeNamesText: accountSchema
+        ? accountDisplayNames(assigneeIds, displayNames).join('、')
+        : Array.isArray(node.assigneeNames) ? node.assigneeNames.join('、') : ''
     }
   }
 
@@ -555,8 +633,9 @@ function createCloudBusinessRepository({
     const canManage = accountSchema
       ? exactNewLineRelationships(line).managers.includes(currentActor._id)
       : Boolean(currentActor.openid) && membershipArray(line.managerIds).includes(currentActor.openid)
-    const projectedNodes = await Promise.all(nodes.map(node =>
-      publicNodeProjection(node, currentActor, canManage, accountSchema)))
+    const displayNames = await createDisplayNameCache(nodes, currentActor, accountSchema)
+    const projectedNodes = nodes.map(node =>
+      publicNodeProjection(node, currentActor, canManage, accountSchema, displayNames))
     const canEditNodes = !accountSchema && canManage && Number(line.progress || 0) === 0 &&
       nodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
     await db.runTransaction(async transaction => {

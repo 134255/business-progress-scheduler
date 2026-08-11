@@ -41,10 +41,10 @@ function seedDefinition(overrides = {}) {
   ]
   return {
     users: overrides.users || [
-      { _id: 'user-1', status: 'active' },
-      { _id: 'user-2', status: 'active' },
-      { _id: 'user-3', status: 'active' },
-      { _id: 'user-4', status: 'active' }
+      { _id: 'user-1', status: 'active', displayName: '用户一' },
+      { _id: 'user-2', status: 'active', displayName: '用户二' },
+      { _id: 'user-3', status: 'active', displayName: '用户三' },
+      { _id: 'user-4', status: 'active', displayName: '用户四' }
     ],
     templates: [{
       _id: 'template-1', name: '交付模板', status: 'enabled', version: 4,
@@ -56,7 +56,8 @@ function seedDefinition(overrides = {}) {
 }
 
 function createRepositoryHarness(seed = seedDefinition(), options = {}) {
-  const fake = createFakeCloudDatabase(seed)
+  const { fakeOptions, ...repositoryOptions } = options
+  const fake = createFakeCloudDatabase(seed, fakeOptions)
   const repository = createCloudBusinessRepository({
     db: fake.db,
     clock: () => new Date('2026-08-07T02:30:00.000Z'),
@@ -69,7 +70,7 @@ function createRepositoryHarness(seed = seedDefinition(), options = {}) {
         }
       }
     },
-    ...options
+    ...repositoryOptions
   })
   return { fake, repository }
 }
@@ -473,7 +474,29 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
         processingDueStatus: 'calculated', processingDueAt: new Date('2026-08-11T08:00:00.000Z'),
         processingOverdueWorkMinutes: 30, reviewDueStatus: 'calculated',
         reviewDueAt: new Date('2026-08-11T09:00:00.000Z'), reviewOverdueWorkMinutes: 10,
-        activeReviewRoundId: 'round-1', latestFeedbackId: 'feedback-secret', feedbackClaimId: 'claim-secret'
+        activeReviewRoundId: 'round-1', latestFeedbackId: 'feedback-secret', feedbackClaimId: 'claim-secret',
+        requiresEvidence: true, allowedEvidenceTypes: ['pdf', 'mp4'],
+        fieldDefinitions: [
+          {
+            fieldKey: 'summary', sequence: 0, name: '摘要', description: '填写摘要',
+            type: 'short_text', required: true, constraints: { minLength: 2, maxLength: 100 },
+            internalHash: 'field-secret'
+          },
+          {
+            fieldKey: 'amount', sequence: 1, name: '金额', description: '',
+            type: 'number', required: false, constraints: { min: 0, max: 9999, decimalPlaces: 2 },
+            reservationId: 'field-reservation'
+          },
+          {
+            fieldKey: 'category', sequence: 2, name: '类型', description: '',
+            type: 'single_select', required: true, constraints: { options: ['合同', '发票'] },
+            credentialHash: 'field-credential'
+          },
+          {
+            fieldKey: 'confirmed', sequence: 3, name: '已确认', description: '',
+            type: 'boolean', required: false, constraints: {}, internalLease: 'field-lease'
+          }
+        ]
       }]
     }
   })
@@ -495,9 +518,35 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
     processingDueStatus: 'calculated', processingDueAt: new Date('2026-08-11T08:00:00.000Z'),
     processingOverdueWorkMinutes: 30, reviewDueStatus: 'calculated',
     reviewDueAt: new Date('2026-08-11T09:00:00.000Z'), reviewOverdueWorkMinutes: 10,
-    activeReviewRoundId: 'round-1', canFeedback: false
+    activeReviewRoundId: 'round-1', canFeedback: false,
+    requiresEvidence: true, allowedEvidenceTypes: ['pdf', 'mp4'],
+    fieldDefinitions: [
+      {
+        fieldKey: 'summary', sequence: 0, name: '摘要', description: '填写摘要',
+        type: 'short_text', required: true, constraints: { minLength: 2, maxLength: 100 }
+      },
+      {
+        fieldKey: 'amount', sequence: 1, name: '金额', description: '',
+        type: 'number', required: false, constraints: { min: 0, max: 9999, decimalPlaces: 2 }
+      },
+      {
+        fieldKey: 'category', sequence: 2, name: '类型', description: '',
+        type: 'single_select', required: true, constraints: { options: ['合同', '发票'] }
+      },
+      {
+        fieldKey: 'confirmed', sequence: 3, name: '已确认', description: '',
+        type: 'boolean', required: false, constraints: {}
+      }
+    ]
   })
-  assert.doesNotMatch(JSON.stringify(result), /user-2|user-3|wx-secret|credentialHash|secret-request|secret-lease|feedback-secret|claim-secret/)
+  assert.doesNotMatch(JSON.stringify(result), /user-2|user-3|wx-secret|credentialHash|secret-request|secret-lease|feedback-secret|claim-secret|field-secret|field-reservation|field-credential|field-lease/)
+  result.nodes[0].fieldDefinitions[0].constraints.maxLength = 1
+  result.nodes[0].fieldDefinitions[2].constraints.options.push('内部类型')
+  result.nodes[0].allowedEvidenceTypes.push('jpg')
+  const storedNode = fake.documents('business_nodes').find(item => item._id === 'node-review')
+  assert.equal(storedNode.fieldDefinitions[0].constraints.maxLength, 100)
+  assert.deepEqual(storedNode.fieldDefinitions[2].constraints.options, ['合同', '发票'])
+  assert.deepEqual(storedNode.allowedEvidenceTypes, ['pdf', 'mp4'])
 
   fake.beforeNextTransaction(() => {
     const user = fake.documents('users').find(item => item._id === 'user-1')
@@ -506,6 +555,92 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
   await assert.rejects(repository.getBusinessLine({
     actor: { _id: 'user-1', status: 'active' }, lineId: 'line-review'
   }), error => error.code === 'FORBIDDEN')
+})
+
+test('旧业务节点详情保留动态字段和必传凭证契约并剥离字段内部属性', async () => {
+  const seed = seedDefinition({
+    extra: {
+      business_lines: [{
+        _id: 'legacy-line', code: 'BL-LEGACY', name: '旧业务', status: 'active', version: 1,
+        managerIds: ['wx-user-1'], memberIds: ['wx-user-1'], currentNodeId: 'legacy-node',
+        currentNodeIndex: 0
+      }],
+      business_nodes: [{
+        _id: 'legacy-node', businessLineId: 'legacy-line', nodeCode: 'BL-LEGACY-N001',
+        sequence: 0, name: '旧节点', status: 'ready', version: 1,
+        assigneeIds: ['wx-user-1'], assigneeNames: ['旧负责人'], requiresEvidence: true,
+        allowedEvidenceTypes: ['jpg', 'pdf'],
+        fieldDefinitions: [{
+          fieldKey: 'notes', sequence: 0, name: '说明', description: '', type: 'long_text',
+          required: true, constraints: { maxLength: 500 }, internalDigest: 'do-not-return'
+        }]
+      }]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+
+  const result = await repository.getBusinessLine({
+    actor: { _id: 'user-1', openid: 'wx-user-1' }, lineId: 'legacy-line'
+  })
+
+  assert.equal(result.nodes[0].requiresEvidence, true)
+  assert.deepEqual(result.nodes[0].allowedEvidenceTypes, ['jpg', 'pdf'])
+  assert.deepEqual(result.nodes[0].fieldDefinitions, [{
+    fieldKey: 'notes', sequence: 0, name: '说明', description: '', type: 'long_text',
+    required: true, constraints: { maxLength: 500 }
+  }])
+  assert.doesNotMatch(JSON.stringify(result), /internalDigest|do-not-return/)
+})
+
+test('业务详情按请求缓存负责人显示名且重复账号只解析一次', async () => {
+  const participants = Array.from({ length: 46 }, (_, index) => ({
+    _id: `staff-${String(index + 1).padStart(2, '0')}`,
+    status: 'active', displayName: `成员${String(index + 1).padStart(2, '0')}`
+  }))
+  const nodes = Array.from({ length: 48 }, (_, index) => {
+    const processor = participants[index % participants.length]._id
+    const reviewer = participants[(index + 1) % participants.length]._id
+    return {
+      _id: `node-${String(index + 1).padStart(2, '0')}`, businessLineId: 'line-many',
+      nodeCode: `BL-20260811-0099-N${String(index + 1).padStart(3, '0')}`,
+      sequence: index, name: `节点${index + 1}`, status: index === 0 ? 'ready' : 'waiting',
+      version: 1, workflowMode: 'review', processorUserIds: [processor],
+      reviewerUserIds: [reviewer], reviewMode: 'any', processingRoundNumber: 1,
+      reviewRoundNumber: 0, processingDueStatus: 'calculated', reviewDueStatus: 'not_started',
+      requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+    }
+  })
+  const reads = new Map()
+  const seed = seedDefinition({
+    users: [{ _id: 'manager-1', status: 'active', displayName: '管理员' }, ...participants],
+    extra: {
+      business_lines: [{
+        _id: 'line-many', code: 'BL-20260811-0099', name: '批量业务', status: 'active', version: 1,
+        managerUserIds: ['manager-1'], memberUserIds: participants.map(item => item._id),
+        currentNodeId: 'node-01', currentNodeIndex: 0, nodeCount: 48
+      }],
+      business_nodes: nodes
+    }
+  })
+  const { repository } = createRepositoryHarness(seed, {
+    fakeOptions: {
+      transformRead({ collection, data }) {
+        if (collection === 'users' && data._id.startsWith('staff-')) {
+          reads.set(data._id, (reads.get(data._id) || 0) + 1)
+        }
+        return data
+      }
+    }
+  })
+
+  const result = await repository.getBusinessLine({
+    actor: { _id: 'manager-1' }, lineId: 'line-many'
+  })
+
+  assert.equal(result.nodes.length, 48)
+  assert.equal([...reads.values()].reduce((sum, count) => sum + count, 0), 46)
+  assert.equal([...reads.values()].every(count => count === 1), true)
+  assert.equal(result.nodes[0].reviewerDisplayNames[0], result.nodes[46].reviewerDisplayNames[0])
 })
 
 test('business detail reads hide creating reservations and deny non-members in both schemas', async () => {

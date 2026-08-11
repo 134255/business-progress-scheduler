@@ -14,9 +14,11 @@ const RETENTION_MS = 60 * 24 * 60 * 60 * 1000
 const MAX_QUERY_WINDOW = 100
 const NOTIFICATION_TYPES = new Set([
   'review_started',
+  'review_reminder',
   'node_review_rejected',
   'business_completed',
   'node_processing_started',
+  'processing_reminder',
   'work_calendar_missing',
   'evidence_retention'
 ])
@@ -1220,11 +1222,15 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       .limit(MAX_QUERY_WINDOW)
       .get()
     const candidates = Array.isArray(response && response.data) ? response.data : []
-    const validated = (await Promise.all(candidates.map(candidate =>
+    const initiallyValidated = (await Promise.all(candidates.map(candidate =>
       validatedPendingCandidate(candidate, account._id)))).filter(Boolean)
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() ||
         left.reviewRoundId.localeCompare(right.reviewRoundId))
     await requireCurrentAccount(db, actor)
+    const validated = (await Promise.all(initiallyValidated.map(candidate =>
+      validatedPendingCandidate({ _id: candidate.reviewRoundId }, account._id)))).filter(Boolean)
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() ||
+        left.reviewRoundId.localeCompare(right.reviewRoundId))
     const offset = (query.page - 1) * query.pageSize
     return {
       items: validated.slice(offset, offset + query.pageSize),
@@ -1391,11 +1397,15 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         return rightTime - leftTime || String(left._id || '').localeCompare(String(right._id || ''))
       })
       .slice(0, MAX_QUERY_WINDOW)
-    const items = (await Promise.all(candidates.map(item =>
+    const initiallyValidated = (await Promise.all(candidates.map(item =>
       validatedNotification(item._id, { _id: account._id })))).filter(Boolean)
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() ||
         left.notificationId.localeCompare(right.notificationId))
     await requireCurrentAccount(db, actor)
+    const items = (await Promise.all(initiallyValidated.map(item =>
+      validatedNotification(item.notificationId, { _id: account._id })))).filter(Boolean)
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() ||
+        left.notificationId.localeCompare(right.notificationId))
     const offset = (query.page - 1) * query.pageSize
     return {
       items: items.slice(offset, offset + query.pageSize),
