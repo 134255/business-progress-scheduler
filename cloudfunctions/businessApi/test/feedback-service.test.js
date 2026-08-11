@@ -173,3 +173,74 @@ test('feedback input must be a plain own-property request with every required ke
   Object.defineProperty(accessor, 'comment', { get() { return 'unsafe' }, enumerable: true })
   await assert.rejects(service.submitFeedback({ actor, input: accessor }), error => error.code === 'VALIDATION_ERROR')
 })
+
+test('新版节点处理人只能保存进度或标记受阻，不能直接完成', async () => {
+  const reviewContext = context({
+    node: {
+      ...context().node,
+      workflowMode: 'review',
+      processorUserIds: ['account-1'],
+      reviewerUserIds: ['reviewer-1'],
+      processingRoundNumber: 1
+    }
+  })
+  const { actor, calls, service } = harness({ context: reviewContext })
+  const { status: ignoredStatus, ...progressBase } = input()
+
+  await assert.rejects(
+    service.saveNodeProgress({ actor, input: { ...progressBase, action: 'completed' } }),
+    error => error.code === 'VALIDATION_ERROR'
+  )
+  const result = await service.saveNodeProgress({
+    actor,
+    input: { ...progressBase, action: 'save_progress' }
+  })
+
+  assert.equal(result.nodeStatus, 'in_progress')
+  assert.equal(calls.at(-1)[1].input.action, 'save_progress')
+  assert.equal(calls.at(-1)[1].input.status, 'in_progress')
+})
+
+test('标记受阻原因必填且发布不可变处理版本', async () => {
+  const reviewContext = context({
+    node: {
+      ...context().node,
+      workflowMode: 'review',
+      processorUserIds: ['account-1'],
+      reviewerUserIds: ['reviewer-1'],
+      processingRoundNumber: 2
+    }
+  })
+  const { actor, calls, service } = harness({ context: reviewContext })
+  const { status: ignoredStatus, ...progressBase } = input()
+  const base = { ...progressBase, action: 'mark_blocked', evidenceIds: [] }
+
+  await assert.rejects(
+    service.saveNodeProgress({ actor, input: { ...base, comment: '  ' } }),
+    error => error.code === 'BLOCKED_REASON_REQUIRED'
+  )
+  await service.saveNodeProgress({ actor, input: { ...base, comment: ' 等待外部资料 ' } })
+
+  assert.equal(calls.at(-1)[1].input.status, 'blocked')
+  assert.equal(calls.at(-1)[1].input.comment, '等待外部资料')
+})
+
+test('旧完成入口不能绕过新版节点审核', async () => {
+  const { actor, calls, service } = harness({
+    context: context({
+      node: {
+        ...context().node,
+        workflowMode: 'review',
+        processorUserIds: ['account-1'],
+        reviewerUserIds: ['reviewer-1'],
+        processingRoundNumber: 1
+      }
+    })
+  })
+
+  await assert.rejects(
+    service.submitFeedback({ actor, input: input() }),
+    error => error.code === 'NODE_PENDING_REVIEW'
+  )
+  assert.equal(calls.some(call => call[0] === 'commit'), false)
+})

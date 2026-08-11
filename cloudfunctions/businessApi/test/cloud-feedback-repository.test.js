@@ -465,6 +465,25 @@ test('published lookup is exact and revalidates the current active account befor
   assert.deepEqual(await finalHarness.repository.findPublishedFeedback(finalValue), finalResult)
 })
 
+test('旧提交入口的精确重试也不能绕过新版审核节点', async () => {
+  const { fake, repository } = createFeedbackHarness({ evidenceCount: 0 })
+  const value = submission()
+  await repository.commitFeedback(value)
+  const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+  fake.replace('business_nodes', 'node-1', {
+    ...node,
+    workflowMode: 'review',
+    processorUserIds: ['account-a'],
+    reviewerUserIds: ['manager'],
+    processingRoundNumber: 1
+  })
+
+  await assert.rejects(
+    repository.findPublishedFeedback({ ...value, legacyOnly: true }),
+    error => error.code === 'NODE_PENDING_REVIEW'
+  )
+})
+
 test('disabled actors cannot distinguish feedback reservation existence, status, or payload across actor-facing entrypoints', async () => {
   async function prepare(state, suffix) {
     const harness = createFeedbackHarness({ evidenceCount: 0 })
@@ -1152,4 +1171,121 @@ test('terminal history excludes ordinary evidence without a strict line deadline
   const result = await repository.getNodeHistory({ actor: { _id: 'manager' }, businessLineId: 'line-1', nodeId: 'node-1' })
   assert.deepEqual(result.history[0].evidences.map(item => item.evidenceId), ['evidence-2'])
   assert.deepEqual(result.history[1].evidences, [])
+})
+
+function reviewWorkflowSeed() {
+  const data = seed({ evidenceCount: 3 })
+  data.business_nodes[0] = {
+    ...data.business_nodes[0],
+    workflowMode: 'review',
+    processorUserIds: ['account-a', 'account-b'],
+    reviewerUserIds: ['manager'],
+    reviewMode: 'any',
+    processingRoundNumber: 1,
+    processingSlaWorkHours: 22,
+    reviewSlaWorkHours: 8,
+    processingStartedAt: new Date('2026-08-07T01:00:00.000Z')
+  }
+  delete data.business_nodes[0].assigneeUserIds
+  return data
+}
+
+test('新版节点保存进度复用分块预约并持久化处理动作与轮次', async () => {
+  const data = reviewWorkflowSeed()
+  const { fake, repository } = createFeedbackHarness({ seed: data })
+  const value = submission({
+    evidenceIds: ['evidence-1'],
+    input: { status: 'in_progress', action: 'save_progress' },
+    fieldSnapshots: [{ fieldKey: 'summary', name: '摘要', type: 'short_text', value: '第一版' }],
+    evidenceTotalBytes: 1
+  })
+
+  const result = await repository.commitFeedback(value)
+
+  assert.equal(result.nodeStatus, 'in_progress')
+  const [feedback] = fake.documents('node_feedback')
+  assert.equal(feedback.action, 'save_progress')
+  assert.equal(feedback.processingRoundNumber, 1)
+  assert.equal(feedback.blockedReason, '')
+  assert.equal(fake.documents('evidences')[0].processingRoundNumber, 1)
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+})
+
+test('当前处理轮草稿分页采用最新字段并按首次版本顺序聚合全部有效凭证', async () => {
+  const data = reviewWorkflowSeed()
+  data.node_feedback = []
+  data.evidences = []
+  for (let revision = 1; revision <= 101; revision += 1) {
+    const feedbackId = `feedback-${String(revision).padStart(3, '0')}`
+    const evidenceId = `evidence-${String(revision).padStart(3, '0')}`
+    data.node_feedback.push({
+      _id: feedbackId, businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
+      revision, status: 'in_progress', action: 'save_progress', processingRoundNumber: 1,
+      submittedBy: 'account-a', submittedAt: new Date(NOW.getTime() + revision),
+      fieldValues: [{ fieldKey: 'summary', name: '摘要', type: 'short_text', value: `版本-${revision}` }]
+    })
+    data.evidences.push({
+      _id: evidenceId, businessLineId: 'line-1', nodeId: 'node-1', feedbackId,
+      feedbackRevision: revision, processingRoundNumber: 1, attachmentState: 'attached',
+      retentionScope: 'business_line', retentionSource: 'node_feedback', storageStatus: 'available',
+      fileName: `${revision}.pdf`, category: 'pdf', extension: 'pdf', size: 1,
+      purgedAt: null, purgeDueAt: null
+    })
+  }
+  data.business_nodes[0].latestFeedbackId = 'feedback-101'
+  data.business_nodes[0].latestFeedbackRevision = 101
+  const { repository } = createFeedbackHarness({ seed: data })
+
+  const result = await repository.getCurrentProcessingRoundDraft({
+    actor: { _id: 'account-a', status: 'active' },
+    businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4
+  })
+
+  assert.equal(result.feedbackId, 'feedback-101')
+  assert.equal(result.feedbackRevision, 101)
+  assert.equal(result.fieldSnapshots[0].value, '版本-101')
+  assert.equal(result.evidenceIds.length, 101)
+  assert.deepEqual(result.evidenceIds.slice(0, 2), ['evidence-001', 'evidence-002'])
+  assert.equal(result.evidenceTotalBytes, 101)
+})
+
+test('当前处理轮草稿拒绝跨轮次、错误归属和超过20MB的凭证集合', async () => {
+  const data = reviewWorkflowSeed()
+  data.node_feedback = [{
+    _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
+    revision: 1, status: 'in_progress', action: 'save_progress', processingRoundNumber: 1,
+    submittedBy: 'account-a', submittedAt: NOW, fieldValues: []
+  }]
+  data.business_nodes[0].latestFeedbackId = 'feedback-current'
+  data.business_nodes[0].latestFeedbackRevision = 1
+  data.evidences = [{
+    _id: 'evidence-large', businessLineId: 'line-1', nodeId: 'node-1', feedbackId: 'feedback-current',
+    feedbackRevision: 1, processingRoundNumber: 1, attachmentState: 'attached',
+    retentionScope: 'business_line', retentionSource: 'node_feedback', storageStatus: 'available',
+    size: 20 * 1024 * 1024 + 1, purgedAt: null, purgeDueAt: null
+  }, {
+    _id: 'evidence-wrong-round', businessLineId: 'line-1', nodeId: 'node-1', feedbackId: 'feedback-current',
+    feedbackRevision: 1, processingRoundNumber: 2, attachmentState: 'attached',
+    retentionScope: 'business_line', retentionSource: 'node_feedback', storageStatus: 'available',
+    size: 1, purgedAt: null, purgeDueAt: null
+  }]
+  const { repository } = createFeedbackHarness({ seed: data })
+
+  await assert.rejects(
+    repository.getCurrentProcessingRoundDraft({
+      actor: { _id: 'account-a', status: 'active' },
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4
+    }),
+    error => error.code === 'EVIDENCE_NOT_ATTACHABLE'
+  )
+
+  data.evidences = [data.evidences[0]]
+  const overLimit = createFeedbackHarness({ seed: data }).repository
+  await assert.rejects(
+    overLimit.getCurrentProcessingRoundDraft({
+      actor: { _id: 'account-a', status: 'active' },
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4
+    }),
+    error => error.code === 'FEEDBACK_TOTAL_TOO_LARGE'
+  )
 })

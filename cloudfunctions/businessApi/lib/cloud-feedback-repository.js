@@ -67,6 +67,12 @@ function isCurrentNode(line, node) {
   return Number.isSafeInteger(line.currentNodeIndex) && Number(node.sequence) === line.currentNodeIndex
 }
 
+function processorIds(node) {
+  return node && node.workflowMode === 'review'
+    ? membership(node.processorUserIds)
+    : membership(node && node.assigneeUserIds)
+}
+
 function parseDeadline(value) {
   if (value === null || value === undefined) return null
   if (value instanceof Date) {
@@ -169,11 +175,13 @@ function createCloudFeedbackRepository({
     }
     const requestHash = hash(`${actor._id}\0${input.nodeId}\0${input.requestKey}`)
     const evidenceDigest = hash(JSON.stringify(input.evidenceIds))
-    const inputHash = hash(JSON.stringify([
+    const inputIdentity = [
       actor._id, input.businessLineId, input.nodeId, input.expectedNodeVersion,
       input.status, fieldSnapshots, input.comment, evidenceDigest, input.evidenceIds.length,
       evidenceTotalBytes, requestFingerprint
-    ]))
+    ]
+    if (input.action) inputIdentity.splice(5, 0, input.action)
+    const inputHash = hash(JSON.stringify(inputIdentity))
     return { feedbackId: `feedback-${requestHash}`, requestHash, evidenceDigest, inputHash, requestFingerprint }
   }
 
@@ -184,7 +192,7 @@ function createCloudFeedbackRepository({
     if (line.status !== 'active') throw createError('NODE_NOT_ACTIVE')
     if (!node || node.businessLineId !== line._id) throw createError('NOT_FOUND')
     if (!accountSchema(line, node) || !isAccountMember(line, actor._id) ||
-        !membership(node.assigneeUserIds).includes(actor._id)) {
+        !processorIds(node).includes(actor._id)) {
       throw createError('FORBIDDEN')
     }
     if (!isCurrentNode(line, node) || !ACTIVE_NODE_STATUSES.has(node.status)) {
@@ -201,7 +209,7 @@ function createCloudFeedbackRepository({
       throw createError('NOT_FOUND')
     }
     if (!accountSchema(line, node) || !isAccountMember(line, actor._id) ||
-        !membership(node.assigneeUserIds).includes(actor._id)) throw createError('FORBIDDEN')
+        !processorIds(node).includes(actor._id)) throw createError('FORBIDDEN')
   }
 
   function assertCurrentActorAuthorization(actor, line, node) {
@@ -210,13 +218,13 @@ function createCloudFeedbackRepository({
       throw createError('NOT_FOUND')
     }
     if (!accountSchema(line, node) || !isAccountMember(line, actor._id) ||
-        !membership(node.assigneeUserIds).includes(actor._id)) throw createError('FORBIDDEN')
+        !processorIds(node).includes(actor._id)) throw createError('FORBIDDEN')
   }
 
   function assertContentionPollAuthorization(actor, line, node) {
     if (!actor || actor.status !== 'active' || !line || line.status === 'creating' || !node ||
         node.businessLineId !== line._id || !accountSchema(line, node) ||
-        !isAccountMember(line, actor._id) || !membership(node.assigneeUserIds).includes(actor._id)) {
+        !isAccountMember(line, actor._id) || !processorIds(node).includes(actor._id)) {
       throw createError('FORBIDDEN')
     }
   }
@@ -298,6 +306,9 @@ function createCloudFeedbackRepository({
     return db.runTransaction(async transaction => {
       const current = await readSubmissionDocuments(transaction, actor._id, input)
       assertCurrentActorAuthorization(current.actor, current.line, current.node)
+      if (value.legacyOnly === true && current.node.workflowMode === 'review') {
+        throw createError('NODE_PENDING_REVIEW')
+      }
       const existing = await readDocument(transaction, COLLECTIONS.feedback, feedbackId)
       if (!existing || existing.publishState !== 'published') return null
       assertPublishedRetry(current.actor, current.line, current.node, existing)
@@ -359,6 +370,11 @@ function createCloudFeedbackRepository({
         if (completedFlow) throw createError('NODE_ALREADY_COMPLETED')
       }
       assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
+      if (current.node.workflowMode === 'review' &&
+          (!['save_progress', 'mark_blocked'].includes(value.input.action) ||
+            !safeInteger(current.node.processingRoundNumber, { minimum: 1 }))) {
+        throw createError('VALIDATION_ERROR')
+      }
       if (value.input.status === 'completed' && current.node.requiresEvidence && !value.input.evidenceIds.length) {
         throw createError('EVIDENCE_NOT_ATTACHABLE')
       }
@@ -382,6 +398,13 @@ function createCloudFeedbackRepository({
         nodeName: current.node.name,
         submittedBy: current.actor._id,
         status: value.input.status,
+        ...(current.node.workflowMode === 'review'
+          ? {
+              action: value.input.action,
+              processingRoundNumber: current.node.processingRoundNumber,
+              blockedReason: value.input.action === 'mark_blocked' ? value.input.comment : ''
+            }
+          : {}),
         fieldValues: clone(value.fieldSnapshots),
         comment: value.input.comment,
         publishState: 'reserved',
@@ -484,7 +507,10 @@ function createCloudFeedbackRepository({
             retentionStartedAt: null,
             purgeDueAt: null,
             retentionScope: 'business_line',
-            retentionSource: 'node_feedback'
+            retentionSource: 'node_feedback',
+            ...(reservation.processingRoundNumber === undefined
+              ? {}
+              : { processingRoundNumber: reservation.processingRoundNumber })
           }
         })
       }
@@ -554,6 +580,14 @@ function createCloudFeedbackRepository({
         feedbackClaimHash: db.command.remove(),
         feedbackClaimExpiresAt: db.command.remove(),
         updatedAt: db.serverDate()
+      }
+      if (current.node.workflowMode === 'review') {
+        if (!['save_progress', 'mark_blocked'].includes(value.input.action) ||
+            !safeInteger(current.node.processingRoundNumber, { minimum: 1 }) ||
+            reservation.processingRoundNumber !== current.node.processingRoundNumber) {
+          throw createError('VERSION_CONFLICT')
+        }
+        nodeChanges.blockedReason = value.input.action === 'mark_blocked' ? value.input.comment : ''
       }
       if (value.input.status === 'completed') nodeChanges.completedAt = reservation.transitionAt
       await transaction.collection(COLLECTIONS.nodes).doc(current.node._id).update({ data: nodeChanges })
@@ -794,10 +828,85 @@ function createCloudFeedbackRepository({
   async function readAll(buildQuery) {
     const items = []
     for (let offset = 0; ; offset += QUERY_PAGE_SIZE) {
-      const response = await buildQuery().skip(offset).limit(QUERY_PAGE_SIZE).get()
+      const response = await buildQuery().orderBy('_id', 'asc').skip(offset).limit(QUERY_PAGE_SIZE).get()
       const page = response.data || []
       items.push(...page)
       if (page.length < QUERY_PAGE_SIZE) return items
+    }
+  }
+
+  async function getCurrentProcessingRoundDraft({ actor, businessLineId, nodeId, expectedNodeVersion }) {
+    const input = { businessLineId, nodeId, expectedNodeVersion, status: 'in_progress' }
+    const context = await db.runTransaction(async transaction => {
+      const documents = await readSubmissionDocuments(transaction, actor && actor._id, input)
+      assertActiveAccountSubmission(documents.actor, documents.line, documents.node, input)
+      if (documents.node.workflowMode !== 'review' ||
+          !safeInteger(documents.node.processingRoundNumber, { minimum: 1 })) {
+        throw createError('VALIDATION_ERROR')
+      }
+      return documents
+    })
+    const processingRoundNumber = context.node.processingRoundNumber
+    const stored = await readAll(() => db.collection(COLLECTIONS.feedback).where({ nodeId }))
+    const feedback = stored.filter(item =>
+      item && item.businessLineId === businessLineId && item.nodeId === nodeId &&
+      item.publishState === 'published' && item.processingRoundNumber === processingRoundNumber &&
+      ['save_progress', 'mark_blocked'].includes(item.action) &&
+      safeInteger(item.revision, { minimum: 1 }))
+    feedback.sort((left, right) => left.revision - right.revision || String(left._id).localeCompare(String(right._id)))
+    if (feedback.some((item, index) => index > 0 && feedback[index - 1].revision === item.revision)) {
+      throw createError('VERSION_CONFLICT')
+    }
+    const latest = feedback.at(-1)
+    if (!latest || context.node.latestFeedbackId !== latest._id ||
+        context.node.latestFeedbackRevision !== latest.revision || !Array.isArray(latest.fieldValues)) {
+      throw createError('VERSION_CONFLICT')
+    }
+    const feedbackById = new Map(feedback.map(item => [item._id, item]))
+    const evidenceRows = await readAll(() => db.collection(COLLECTIONS.evidences).where({ nodeId }))
+    const at = now().getTime()
+    const accepted = []
+    for (const evidence of evidenceRows) {
+      const ownerFeedback = feedbackById.get(evidence && evidence.feedbackId)
+      if (!ownerFeedback) continue
+      if (evidence.businessLineId !== businessLineId || evidence.nodeId !== nodeId ||
+          evidence.processingRoundNumber !== processingRoundNumber ||
+          evidence.feedbackRevision !== ownerFeedback.revision) {
+        throw createError('EVIDENCE_NOT_ATTACHABLE')
+      }
+      if (evidence.attachmentState !== 'attached' || evidence.storageStatus !== 'available' ||
+          evidence.purgedAt !== null && evidence.purgedAt !== undefined) continue
+      const retention = classifyEvidenceRetention(evidence, context.line)
+      if (!retention || !safeInteger(evidence.size, { minimum: 1 })) {
+        throw createError('EVIDENCE_NOT_ATTACHABLE')
+      }
+      if (retention.effectivePurgeDueAt && retention.effectivePurgeDueAt.getTime() <= at) continue
+      accepted.push({ evidence, revision: ownerFeedback.revision })
+    }
+    accepted.sort((left, right) => left.revision - right.revision ||
+      String(left.evidence._id).localeCompare(String(right.evidence._id)))
+    const evidenceIds = []
+    const seen = new Set()
+    let evidenceTotalBytes = 0
+    for (const { evidence } of accepted) {
+      if (seen.has(evidence._id)) continue
+      seen.add(evidence._id)
+      if (evidence.size > FEEDBACK_TOTAL_LIMIT - evidenceTotalBytes) {
+        throw createError('FEEDBACK_TOTAL_TOO_LARGE')
+      }
+      evidenceTotalBytes += evidence.size
+      evidenceIds.push(evidence._id)
+    }
+    if (context.node.requiresEvidence && evidenceIds.length === 0) throw createError('EVIDENCE_NOT_ATTACHABLE')
+    return {
+      line: clone(context.line),
+      node: clone(context.node),
+      feedbackId: latest._id,
+      feedbackRevision: latest.revision,
+      processingRoundNumber,
+      fieldSnapshots: clone(latest.fieldValues),
+      evidenceIds,
+      evidenceTotalBytes
     }
   }
 
@@ -864,7 +973,7 @@ function createCloudFeedbackRepository({
     }
     const canSubmit = context.line.status === 'active' && isCurrentNode(context.line, context.node) &&
       ACTIVE_NODE_STATUSES.has(context.node.status) && accountSchema(context.line, context.node) &&
-      membership(context.node.assigneeUserIds).includes(context.actor._id)
+      processorIds(context.node).includes(context.actor._id)
     return {
       node: { id: context.node._id, name: context.node.name, nodeCode: context.node.nodeCode, status: context.node.status },
       canSubmit,
@@ -880,7 +989,8 @@ function createCloudFeedbackRepository({
     finalizeFeedback,
     recoverExpiredReservation,
     commitFeedback,
-    getNodeHistory
+    getNodeHistory,
+    getCurrentProcessingRoundDraft
   }
 }
 

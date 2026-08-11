@@ -7,11 +7,16 @@ const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const REQUEST_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const FEEDBACK_STATUSES = new Set(['in_progress', 'blocked', 'completed'])
+const PROGRESS_ACTIONS = new Set(['save_progress', 'mark_blocked'])
 const INPUT_KEYS = new Set([
   'businessLineId', 'nodeId', 'expectedNodeVersion', 'status',
   'fieldValues', 'comment', 'evidenceIds', 'requestKey'
 ])
 const REQUIRED_INPUT_KEYS = [...INPUT_KEYS]
+const PROGRESS_INPUT_KEYS = new Set([
+  'businessLineId', 'nodeId', 'expectedNodeVersion', 'action',
+  'fieldValues', 'comment', 'evidenceIds', 'requestKey'
+])
 
 function createError(code) {
   const error = new Error(code)
@@ -43,10 +48,12 @@ function isPlainOwnObject(value) {
 }
 
 function createRequestFingerprint(actor, input) {
-  return crypto.createHash('sha256').update(JSON.stringify([
+  const identity = [
     actor._id, input.businessLineId, input.nodeId, input.expectedNodeVersion,
     input.status, input.fieldValues, input.comment, input.evidenceIds, input.requestKey
-  ])).digest('hex')
+  ]
+  if (input.action) identity.splice(5, 0, input.action)
+  return crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex')
 }
 
 function normalizeInput(input) {
@@ -80,6 +87,39 @@ function normalizeInput(input) {
   }
 }
 
+function normalizeProgressInput(input) {
+  if (!isPlainOwnObject(input) || Reflect.ownKeys(input).some(key =>
+    typeof key !== 'string' || !PROGRESS_INPUT_KEYS.has(key)) ||
+      [...PROGRESS_INPUT_KEYS].some(key => {
+        const descriptor = Object.getOwnPropertyDescriptor(input, key)
+        return !descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      })) {
+    throw createError('VALIDATION_ERROR')
+  }
+  if (!PROGRESS_ACTIONS.has(input.action) || !Number.isSafeInteger(input.expectedNodeVersion) ||
+      input.expectedNodeVersion < 1 || typeof input.requestKey !== 'string' ||
+      !REQUEST_KEY.test(input.requestKey) || !Array.isArray(input.fieldValues) ||
+      !Array.isArray(input.evidenceIds) ||
+      input.comment !== undefined && input.comment !== null && typeof input.comment !== 'string') {
+    throw createError('VALIDATION_ERROR')
+  }
+  const comment = typeof input.comment === 'string' ? input.comment.trim() : ''
+  if (input.action === 'mark_blocked' && !comment) throw createError('BLOCKED_REASON_REQUIRED')
+  const evidenceIds = input.evidenceIds.map(requireId)
+  if (new Set(evidenceIds).size !== evidenceIds.length) throw createError('EVIDENCE_NOT_ATTACHABLE')
+  return {
+    businessLineId: requireId(input.businessLineId),
+    nodeId: requireId(input.nodeId),
+    expectedNodeVersion: input.expectedNodeVersion,
+    action: input.action,
+    status: input.action === 'mark_blocked' ? 'blocked' : 'in_progress',
+    fieldValues: input.fieldValues,
+    comment,
+    evidenceIds,
+    requestKey: input.requestKey
+  }
+}
+
 function orderedEvidences(evidences, evidenceIds) {
   if (!Array.isArray(evidences)) throw createError('EVIDENCE_NOT_ATTACHABLE')
   const byId = new Map()
@@ -104,7 +144,12 @@ function createFeedbackService({ repository }) {
     const normalized = normalizeInput(input)
     const requestFingerprint = createRequestFingerprint(actor, normalized)
     const { fieldValues, ...commitInput } = normalized
-    const published = await repository.findPublishedFeedback({ actor, input: commitInput, requestFingerprint })
+    const published = await repository.findPublishedFeedback({
+      actor,
+      input: commitInput,
+      requestFingerprint,
+      legacyOnly: true
+    })
     if (published) return published
     const submission = await repository.getSubmissionContext({
       actor,
@@ -112,6 +157,9 @@ function createFeedbackService({ repository }) {
       nodeId: normalized.nodeId,
       evidenceIds: normalized.evidenceIds
     })
+    if (submission.node && submission.node.workflowMode === 'review') {
+      throw createError('NODE_PENDING_REVIEW')
+    }
     let fieldSnapshots
     let evidenceTotalBytes
     try {
@@ -133,12 +181,44 @@ function createFeedbackService({ repository }) {
     })
   }
 
+  async function saveNodeProgress({ actor, input }) {
+    requireActiveActor(actor)
+    const normalized = normalizeProgressInput(input)
+    const requestFingerprint = createRequestFingerprint(actor, normalized)
+    const { fieldValues, ...commitInput } = normalized
+    const published = await repository.findPublishedFeedback({ actor, input: commitInput, requestFingerprint })
+    if (published) return published
+    const submission = await repository.getSubmissionContext({
+      actor,
+      businessLineId: normalized.businessLineId,
+      nodeId: normalized.nodeId,
+      evidenceIds: normalized.evidenceIds
+    })
+    if (!submission.node || submission.node.workflowMode !== 'review') throw createError('VALIDATION_ERROR')
+    let fieldSnapshots
+    let evidenceTotalBytes
+    try {
+      fieldSnapshots = validateFieldValues(submission.node.fieldDefinitions, normalized.fieldValues)
+      const evidences = orderedEvidences(submission.evidences, normalized.evidenceIds)
+      evidenceTotalBytes = validateFeedbackTotalSize(evidences.map(evidence => evidence.size))
+    } catch (error) {
+      markApplicationError(error)
+    }
+    return repository.commitFeedback({
+      actor,
+      input: commitInput,
+      requestFingerprint,
+      fieldSnapshots,
+      evidenceTotalBytes
+    })
+  }
+
   async function getNodeHistory({ actor, businessLineId, nodeId }) {
     requireActiveActor(actor)
     return repository.getNodeHistory({ actor, businessLineId: requireId(businessLineId), nodeId: requireId(nodeId) })
   }
 
-  return { submitFeedback, getNodeHistory }
+  return { submitFeedback, saveNodeProgress, getNodeHistory }
 }
 
 module.exports = { createFeedbackService, createRequestFingerprint }
