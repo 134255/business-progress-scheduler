@@ -1,5 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
 
 const { createFakeCloudDatabase } = require('../../businessApi/test/helpers/fake-cloud-database')
 const { createCloudRetentionRepository } = require('../lib/cloud-retention-repository')
@@ -282,4 +284,72 @@ test('候选返回后进程崩溃未处理时游标回绕并再次交付同一�
   })
   assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), ['feedback-crash'])
   assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), ['feedback-crash'])
+})
+
+test('相同到期时间跨页按到期时间与编号推进且不丢不重', async () => {
+  const dueAt = new Date('2026-08-09T00:00:00.000Z')
+  const { repository } = repositoryFor({
+    node_feedback: ['c', 'a', 'b'].map(id => ({
+      _id: `feedback-${id}`, publishState: 'reserved', claimExpiresAt: dueAt,
+      businessLineId: 'line-1', nodeId: 'node-1'
+    }))
+  })
+  const delivered = []
+  for (let index = 0; index < 4; index += 1) {
+    delivered.push(...await repository.listExpiredFeedbackReservations({ now: NOW, limit: 1 }))
+  }
+  assert.deepEqual(delivered, ['feedback-a', 'feedback-b', 'feedback-c'])
+})
+
+test('范围扫描按到期时间再按编号而不是只按编号排序', async () => {
+  const { repository } = repositoryFor({
+    node_feedback: [
+      { _id: 'feedback-a', publishState: 'reserved', claimExpiresAt: new Date('2026-08-09T00:00:00.000Z'), businessLineId: 'line-1', nodeId: 'node-1' },
+      { _id: 'feedback-z', publishState: 'reserved', claimExpiresAt: new Date('2026-08-08T00:00:00.000Z'), businessLineId: 'line-1', nodeId: 'node-1' }
+    ]
+  })
+  assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 1 }), ['feedback-z'])
+  assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 1 }), ['feedback-a'])
+})
+
+test('损坏的复合游标排序值或编号均失败关闭', async () => {
+  for (const cursor of [
+    { phase: 'reserved', afterSortValue: 'not-a-date', afterId: 'feedback-a' },
+    { phase: 'reserved', afterSortValue: '2026-08-09T00:00:00.000Z', afterId: 7 }
+  ]) {
+    const { repository } = repositoryFor({
+      system_settings: [{ _id: 'evidence-retention:feedback-reservations', ...cursor }]
+    })
+    await assert.rejects(repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), /cursor/i)
+  }
+})
+
+test('范围查询调用严格按到期字段和编号升序并与索引契约一致', async () => {
+  const { fake, repository } = repositoryFor({
+    node_feedback: [{
+      _id: 'feedback-a', publishState: 'reserved', claimExpiresAt: new Date('2026-08-09T00:00:00.000Z'),
+      businessLineId: 'line-1', nodeId: 'node-1'
+    }]
+  })
+  await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 })
+  const query = fake.queryCalls.find(call => call.collection === 'node_feedback' && call.criteria.publishState === 'reserved')
+  assert.deepEqual(query.order, [['claimExpiresAt', 'asc'], ['_id', 'asc']])
+  const manual = fs.readFileSync(path.resolve(__dirname, '../../../docs/deployment/template-node-fields-setup.md'), 'utf8')
+  assert.match(manual, /`node_feedback` \| `publishState` 升序、`claimExpiresAt` 升序、`_id` 升序/)
+})
+
+test('各范围阶段都按自身权威到期字段和编号升序', async () => {
+  const { fake, repository } = repositoryFor({})
+  await repository.createDueReminders({ now: NOW, limit: 40 })
+  await repository.listExpiredOrphans({ now: NOW, limit: 40 })
+  await repository.listDueEvidence({ now: NOW, limit: 40 })
+  await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 })
+  await repository.listExpiredAmendmentReservations({ now: NOW, limit: 40 })
+  const orders = fake.queryCalls.map(call => `${call.collection}:${call.order.map(item => item[0]).join(',')}`)
+  for (const expected of [
+    'business_lines:purgeDueAt,_id', 'evidences:orphanExpiresAt,_id',
+    'evidences:purgeClaimExpiresAt,_id', 'evidences:purgeDueAt,_id',
+    'business_nodes:feedbackClaimExpiresAt,_id', 'node_feedback:claimExpiresAt,_id',
+    'audit_logs:claimExpiresAt,_id'
+  ]) assert.equal(orders.includes(expected), true, expected)
 })

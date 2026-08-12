@@ -101,6 +101,10 @@ test('无效依赖、时钟和批次在执行前失败', async () => {
   assert.throws(() => createRetentionService({ repository: {}, storage: {}, clock: () => new Date(), batchSize: 0 }), /batchSize/)
   const service = createRetentionService({ repository: {}, storage: {}, clock: () => new Date('invalid'), batchSize: 10 })
   await assert.rejects(service.runOnce(), /clock/)
+  assert.throws(
+    () => createRetentionService({ repository: {}, storage: {}, clock: () => new Date(), batchSize: 41 }),
+    /batchSize/
+  )
 })
 
 test('每条维护路径单次只读取一个有界候选页', async () => {

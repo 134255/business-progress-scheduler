@@ -12,6 +12,7 @@ const RECOVERY_CHUNK_SIZE = 40
 const MAX_SCAN_SIZE = 40
 const CURSOR_PREFIX = 'evidence-retention:'
 const CURSOR_ID = /^[A-Za-z0-9:_-]{1,128}$/
+const SORT_TYPES = new Set(['date', 'string'])
 
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
@@ -82,33 +83,109 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     return limit
   }
 
+  function serializeSortValue(value, type) {
+    if (type === 'date' && validDate(value)) return value.toISOString()
+    if (type === 'string' && typeof value === 'string' && value) return value
+    throw new Error('retention row sort value invalid')
+  }
+
+  function deserializeSortValue(value, type) {
+    if (type === 'date' && typeof value === 'string') {
+      const parsed = new Date(value)
+      if (validDate(parsed) && parsed.toISOString() === value) return parsed
+    }
+    if (type === 'string' && typeof value === 'string' && value) return value
+    throw new Error('retention cursor sort value invalid')
+  }
+
+  function phaseByKey(phases, key) {
+    return phases.find(phase => phase.key === key)
+  }
+
   async function readCursor(name, phases) {
     const cursor = await readDocument(db, 'system_settings', `${CURSOR_PREFIX}${name}`)
-    if (!cursor) return { phase: phases[0], afterId: '' }
-    if (!phases.includes(cursor.phase) || typeof cursor.afterId !== 'string' ||
-        cursor.afterId && !CURSOR_ID.test(cursor.afterId)) {
+    if (!cursor) return { phase: phases[0].key, afterSortValue: null, afterId: '' }
+    const phase = phaseByKey(phases, cursor.phase)
+    const empty = cursor.afterSortValue === null && cursor.afterId === ''
+    const positioned = typeof cursor.afterSortValue === 'string' &&
+      typeof cursor.afterId === 'string' && CURSOR_ID.test(cursor.afterId)
+    if (!phase || (!empty && !positioned)) {
       throw new Error(`retention cursor invalid: ${name}`)
     }
-    return { phase: cursor.phase, afterId: cursor.afterId }
+    if (positioned) deserializeSortValue(cursor.afterSortValue, phase.sortType)
+    return { phase: cursor.phase, afterSortValue: cursor.afterSortValue, afterId: cursor.afterId }
   }
 
   async function advanceCursor(name, phases, current, rawPage, limit) {
     const full = rawPage.length === limit
-    const phaseIndex = phases.indexOf(current.phase)
+    const phaseIndex = phases.findIndex(phase => phase.key === current.phase)
+    const phase = phases[phaseIndex]
     const next = full
-      ? { phase: current.phase, afterId: rawPage[rawPage.length - 1]._id }
-      : { phase: phases[(phaseIndex + 1) % phases.length], afterId: '' }
+      ? {
+          phase: current.phase,
+          afterSortValue: serializeSortValue(rawPage[rawPage.length - 1][phase.sortField], phase.sortType),
+          afterId: rawPage[rawPage.length - 1]._id
+        }
+      : { phase: phases[(phaseIndex + 1) % phases.length].key, afterSortValue: null, afterId: '' }
     await db.runTransaction(async transaction => {
       const stored = await readDocument(transaction, 'system_settings', `${CURSOR_PREFIX}${name}`)
-      const actual = stored ? { phase: stored.phase, afterId: stored.afterId } : { phase: phases[0], afterId: '' }
-      if (actual.phase !== current.phase || actual.afterId !== current.afterId) {
+      const actual = stored
+        ? { phase: stored.phase, afterSortValue: stored.afterSortValue, afterId: stored.afterId }
+        : { phase: phases[0].key, afterSortValue: null, afterId: '' }
+      if (actual.phase !== current.phase || actual.afterSortValue !== current.afterSortValue ||
+          actual.afterId !== current.afterId) {
         throw new Error(`retention cursor conflict: ${name}`)
       }
       await transaction.collection('system_settings').doc(`${CURSOR_PREFIX}${name}`).set({ data: {
-        phase: next.phase, afterId: next.afterId, updatedAt: db.serverDate()
+        phase: next.phase, afterSortValue: next.afterSortValue, afterId: next.afterId, updatedAt: db.serverDate()
       } })
     })
     return next
+  }
+
+  function queryRows({ collection, criteria, sortField, limit }) {
+    return db.collection(collection).where(criteria)
+      .orderBy(sortField, 'asc').orderBy('_id', 'asc').limit(limit).get()
+  }
+
+  async function readKeysetPage({ definition, cursor, limit }) {
+    const { __collection: collection, __sortField: sortField, __sortType: sortType,
+      __constantSort: constantSort, ...criteria } = definition
+    if (typeof collection !== 'string' || typeof sortField !== 'string' || !SORT_TYPES.has(sortType)) {
+      throw new TypeError('retention phase query definition invalid')
+    }
+    if (!cursor.afterId) {
+      const response = await queryRows({ collection, criteria, sortField, limit })
+      return Array.isArray(response && response.data) ? response.data : []
+    }
+    const afterSortValue = deserializeSortValue(cursor.afterSortValue, sortType)
+    if (constantSort) {
+      const response = await queryRows({
+        collection, criteria: { ...criteria, _id: db.command.gt(cursor.afterId) }, sortField, limit
+      })
+      return Array.isArray(response && response.data) ? response.data : []
+    }
+    const sameResponse = await queryRows({
+      collection,
+      criteria: { ...criteria, [sortField]: db.command.eq(afterSortValue), _id: db.command.gt(cursor.afterId) },
+      sortField,
+      limit
+    })
+    const sameRows = Array.isArray(sameResponse && sameResponse.data) ? sameResponse.data : []
+    if (sameRows.length === limit) return sameRows
+    const lowerBound = db.command.gt(afterSortValue)
+    const existingBound = criteria[sortField]
+    const laterResponse = await queryRows({
+      collection,
+      criteria: {
+        ...criteria,
+        [sortField]: existingBound === undefined ? lowerBound : db.command.and(lowerBound, existingBound)
+      },
+      sortField,
+      limit: limit - sameRows.length
+    })
+    const laterRows = Array.isArray(laterResponse && laterResponse.data) ? laterResponse.data : []
+    return [...sameRows, ...laterRows]
   }
 
   async function scanOnePage({ name, phases, limit, query, project }) {
@@ -120,14 +197,11 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     while (scanned < limit && !visited.has(cursor.phase)) {
       visited.add(cursor.phase)
       const remaining = limit - scanned
-      const criteria = { ...query(cursor.phase) }
-      if (cursor.afterId) criteria._id = db.command.gt(cursor.afterId)
-      const response = await db.collection(criteria.__collection)
-        .where(Object.fromEntries(Object.entries(criteria).filter(([key]) => key !== '__collection')))
-        .orderBy('_id', 'asc').limit(remaining).get()
-      const rawPage = Array.isArray(response && response.data) ? response.data : []
+      const phaseDefinition = phaseByKey(phases, cursor.phase)
+      const definition = { ...query(phaseDefinition.key) }
+      const rawPage = await readKeysetPage({ definition, cursor, limit: remaining })
       scanned += rawPage.length
-      const phase = cursor.phase
+      const phase = phaseDefinition.key
       cursor = await advanceCursor(name, phases, cursor, rawPage, remaining)
       for (const row of rawPage) {
         const value = await project(row, phase)
@@ -146,7 +220,9 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     if (!validDate(now)) throw new TypeError('now must be a valid Date')
     requireScanLimit(limit)
     const today = shanghaiDaySerial(now)
-    const phases = [...FROZEN_STATUSES].flatMap(status => [15, 7, 1].map(days => `${status}:${days}`))
+    const phases = [...FROZEN_STATUSES].flatMap(status => [15, 7, 1].map(days => ({
+      key: `${status}:${days}`, sortField: 'purgeDueAt', sortType: 'date'
+    })))
     const page = await scanOnePage({
       name: 'reminders', phases, limit,
       query(phase) {
@@ -154,6 +230,7 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
         const [start, end] = shanghaiDayRange(now, Number(daysText))
         return {
           __collection: 'business_lines', status,
+          __sortField: 'purgeDueAt', __sortType: 'date',
           purgeDueAt: db.command.and(db.command.gte(start), db.command.lt(end))
         }
       },
@@ -204,17 +281,29 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
   }
 
   async function listDueEvidence({ now, limit }) {
-    const phases = [
+    const phaseKeys = [
       'business_line:available', 'business_line:purge_failed', 'business_line:purge_pending',
       'evidence:available', 'evidence:purge_failed', 'evidence:purge_pending'
     ]
+    const phases = phaseKeys.map(key => {
+      const [scope, storageStatus] = key.split(':')
+      const dueField = storageStatus === 'purge_pending'
+        ? 'purgeClaimExpiresAt'
+        : scope === 'evidence' ? 'purgeDueAt' : 'storageStatus'
+      return { key, sortField: dueField, sortType: dueField === 'storageStatus' ? 'string' : 'date' }
+    })
     return scanOnePage({
       name: 'due-evidence', phases, limit,
       query(phase) {
         const [scope, storageStatus] = phase.split(':')
         return {
           __collection: 'evidences', retentionScope: scope, storageStatus,
-          ...(storageStatus === 'purge_pending' ? { purgeClaimExpiresAt: db.command.lte(now) } : {})
+          __sortField: storageStatus === 'purge_pending'
+            ? 'purgeClaimExpiresAt' : scope === 'evidence' ? 'purgeDueAt' : 'storageStatus',
+          __sortType: storageStatus === 'purge_pending' || scope === 'evidence' ? 'date' : 'string',
+          ...((storageStatus === 'purge_pending')
+            ? { purgeClaimExpiresAt: db.command.lte(now) }
+            : scope === 'evidence' ? { purgeDueAt: db.command.lte(now) } : { __constantSort: true })
         }
       },
       async project(evidence, phase) {
@@ -234,12 +323,18 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
   }
 
   async function listExpiredOrphans({ now, limit }) {
-    const phases = ['available', 'purge_failed', 'purge_pending']
+    const phases = ['available', 'purge_failed', 'purge_pending'].map(storageStatus => ({
+      key: storageStatus,
+      sortField: storageStatus === 'purge_pending' ? 'purgeClaimExpiresAt' : 'orphanExpiresAt',
+      sortType: 'date'
+    }))
     return scanOnePage({
       name: 'orphans', phases, limit,
       query(storageStatus) {
         return {
           __collection: 'evidences', storageStatus,
+          __sortField: storageStatus === 'purge_pending' ? 'purgeClaimExpiresAt' : 'orphanExpiresAt',
+          __sortType: 'date',
           ...(storageStatus === 'purge_pending'
             ? { purgeClaimExpiresAt: db.command.lte(now) }
             : { orphanExpiresAt: db.command.lte(now) })
@@ -330,15 +425,23 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
   }
 
   async function listExpiredFeedbackReservations({ now, limit }) {
-    const phases = ['aborting', 'reserved', 'missing']
+    const phases = [
+      { key: 'aborting', sortField: 'publishState', sortType: 'string' },
+      { key: 'reserved', sortField: 'claimExpiresAt', sortType: 'date' },
+      { key: 'missing', sortField: 'feedbackClaimExpiresAt', sortType: 'date' }
+    ]
     return scanOnePage({
       name: 'feedback-reservations', phases, limit,
       query(phase) {
         if (phase === 'missing') return {
-          __collection: 'business_nodes', feedbackClaimExpiresAt: db.command.lte(now)
+          __collection: 'business_nodes', __sortField: 'feedbackClaimExpiresAt', __sortType: 'date',
+          feedbackClaimExpiresAt: db.command.lte(now)
         }
         return {
           __collection: 'node_feedback', publishState: phase,
+          __sortField: phase === 'reserved' ? 'claimExpiresAt' : 'publishState',
+          __sortType: phase === 'reserved' ? 'date' : 'string',
+          ...(phase === 'aborting' ? { __constantSort: true } : {}),
           ...(phase === 'reserved' ? { claimExpiresAt: db.command.lte(now) } : {})
         }
       },
@@ -438,12 +541,18 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
   }
 
   async function listExpiredAmendmentReservations({ now, limit }) {
-    const phases = ['aborting', 'reserved']
+    const phases = [
+      { key: 'aborting', sortField: 'publishState', sortType: 'string' },
+      { key: 'reserved', sortField: 'claimExpiresAt', sortType: 'date' }
+    ]
     return scanOnePage({
       name: 'amendment-reservations', phases, limit,
       query(publishState) {
         return {
           __collection: 'audit_logs', action: 'AMEND_FROZEN_BUSINESS', publishState,
+          __sortField: publishState === 'reserved' ? 'claimExpiresAt' : 'publishState',
+          __sortType: publishState === 'reserved' ? 'date' : 'string',
+          ...(publishState === 'aborting' ? { __constantSort: true } : {}),
           ...(publishState === 'reserved' ? { claimExpiresAt: db.command.lte(now) } : {})
         }
       },

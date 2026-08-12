@@ -6,6 +6,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   const removeValue = { __remove: true }
   const state = {}
   const transactionQueries = []
+  const queryCalls = []
   const transactionRuns = []
   const beforeTransactionHooks = []
   const pendingWriteFailures = []
@@ -140,6 +141,8 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   function matches(document, criteria) {
     return Object.entries(criteria || {}).every(([key, value]) => {
       if (value && value.__operator === 'and') return value.values.every(entry => matches(document, { [key]: entry }))
+      if (value && value.__operator === 'eq') return document[key] === value.value ||
+        document[key] instanceof Date && value.value instanceof Date && document[key].getTime() === value.value.getTime()
       if (value && value.__operator === 'gt') return String(document[key] || '') > String(value.value)
       if (value && value.__operator === 'gte') return document[key] !== undefined && document[key] >= value.value
       if (value && value.__operator === 'lt') return document[key] !== undefined && document[key] < value.value
@@ -180,6 +183,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       },
       async get() {
         rejectTransactionQuery('get')
+        queryCalls.push({ collection: name, criteria: clone(criteria), order: clone(order), limit: maximum })
         let result = [...documents(name, targetState).values()].filter(document => matches(document, criteria))
         for (const [field, direction] of order.slice().reverse()) {
           result.sort((left, right) => {
@@ -234,6 +238,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     command: {
       remove: () => removeValue,
       and: (...values) => ({ __operator: 'and', values }),
+      eq: value => ({ __operator: 'eq', value }),
       gt: value => ({ __operator: 'gt', value }),
       gte: value => ({ __operator: 'gte', value }),
       lt: value => ({ __operator: 'lt', value }),
@@ -307,6 +312,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     db,
     state,
     transactionQueries,
+    queryCalls,
     transactionRuns,
     metrics,
     documents(name) {

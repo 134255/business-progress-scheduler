@@ -14,12 +14,12 @@ function safeCategory(error) {
   return typeof value === 'string' && SAFE_ERROR_CATEGORY.test(value) ? value : 'UNKNOWN'
 }
 
-function createRetentionService({ repository, storage, clock = () => new Date(), batchSize = 50 } = {}) {
+function createRetentionService({ repository, storage, clock = () => new Date(), batchSize = 40 } = {}) {
   if (!repository || typeof repository !== 'object') throw new TypeError('repository is required')
   if (!storage || typeof storage !== 'object') throw new TypeError('storage is required')
   if (typeof clock !== 'function') throw new TypeError('clock is required')
-  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 100) {
-    throw new TypeError('batchSize must be an integer from 1 to 100')
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 40) {
+    throw new TypeError('batchSize must be an integer from 1 to 40')
   }
 
   function recordFailure(failures, error) {

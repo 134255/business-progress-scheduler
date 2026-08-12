@@ -25,7 +25,7 @@ function createDefaultService() {
     repository,
     storage: createCloudStorageAdapter({ cloud }),
     clock,
-    batchSize: 50
+    batchSize: 40
   })
 }
 

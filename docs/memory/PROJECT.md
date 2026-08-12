@@ -40,7 +40,7 @@ Task 9 已落地业务驳回、关闭冻结和超级管理员审计修订。普�
 Task 10 已落地原生小程序动态反馈和凭证交互。节点页从受保护接口重新读取字段快照、版本、提交权限与历史；凭证只能通过云存储上传后登记为 `evidenceId`，所有查看和下载先申请短期地址。超级管理员使用独立受保护接口全局检索冻结业务和查看脱敏修订历史，普通业务成员读取边界保持不变。
 Task 11 已落地独立 `evidenceRetention` 定时云函数。它先分块回收反馈和审计修订的过期预约，再处理 24 小时孤立凭证、提前 15/7/1 天提醒和两种 60 天保留来源；文件清理使用带随机令牌的短期事务租约，云端删除成功或对象已不存在后才写入 `purged`，失败只保存安全分类与重试计数。真实定时触发器和目标环境索引由部署任务配置。完整的安全部署、索引、回滚和脱敏验收顺序记录在 `docs/deployment/template-node-fields-setup.md`。
 
-所有必需多键索引中的账号数组采用最多 50 项且可见 BSON 编码不超过 768 字节的保守预算；业务成员数组另为最长 128 字节创建者预留一项，并与 100 次事务操作预算同时生效。新审核轮次固化处理人/审核人显示名，旧轮次缺失快照时只显示安全固定占位。`evidenceRetention` 按精确状态/到期组合查询及 `system_settings/evidence-retention:*` keyset 游标，每条路径单次最多扫描 40 条原始记录；详细决策见 `docs/memory/decisions/ADR-0006-index-budget-history-snapshots-and-retention-cursors.md`。
+所有必需多键索引中的账号数组采用最多 50 项且可见 BSON 编码不超过 768 字节的保守预算；业务成员数组另为最长 128 字节创建者预留一项，并与 100 次事务操作预算同时生效。新审核轮次固化处理人/审核人显示名，旧轮次缺失快照时只显示安全固定占位。`evidenceRetention` 的生产与服务批次上限统一为 40；精确状态/到期组合查询按权威排序字段与 `_id` 使用持久复合 keyset 游标，每条路径单次最多扫描 40 条原始记录；详细决策见 `docs/memory/decisions/ADR-0006-index-budget-history-snapshots-and-retention-cursors.md`。
 
 Account deployment requires the `system_settings/account_admin_state` guard, deterministic `wechat_bindings/<sha256(openid)>` backfill, and removal of the legacy `users.openid` unique index only after a verified migration. The security-redacted operator procedure is `docs/deployment/account-admin-setup.md`.
 

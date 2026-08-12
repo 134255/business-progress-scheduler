@@ -134,7 +134,8 @@
 | `node_feedback` | `publishState` 升序、`claimExpiresAt` 升序、`_id` 升序 | 否 | 过期或恢复中反馈预约的有界扫描 |
 | `evidences` | `businessLineId` 升序、`nodeId` 升序、`uploadedAt` 降序 | 否 | 业务节点凭证历史 |
 | `evidences` | `storageStatus` 升序、`purgeDueAt` 升序 | 否 | 到期凭证治理 |
-| `evidences` | `retentionScope` 升序、`storageStatus` 升序、`_id` 升序 | 否 | 可用/失败保留凭证的状态游标扫描 |
+| `evidences` | `retentionScope` 升序、`storageStatus` 升序、`_id` 升序 | 否 | 业务统一期限下可用/失败保留凭证的状态游标扫描 |
+| `evidences` | `retentionScope` 升序、`storageStatus` 升序、`purgeDueAt` 升序、`_id` 升序 | 否 | 独立修订期限下可用/失败保留凭证的到期游标扫描 |
 | `evidences` | `retentionScope` 升序、`storageStatus` 升序、`purgeClaimExpiresAt` 升序、`_id` 升序 | 否 | 租约到期保留凭证的状态游标扫描 |
 | `evidences` | `storageStatus` 升序、`orphanExpiresAt` 升序、`_id` 升序 | 否 | 可用/失败孤立凭证到期扫描 |
 | `evidences` | `storageStatus` 升序、`purgeClaimExpiresAt` 升序、`_id` 升序 | 否 | 清理租约到期的孤立凭证扫描 |
@@ -153,7 +154,7 @@
 
 所有进入必需多键索引的账号数组使用同一保守契约：单数组最多 50 个账号编号，按可见 BSON string-array 编码估算不得超过 768 字节；业务成员数组还必须为创建者预留一个最长 128 字节账号位，因此模板参与人理论人数上限为 49，实际还会受字节预算和 100 次事务操作上限共同限制。账号编号按 UTF-8 字节计算，不以 JSON 字符数猜测；30 个真实长度账号夹具已证明会越界并在模板验证、启用、可用性投影、业务创建和通知写入前失败关闭。CloudBase 未公开数组多键索引逐字节模型，768 字节是相对公开 1024 字节索引键上限预留至少 25% 的保守边界，仍须在目标环境用无敏感隔离账号验证。
 
-`evidenceRetention` 的 `system_settings/evidence-retention:*` 文档只保存阶段、最后扫描 `_id` 和更新时间。每条路径单次原始扫描与处理量均不超过 40，按状态/到期字段精确查询并以 `_id` 做持久 keyset 推进；页尾按阶段回绕，进程在返回候选后崩溃只会使候选再次出现，由预约、租约和确定性通知编号保持幂等。任何损坏游标都失败关闭，不得手工修补或删除后继续自动运行。
+`evidenceRetention` 的 `system_settings/evidence-retention:*` 文档只保存阶段、该阶段最后扫描的 `afterSortValue`、`afterId` 和更新时间。所有范围阶段均按上表相应到期字段升序、再按 `_id` 升序做持久复合 keyset；固定状态阶段按状态字段升序、再按 `_id` 升序。CloudBase 单查询不能表达元组 OR，因此续页先有界查询“排序值相同且 `_id` 更大”，余量再有界查询“排序值更大”，两段返回的原始记录合计仍不超过 40，不使用 `skip` 或全量读取。每条路径单次原始扫描与处理量均不超过 40；页尾按阶段轮转并最终回绕，进程在返回候选后崩溃只会使候选再次出现，由预约、租约和确定性通知编号保持幂等。阶段、`afterSortValue` 或 `afterId` 缺失、类型错误或不可严格反序列化时均失败关闭，不得手工修补或删除后继续自动运行。上述复合索引的真实 CloudBase 选择仍未验证。
 
 `calendarSync` 会自动创建或更新固定文档 `system_settings/calendar-review-processing-cursor`，其中只保存 `kind`、`cursorId`、`version` 和更新时间，不含业务正文或账号信息。部署前不要手工伪造该文档；若已有同编号但结构不符的文档，函数会失败关闭，应先停止触发器并按审计流程核查，不能直接删除或覆盖。该游标沿用上表的 `business_nodes(processingTimingStatus ASC, _id ASC)` 索引，不需要新增游标集合索引。
 
