@@ -350,6 +350,24 @@ test('missing work calendar publishes the business with a deterministic safe adm
   assert.equal(warnings[0].status, 'pending')
 })
 
+test('日历缺失只将截止时间标为待补算，不阻断新版业务创建', async () => {
+  const { fake, repository } = createRepositoryHarness(seedDefinition(), {
+    workTimeService: {
+      async tryAddWorkMinutes() {
+        return { status: 'pending_calendar', dueAt: null, missingDate: '2026-08-07' }
+      }
+    }
+  })
+  const created = await repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  })
+
+  assert.ok(created.id)
+  assert.equal(fake.documents('business_lines').length, 1)
+  assert.equal(fake.documents('business_nodes')[0].processingDueStatus, 'pending_calendar')
+  assert.equal(fake.documents('business_nodes')[0].processingDueAt, null)
+})
+
 test('administrator warning failure does not roll back publication and a retry creates it once', async () => {
   const { fake, repository } = createRepositoryHarness(seedDefinition(), {
     workTimeService: {

@@ -498,6 +498,21 @@ test('旧提交入口的精确重试也不能绕过新版审核节点', async ()
   )
 })
 
+test('旧节点反馈兼容读取不会为历史数据补造审核轮次', async () => {
+  const data = seed({ evidenceCount: 0 })
+  data.node_feedback = [{
+    _id: 'legacy-feedback-only', businessLineId: 'line-1', nodeId: 'node-1', status: 'completed',
+    submittedBy: 'account-a', createdAt: NOW, evidenceIds: []
+  }]
+  const { fake, repository } = createFeedbackHarness({ seed: data })
+  const result = await repository.getNodeHistory({
+    actor: { _id: 'manager', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1'
+  })
+
+  assert.deepEqual(result.history.map(item => item.feedbackId), ['legacy-feedback-only'])
+  assert.equal(fake.documents('node_review_rounds').length, 0)
+})
+
 test('disabled actors cannot distinguish feedback reservation existence, status, or payload across actor-facing entrypoints', async () => {
   async function prepare(state, suffix) {
     const harness = createFeedbackHarness({ evidenceCount: 0 })

@@ -321,6 +321,40 @@ test('审核详情只允许当前审核人、业务管理员或超级管理员�
   }), error => error.code === 'FORBIDDEN')
 })
 
+test('审核查询投影不泄漏凭据、OpenID、云文件编号、哈希、租约或请求摘要', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.business_lines[0].code = 'BL-20260811-0001'
+  data.business_lines[0].name = '脱敏查询'
+  Object.assign(data.node_review_rounds[0], {
+    requestKeyHash: 'request-summary-secret', inputHash: 'input-summary-secret', draftHash: 'draft-summary-secret',
+    reviewLeaseToken: 'review-lease-secret', reviewerOpenid: 'wx-review-secret'
+  })
+  data.node_review_rounds[0].evidenceIds = ['evidence-private']
+  data.evidences = [{
+    _id: 'evidence-private', businessLineId: 'line-1', nodeId: 'node-1',
+    fileId: 'cloud://private-file-number', sha256: 'evidence-hash-secret',
+    reservationLeaseToken: 'evidence-lease-secret', requestSummary: 'evidence-request-secret'
+  }]
+  data.node_review_votes = [{
+    _id: 'vote-private', reviewRoundId: 'review-feedback-current', businessLineId: 'line-1', nodeId: 'node-1',
+    reviewerUserId: 'reviewer-2', reviewerDisplayName: '审核人二', decision: 'approved', comment: '',
+    requestKeyHash: 'vote-request-secret', inputHash: 'vote-input-secret', reviewerOpenid: 'wx-vote-secret', createdAt: NOW
+  }]
+  data.users = data.users.map(user => user._id === 'reviewer-1'
+    ? { ...user, credentialHash: 'credential-secret', openid: 'wx-account-secret' }
+    : user)
+  const { repository } = harness({ seed: data })
+  const detail = await repository.getReviewDetail({
+    actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  })
+  const serialized = JSON.stringify(detail)
+  for (const secret of [
+    'credential-secret', 'wx-account-secret', 'wx-review-secret', 'wx-vote-secret', 'cloud://private-file-number',
+    'evidence-hash-secret', 'review-lease-secret', 'evidence-lease-secret', 'request-summary-secret',
+    'input-summary-secret', 'draft-summary-secret', 'evidence-request-secret', 'vote-request-secret', 'vote-input-secret'
+  ]) assert.equal(serialized.includes(secret), false, secret)
+})
+
 test('审核详情按凭证编号投影全部合法凭证且不引入文件数量上限', async () => {
   const data = votingSeed({ mode: 'all' })
   data.business_lines[0].code = 'BL-20260811-0001'

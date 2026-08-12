@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact review: 2026-08-10 (Asia/Shanghai)
+Last stable-fact review: 2026-08-12 (Asia/Shanghai)
 
 ## Product
 
@@ -11,7 +11,7 @@ Approved V1 rules include:
 - Account/password login with first-login password change, one-to-one WeChat identity binding, lockout, administrator reset, and at least one active super administrator.
 - Template snapshots, sequential nodes, multiple responsible accounts with first-completion-wins (`OR` signing), logical deletion, audit history, and optimistic/concurrent flow protection.
 - Templates contain stable node and dynamic-field identifiers. Enabled templates are read-only and must be disabled before editing. New business lines receive server-generated globally unique codes, and instance nodes receive immutable codes derived from the business code.
-- Node feedback is revisioned and immutable. An active node assignee may reject the immediately preceding completed node with a mandatory reason; original deadlines are not reset and rework history remains auditable.
+- Node feedback is revisioned and immutable. New review-workflow nodes separate non-overlapping processors and reviewers: processors save progress or submit for review, while independent reviewers use OR/ALL votes to approve or reject; new nodes cannot use the legacy direct-complete or legacy-reject path. Old business nodes retain controlled feedback-read compatibility and never receive fabricated review history.
 - Completed, cancelled, and closed business lines freeze their structured data. Only a super administrator may append a reasoned correction with before/after values; ordinary update paths remain blocked.
 - China workday calculations from a locally cached holiday adapter; default working hours are 09:00–20:00 without lunch break. Default node SLA is two workdays (22 work hours), and template nodes may override it.
 - In-app notifications as the fallback channel and a future Enterprise WeChat self-built application as the strong-reminder channel. Unfinished nodes are reminded every accumulated work hour during working time.
@@ -31,7 +31,7 @@ The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-bus
 - `calendarSync` uses Node's built-in HTTPS client and publishes each fully validated AILCC year as a uniquely identified immutable generation in `work_calendar_entries`. `work_calendar_years` atomically selects the active generation only after every natural day is staged; an expired worker can keep writing only its own unselected generation and cannot overwrite a successor. Same-version skips compare every stored date/workday value with the validated source year through at most four 100-row pages per year; this query requires the `work_calendar_entries(sourceYear ASC, generationId ASC, date ASC)` composite index. Scheduled authorization relies only on the platform-injected `getWXContext().TRIGGER_SRC === 'timer'` value and uses the server clock; event payload fields do not authorize. Manual synchronization is available only through the authenticated super-administrator API, which issues a short-lived one-time server-side ticket.
 - Enterprise WeChat sending must remain behind an adapter and disabled until approved secure configuration is supplied.
 
-Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `evidences`, `work_calendar_entries`, `work_calendar_years`, `calendar_sync_requests`, `notifications`, notification-delivery records, and `audit_logs`.
+Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `node_review_rounds`, `node_review_votes`, `evidences`, `work_calendar_entries`, `work_calendar_years`, `calendar_sync_requests`, `notifications`, notification-delivery records, and `audit_logs`. Deployment also retains the target-environment-compatible `work_calendar` collection when present.
 
 Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 Unbounded-count feedback evidence attachment uses hidden, deterministic, chunked reservations under the existing `node_feedback` and `evidences` collections; the invariant and Task 11 recovery obligation are recorded in `docs/memory/decisions/ADR-0003-feedback-evidence-reservations.md`.
@@ -50,7 +50,7 @@ Task 9 已接入小程序端审核工作台：受保护的业务服务提供提�
 - CloudBase environment identifier: `cloud1-d5gxt99rh492670d9`.
 - Mini Program root: `miniprogram/`.
 - Cloud-function root: `cloudfunctions/`.
-- Cloud function names: ordinary authenticated API `businessApi`; calendar synchronization and pending-deadline worker `calendarSync`; scheduled retention worker `evidenceRetention`.
+- Cloud function names: ordinary authenticated API `businessApi`; calendar synchronization and pending-deadline worker `calendarSync`; hourly processing/review reminder worker `workflowReminder`; scheduled retention worker `evidenceRetention`.
 - Default Git integration branch: `main`; remote tracking branch: `origin/main`.
 
 These identifiers are not credentials. Secret values, administrator passwords, recovery codes, account identity values, and customer records must be supplied through approved secure channels and never stored here.
@@ -61,10 +61,14 @@ Run from the repository root:
 
 ```powershell
 npm.cmd test --prefix cloudfunctions/businessApi
+npm.cmd test --prefix cloudfunctions/calendarSync
+npm.cmd test --prefix cloudfunctions/workflowReminder
+npm.cmd test --prefix cloudfunctions/evidenceRetention
+node --test miniprogram/test/*.test.js
 node tools/test-wxml-structure.mjs
 git diff --check
 git status --short --branch
 python "C:\Users\87579\.codex\skills\maintaining-project-memory\scripts\validate_memory.py" .
 ```
 
-Cloud deployment and simulator acceptance are manual WeChat DevTools checks and must be recorded as `unverified` until rerun for the exact current code.
+CloudBase collection and index changes, cloud-function upload, trigger configuration, WeChat DevTools interaction, multi-account concurrency, and calendar data coverage are manual acceptance boundaries and must be recorded as `unverified` until rerun for the exact current code. Initial node-review acceptance keeps `calendarSync`, `workflowReminder`, and `evidenceRetention` at `triggers: []`; after isolation acceptance, only calendar daily synchronization and hourly reminders may be approved separately.

@@ -574,6 +574,33 @@ test('legacy feedback write and history handlers are absent after protected-rout
   assert.equal(Object.hasOwn(routes, 'getNodeHistory'), false)
 })
 
+test('旧节点可继续经受保护反馈入口运行，但新版审核节点不能借旧入口伪造审核轮次', async () => {
+  const calls = []
+  const feedbackService = {
+    async submitFeedback(value) {
+      calls.push(value)
+      return { feedbackId: 'legacy-feedback-1', revision: 1 }
+    }
+  }
+  const harness = createRouteHarness({ feedbackService })
+  const legacyResult = await harness.api.main({
+    action: 'submitFeedback',
+    payload: {
+      businessLineId: 'legacy-line', nodeId: 'legacy-node', expectedNodeVersion: 3,
+      status: 'completed', fieldValues: [], comment: '', evidenceIds: [], requestKey: 'legacy-feedback'
+    }
+  })
+  const forgedRound = await harness.api.main({
+    action: 'createReviewRound', payload: {
+      businessLineId: 'new-line', nodeId: 'review-node', expectedNodeVersion: 4, requestKey: 'forged-round'
+    }
+  })
+
+  assert.equal(legacyResult.ok, true)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(forgedRound, { ok: false, code: 'UNKNOWN_ACTION', message: 'Unsupported action' })
+})
+
 test('旧业务写入与删除入口在受保护生命周期接口接管后不可部署', () => {
   const routes = createDefaultLegacyRoutes()
   assert.equal(Object.hasOwn(routes, 'updateBusinessLine'), false)

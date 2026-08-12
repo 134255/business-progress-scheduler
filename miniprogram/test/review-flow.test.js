@@ -315,6 +315,12 @@ test('待审核节点禁止字段、文件和所有处理写操作', async () =>
   assert.match(wxml, /legacyMode/)
 })
 
+test('新版审核节点页面不展示旧直接完成或旧驳回入口', () => {
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/node-feedback/index.wxml'), 'utf8')
+  assert.doesNotMatch(wxml, /完成节点|直接完成|驳回上一节点/)
+  assert.match(wxml, /提交审核/)
+})
+
 test('单独保存处理进度后清除已登记本地文件并恢复服务端最新字段草稿', async () => {
   let historyReads = 0
   const calls = []

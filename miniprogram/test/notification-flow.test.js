@@ -70,6 +70,23 @@ test('通知列表分页去重、进入时标记已读且导航只使用服务�
   assert.equal(page.data.items[0].body, undefined)
 })
 
+test('处理与审核提醒通知以不同服务端编号保留，不会在客户端列表互相覆盖', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { reLaunch: () => {}, navigateTo: () => {}, showToast: () => {} }
+  const page = loadPage('pages/notification-list/index.js', {
+    listMyNotifications: async () => ({ items: [
+      { notificationId: 'processing-reminder-node-1-hour-1', type: 'node_processing_reminder', read: false },
+      { notificationId: 'review-reminder-round-1-user-1-hour-1', type: 'node_review_reminder', read: false }
+    ], hasMore: false })
+  })
+
+  await page.onShow()
+
+  assert.deepEqual(page.data.items.map(item => item.notificationId), [
+    'processing-reminder-node-1-hour-1', 'review-reminder-round-1-user-1-hour-1'
+  ])
+})
+
 test('同一通知页面切换账号时新账号刷新可抢占旧加载状态', async () => {
   const first = deferred()
   const app = { globalData: { currentUser: activeUser('account-1') } }
