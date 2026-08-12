@@ -598,6 +598,13 @@ Page({
       wx.showToast({ title: '请填写受阻原因', icon: 'none' })
       return false
     }
+    let fieldValues
+    try {
+      fieldValues = this.normalizedFieldValues()
+    } catch (error) {
+      wx.showToast({ title: safeErrorMessage(error, '请检查字段内容'), icon: 'none' })
+      return false
+    }
     const requestedActorId = currentUserId()
     const operation = Object.freeze({
       actorId: requestedActorId,
@@ -606,7 +613,7 @@ Page({
       nodeId: this.data.nodeId,
       nodeVersion: this.data.expectedNodeVersion,
       draftPayload: Object.freeze({
-        fieldValues: Object.freeze(this.normalizedFieldValues().map(item => Object.freeze({ ...item }))),
+        fieldValues: Object.freeze(fieldValues.map(item => Object.freeze({ ...item }))),
         comment: this.data.comment.trim()
       })
     })
@@ -669,6 +676,15 @@ Page({
       wx.showToast({ title: '提交审核前必须上传凭证', icon: 'none' })
       return
     }
+    let fieldValues = null
+    if (!savedProgress) {
+      try {
+        fieldValues = this.normalizedFieldValues()
+      } catch (error) {
+        wx.showToast({ title: safeErrorMessage(error, '请检查字段内容'), icon: 'none' })
+        return
+      }
+    }
     if (this.progressIntent !== 'review-draft') {
       this.progressIntent = 'review-draft'
       this.progressRequestKey = useStoredDraft ? '' : savedProgress ? savedProgress.requestKey : requestKey('progress')
@@ -686,7 +702,7 @@ Page({
     const reviewDraft = savedProgress
       ? { ...savedProgress.payload, fieldValues: savedProgress.payload.fieldValues.map(item => ({ ...item })) }
       : {
-          fieldValues: this.normalizedFieldValues().map(item => ({ ...item })),
+          fieldValues: fieldValues.map(item => ({ ...item })),
           comment: this.data.comment.trim()
         }
     const operation = Object.freeze({

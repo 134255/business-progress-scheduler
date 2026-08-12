@@ -1,4 +1,5 @@
 const businessService = require('../../services/business')
+const { safeErrorMessage } = require('../../utils/safe-error')
 
 const MEBIBYTE = 1024 * 1024
 const TOTAL_LIMIT = 20 * MEBIBYTE
@@ -291,12 +292,16 @@ Page({
     const evidenceId = event.currentTarget.dataset.evidenceid
     const status = event.currentTarget.dataset.status
     if (!evidenceId || status !== 'available') return
-    const grant = await businessService.getEvidenceAccess(evidenceId)
-    if (grant.category === 'image') wx.previewImage({ current: grant.url, urls: [grant.url] })
-    else if (grant.category === 'video') this.setData({ videoPreview: grant })
-    else {
-      const downloaded = await wx.downloadFile({ url: grant.url })
-      await wx.openDocument({ filePath: downloaded.tempFilePath, fileType: 'pdf', showMenu: true })
+    try {
+      const grant = await businessService.getEvidenceAccess(evidenceId)
+      if (grant.category === 'image') wx.previewImage({ current: grant.url, urls: [grant.url] })
+      else if (grant.category === 'video') this.setData({ videoPreview: grant })
+      else {
+        const downloaded = await wx.downloadFile({ url: grant.url })
+        await wx.openDocument({ filePath: downloaded.tempFilePath, fileType: 'pdf', showMenu: true })
+      }
+    } catch (error) {
+      wx.showToast({ title: safeErrorMessage(error, '凭证暂时无法打开'), icon: 'none' })
     }
   }
 })

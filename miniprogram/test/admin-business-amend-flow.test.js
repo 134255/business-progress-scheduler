@@ -279,6 +279,22 @@ test('超级管理员修订附件使用专用用途登记并只提交凭证标�
   assert.deepEqual(amendment.changes, {})
 })
 
+test('冻结业务审计凭证预览失败只显示中文安全提示', async () => {
+  const toasts = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser('super_admin', 'root') } })
+  global.wx = { showToast: options => toasts.push(options) }
+  const page = loadPage('pages/admin-business-amend/index.js', {
+    getEvidenceAccess: async () => {
+      throw Object.assign(new Error('FORBIDDEN: cloud://secret/path'), { code: 'FORBIDDEN' })
+    }
+  })
+
+  await page.previewEvidence({ currentTarget: { dataset: { evidenceid: 'evidence-1', status: 'available' } } })
+
+  assert.deepEqual(toasts, [{ title: '凭证暂时无法打开', icon: 'none' }])
+  assert.doesNotMatch(JSON.stringify(toasts), /FORBIDDEN|cloud:\/\//)
+})
+
 test('普通用户不能打开超级管理员冻结修订页', async () => {
   const launches = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })

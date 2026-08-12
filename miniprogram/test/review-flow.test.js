@@ -216,6 +216,44 @@ test('提交审核等待两步响应期间冻结草稿文件并保持不可变�
   await pending
 })
 
+test('三种审核处理操作遇字段校验错误时中文提示且不污染写操作状态', async () => {
+  const toasts = []
+  let writes = 0
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {}, reLaunch: () => {},
+    showToast: options => toasts.push(options), cloud: { uploadFile: async () => assert.fail('校验失败不应上传') }
+  }
+  const node = reviewNode()
+  const page = loadPage('pages/node-feedback/index.js', {
+    getBusinessLine: async () => ({ line: { _id: 'line-1', status: 'active', version: 8 }, nodes: [node] }),
+    getNodeHistory: async () => ({ node, canSubmit: true, history: [] }),
+    submitFeedback: async () => { writes += 1 }, submitNodeForReview: async () => { writes += 1 }
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({ comment: '受阻原因完整' })
+  const initialWriteState = {
+    progressIntent: page.progressIntent,
+    progressRequestKey: page.progressRequestKey,
+    reviewRequestKey: page.reviewRequestKey
+  }
+
+  for (const action of ['onSaveProgress', 'onMarkBlocked', 'onSubmitReview']) {
+    await page[action]()
+    assert.equal(page.data.submitting, false, `${action} 不得进入提交态`)
+    assert.equal(page.data.reviewDraftLocked, false, `${action} 不得锁定草稿`)
+    assert.equal(page.writeSequence, 0, `${action} 不得占用写序号`)
+    assert.equal(page.progressIntent, initialWriteState.progressIntent, `${action} 不得建立处理意图`)
+    assert.equal(page.progressRequestKey, initialWriteState.progressRequestKey, `${action} 不得生成处理请求键`)
+    assert.equal(page.reviewRequestKey, initialWriteState.reviewRequestKey, `${action} 不得生成审核请求键`)
+  }
+
+  assert.equal(writes, 0)
+  assert.deepEqual(toasts.map(item => item.title), [
+    '请填写必填字段：摘要', '请填写必填字段：摘要', '请填写必填字段：摘要'
+  ])
+})
+
 for (const item of [
   { name: '账号变化', invalidate: ({ app }) => { app.globalData.currentUser = activeUser('other-account') } },
   { name: '页面卸载', invalidate: ({ page }) => page.onUnload() },
