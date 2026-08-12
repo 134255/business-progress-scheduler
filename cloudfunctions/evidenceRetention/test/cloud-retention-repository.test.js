@@ -353,3 +353,97 @@ test('各范围阶段都按自身权威到期字段和编号升序', async () =>
     'audit_logs:claimExpiresAt,_id'
   ]) assert.equal(orders.includes(expected), true, expected)
 })
+
+test('旧版合法游标自动迁移到同阶段起点并继续扫描而不推断排序值', async () => {
+  const { fake, repository } = repositoryFor({
+    system_settings: [{
+      _id: 'evidence-retention:feedback-reservations', phase: 'reserved', afterId: 'feedback-z',
+      updatedAt: { __serverDate: 1 }
+    }],
+    node_feedback: [{
+      _id: 'feedback-a', publishState: 'reserved', claimExpiresAt: new Date('2026-08-09T00:00:00.000Z'),
+      businessLineId: 'line-1', nodeId: 'node-1'
+    }]
+  })
+  assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), ['feedback-a'])
+  const cursor = fake.documents('system_settings')[0]
+  assert.equal(cursor.schemaVersion, 2)
+  assert.equal(Number.isSafeInteger(cursor.revision) && cursor.revision > 0, true)
+  assert.match(cursor.legacyAfterIdDigest, /^[a-f0-9]{64}$/)
+  assert.equal(JSON.stringify(cursor).includes('feedback-z'), false)
+  assert.equal(fake.writeCalls.filter(call => call.data && call.data.legacyMigration === 'reset_to_phase_start' &&
+    call.data.revision === 1).length, 1)
+})
+
+test('两个并发工作器只迁移旧游标一次且都返回合法页而不漏记录', async () => {
+  const { fake, repository } = repositoryFor({
+    system_settings: [{
+      _id: 'evidence-retention:feedback-reservations', phase: 'reserved', afterId: 'feedback-old'
+    }],
+    node_feedback: ['a', 'b'].map(id => ({
+      _id: `feedback-${id}`, publishState: 'reserved', claimExpiresAt: new Date('2026-08-09T00:00:00.000Z'),
+      businessLineId: 'line-1', nodeId: 'node-1'
+    }))
+  })
+  const pages = await Promise.all([
+    repository.listExpiredFeedbackReservations({ now: NOW, limit: 1 }),
+    repository.listExpiredFeedbackReservations({ now: NOW, limit: 1 })
+  ])
+  assert.equal(pages.every(page => page.length === 1), true)
+  assert.equal(pages.flat().every(id => id === 'feedback-a'), true)
+  const cursor = fake.documents('system_settings')[0]
+  assert.equal(cursor.schemaVersion, 2)
+  assert.equal(cursor.legacyMigration, 'reset_to_phase_start')
+  assert.equal(Number.isSafeInteger(cursor.revision), true)
+  assert.equal(fake.writeCalls.filter(call => call.data && call.data.legacyMigration === 'reset_to_phase_start' &&
+    call.data.revision === 1).length, 1)
+})
+
+test('旧游标迁移后崩溃重试可重交付候选但确定性提醒不重复', async () => {
+  const { fake, repository } = repositoryFor({
+    system_settings: [{
+      _id: 'evidence-retention:reminders', phase: 'completed:15', afterId: 'legacy-line-z'
+    }],
+    business_lines: [{
+      _id: 'line-a', status: 'completed', purgeDueAt: new Date('2026-08-25T00:00:00.000Z'),
+      managerUserIds: ['manager-a']
+    }]
+  })
+  assert.equal(await repository.createDueReminders({ now: NOW, limit: 40 }), 1)
+  assert.equal(await repository.createDueReminders({ now: NOW, limit: 40 }), 0)
+  assert.equal(fake.documents('notifications').length, 1)
+})
+
+test('损坏旧游标不会被迁移洗白', async () => {
+  for (const cursor of [
+    { phase: 'unknown', afterId: 'feedback-a' },
+    { phase: 'reserved', afterId: 7 },
+    { phase: 'reserved', afterId: 'feedback-a', sensitivePayload: 'must-not-survive' }
+  ]) {
+    const { fake, repository } = repositoryFor({
+      system_settings: [{ _id: 'evidence-retention:feedback-reservations', ...cursor }]
+    })
+    await assert.rejects(repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), /cursor/i)
+    assert.equal(fake.documents('system_settings')[0].schemaVersion, undefined)
+  }
+})
+
+test('新版游标不会重复迁移且溢出的乐观修订失败关闭', async () => {
+  const valid = repositoryFor({
+    system_settings: [{
+      _id: 'evidence-retention:feedback-reservations', schemaVersion: 2, revision: 7,
+      phase: 'reserved', afterSortValue: null, afterId: '', legacyMigration: 'reset_to_phase_start',
+      legacyAfterIdDigest: 'a'.repeat(64), migratedAt: { __serverDate: 1 }, updatedAt: { __serverDate: 1 }
+    }]
+  })
+  await valid.repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 })
+  assert.equal(valid.fake.documents('system_settings')[0].legacyAfterIdDigest, 'a'.repeat(64))
+
+  const overflow = repositoryFor({
+    system_settings: [{
+      _id: 'evidence-retention:feedback-reservations', schemaVersion: 2, revision: Number.MAX_SAFE_INTEGER,
+      phase: 'reserved', afterSortValue: null, afterId: ''
+    }]
+  })
+  await assert.rejects(overflow.repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), /cursor/i)
+})

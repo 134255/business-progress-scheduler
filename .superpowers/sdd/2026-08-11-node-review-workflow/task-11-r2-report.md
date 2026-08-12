@@ -43,3 +43,13 @@ node --test cloudfunctions/evidenceRetention/test/index.test.js cloudfunctions/e
 - 项目记忆校验：通过。
 
 真实 CloudBase 两段范围查询的复合索引选择、云函数部署和触发器仍未验证；`evidenceRetention` 必须继续保持 `triggers: []`。
+
+## 修复轮次 1：旧游标自动迁移
+
+复审发现基线 `a740964` 已持久化的合法游标只有 `{phase, afterId}`，而 `005c066` 强制要求 `afterSortValue`，会使升级后的工作器永久报 `retention cursor invalid`；手册同时禁止人工删除或覆盖，因此根因必须在读取边界解决。
+
+RED：聚焦仓库测试 25 项中 21 通过、4 失败。旧合法游标、两个并发迁移和迁移后幂等场景均被新版读取拒绝；新版迁移证据也会在推进时丢失。损坏旧游标仍按预期失败关闭。
+
+GREEN：游标新增明确 `schemaVersion: 2` 和独立安全整数 `revision`。旧游标只有字段集合、phase、`afterId` 和可选旧 `version` 全部严格合法时才在小事务中 CAS 迁移；迁移保留 phase、重置到该阶段起点，只保存旧编号 SHA-256 摘要和安全迁移标志，不保存原编号或业务正文。并发迁移恰一写；推进 CAS 竞争时返回已经有界读取的可幂等重交付页，不重复查询，因此单次原始读取仍不超过 40。损坏旧游标、新版损坏游标和 revision 溢出均失败关闭。聚焦 GREEN：25/25。
+
+修复轮次 1 最终门禁：`businessApi` 490/490、`calendarSync` 47/47、`workflowReminder` 29/29、`evidenceRetention` 37/37、小程序 134/134、WXML 4/4；3 个变更 JavaScript 文件语法、`git diff --check` 和项目记忆校验均通过。真实 CloudBase 事务冲突行为、旧游标迁移、两段范围查询的复合索引选择、云函数部署和触发器仍未验证；`evidenceRetention` 必须继续保持 `triggers: []`。

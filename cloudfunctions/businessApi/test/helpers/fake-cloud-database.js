@@ -7,6 +7,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   const state = {}
   const transactionQueries = []
   const queryCalls = []
+  const writeCalls = []
   const transactionRuns = []
   const beforeTransactionHooks = []
   const pendingWriteFailures = []
@@ -101,7 +102,10 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       },
       async set({ data }) {
         countOperation()
-        if (transactionRecord) transactionRecord.writes += 1
+        if (transactionRecord) {
+          transactionRecord.writes += 1
+          transactionRecord.writeDetails.push({ collection: name, id, operation: 'set', data: clone(data) })
+        }
         maybeFailWrite(name, 'set')
         const stored = materialize(data, id)
         if (name === 'users') enforceUserIndexes(stored, id, targetState)
@@ -111,12 +115,16 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
           if (current && current.userId !== stored.userId) throw duplicateError('wechat_binding_primary')
         }
         documents(name, targetState).set(id, stored)
+        if (!transactionRecord) writeCalls.push({ collection: name, id, operation: 'set', data: clone(data) })
         if (targetState === state) stateVersion += 1
         return { stats: { created: 1, updated: 0 } }
       },
       async update({ data }) {
         countOperation()
-        if (transactionRecord) transactionRecord.writes += 1
+        if (transactionRecord) {
+          transactionRecord.writes += 1
+          transactionRecord.writeDetails.push({ collection: name, id, operation: 'update', data: clone(data) })
+        }
         maybeFailWrite(name, 'update')
         const current = documents(name, targetState).get(id)
         if (!current) return { stats: { updated: 0 } }
@@ -124,14 +132,19 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
         if (name === 'users') enforceUserIndexes(updated, id, targetState)
         enforceBusinessIndexes(name, updated, id, targetState)
         documents(name, targetState).set(id, updated)
+        if (!transactionRecord) writeCalls.push({ collection: name, id, operation: 'update', data: clone(data) })
         if (targetState === state) stateVersion += 1
         return { stats: { updated: 1 } }
       },
       async remove() {
         countOperation()
-        if (transactionRecord) transactionRecord.writes += 1
+        if (transactionRecord) {
+          transactionRecord.writes += 1
+          transactionRecord.writeDetails.push({ collection: name, id, operation: 'remove' })
+        }
         maybeFailWrite(name, 'remove')
         const removed = documents(name, targetState).delete(id)
+        if (removed && !transactionRecord) writeCalls.push({ collection: name, id, operation: 'remove' })
         if (removed && targetState === state) stateVersion += 1
         return { stats: { removed: removed ? 1 : 0 } }
       }
@@ -259,7 +272,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       for (let attempt = 0; attempt < 8; attempt += 1) {
         const baseVersion = stateVersion
         const localState = snapshot()
-        const attemptRecord = { operations: 0, writes: 0 }
+        const attemptRecord = { operations: 0, writes: 0, writeDetails: [] }
         record.callbacks += 1
         metrics.activeCallbacks += 1
         metrics.maxActiveCallbacks = Math.max(metrics.maxActiveCallbacks, metrics.activeCallbacks)
@@ -294,6 +307,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
           metrics.retries += 1
           continue
         }
+        writeCalls.push(...attemptRecord.writeDetails)
         if (options.afterTransaction) {
           await options.afterTransaction({ result: clone(result), record: clone(record) })
         }
@@ -313,6 +327,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     state,
     transactionQueries,
     queryCalls,
+    writeCalls,
     transactionRuns,
     metrics,
     documents(name) {

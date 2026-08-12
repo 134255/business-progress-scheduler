@@ -1,5 +1,6 @@
 'use strict'
 
+const crypto = require('node:crypto')
 const { fitsIndexedAccountArray } = require('./index-key-budget')
 
 const FROZEN_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
@@ -13,6 +14,12 @@ const MAX_SCAN_SIZE = 40
 const CURSOR_PREFIX = 'evidence-retention:'
 const CURSOR_ID = /^[A-Za-z0-9:_-]{1,128}$/
 const SORT_TYPES = new Set(['date', 'string'])
+const CURSOR_SCHEMA_VERSION = 2
+const LEGACY_CURSOR_FIELDS = new Set(['_id', 'phase', 'afterId', 'updatedAt', 'version'])
+const CURRENT_CURSOR_FIELDS = new Set([
+  '_id', 'schemaVersion', 'revision', 'phase', 'afterSortValue', 'afterId', 'updatedAt',
+  'legacyMigration', 'legacyAfterIdDigest', 'migratedAt'
+])
 
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
@@ -102,24 +109,96 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     return phases.find(phase => phase.key === key)
   }
 
-  async function readCursor(name, phases) {
-    const cursor = await readDocument(db, 'system_settings', `${CURSOR_PREFIX}${name}`)
-    if (!cursor) return { phase: phases[0].key, afterSortValue: null, afterId: '' }
+  function exactCursorFields(cursor, allowed) {
+    const prototype = Object.getPrototypeOf(cursor)
+    if (prototype !== Object.prototype && prototype !== null) return false
+    return Reflect.ownKeys(cursor).every(key => typeof key === 'string' && allowed.has(key) &&
+      Object.prototype.propertyIsEnumerable.call(cursor, key) &&
+      Object.prototype.hasOwnProperty.call(cursor, key) &&
+      !Object.getOwnPropertyDescriptor(cursor, key).get && !Object.getOwnPropertyDescriptor(cursor, key).set)
+  }
+
+  function validRevision(value, allowMaximum = true) {
+    return Number.isSafeInteger(value) && value >= 0 && (allowMaximum || value < Number.MAX_SAFE_INTEGER)
+  }
+
+  function parseCurrentCursor(name, phases, cursor) {
     const phase = phaseByKey(phases, cursor.phase)
     const empty = cursor.afterSortValue === null && cursor.afterId === ''
     const positioned = typeof cursor.afterSortValue === 'string' &&
       typeof cursor.afterId === 'string' && CURSOR_ID.test(cursor.afterId)
-    if (!phase || (!empty && !positioned)) {
+    const migrationFields = cursor.legacyMigration === undefined && cursor.legacyAfterIdDigest === undefined &&
+        cursor.migratedAt === undefined ||
+      cursor.legacyMigration === 'reset_to_phase_start' &&
+        typeof cursor.legacyAfterIdDigest === 'string' && /^[a-f0-9]{64}$/.test(cursor.legacyAfterIdDigest) &&
+        cursor.migratedAt !== undefined
+    if (!exactCursorFields(cursor, CURRENT_CURSOR_FIELDS) || cursor.schemaVersion !== CURSOR_SCHEMA_VERSION ||
+        !validRevision(cursor.revision, false) || !phase || (!empty && !positioned) || !migrationFields) {
       throw new Error(`retention cursor invalid: ${name}`)
     }
     if (positioned) deserializeSortValue(cursor.afterSortValue, phase.sortType)
-    return { phase: cursor.phase, afterSortValue: cursor.afterSortValue, afterId: cursor.afterId }
+    return {
+      phase: cursor.phase, afterSortValue: cursor.afterSortValue, afterId: cursor.afterId,
+      schemaVersion: CURSOR_SCHEMA_VERSION, revision: cursor.revision,
+      ...(cursor.legacyMigration === undefined ? {} : {
+        legacyMigration: cursor.legacyMigration,
+        legacyAfterIdDigest: cursor.legacyAfterIdDigest,
+        migratedAt: cursor.migratedAt
+      })
+    }
+  }
+
+  function parseLegacyCursor(name, phases, cursor) {
+    const revision = cursor.version === undefined ? 0 : cursor.version
+    if (!exactCursorFields(cursor, LEGACY_CURSOR_FIELDS) || cursor.schemaVersion !== undefined ||
+        !phaseByKey(phases, cursor.phase) || typeof cursor.afterId !== 'string' ||
+        cursor.afterId && !CURSOR_ID.test(cursor.afterId) || !validRevision(revision, false)) {
+      throw new Error(`retention cursor invalid: ${name}`)
+    }
+    return { phase: cursor.phase, afterId: cursor.afterId, revision }
+  }
+
+  async function migrateLegacyCursor(name, phases, legacy) {
+    const id = `${CURSOR_PREFIX}${name}`
+    return db.runTransaction(async transaction => {
+      const stored = await readDocument(transaction, 'system_settings', id)
+      if (!stored) throw new Error(`retention cursor conflict: ${name}`)
+      if (stored.schemaVersion === CURSOR_SCHEMA_VERSION) return parseCurrentCursor(name, phases, stored)
+      const actual = parseLegacyCursor(name, phases, stored)
+      if (actual.phase !== legacy.phase || actual.afterId !== legacy.afterId || actual.revision !== legacy.revision) {
+        throw new Error(`retention cursor conflict: ${name}`)
+      }
+      const migrated = {
+        schemaVersion: CURSOR_SCHEMA_VERSION,
+        revision: legacy.revision + 1,
+        phase: legacy.phase,
+        afterSortValue: null,
+        afterId: '',
+        legacyMigration: 'reset_to_phase_start',
+        legacyAfterIdDigest: crypto.createHash('sha256').update(legacy.afterId).digest('hex'),
+        migratedAt: db.serverDate(),
+        updatedAt: db.serverDate()
+      }
+      await transaction.collection('system_settings').doc(id).set({ data: migrated })
+      return { ...migrated }
+    })
+  }
+
+  async function readCursor(name, phases) {
+    const cursor = await readDocument(db, 'system_settings', `${CURSOR_PREFIX}${name}`)
+    if (!cursor) return {
+      phase: phases[0].key, afterSortValue: null, afterId: '',
+      schemaVersion: CURSOR_SCHEMA_VERSION, revision: 0
+    }
+    if (cursor.schemaVersion === CURSOR_SCHEMA_VERSION) return parseCurrentCursor(name, phases, cursor)
+    return migrateLegacyCursor(name, phases, parseLegacyCursor(name, phases, cursor))
   }
 
   async function advanceCursor(name, phases, current, rawPage, limit) {
     const full = rawPage.length === limit
     const phaseIndex = phases.findIndex(phase => phase.key === current.phase)
     const phase = phases[phaseIndex]
+    if (!validRevision(current.revision, false)) throw new Error(`retention cursor invalid: ${name}`)
     const next = full
       ? {
           phase: current.phase,
@@ -130,17 +209,38 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     await db.runTransaction(async transaction => {
       const stored = await readDocument(transaction, 'system_settings', `${CURSOR_PREFIX}${name}`)
       const actual = stored
-        ? { phase: stored.phase, afterSortValue: stored.afterSortValue, afterId: stored.afterId }
-        : { phase: phases[0].key, afterSortValue: null, afterId: '' }
+        ? parseCurrentCursor(name, phases, stored)
+        : {
+            phase: phases[0].key, afterSortValue: null, afterId: '',
+            schemaVersion: CURSOR_SCHEMA_VERSION, revision: 0
+          }
       if (actual.phase !== current.phase || actual.afterSortValue !== current.afterSortValue ||
-          actual.afterId !== current.afterId) {
+          actual.afterId !== current.afterId || actual.revision !== current.revision) {
         throw new Error(`retention cursor conflict: ${name}`)
       }
-      await transaction.collection('system_settings').doc(`${CURSOR_PREFIX}${name}`).set({ data: {
-        phase: next.phase, afterSortValue: next.afterSortValue, afterId: next.afterId, updatedAt: db.serverDate()
-      } })
+      const data = {
+        schemaVersion: CURSOR_SCHEMA_VERSION,
+        revision: current.revision + 1,
+        phase: next.phase,
+        afterSortValue: next.afterSortValue,
+        afterId: next.afterId,
+        ...(current.legacyMigration === undefined ? {} : {
+          legacyMigration: current.legacyMigration,
+          legacyAfterIdDigest: current.legacyAfterIdDigest,
+          migratedAt: current.migratedAt
+        }),
+        updatedAt: db.serverDate()
+      }
+      const document = transaction.collection('system_settings').doc(`${CURSOR_PREFIX}${name}`)
+      if (stored) await document.update({ data })
+      else await document.set({ data })
     })
-    return next
+    return { ...next, schemaVersion: CURSOR_SCHEMA_VERSION, revision: current.revision + 1,
+      ...(current.legacyMigration === undefined ? {} : {
+        legacyMigration: current.legacyMigration,
+        legacyAfterIdDigest: current.legacyAfterIdDigest,
+        migratedAt: current.migratedAt
+      }) }
   }
 
   function queryRows({ collection, criteria, sortField, limit }) {
@@ -202,7 +302,16 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
       const rawPage = await readKeysetPage({ definition, cursor, limit: remaining })
       scanned += rawPage.length
       const phase = phaseDefinition.key
-      cursor = await advanceCursor(name, phases, cursor, rawPage, remaining)
+      try {
+        cursor = await advanceCursor(name, phases, cursor, rawPage, remaining)
+      } catch (error) {
+        if (!String(error && error.message).startsWith(`retention cursor conflict: ${name}`)) throw error
+        for (const row of rawPage) {
+          const value = await project(row, phase)
+          if (value !== null && value !== undefined) projected.push(value)
+        }
+        break
+      }
       for (const row of rawPage) {
         const value = await project(row, phase)
         if (value !== null && value !== undefined) projected.push(value)
