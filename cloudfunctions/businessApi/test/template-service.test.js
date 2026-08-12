@@ -296,12 +296,12 @@ test('enablement rejects legacy definitions that cannot fit the business snapsho
     _id: `t1-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
-    assigneeUserIds: [`account-${index}`]
+    assigneeUserIds: [`a${index}`]
   }))
   const harness = createTemplateHarness({
     templates: [{ _id: 't1', name: '模板', status: 'disabled', version: 1, nodeCount: 48 }],
     nodes,
-    users: nodes.map((node, index) => ({ _id: `account-${index}`, status: 'active' }))
+    users: nodes.map((node, index) => ({ _id: `a${index}`, status: 'active' }))
   })
 
   await assert.rejects(harness.service.changeTemplateStatus({
@@ -372,7 +372,7 @@ test('ordinary listings do not advertise legacy enabled templates that exceed th
     _id: `t1-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
-    assigneeUserIds: [`account-${index}`]
+    assigneeUserIds: [`a${index}`]
   }))
   const harness = createTemplateHarness({
     templates: [{
@@ -380,7 +380,7 @@ test('ordinary listings do not advertise legacy enabled templates that exceed th
       nodeCount: 48
     }],
     nodes,
-    users: nodes.map((node, index) => ({ _id: `account-${index}`, status: 'active' }))
+    users: nodes.map((node, index) => ({ _id: `a${index}`, status: 'active' }))
   })
 
   const result = await harness.service.listEnabledTemplates({ actor: harness.user })
@@ -393,8 +393,8 @@ test('ordinary listings hide review templates that exceed the future participant
     _id: `t1-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
-    processorUserIds: [`processor-${index % 46}`],
-    reviewerUserIds: ['reviewer-shared']
+    processorUserIds: [`p${index % 46}`],
+    reviewerUserIds: ['r']
   }))
   const userIds = [...new Set(nodes.flatMap(node => [
     ...node.processorUserIds,
@@ -410,6 +410,31 @@ test('ordinary listings hide review templates that exceed the future participant
   })
 
   const result = await harness.service.listEnabledTemplates({ actor: harness.user })
+  assert.equal(result.items[0].available, false)
+  assert.equal(result.items[0].unavailableReason, 'TEMPLATE_LIMIT_EXCEEDED')
+})
+
+test('启用与普通可用性投影都拒绝三十个真实长度索引账号', async () => {
+  const ids = Array.from({ length: 30 }, (_, index) =>
+    `acct-${String(index).padStart(2, '0')}-12345678901234567890123456789012`)
+  const node = storedNode('t1', {
+    processorUserIds: ids.slice(0, 15),
+    reviewerUserIds: ids.slice(15)
+  })
+  const users = ids.map(_id => ({ _id, status: 'active' }))
+  const disabled = createTemplateHarness({
+    templates: [{ _id: 't1', name: '规模超限', status: 'disabled', version: 1, nodeCount: 1 }],
+    nodes: [node], users
+  })
+  await assert.rejects(disabled.service.changeTemplateStatus({
+    actor: disabled.admin, templateId: 't1', expectedVersion: 1, status: 'enabled'
+  }), error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' && /索引账号数组/.test(error.message))
+
+  const enabled = createTemplateHarness({
+    templates: [{ _id: 't1', name: '规模超限', status: 'enabled', version: 1, nodeCount: 1 }],
+    nodes: [node], users
+  })
+  const result = await enabled.service.listEnabledTemplates({ actor: enabled.user })
   assert.equal(result.items[0].available, false)
   assert.equal(result.items[0].unavailableReason, 'TEMPLATE_LIMIT_EXCEEDED')
 })

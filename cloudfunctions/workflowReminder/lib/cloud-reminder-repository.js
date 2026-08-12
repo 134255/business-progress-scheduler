@@ -1,6 +1,7 @@
 'use strict'
 
 const crypto = require('node:crypto')
+const { fitsIndexedAccountArray } = require('./index-key-budget')
 
 const MAX_BATCH_SIZE = 40
 const MAX_REVIEWERS = 100
@@ -218,7 +219,7 @@ function createCloudReminderRepository({ db } = {}) {
       const processors = ownExactIds(node, 'processorUserIds', { nonEmpty: true })
       const lineMembers = ownExactIds(line, 'memberUserIds', { nonEmpty: true })
       const lineManagers = ownExactIds(line, 'managerUserIds', { nonEmpty: true })
-      if (!processors || !lineMembers || !lineManagers ||
+      if (!processors || !fitsIndexedAccountArray(processors) || !lineMembers || !lineManagers ||
           processors.some(id => !lineMembers.includes(id))) return { created: false }
       for (const processorId of processors) {
         const account = await readDocument(transaction, 'users', processorId)
@@ -286,7 +287,8 @@ function createCloudReminderRepository({ db } = {}) {
       const roundReviewers = ownExactIds(round, 'reviewerUserIds', { nonEmpty: true })
       const lineMembers = ownExactIds(line, 'memberUserIds', { nonEmpty: true })
       const lineManagers = ownExactIds(line, 'managerUserIds', { nonEmpty: true })
-      if (!nodeReviewers || !roundReviewers || !lineMembers || !lineManagers ||
+      if (!nodeReviewers || !roundReviewers || !fitsIndexedAccountArray(roundReviewers) ||
+          !lineMembers || !lineManagers ||
           roundReviewers.length > MAX_REVIEWERS ||
           nodeReviewers.length !== roundReviewers.length ||
           nodeReviewers.some((id, index) => id !== roundReviewers[index]) ||

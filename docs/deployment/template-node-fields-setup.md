@@ -110,12 +110,15 @@
 | `business_lines` | `status` 升序、`updatedAt` 降序 | 否 | 状态筛选与后台检索 |
 | `business_lines` | `memberUserIds` 升序、`updatedAt` 降序 | 否 | 新账号成员业务列表 |
 | `business_lines` | `managerUserIds` 升序、`updatedAt` 降序 | 否 | 新账号管理员业务列表 |
+| `business_lines` | `status` 升序、`purgeDueAt` 升序、`_id` 升序 | 否 | 冻结业务 15/7/1 日提醒的精确到期扫描 |
 | `template_nodes` | `templateId` 升序、`sequence` 升序 | 否 | 模板节点有序读取 |
 | `business_nodes` | `nodeCode` 升序 | 是 | 节点编号最终防重 |
 | `business_nodes` | `businessLineId` 升序、`sequence` 升序 | 否 | 业务节点时间线 |
 | `business_nodes` | `workflowMode` 升序、`processingDueStatus` 升序、`_id` 升序 | 否 | 审核节点处理提醒有界扫描 |
 | `business_nodes` | `processingTimingStatus` 升序、`_id` 升序 | 否 | 待审核节点的处理工作分钟待补算扫描 |
 | `business_nodes` | `processingDueStatus` 升序、`_id` 升序 | 否 | 日历恢复后的处理截止时间补算扫描 |
+| `business_nodes` | `feedbackClaimExpiresAt` 升序、`_id` 升序 | 否 | 丢失反馈预约的过期节点锁扫描 |
+| `business_nodes` | `feedbackClaimId` 升序、`_id` 升序 | 否 | 按固定反馈预约编号恢复节点锁 |
 | `node_review_rounds` | `nodeId` 升序、`reviewRoundNumber` 升序 | 否 | 节点审核轮次时间线 |
 | `node_review_rounds` | `businessLineId` 升序、`status` 升序、`updatedAt` 降序 | 否 | 业务状态下的审核轮次查询 |
 | `node_review_rounds` | `reviewerUserIds` 升序、`status` 升序、`createdAt` 降序、`_id` 升序 | 否 | 审核人待办列表 |
@@ -127,18 +130,30 @@
 | `node_review_votes` | `reviewRoundId` 升序、`reviewerUserId` 升序 | 是 | 每名审核人每轮唯一投票 |
 | `node_review_votes` | `reviewRoundId` 升序、`createdAt` 升序、`_id` 升序 | 否 | 审核详情投票时间线 |
 | `node_feedback` | `nodeId` 升序、`revision` 降序 | 否 | 节点反馈历史 |
+| `node_feedback` | `publishState` 升序、`_id` 升序 | 否 | 恢复中反馈预约扫描 |
+| `node_feedback` | `publishState` 升序、`claimExpiresAt` 升序、`_id` 升序 | 否 | 过期或恢复中反馈预约的有界扫描 |
 | `evidences` | `businessLineId` 升序、`nodeId` 升序、`uploadedAt` 降序 | 否 | 业务节点凭证历史 |
 | `evidences` | `storageStatus` 升序、`purgeDueAt` 升序 | 否 | 到期凭证治理 |
+| `evidences` | `retentionScope` 升序、`storageStatus` 升序、`_id` 升序 | 否 | 可用/失败保留凭证的状态游标扫描 |
+| `evidences` | `retentionScope` 升序、`storageStatus` 升序、`purgeClaimExpiresAt` 升序、`_id` 升序 | 否 | 租约到期保留凭证的状态游标扫描 |
+| `evidences` | `storageStatus` 升序、`orphanExpiresAt` 升序、`_id` 升序 | 否 | 可用/失败孤立凭证到期扫描 |
+| `evidences` | `storageStatus` 升序、`purgeClaimExpiresAt` 升序、`_id` 升序 | 否 | 清理租约到期的孤立凭证扫描 |
 | `evidences` | `feedbackId` 升序、`uploadedAt` 升序 | 否 | 反馈补偿与附件恢复 |
 | `evidences` | `feedbackId` 升序、`_id` 升序 | 否 | 定时工作器分块恢复反馈预约 |
 | `evidences` | `amendmentId` 升序、`_id` 升序 | 否 | 定时工作器分块恢复修订预约 |
 | `audit_logs` | `targetType` 升序、`targetId` 升序、`createdAt` 降序 | 否 | 对象审计历史 |
 | `audit_logs` | `targetId` 升序、`createdAt` 降序 | 否 | 冻结业务修订详情 |
+| `audit_logs` | `action` 升序、`publishState` 升序、`_id` 升序 | 否 | 恢复中审计修订预约扫描 |
+| `audit_logs` | `action` 升序、`publishState` 升序、`claimExpiresAt` 升序、`_id` 升序 | 否 | 过期或恢复中审计修订预约扫描 |
 | `notifications` | `recipientUserIds` 升序、`createdAt` 降序、`_id` 升序 | 否 | 当前账号通知分页 |
 | `notifications` | `audienceRole` 升序、`createdAt` 降序、`_id` 升序 | 否 | 超级管理员广播通知分页 |
 | `work_calendar_entries` | `sourceYear` 升序、`generationId` 升序、`date` 升序 | 否 | 同版本全年完整性的有界分页校验 |
 
 `work_calendar_entries` 索引未在真实 CloudBase 验证前，不得将日历同步标记为可部署通过；索引错误应保留旧活动代际并返回安全失败。
+
+所有进入必需多键索引的账号数组使用同一保守契约：单数组最多 50 个账号编号，按可见 BSON string-array 编码估算不得超过 768 字节；业务成员数组还必须为创建者预留一个最长 128 字节账号位，因此模板参与人理论人数上限为 49，实际还会受字节预算和 100 次事务操作上限共同限制。账号编号按 UTF-8 字节计算，不以 JSON 字符数猜测；30 个真实长度账号夹具已证明会越界并在模板验证、启用、可用性投影、业务创建和通知写入前失败关闭。CloudBase 未公开数组多键索引逐字节模型，768 字节是相对公开 1024 字节索引键上限预留至少 25% 的保守边界，仍须在目标环境用无敏感隔离账号验证。
+
+`evidenceRetention` 的 `system_settings/evidence-retention:*` 文档只保存阶段、最后扫描 `_id` 和更新时间。每条路径单次原始扫描与处理量均不超过 40，按状态/到期字段精确查询并以 `_id` 做持久 keyset 推进；页尾按阶段回绕，进程在返回候选后崩溃只会使候选再次出现，由预约、租约和确定性通知编号保持幂等。任何损坏游标都失败关闭，不得手工修补或删除后继续自动运行。
 
 `calendarSync` 会自动创建或更新固定文档 `system_settings/calendar-review-processing-cursor`，其中只保存 `kind`、`cursorId`、`version` 和更新时间，不含业务正文或账号信息。部署前不要手工伪造该文档；若已有同编号但结构不符的文档，函数会失败关闭，应先停止触发器并按审计流程核查，不能直接删除或覆盖。该游标沿用上表的 `business_nodes(processingTimingStatus ASC, _id ASC)` 索引，不需要新增游标集合索引。
 

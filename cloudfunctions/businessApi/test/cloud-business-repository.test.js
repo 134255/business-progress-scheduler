@@ -281,11 +281,11 @@ test('snapshot creation rejects creator-aware operation budget overflow before s
     _id: `template-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
-    processorUserIds: [`participant-${index % 24}`],
-    reviewerUserIds: [`participant-${24 + (index % 23)}`]
+    processorUserIds: [`p${index % 24}`],
+    reviewerUserIds: [`p${24 + (index % 23)}`]
   }))
   const users = [{ _id: 'user-1', status: 'active' }].concat(Array.from({ length: 47 }, (_, index) => ({
-    _id: `participant-${index}`, status: 'active'
+    _id: `p${index}`, status: 'active'
   })))
   const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes, users }))
 
@@ -302,11 +302,11 @@ test('snapshot transaction budget permits exactly one hundred operations with de
     _id: `template-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
-    processorUserIds: [`participant-${index % 23}`],
-    reviewerUserIds: [`participant-${23 + (index % 23)}`]
+    processorUserIds: [`p${index % 23}`],
+    reviewerUserIds: [`p${23 + (index % 23)}`]
   }))
   const users = [{ _id: 'user-1', status: 'active' }].concat(Array.from({ length: 46 }, (_, index) => ({
-    _id: `participant-${index}`, status: 'active'
+    _id: `p${index}`, status: 'active'
   })))
   const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes, users }))
 
@@ -316,6 +316,22 @@ test('snapshot transaction budget permits exactly one hundred operations with de
 
   assert.equal(fake.transactionRuns[0].operations, 100)
   assert.equal(fake.documents('business_lines').length, 1)
+})
+
+test('业务创建在事务前拒绝三十个真实长度账号形成的索引键超限', async () => {
+  const ids = Array.from({ length: 30 }, (_, index) =>
+    `acct-${String(index).padStart(2, '0')}-12345678901234567890123456789012`)
+  const nodes = [sourceNode({
+    processorUserIds: ids.slice(0, 15),
+    reviewerUserIds: ids.slice(15)
+  })]
+  const users = [{ _id: 'user-1', status: 'active' }, ...ids.map(_id => ({ _id, status: 'active' }))]
+  const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes, users }))
+
+  await assert.rejects(repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  }), error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' && /索引账号数组/.test(error.message))
+  assert.equal(fake.transactionRuns.length, 0)
 })
 
 test('missing work calendar publishes the business with a deterministic safe administrator warning', async () => {

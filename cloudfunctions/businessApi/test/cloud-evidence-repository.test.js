@@ -268,6 +268,83 @@ test('permits an active account-ID business owner on the current node', async ()
   assert.equal((await harness.repository.registerUpload(registration())).evidenceId, 'evidence-1')
 })
 
+test('新版审核业务快照只允许当前处理人登记凭证且后续成员访问保持可用', async () => {
+  const documents = seed({
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+      workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['reviewer-1'],
+      reviewMode: 'any', allowedEvidenceTypes: ['pdf']
+    }]
+  })
+  const harness = createHarness({ documents })
+
+  const registered = await harness.repository.registerUpload(registration())
+  assert.equal(registered.evidenceId, 'evidence-1')
+  assert.equal((await harness.repository.getAccessGrant({
+    actor: { _id: 'account-1' }, evidenceId: 'evidence-1'
+  })).url, 'https://temporary.example/report.pdf')
+})
+
+test('新版审核节点混入旧负责人或损坏角色关系时登记失败关闭', async () => {
+  for (const node of [
+    {
+      workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['reviewer-1'],
+      assigneeUserIds: ['account-1']
+    },
+    {
+      workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-1']
+    },
+    {
+      workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: null
+    },
+    {
+      workflowMode: 'unknown', processorUserIds: ['account-1'], reviewerUserIds: ['reviewer-1']
+    }
+  ]) {
+    const harness = createHarness({ documents: seed({
+      business_nodes: [{
+        _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+        allowedEvidenceTypes: ['pdf'], ...node
+      }]
+    }) })
+    await assert.rejects(harness.repository.registerUpload(registration()), assertCode('FORBIDDEN'))
+    assert.deepEqual(harness.calls, [])
+  }
+})
+
+test('业务负责人也不能绕过损坏的新版审核关系', async () => {
+  const documents = seed({
+    business_lines: [{
+      _id: 'business-1', status: 'active', currentNodeId: 'node-1', currentNodeIndex: 0,
+      managerUserIds: ['account-1'], memberUserIds: ['account-1']
+    }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+      workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: null,
+      allowedEvidenceTypes: ['pdf']
+    }]
+  })
+  const harness = createHarness({ documents })
+  await assert.rejects(harness.repository.registerUpload(registration()), assertCode('FORBIDDEN'))
+  assert.deepEqual(harness.calls, [])
+})
+
+test('声明审核模式的节点绝不回退到纯旧OpenID负责人授权', async () => {
+  const documents = seed({
+    business_lines: [{
+      _id: 'business-1', status: 'active', currentNodeId: 'node-1', currentNodeIndex: 0,
+      managerIds: ['wx-owner'], memberIds: ['wx-current', 'wx-owner']
+    }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+      workflowMode: 'review', assigneeIds: ['wx-current'], evidenceTypes: ['pdf']
+    }]
+  })
+  const harness = createHarness({ documents })
+  await assert.rejects(harness.repository.registerUpload(registration()), assertCode('FORBIDDEN'))
+  assert.deepEqual(harness.calls, [])
+})
+
 test('new-schema records never fall back to legacy OpenID memberships or assignees', async () => {
   const documents = seed({
     business_lines: [{

@@ -252,8 +252,8 @@ test('损坏审核扫描游标失败关闭', async () => {
   await assert.rejects(repository.listDueReviewReminders({ limit: 40 }), TypeError)
 })
 
-test('近100名审核人的单次提醒事务保持不超过100次固定文档操作', async () => {
-  const reviewers = Array.from({ length: 96 }, (_, index) => `reviewer-${String(index).padStart(2, '0')}`)
+test('索引预算内审核人的单次提醒事务保持不超过100次固定文档操作', async () => {
+  const reviewers = Array.from({ length: 10 }, (_, index) => `account-reviewer-${String(index).padStart(2, '0')}`)
   const data = reviewSeed({ vote: false })
   data.users = data.users.filter(user => !user._id.startsWith('reviewer-')).concat(
     reviewers.map(_id => ({ _id, status: 'active' })))
@@ -275,6 +275,26 @@ test('近100名审核人的单次提醒事务保持不超过100次固定文档�
     advanceHour: false
   }), { created: true, fulfilled: true })
   assert.ok(fake.transactionRuns.at(-1).operations <= 100)
+})
+
+test('三十个真实长度审核账号超过索引预算时不写通知', async () => {
+  const reviewers = Array.from({ length: 30 }, (_, index) =>
+    `account-reviewer-${String(index).padStart(2, '0')}-1234567890abcdef`)
+  const data = reviewSeed({ vote: false })
+  data.users = data.users.filter(user => !user._id.startsWith('reviewer-')).concat(
+    reviewers.map(_id => ({ _id, status: 'active' })))
+  data.business_lines[0].memberUserIds = ['processor-a', 'processor-b', ...reviewers]
+  data.business_nodes[0].reviewerUserIds = reviewers
+  data.node_review_rounds[0].reviewerUserIds = reviewers
+  data.node_review_rounds[0].voteCount = 0
+  data.node_review_rounds[0].approvedVoteCount = 0
+  const { fake, repository } = harness(data)
+  assert.deepEqual(await repository.createReviewReminder({
+    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: reviewers[0],
+    accumulatedWorkHour: 1, expectedVoteCount: 0, expectedApprovedVoteCount: 0,
+    advanceHour: false
+  }), { created: false })
+  assert.equal(fake.documents('notifications').length, 0)
 })
 
 test('候选读取与扫描游标均受 40 条硬上限约束', async () => {

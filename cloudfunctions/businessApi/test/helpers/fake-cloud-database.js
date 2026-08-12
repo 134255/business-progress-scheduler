@@ -139,7 +139,11 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
 
   function matches(document, criteria) {
     return Object.entries(criteria || {}).every(([key, value]) => {
+      if (value && value.__operator === 'and') return value.values.every(entry => matches(document, { [key]: entry }))
       if (value && value.__operator === 'gt') return String(document[key] || '') > String(value.value)
+      if (value && value.__operator === 'gte') return document[key] !== undefined && document[key] >= value.value
+      if (value && value.__operator === 'lt') return document[key] !== undefined && document[key] < value.value
+      if (value && value.__operator === 'lte') return document[key] !== undefined && document[key] <= value.value
       return Array.isArray(document[key]) ? document[key].includes(value) : document[key] === value
     })
   }
@@ -229,7 +233,11 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   const db = {
     command: {
       remove: () => removeValue,
-      gt: value => ({ __operator: 'gt', value })
+      and: (...values) => ({ __operator: 'and', values }),
+      gt: value => ({ __operator: 'gt', value }),
+      gte: value => ({ __operator: 'gte', value }),
+      lt: value => ({ __operator: 'lt', value }),
+      lte: value => ({ __operator: 'lte', value })
     },
     collection(name) {
       return createQuery(name, false)

@@ -126,6 +126,7 @@ function votingSeed({ mode = 'all', terminal = false } = {}) {
     nodeCode: 'BL-20260811-0001-N001', nodeName: '资料收集',
     processingRoundNumber: 1, reviewRoundNumber: 1, reviewMode: mode,
     reviewerUserIds: ['reviewer-1', 'reviewer-2'], status: 'pending',
+    processorDisplayNames: ['处理人一'], reviewerDisplayNames: ['审核人一', '审核人二'],
     submittedBy: 'processor-1', submittedNodeVersion: 4, lockedNodeVersion: 5,
     feedbackId: 'feedback-current', feedbackRevision: 2,
     fieldValues: [], evidenceIds: [], evidenceTotalBytes: 0,
@@ -319,6 +320,52 @@ test('审核详情只允许当前审核人、业务管理员或超级管理员�
   await assert.rejects(repository.getReviewDetail({
     actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'missing-round'
   }), error => error.code === 'FORBIDDEN')
+})
+
+test('审核轮次固化参与人显示名，历史参与人停用或改名不改变详情', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.business_lines[0].code = 'BL-20260811-0001'
+  data.business_lines[0].name = '历史快照'
+  data.node_review_rounds[0].processorDisplayNames = ['处理人一']
+  data.node_review_rounds[0].reviewerDisplayNames = ['审核人一', '审核人二']
+  data.users = data.users.map(user => user._id === 'reviewer-2'
+    ? { ...user, status: 'disabled', displayName: '改名后的停用账号' }
+    : user._id === 'processor-1'
+      ? { ...user, displayName: '改名后的处理人' }
+      : user)
+  const { repository } = harness({ seed: data })
+
+  const detail = await repository.getReviewDetail({
+    actor: { _id: 'reviewer-1' }, reviewRoundId: 'review-feedback-current'
+  })
+  assert.deepEqual(detail.processorDisplayNames, ['处理人一'])
+  assert.deepEqual(detail.reviewerDisplayNames, ['审核人一', '审核人二'])
+})
+
+test('旧审核轮次缺少显示名快照时使用固定安全占位且不泄漏账号编号', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.business_lines[0].code = 'BL-20260811-0001'
+  data.business_lines[0].name = '旧轮次兼容'
+  data.users = data.users.filter(user => user._id !== 'reviewer-2')
+  delete data.node_review_rounds[0].processorDisplayNames
+  delete data.node_review_rounds[0].reviewerDisplayNames
+  const { repository } = harness({ seed: data })
+
+  const detail = await repository.getReviewDetail({
+    actor: { _id: 'reviewer-1' }, reviewRoundId: 'review-feedback-current'
+  })
+  assert.deepEqual(detail.processorDisplayNames, ['历史处理人'])
+  assert.deepEqual(detail.reviewerDisplayNames, ['历史审核人', '历史审核人'])
+  assert.doesNotMatch(JSON.stringify(detail), /processor-1|reviewer-1|reviewer-2/)
+})
+
+test('新审核轮次创建时固化处理人和审核人显示名', async () => {
+  const { fake, repository } = harness()
+  await repository.createReviewRound(request())
+  const round = fake.documents('node_review_rounds')[0]
+
+  assert.deepEqual(round.processorDisplayNames, ['处理人一'])
+  assert.deepEqual(round.reviewerDisplayNames, ['审核人一', '审核人二'])
 })
 
 test('审核查询投影不泄漏凭据、OpenID、云文件编号、哈希、租约或请求摘要', async () => {
@@ -579,6 +626,21 @@ test('超级管理员合并定向与角色通知后再执行稳定窗口截取',
   assert.equal(result.items[0].notificationId, 'role-latest')
   assert.equal(result.items.length, 20)
   assert.equal(result.hasMore, true)
+})
+
+test('超级管理员可见纯旧业务安全降级的凭证保留通知', async () => {
+  const data = votingSeed({ mode: 'all' })
+  data.users.push({ _id: 'root-1', status: 'active', role: 'super_admin' })
+  data.notifications = [{
+    _id: 'legacy-retention', type: 'evidence_retention', audienceRole: 'super_admin',
+    businessLineId: 'legacy-line', daysRemaining: 15, status: 'pending', createdAt: NOW
+  }]
+  const { repository } = harness({ seed: data })
+
+  const result = await repository.listNotifications({
+    actor: { _id: 'root-1' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.equal(result.items[0].notificationId, 'legacy-retention')
 })
 
 test('驳回后审核人仍可读取已固化轮次但处理人不能借历史轮次越权', async () => {

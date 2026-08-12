@@ -4,6 +4,7 @@ const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
 const { deterministicVoteId } = require('./review-domain')
+const { fitsIndexedAccountArray } = require('./index-key-budget')
 
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_LINE_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
@@ -167,6 +168,29 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     return safeAccount(await readDocument(database, 'users', actor._id), actor._id)
   }
 
+  async function participantNameSnapshots(database, ids, knownAccount = null) {
+    const names = []
+    for (const id of ids) {
+      const account = knownAccount && knownAccount._id === id
+        ? knownAccount
+        : await readDocument(database, 'users', id)
+      safeAccount(account, id)
+      names.push(reviewerDisplayName(account))
+    }
+    return names
+  }
+
+  function persistedNameSnapshots(round, key, count, placeholder) {
+    const field = ownDataValue(round, key)
+    if (!field.present) return Array.from({ length: count }, () => placeholder)
+    if (!field.valid || !Array.isArray(field.value) || field.value.length !== count) {
+      throw createError('FORBIDDEN')
+    }
+    const names = field.value.map(value => validDisplayName(value, 100))
+    if (names.some(value => !value)) throw createError('FORBIDDEN')
+    return names
+  }
+
   function safeLineRelationships(line) {
     const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
     const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
@@ -187,7 +211,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         node.reviewRoundNumber === round.reviewRoundNumber
       : round.processingRoundNumber === node.processingRoundNumber &&
         round.reviewRoundNumber === node.reviewRoundNumber
-    if (!processors || !reviewers || !roundReviewers || !sameIds(reviewers, roundReviewers) ||
+    if (!processors || !reviewers || !roundReviewers || !fitsIndexedAccountArray(processors) ||
+        !fitsIndexedAccountArray(reviewers) || !sameIds(reviewers, roundReviewers) ||
         processors.some(id => reviewers.includes(id)) || !REVIEW_MODES.has(round.reviewMode) ||
         round.reviewMode !== node.reviewMode || !safeInteger(round.processingRoundNumber, 1) ||
         !safeInteger(round.reviewRoundNumber, 1) || !roundNumbersMatch) throw createError('FORBIDDEN')
@@ -290,6 +315,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     const processors = ownExactAccountIds(node, 'processorUserIds')
     const reviewers = ownExactAccountIds(node, 'reviewerUserIds')
     if (!processors || !processors.length || !reviewers || !reviewers.length ||
+        !fitsIndexedAccountArray(processors) || !fitsIndexedAccountArray(reviewers) ||
         processors.some(id => reviewers.includes(id)) || !lineMember(line, actor._id) ||
         !processors.includes(actor._id)) throw createError('FORBIDDEN')
     if (!isCurrentNode(line, node)) throw createError('NODE_NOT_ACTIVE')
@@ -310,6 +336,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
     const roundReviewers = ownExactAccountIds(round, 'reviewerUserIds', { nonEmpty: true })
     if (!managers || !members || !processors || !reviewers || !roundReviewers ||
+        !fitsIndexedAccountArray(processors) || !fitsIndexedAccountArray(reviewers) ||
         !sameIds(reviewers, roundReviewers) || processors.some(id => reviewers.includes(id)) ||
         !members.includes(actor._id) && !managers.includes(actor._id) ||
         !reviewers.includes(actor._id) || !roundReviewers.includes(actor._id)) {
@@ -721,7 +748,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       const actor = await readDocument(transaction, 'users', value.actor._id)
       const line = await readDocument(transaction, 'business_lines', value.input.businessLineId)
       const node = await readDocument(transaction, 'business_nodes', value.input.nodeId)
-      const { reviewers } = assertBaseAuthorization(actor, line, node)
+      const { processors, reviewers } = assertBaseAuthorization(actor, line, node)
       const existing = await readDocument(transaction, 'node_review_rounds', roundId)
       if (existing) {
         const feedback = await readDocument(transaction, 'node_feedback', value.draft.feedbackId)
@@ -737,6 +764,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       validateTiming(value.timing, node)
       const feedback = await readDocument(transaction, 'node_feedback', value.draft.feedbackId)
       validateDraft(value, node, feedback)
+      const processorDisplayNames = await participantNameSnapshots(transaction, processors, actor)
+      const reviewerDisplayNames = await participantNameSnapshots(transaction, reviewers)
       const lockedNodeVersion = increment(node.version)
       const reviewRoundNumber = increment(node.reviewRoundNumber === undefined ? 0 : node.reviewRoundNumber)
       const round = {
@@ -748,6 +777,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         reviewRoundNumber,
         reviewMode: node.reviewMode,
         reviewerUserIds: clone(reviewers),
+        processorDisplayNames,
+        reviewerDisplayNames,
         feedbackId: value.draft.feedbackId,
         feedbackRevision: value.draft.feedbackRevision,
         fieldValues: clone(value.draft.fieldSnapshots),
@@ -1156,6 +1187,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       }
 
       const notificationId = `review-result-${hash(`${round._id}\0${finalStatus}`).slice(0, 40)}`
+      if (!fitsIndexedAccountArray(recipients)) throw createError('VERSION_CONFLICT')
       await transaction.collection('notifications').doc(notificationId).set({ data: {
         type: notificationType,
         recipientUserIds: clone(recipients),
@@ -1265,16 +1297,6 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     }
   }
 
-  async function participantDisplayNames(ids) {
-    const names = []
-    for (const id of ids) {
-      const account = await readDocument(db, 'users', id)
-      if (!account || account._id !== id || account.status !== 'active') throw createError('FORBIDDEN')
-      names.push(reviewerDisplayName(account))
-    }
-    return names
-  }
-
   async function readAuthorizedDetailSnapshot(actor, reviewRoundId) {
     return db.runTransaction(async transaction => {
       const { account, role } = await requireCurrentAccount(transaction, actor)
@@ -1326,10 +1348,12 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     }
     const canAct = second.isReviewer && !second.hasVoted && second.round.status === 'pending'
     const relationships = safeRoundRelationships(second.line, second.node, second.round)
-    const [processorDisplayNames, reviewerDisplayNames] = await Promise.all([
-      participantDisplayNames(relationships.processors),
-      participantDisplayNames(relationships.reviewers)
-    ])
+    const processorDisplayNames = persistedNameSnapshots(
+      second.round, 'processorDisplayNames', relationships.processors.length, '历史处理人'
+    )
+    const reviewerDisplayNames = persistedNameSnapshots(
+      second.round, 'reviewerDisplayNames', relationships.reviewers.length, '历史审核人'
+    )
     const third = await readAuthorizedDetailSnapshot(actor, reviewRoundId)
     if (second.line.version !== third.line.version || second.node.version !== third.node.version ||
         second.round.version !== third.round.version || second.round.status !== third.round.status) {

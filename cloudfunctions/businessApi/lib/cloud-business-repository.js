@@ -9,6 +9,11 @@ const { ownDataValue, ownExactAccountIds } = require('./account-relationship-sch
 const { normalizeFieldDefinition } = require('./field-domain')
 const { ALLOWED_EVIDENCE_TYPES } = require('./template-domain')
 const {
+  INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE,
+  fitsBusinessMemberArray,
+  fitsIndexedAccountArray
+} = require('./index-key-budget')
+const {
   APPLICATION_ERROR_MARKER,
   MAX_TEMPLATE_NODES,
   TEMPLATE_LIMIT_MESSAGE
@@ -111,7 +116,11 @@ function snapshotReservationOperationCount(nodes) {
 }
 
 function canCreateBusinessSnapshot(nodes) {
+  const participants = snapshotParticipantUserIds(nodes)
   return Array.isArray(nodes) && nodes.length > 0 && nodes.length <= MAX_TEMPLATE_NODES &&
+    fitsBusinessMemberArray(participants) && nodes.every(node => node && node.workflowMode === 'review'
+      ? fitsIndexedAccountArray(node.processorUserIds) && fitsIndexedAccountArray(node.reviewerUserIds)
+      : fitsIndexedAccountArray(node && node.assigneeUserIds)) &&
     snapshotReservationOperationCount(nodes) <= MAX_TRANSACTION_OPERATIONS
 }
 
@@ -1245,7 +1254,10 @@ function createCloudBusinessRepository({
       throw createError('TEMPLATE_LIMIT_EXCEEDED', TEMPLATE_LIMIT_MESSAGE)
     }
     if (!canCreateBusinessSnapshot(definition.nodes)) {
-      throw createError('TEMPLATE_LIMIT_EXCEEDED', SNAPSHOT_LIMIT_MESSAGE)
+      const message = fitsBusinessMemberArray(snapshotParticipantUserIds(definition.nodes))
+        ? SNAPSHOT_LIMIT_MESSAGE
+        : INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE
+      throw createError('TEMPLATE_LIMIT_EXCEEDED', message)
     }
   }
 

@@ -90,6 +90,31 @@ test('启用前要求连续唯一节点键、启用处理人和审核人、且�
   assert.throws(() => validateTemplateForEnable(template, [{ ...first, reviewerUserIds: [] }], ['account-1']), error => error.code === 'TEMPLATE_INVALID')
 })
 
+test('模板拒绝会进入必需索引的超预算账号数组并接受保守边界', () => {
+  const ids = count => Array.from({ length: count }, (_, index) =>
+    `acct-${String(index).padStart(2, '0')}-12345678901234567890123456789012`)
+  const within = createNode({
+    processorUserIds: ids(5),
+    reviewerUserIds: ids(5).map(id => id.replace('acct-', 'rvwr-'))
+  })
+  const active = [...within.processorUserIds, ...within.reviewerUserIds]
+
+  assert.equal(validateTemplateForEnable({ status: 'draft' }, [within], active), true)
+
+  const over = createNode({
+    processorUserIds: ids(15),
+    reviewerUserIds: ids(15).map(id => id.replace('acct-', 'rvwr-'))
+  })
+  assert.throws(
+    () => validateTemplateForEnable(
+      { status: 'draft' },
+      [over],
+      [...over.processorUserIds, ...over.reviewerUserIds]
+    ),
+    error => error.code === 'TEMPLATE_LIMIT_EXCEEDED' && /索引账号数组/.test(error.message)
+  )
+})
+
 test('enabled templates are read-only until disabled and deleted templates are unavailable', () => {
   assert.doesNotThrow(() => assertTemplateEditable({ status: 'draft' }))
   assert.doesNotThrow(() => assertTemplateEditable({ status: 'disabled' }))

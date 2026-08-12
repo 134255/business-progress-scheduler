@@ -46,12 +46,62 @@ test('提醒批次跳过已存在记录并在后续运行继续处理剩余业�
     })),
     notifications: [{ _id: 'evidence-retention:line-a:15', type: 'evidence_retention' }]
   })
+  assert.equal(await repository.createDueReminders({ now: NOW, limit: 1 }), 0)
   assert.equal(await repository.createDueReminders({ now: NOW, limit: 1 }), 1)
   assert.equal(await repository.createDueReminders({ now: NOW, limit: 1 }), 1)
   assert.equal(await repository.createDueReminders({ now: NOW, limit: 1 }), 0)
   assert.deepEqual(fake.documents('notifications').map(item => item._id).sort(), [
     'evidence-retention:line-a:15', 'evidence-retention:line-b:15', 'evidence-retention:line-c:15'
   ])
+})
+
+test('纯旧OpenID业务保留提醒降级为超级管理员受众且重复执行幂等', async () => {
+  const { fake, repository } = repositoryFor({
+    business_lines: [{
+      _id: 'legacy-line', status: 'completed', purgeDueAt: new Date('2026-08-25T00:00:00.000Z'),
+      managerIds: ['legacy-openid'], memberIds: ['legacy-openid']
+    }]
+  })
+
+  assert.equal(await repository.createDueReminders({ now: NOW, limit: 20 }), 1)
+  assert.equal(await repository.createDueReminders({ now: NOW, limit: 20 }), 0)
+  const note = fake.documents('notifications')[0]
+  assert.equal(note.audienceRole, 'super_admin')
+  assert.equal(Object.hasOwn(note, 'recipientUserIds'), false)
+  assert.doesNotMatch(JSON.stringify(note), /legacy-openid/)
+})
+
+test('已有同编号空受众保留提醒会在事务中升级而不是永久跳过', async () => {
+  const notificationId = 'evidence-retention:legacy-line:15'
+  const { fake, repository } = repositoryFor({
+    business_lines: [{
+      _id: 'legacy-line', status: 'completed', purgeDueAt: new Date('2026-08-25T00:00:00.000Z'),
+      managerIds: ['legacy-openid'], memberIds: ['legacy-openid']
+    }],
+    notifications: [{
+      _id: notificationId, type: 'evidence_retention', businessLineId: 'legacy-line',
+      recipientUserIds: [], daysRemaining: 15, status: 'pending'
+    }]
+  })
+
+  assert.equal(await repository.createDueReminders({ now: NOW, limit: 20 }), 1)
+  const note = fake.documents('notifications').find(item => item._id === notificationId)
+  assert.equal(note.audienceRole, 'super_admin')
+  assert.equal(Object.hasOwn(note, 'recipientUserIds'), false)
+})
+
+test('账号制保留提醒受众超过索引预算时失败关闭且不降级为角色通知', async () => {
+  const managerUserIds = Array.from({ length: 30 }, (_, index) =>
+    `account-manager-${String(index).padStart(2, '0')}-1234567890abcdef`)
+  const { fake, repository } = repositoryFor({
+    business_lines: [{
+      _id: 'oversized-line', status: 'completed',
+      purgeDueAt: new Date('2026-08-25T00:00:00.000Z'),
+      managerUserIds, memberUserIds: managerUserIds
+    }]
+  })
+  assert.equal(await repository.createDueReminders({ now: NOW, limit: 20 }), 0)
+  assert.deepEqual(fake.documents('notifications'), [])
 })
 
 test('到期候选包含统一业务期限和独立修订期限的精确边界并排除不安全记录', async () => {
@@ -194,4 +244,42 @@ test('过期审计修订预约分块恢复孤立期限并终结为不可发布�
   assert.equal(fake.documents('audit_logs').find(item => item._id === 'amend-expired').publishState, 'aborted')
   assert.equal(fake.documents('evidences').every(item => item.amendmentId === null && item.attachmentState === undefined), true)
   assert.equal(Math.max(...fake.transactionRuns.map(item => item.operations)) <= 100, true)
+})
+
+test('反馈预约有界页会越过四十条坏记录并在下一轮到达第四十一条', async () => {
+  const bad = Array.from({ length: 40 }, (_, index) => ({
+    _id: `feedback-${String(index).padStart(2, '0')}`,
+    publishState: 'reserved', claimExpiresAt: NOW
+  }))
+  const { repository } = repositoryFor({
+    node_feedback: [...bad, {
+      _id: 'feedback-40', publishState: 'reserved', businessLineId: 'line-1', nodeId: 'node-1',
+      claimExpiresAt: NOW
+    }]
+  })
+
+  assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), [])
+  assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), ['feedback-40'])
+})
+
+test('损坏的保留游标失败关闭且空候选只执行有限查询', async () => {
+  const { repository } = repositoryFor({
+    system_settings: [{ _id: 'evidence-retention:feedback-reservations', afterId: 7 }],
+    node_feedback: []
+  })
+  await assert.rejects(
+    repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }),
+    /cursor/i
+  )
+})
+
+test('候选返回后进程崩溃未处理时游标回绕并再次交付同一候选', async () => {
+  const { repository } = repositoryFor({
+    node_feedback: [{
+      _id: 'feedback-crash', businessLineId: 'line-crash', nodeId: 'node-crash',
+      publishState: 'aborting'
+    }]
+  })
+  assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), ['feedback-crash'])
+  assert.deepEqual(await repository.listExpiredFeedbackReservations({ now: NOW, limit: 40 }), ['feedback-crash'])
 })

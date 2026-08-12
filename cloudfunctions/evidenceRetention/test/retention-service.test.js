@@ -102,3 +102,11 @@ test('无效依赖、时钟和批次在执行前失败', async () => {
   const service = createRetentionService({ repository: {}, storage: {}, clock: () => new Date('invalid'), batchSize: 10 })
   await assert.rejects(service.runOnce(), /clock/)
 })
+
+test('每条维护路径单次只读取一个有界候选页', async () => {
+  const { service, calls } = harness()
+  await service.runOnce()
+  for (const name of ['listFeedback', 'listAmendment', 'listOrphans', 'listDue']) {
+    assert.equal(calls.filter(call => call[0] === name).length, 1, name)
+  }
+})

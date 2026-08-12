@@ -28,26 +28,22 @@ function createRetentionService({ repository, storage, clock = () => new Date(),
   }
 
   async function scan({ list, handle, now, failures }) {
-    let afterId = ''
     let completed = 0
-    for (;;) {
-      const page = await list({ now, afterId, limit: batchSize })
-      if (!Array.isArray(page)) throw new TypeError('repository page must be an array')
-      if (!page.length) return completed
-      for (const candidate of page) {
-        const id = typeof candidate === 'string' ? candidate : candidate && candidate.evidenceId
-        if (typeof id !== 'string' || !id) {
-          recordFailure(failures, { category: 'INVALID_RECORD' })
-          continue
-        }
-        try {
-          if (await handle(candidate, id)) completed += 1
-        } catch (error) {
-          recordFailure(failures, error)
-        }
-        afterId = id
+    const page = await list({ now, limit: batchSize })
+    if (!Array.isArray(page)) throw new TypeError('repository page must be an array')
+    for (const candidate of page) {
+      const id = typeof candidate === 'string' ? candidate : candidate && candidate.evidenceId
+      if (typeof id !== 'string' || !id) {
+        recordFailure(failures, { category: 'INVALID_RECORD' })
+        continue
+      }
+      try {
+        if (await handle(candidate, id)) completed += 1
+      } catch (error) {
+        recordFailure(failures, error)
       }
     }
+    return completed
   }
 
   async function recoverReservations({ listName, recoverName, now, failures }) {

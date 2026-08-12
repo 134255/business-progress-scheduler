@@ -4,6 +4,7 @@ const { MAX_SINGLE_FILE_SIZE, classifyAndValidateFile } = require('./evidence-po
 const { normalizeCloudFileId } = require('./evidence-service')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { classifyEvidenceRetention } = require('./evidence-retention')
+const { ownExactAccountIds } = require('./account-relationship-schema')
 
 const COLLECTIONS = Object.freeze({
   users: 'users',
@@ -82,10 +83,23 @@ function isOwner(line, actor, accountSchema) {
     : Boolean(actor.openid) && memberships(line.managerIds).includes(actor.openid)
 }
 
-function isAssignee(node, actor, accountSchema) {
-  return accountSchema
-    ? memberships(node.assigneeUserIds).includes(actor._id)
-    : Boolean(actor.openid) && memberships(node.assigneeIds).includes(actor.openid)
+function nodeAuthorization(node, actor, accountSchema) {
+  if (node && node.workflowMode === 'review') {
+    if (!accountSchema) return { valid: false, authorized: false }
+    const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
+    const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+    if (!processors || !reviewers || processors.some(id => reviewers.includes(id)) ||
+        Object.prototype.hasOwnProperty.call(node, 'assigneeUserIds')) return { valid: false, authorized: false }
+    return { valid: true, authorized: processors.includes(actor._id) }
+  }
+  if (node && Object.prototype.hasOwnProperty.call(node, 'workflowMode')) return { valid: false, authorized: false }
+  if (!accountSchema) {
+    return { valid: true, authorized: Boolean(actor.openid) && memberships(node.assigneeIds).includes(actor.openid) }
+  }
+  const assignees = ownExactAccountIds(node, 'assigneeUserIds', { nonEmpty: true })
+  if (!assignees || Object.prototype.hasOwnProperty.call(node, 'processorUserIds') ||
+      Object.prototype.hasOwnProperty.call(node, 'reviewerUserIds')) return { valid: false, authorized: false }
+  return { valid: true, authorized: assignees.includes(actor._id) }
 }
 
 function isCurrentNode(line, node) {
@@ -173,7 +187,8 @@ function createCloudEvidenceRepository({
     if (!isCurrentNode(line, node) || !ACTIVE_NODE_STATUSES.has(node.status)) {
       throw createError('NODE_NOT_ACTIVE')
     }
-    if (!isOwner(line, actor, accountSchema) && !isAssignee(node, actor, accountSchema)) {
+    const authorization = nodeAuthorization(node, actor, accountSchema)
+    if (!authorization.valid || !isOwner(line, actor, accountSchema) && !authorization.authorized) {
       throw createError('FORBIDDEN')
     }
     return { actor, line, node, allowedTypes: allowedTypes(node, accountSchema) }

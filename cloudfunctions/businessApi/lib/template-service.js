@@ -27,7 +27,7 @@ function callTemplateDomain(operation) {
   try {
     return operation()
   } catch (error) {
-    if (['TEMPLATE_INVALID', 'TEMPLATE_NOT_EDITABLE', 'ASSIGNEE_INACTIVE',
+    if (['TEMPLATE_INVALID', 'TEMPLATE_LIMIT_EXCEEDED', 'TEMPLATE_NOT_EDITABLE', 'ASSIGNEE_INACTIVE',
       'PROCESSOR_INACTIVE', 'REVIEWER_INACTIVE', 'ROLE_OVERLAP', 'NOT_FOUND'].includes(error.code)) {
       error[APPLICATION_ERROR_MARKER] = true
     }
@@ -357,7 +357,8 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
         } catch (error) {
           unavailableReason = error.code === 'ASSIGNEE_INACTIVE'
             ? 'ASSIGNEE_INACTIVE'
-            : ['PROCESSOR_INACTIVE', 'REVIEWER_INACTIVE', 'ROLE_OVERLAP', 'TEMPLATE_INVALID'].includes(error.code)
+            : ['PROCESSOR_INACTIVE', 'REVIEWER_INACTIVE', 'ROLE_OVERLAP', 'TEMPLATE_INVALID',
+                'TEMPLATE_LIMIT_EXCEEDED'].includes(error.code)
               ? error.code
               : 'TEMPLATE_INVALID'
         }

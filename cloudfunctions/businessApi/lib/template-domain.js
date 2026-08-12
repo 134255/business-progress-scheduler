@@ -1,5 +1,10 @@
 const { normalizeFieldDefinition } = require('./field-domain')
 const { WORKFLOW_MODE, normalizeReviewMode } = require('./review-domain')
+const {
+  INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE,
+  fitsBusinessMemberArray,
+  fitsIndexedAccountArray
+} = require('./index-key-budget')
 
 const DEFAULT_PROCESSING_SLA_WORK_HOURS = 22
 const DEFAULT_REVIEW_SLA_WORK_HOURS = 8
@@ -38,6 +43,13 @@ function normalizeAccountIds(value) {
   const ids = value.map(requireText)
   if (new Set(ids).size !== ids.length) throw createError('TEMPLATE_INVALID')
   return ids
+}
+
+function assertIndexedAccountArray(values) {
+  if (!fitsIndexedAccountArray(values)) {
+    throw createError('TEMPLATE_LIMIT_EXCEEDED', INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE)
+  }
+  return values
 }
 
 function normalizeEvidenceTypes(value) {
@@ -87,8 +99,8 @@ function normalizeTemplateNode(input) {
     name: requireText(input.name),
     description: typeof input.description === 'string' ? input.description.trim() : '',
     workflowMode: WORKFLOW_MODE,
-    processorUserIds: normalizeAccountIds(input.processorUserIds === undefined ? [] : input.processorUserIds),
-    reviewerUserIds: normalizeAccountIds(input.reviewerUserIds === undefined ? [] : input.reviewerUserIds),
+    processorUserIds: assertIndexedAccountArray(normalizeAccountIds(input.processorUserIds === undefined ? [] : input.processorUserIds)),
+    reviewerUserIds: assertIndexedAccountArray(normalizeAccountIds(input.reviewerUserIds === undefined ? [] : input.reviewerUserIds)),
     reviewMode,
     processingSlaWorkHours,
     reviewSlaWorkHours,
@@ -110,7 +122,7 @@ function normalizeLegacyTemplateNode(input) {
     nodeKey: requireText(input.nodeKey),
     sequence: input.sequence === undefined ? 0 : normalizeSequence(input.sequence),
     name: requireText(input.name),
-    assigneeUserIds: normalizeAccountIds(input.assigneeUserIds),
+    assigneeUserIds: assertIndexedAccountArray(normalizeAccountIds(input.assigneeUserIds)),
     slaWorkHours,
     requiresEvidence,
     allowedEvidenceTypes,
@@ -159,6 +171,12 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
   const definition = normalizeDefinitionNodes(nodes)
   if (!Array.isArray(activeUserIds)) throw createError('TEMPLATE_INVALID')
   const active = new Set(activeUserIds)
+  const participants = definition.workflowMode === WORKFLOW_MODE
+    ? [...new Set(definition.nodes.flatMap(node => [...node.processorUserIds, ...node.reviewerUserIds]))]
+    : [...new Set(definition.nodes.flatMap(node => node.assigneeUserIds))]
+  if (!fitsBusinessMemberArray(participants)) {
+    throw createError('TEMPLATE_LIMIT_EXCEEDED', INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE)
+  }
   for (const node of definition.nodes) {
     if (definition.workflowMode === 'legacy') {
       if (!node.assigneeUserIds.length) throw createError('TEMPLATE_INVALID')

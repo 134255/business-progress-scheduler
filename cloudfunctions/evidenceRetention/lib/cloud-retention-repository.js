@@ -1,5 +1,7 @@
 'use strict'
 
+const { fitsIndexedAccountArray } = require('./index-key-budget')
+
 const FROZEN_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const RETENTION_SCOPE = 'business_line'
 const RETENTION_SOURCE = 'node_feedback'
@@ -7,6 +9,9 @@ const AMENDMENT_SCOPE = 'evidence'
 const AMENDMENT_SOURCE = 'audit_amendment'
 const PURGE_LEASE_MS = 10 * 60 * 1000
 const RECOVERY_CHUNK_SIZE = 40
+const MAX_SCAN_SIZE = 40
+const CURSOR_PREFIX = 'evidence-retention:'
+const CURSOR_ID = /^[A-Za-z0-9:_-]{1,128}$/
 
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
@@ -36,27 +41,21 @@ async function readDocument(source, collection, id) {
   }
 }
 
-async function readAll(db, collection) {
-  const rows = []
-  for (let offset = 0;; offset += 100) {
-    const result = await db.collection(collection).orderBy('_id', 'asc').skip(offset).limit(100).get()
-    const page = Array.isArray(result && result.data) ? result.data : []
-    rows.push(...page)
-    if (page.length < 100) return rows
-  }
-}
-
-async function readPage(db, collection, offset, maximum = 100) {
-  const result = await db.collection(collection).orderBy('_id', 'asc').skip(offset).limit(maximum).get()
-  return Array.isArray(result && result.data) ? result.data : []
-}
-
 function shanghaiDaySerial(value) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
   }).formatToParts(value)
   const part = type => Number(parts.find(item => item.type === type).value)
   return Math.floor(Date.UTC(part('year'), part('month') - 1, part('day')) / 86400000)
+}
+
+function shanghaiDayRange(value, daysAhead) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(value)
+  const part = type => Number(parts.find(item => item.type === type).value)
+  const start = new Date(Date.UTC(part('year'), part('month') - 1, part('day') + daysAhead) - 8 * 60 * 60 * 1000)
+  return [start, new Date(start.getTime() + 24 * 60 * 60 * 1000)]
 }
 
 function pageCandidates(values, afterId, limit) {
@@ -76,76 +75,184 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
   if (typeof clock !== 'function') throw new TypeError('clock is required')
   if (typeof tokenFactory !== 'function') throw new TypeError('tokenFactory is required')
 
+  function requireScanLimit(limit) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_SCAN_SIZE) {
+      throw new TypeError(`limit must be between 1 and ${MAX_SCAN_SIZE}`)
+    }
+    return limit
+  }
+
+  async function readCursor(name, phases) {
+    const cursor = await readDocument(db, 'system_settings', `${CURSOR_PREFIX}${name}`)
+    if (!cursor) return { phase: phases[0], afterId: '' }
+    if (!phases.includes(cursor.phase) || typeof cursor.afterId !== 'string' ||
+        cursor.afterId && !CURSOR_ID.test(cursor.afterId)) {
+      throw new Error(`retention cursor invalid: ${name}`)
+    }
+    return { phase: cursor.phase, afterId: cursor.afterId }
+  }
+
+  async function advanceCursor(name, phases, current, rawPage, limit) {
+    const full = rawPage.length === limit
+    const phaseIndex = phases.indexOf(current.phase)
+    const next = full
+      ? { phase: current.phase, afterId: rawPage[rawPage.length - 1]._id }
+      : { phase: phases[(phaseIndex + 1) % phases.length], afterId: '' }
+    await db.runTransaction(async transaction => {
+      const stored = await readDocument(transaction, 'system_settings', `${CURSOR_PREFIX}${name}`)
+      const actual = stored ? { phase: stored.phase, afterId: stored.afterId } : { phase: phases[0], afterId: '' }
+      if (actual.phase !== current.phase || actual.afterId !== current.afterId) {
+        throw new Error(`retention cursor conflict: ${name}`)
+      }
+      await transaction.collection('system_settings').doc(`${CURSOR_PREFIX}${name}`).set({ data: {
+        phase: next.phase, afterId: next.afterId, updatedAt: db.serverDate()
+      } })
+    })
+    return next
+  }
+
+  async function scanOnePage({ name, phases, limit, query, project }) {
+    requireScanLimit(limit)
+    const projected = []
+    let scanned = 0
+    let cursor = await readCursor(name, phases)
+    const visited = new Set()
+    while (scanned < limit && !visited.has(cursor.phase)) {
+      visited.add(cursor.phase)
+      const remaining = limit - scanned
+      const criteria = { ...query(cursor.phase) }
+      if (cursor.afterId) criteria._id = db.command.gt(cursor.afterId)
+      const response = await db.collection(criteria.__collection)
+        .where(Object.fromEntries(Object.entries(criteria).filter(([key]) => key !== '__collection')))
+        .orderBy('_id', 'asc').limit(remaining).get()
+      const rawPage = Array.isArray(response && response.data) ? response.data : []
+      scanned += rawPage.length
+      const phase = cursor.phase
+      cursor = await advanceCursor(name, phases, cursor, rawPage, remaining)
+      for (const row of rawPage) {
+        const value = await project(row, phase)
+        if (value !== null && value !== undefined) projected.push(value)
+      }
+      if (rawPage.length === remaining) break
+    }
+    return projected.sort((left, right) => {
+      const leftId = typeof left === 'string' ? left : left.evidenceId || left._id
+      const rightId = typeof right === 'string' ? right : right.evidenceId || right._id
+      return leftId.localeCompare(rightId)
+    })
+  }
+
   async function createDueReminders({ now, limit }) {
     if (!validDate(now)) throw new TypeError('now must be a valid Date')
+    requireScanLimit(limit)
     const today = shanghaiDaySerial(now)
+    const phases = [...FROZEN_STATUSES].flatMap(status => [15, 7, 1].map(days => `${status}:${days}`))
+    const page = await scanOnePage({
+      name: 'reminders', phases, limit,
+      query(phase) {
+        const [status, daysText] = phase.split(':')
+        const [start, end] = shanghaiDayRange(now, Number(daysText))
+        return {
+          __collection: 'business_lines', status,
+          purgeDueAt: db.command.and(db.command.gte(start), db.command.lt(end))
+        }
+      },
+      project: line => line
+    })
     let created = 0
-    for (let offset = 0; created < limit; offset += 100) {
-      const page = await readPage(db, 'business_lines', offset)
-      for (const candidateLine of page) {
-        if (!FROZEN_STATUSES.has(candidateLine.status) || !validDate(candidateLine.purgeDueAt)) continue
-        const days = shanghaiDaySerial(candidateLine.purgeDueAt) - today
-        if (![15, 7, 1].includes(days)) continue
+    for (const candidateLine of page) {
+      if (!FROZEN_STATUSES.has(candidateLine.status) || !validDate(candidateLine.purgeDueAt)) continue
+      const days = shanghaiDaySerial(candidateLine.purgeDueAt) - today
+      if (![15, 7, 1].includes(days)) continue
         const notificationId = `evidence-retention:${candidateLine._id}:${days}`
         const didCreate = await db.runTransaction(async transaction => {
-          if (await readDocument(transaction, 'notifications', notificationId)) return false
           const line = await readDocument(transaction, 'business_lines', candidateLine._id)
           if (!line || !FROZEN_STATUSES.has(line.status) || !validDate(line.purgeDueAt) ||
               shanghaiDaySerial(line.purgeDueAt) - shanghaiDaySerial(now) !== days) return false
-          const recipientUserIds = Array.isArray(line.managerUserIds)
-            ? [...new Set(line.managerUserIds.filter(value => typeof value === 'string' && value))]
-            : []
+          const accountSchema = Object.prototype.hasOwnProperty.call(line, 'managerUserIds') ||
+            Object.prototype.hasOwnProperty.call(line, 'memberUserIds')
+          const directRecipients = accountSchema && Array.isArray(line.managerUserIds)
+            ? [...new Set(line.managerUserIds)] : null
+          const hasAccountRecipients = fitsIndexedAccountArray(directRecipients) && directRecipients.length > 0
+          if (accountSchema && !hasAccountRecipients) return false
+          const existing = await readDocument(transaction, 'notifications', notificationId)
+          if (existing) {
+            const brokenLegacyAudience = !hasAccountRecipients && existing.type === 'evidence_retention' &&
+              existing.businessLineId === line._id && existing.daysRemaining === days &&
+              Array.isArray(existing.recipientUserIds) && existing.recipientUserIds.length === 0 &&
+              existing.audienceRole === undefined
+            if (!brokenLegacyAudience) return false
+            await transaction.collection('notifications').doc(notificationId).update({ data: {
+              recipientUserIds: db.command.remove(),
+              audienceRole: 'super_admin',
+              updatedAt: db.serverDate()
+            } })
+            return true
+          }
           await transaction.collection('notifications').doc(notificationId).set({ data: {
-            type: 'evidence_retention', businessLineId: line._id, recipientUserIds,
+            type: 'evidence_retention', businessLineId: line._id,
+            ...(hasAccountRecipients
+              ? { recipientUserIds: directRecipients }
+              : { audienceRole: 'super_admin' }),
             daysRemaining: days, status: 'pending', createdAt: db.serverDate()
           } })
           return true
         })
-        if (didCreate) created += 1
-        if (created >= limit) break
-      }
-      if (page.length < 100) break
+      if (didCreate) created += 1
     }
     return created
   }
 
-  async function listDueEvidence({ now, afterId = '', limit }) {
-    const candidates = []
-    for (let offset = 0; candidates.length < limit; offset += 100) {
-      const page = await readPage(db, 'evidences', offset)
-      for (const evidence of page) {
-        if (evidence._id <= afterId || !purgeCandidateStatus(evidence, now)) continue
-        if (evidence.retentionScope === RETENTION_SCOPE && evidence.retentionSource === RETENTION_SOURCE && evidence.feedbackId) {
+  async function listDueEvidence({ now, limit }) {
+    const phases = [
+      'business_line:available', 'business_line:purge_failed', 'business_line:purge_pending',
+      'evidence:available', 'evidence:purge_failed', 'evidence:purge_pending'
+    ]
+    return scanOnePage({
+      name: 'due-evidence', phases, limit,
+      query(phase) {
+        const [scope, storageStatus] = phase.split(':')
+        return {
+          __collection: 'evidences', retentionScope: scope, storageStatus,
+          ...(storageStatus === 'purge_pending' ? { purgeClaimExpiresAt: db.command.lte(now) } : {})
+        }
+      },
+      async project(evidence, phase) {
+        if (!purgeCandidateStatus(evidence, now)) return null
+        if (phase.startsWith('business_line:') && evidence.retentionSource === RETENTION_SOURCE && evidence.feedbackId) {
           const line = await readDocument(db, 'business_lines', evidence.businessLineId)
-          if (line && FROZEN_STATUSES.has(line.status) && due(line.purgeDueAt, now)) candidates.push({ evidenceId: evidence._id })
-        } else if (evidence.retentionScope === AMENDMENT_SCOPE && evidence.retentionSource === AMENDMENT_SOURCE &&
+          if (line && FROZEN_STATUSES.has(line.status) && due(line.purgeDueAt, now)) return { evidenceId: evidence._id }
+        } else if (phase.startsWith('evidence:') && evidence.retentionSource === AMENDMENT_SOURCE &&
                    evidence.amendmentId && due(evidence.purgeDueAt, now)) {
           const audit = await readDocument(db, 'audit_logs', evidence.amendmentId)
           if (audit && audit.action === 'AMEND_FROZEN_BUSINESS' && audit.publishState === 'published' &&
-              audit.targetId === evidence.businessLineId) candidates.push({ evidenceId: evidence._id })
+              audit.targetId === evidence.businessLineId) return { evidenceId: evidence._id }
         }
-        if (candidates.length >= limit) break
+        return null
       }
-      if (page.length < 100) break
-    }
-    return candidates
+    })
   }
 
-  async function listExpiredOrphans({ now, afterId = '', limit }) {
-    const candidates = []
-    for (let offset = 0; candidates.length < limit; offset += 100) {
-      const page = await readPage(db, 'evidences', offset)
-      for (const evidence of page) {
-        if (evidence._id > afterId && purgeCandidateStatus(evidence, now) && due(evidence.orphanExpiresAt, now) &&
-            !evidence.feedbackId && !evidence.amendmentId &&
-            [undefined, null, 'unattached'].includes(evidence.attachmentState)) {
-          candidates.push({ evidenceId: evidence._id })
+  async function listExpiredOrphans({ now, limit }) {
+    const phases = ['available', 'purge_failed', 'purge_pending']
+    return scanOnePage({
+      name: 'orphans', phases, limit,
+      query(storageStatus) {
+        return {
+          __collection: 'evidences', storageStatus,
+          ...(storageStatus === 'purge_pending'
+            ? { purgeClaimExpiresAt: db.command.lte(now) }
+            : { orphanExpiresAt: db.command.lte(now) })
         }
-        if (candidates.length >= limit) break
+      },
+      project(evidence) {
+        return purgeCandidateStatus(evidence, now) && due(evidence.orphanExpiresAt, now) &&
+          !evidence.feedbackId && !evidence.amendmentId &&
+          [undefined, null, 'unattached'].includes(evidence.attachmentState)
+          ? { evidenceId: evidence._id }
+          : null
       }
-      if (page.length < 100) break
-    }
-    return candidates
+    })
   }
 
   async function retentionEligible(transaction, evidence, now) {
@@ -222,29 +329,40 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     })
   }
 
-  async function listExpiredFeedbackReservations({ now, afterId = '', limit }) {
-    const [feedback, nodes] = await Promise.all([
-      readAll(db, 'node_feedback'), readAll(db, 'business_nodes')
-    ])
-    const byId = new Map(feedback.map(item => [item._id, item]))
-    const ids = new Set(feedback
-      .filter(item => item.publishState === 'aborting' ||
-        (item.publishState === 'reserved' && expiredOrMalformed(item.claimExpiresAt, now)))
-      .map(item => item._id))
-    for (const node of nodes) {
-      if (typeof node.feedbackClaimId === 'string' && node.feedbackClaimId &&
-          !byId.has(node.feedbackClaimId) && expiredOrMalformed(node.feedbackClaimExpiresAt, now)) {
-        ids.add(node.feedbackClaimId)
+  async function listExpiredFeedbackReservations({ now, limit }) {
+    const phases = ['aborting', 'reserved', 'missing']
+    return scanOnePage({
+      name: 'feedback-reservations', phases, limit,
+      query(phase) {
+        if (phase === 'missing') return {
+          __collection: 'business_nodes', feedbackClaimExpiresAt: db.command.lte(now)
+        }
+        return {
+          __collection: 'node_feedback', publishState: phase,
+          ...(phase === 'reserved' ? { claimExpiresAt: db.command.lte(now) } : {})
+        }
+      },
+      async project(item, phase) {
+        if (phase !== 'missing') {
+          if (typeof item.businessLineId !== 'string' || !CURSOR_ID.test(item.businessLineId) ||
+              typeof item.nodeId !== 'string' || !CURSOR_ID.test(item.nodeId)) return null
+          return item.publishState === 'aborting' ||
+            item.publishState === 'reserved' && due(item.claimExpiresAt, now) ? item._id : null
+        }
+        if (typeof item.feedbackClaimId !== 'string' || !item.feedbackClaimId ||
+            !due(item.feedbackClaimExpiresAt, now) ||
+            await readDocument(db, 'node_feedback', item.feedbackClaimId)) return null
+        return item.feedbackClaimId
       }
-    }
-    return [...ids].filter(id => id > afterId).sort().slice(0, limit)
+    })
   }
 
   async function recoverExpiredFeedbackReservation({ id, now }) {
     const initial = await readDocument(db, 'node_feedback', id)
     if (!initial) {
-      const nodes = (await readAll(db, 'business_nodes'))
-        .filter(node => node.feedbackClaimId === id && expiredOrMalformed(node.feedbackClaimExpiresAt, now))
+      const result = await db.collection('business_nodes').where({ feedbackClaimId: id })
+        .orderBy('_id', 'asc').limit(RECOVERY_CHUNK_SIZE).get()
+      const nodes = (result.data || []).filter(node => due(node.feedbackClaimExpiresAt, now))
       let cleared = false
       for (const candidate of nodes) {
         const changed = await db.runTransaction(async transaction => {
@@ -319,12 +437,22 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     })
   }
 
-  async function listExpiredAmendmentReservations({ now, afterId = '', limit }) {
-    const audits = await readAll(db, 'audit_logs')
-    return audits.filter(item => item.action === 'AMEND_FROZEN_BUSINESS' &&
-      (item.publishState === 'aborting' ||
-       (item.publishState === 'reserved' && expiredOrMalformed(item.claimExpiresAt, now))) && item._id > afterId)
-      .map(item => item._id).sort().slice(0, limit)
+  async function listExpiredAmendmentReservations({ now, limit }) {
+    const phases = ['aborting', 'reserved']
+    return scanOnePage({
+      name: 'amendment-reservations', phases, limit,
+      query(publishState) {
+        return {
+          __collection: 'audit_logs', action: 'AMEND_FROZEN_BUSINESS', publishState,
+          ...(publishState === 'reserved' ? { claimExpiresAt: db.command.lte(now) } : {})
+        }
+      },
+      project(item) {
+        if (typeof item.targetId !== 'string' || !CURSOR_ID.test(item.targetId)) return null
+        return item.publishState === 'aborting' ||
+          item.publishState === 'reserved' && due(item.claimExpiresAt, now) ? item._id : null
+      }
+    })
   }
 
   async function recoverExpiredAmendmentReservation({ id, now }) {
