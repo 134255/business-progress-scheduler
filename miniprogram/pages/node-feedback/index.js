@@ -161,6 +161,7 @@ Page({
     this.loadActorId = actorId
     this.pageAlive = true
     this.loadSequence = 0
+    this.writeSequence = 0
     this.progressExpectedNodeVersion = null
     this.reviewExpectedNodeVersion = null
     this.setData({ lineId: String(query.lineId || ''), nodeId: String(query.nodeId || '') })
@@ -274,10 +275,12 @@ Page({
   },
 
   onStatus(event) {
+    if (this.data.submitting || this.data.readOnly) return
     this.setData({ statusIndex: Number(event.detail.value) })
   },
 
   markDraftDirty() {
+    if (this.data.submitting || this.data.reviewDraftLocked) return false
     this.savedProgress = null
     this.progressIntent = ''
     this.progressRequestKey = ''
@@ -285,17 +288,18 @@ Page({
     this.reviewRequestKey = ''
     this.reviewExpectedNodeVersion = null
     this.setData({ draftDirty: true })
+    return true
   },
 
   onComment(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    this.markDraftDirty()
+    if (!this.markDraftDirty()) return
     this.setData({ comment: event.detail.value })
   },
 
   onFieldInput(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    this.markDraftDirty()
+    if (!this.markDraftDirty()) return
     this.setData({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: event.detail.value })
   },
 
@@ -305,7 +309,7 @@ Page({
 
   onBooleanChange(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    this.markDraftDirty()
+    if (!this.markDraftDirty()) return
     const raw = event.detail.value
     const value = raw === true || raw === 'true' ? true : raw === false || raw === 'false' ? false : null
     this.setData({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: value })
@@ -317,7 +321,7 @@ Page({
 
   onSingleSelectChange(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    this.markDraftDirty()
+    if (!this.markDraftDirty()) return
     const key = event.currentTarget.dataset.fieldkey
     const field = this.data.fields.find(item => item.fieldKey === key)
     const options = field && field.constraints && field.constraints.options
@@ -327,7 +331,7 @@ Page({
 
   onMultiSelectChange(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    this.markDraftDirty()
+    if (!this.markDraftDirty()) return
     const key = event.currentTarget.dataset.fieldkey
     const selected = event.detail.value.slice()
     const fields = this.data.fields.map(field => field.fieldKey === key
@@ -378,7 +382,7 @@ Page({
   },
 
   addSelectedFiles(selected) {
-    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
     const files = this.data.files.slice()
     const originalCount = files.length
     let total = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
@@ -419,12 +423,12 @@ Page({
         errorMessage: ''
       })
     }
-    if (files.length !== originalCount) this.markDraftDirty()
+    if (files.length !== originalCount && !this.markDraftDirty()) return
     this.setData({ files, selectedTotalBytes: total, selectedTotalText: formatBytes(total) })
   },
 
   chooseMediaEvidence() {
-    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
     wx.chooseMedia({
       count: 9,
       mediaType: ['image', 'video'],
@@ -444,7 +448,7 @@ Page({
   },
 
   choosePdfEvidence() {
-    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
     wx.chooseMessageFile({
       count: 100,
       type: 'file',
@@ -459,11 +463,11 @@ Page({
   },
 
   removeFile(event) {
-    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
     const index = Number(event.currentTarget.dataset.index)
     const current = this.data.files[index]
     if (!current || current.status === 'uploading') return
-    this.markDraftDirty()
+    if (!this.markDraftDirty()) return
     const files = this.data.files.slice()
     files.splice(index, 1)
     const total = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
@@ -476,32 +480,40 @@ Page({
     this.setData({ files })
   },
 
-  async uploadAndRegisterEvidence() {
-    const requestedActorId = currentUserId()
+  writeStillCurrent(operation) {
+    return Boolean(operation) && this.pageAlive && currentUserId() === operation.actorId &&
+      this.writeSequence === operation.sequence && this.data.lineId === operation.lineId &&
+      this.data.nodeId === operation.nodeId && this.data.expectedNodeVersion === operation.nodeVersion
+  },
+
+  async uploadAndRegisterEvidence(operation) {
     for (let index = 0; index < this.data.files.length; index += 1) {
       const file = this.data.files[index]
       if (file.status === 'registered' && file.evidenceId) continue
+      if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
       this.updateLocalFile(index, { status: 'uploading', statusLabel: '上传中', errorMessage: '' })
       try {
         const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || `evidence.${file.extension}`
-        const cloudPath = `evidence/${this.data.lineId}/${this.data.nodeId}/${Date.now()}-${index}-${safeName}`
+        const cloudPath = `evidence/${operation.lineId}/${operation.nodeId}/${Date.now()}-${index}-${safeName}`
         const upload = await wx.cloud.uploadFile({ cloudPath, filePath: file.path })
-        if (!this.pageAlive || currentUserId() !== requestedActorId) throw new Error('账号状态已变化')
+        if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
         const registered = await businessService.registerEvidenceUpload({
-          businessLineId: this.data.lineId,
-          nodeId: this.data.nodeId,
+          businessLineId: operation.lineId,
+          nodeId: operation.nodeId,
           fileId: upload.fileID,
           fileName: file.name,
           declaredSize: file.size
         })
-        if (!this.pageAlive || currentUserId() !== requestedActorId) throw new Error('账号状态已变化')
+        if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
         this.updateLocalFile(index, {
           status: 'registered', statusLabel: '已登记', evidenceId: registered.evidenceId, errorMessage: ''
         })
       } catch (error) {
-        this.updateLocalFile(index, {
-          status: 'failed', statusLabel: '上传失败', errorMessage: safeErrorMessage(error, '上传失败，请重试')
-        })
+        if (this.writeStillCurrent(operation)) {
+          this.updateLocalFile(index, {
+            status: 'failed', statusLabel: '上传失败', errorMessage: safeErrorMessage(error, '上传失败，请重试')
+          })
+        }
         throw error
       }
     }
@@ -564,15 +576,18 @@ Page({
     return this.data.workflowMode === 'review' && this.data.canSubmit && !this.data.frozen && !this.data.readOnly
   },
 
-  async progressPayload() {
-    const fieldValues = this.normalizedFieldValues()
-    const evidenceIds = await this.uploadAndRegisterEvidence()
+  async progressPayload(operation) {
+    const draftPayload = operation.draftPayload || {
+      fieldValues: this.normalizedFieldValues(),
+      comment: this.data.comment.trim()
+    }
+    const evidenceIds = await this.uploadAndRegisterEvidence(operation)
     return {
-      businessLineId: this.data.lineId,
-      nodeId: this.data.nodeId,
-      expectedNodeVersion: this.data.expectedNodeVersion,
-      fieldValues,
-      comment: this.data.comment.trim(),
+      businessLineId: operation.lineId,
+      nodeId: operation.nodeId,
+      expectedNodeVersion: operation.nodeVersion,
+      fieldValues: draftPayload.fieldValues,
+      comment: draftPayload.comment,
       evidenceIds
     }
   },
@@ -584,6 +599,17 @@ Page({
       return false
     }
     const requestedActorId = currentUserId()
+    const operation = Object.freeze({
+      actorId: requestedActorId,
+      sequence: ++this.writeSequence,
+      lineId: this.data.lineId,
+      nodeId: this.data.nodeId,
+      nodeVersion: this.data.expectedNodeVersion,
+      draftPayload: Object.freeze({
+        fieldValues: Object.freeze(this.normalizedFieldValues().map(item => Object.freeze({ ...item }))),
+        comment: this.data.comment.trim()
+      })
+    })
     const intent = `progress:${action}`
     if (this.progressIntent !== intent) {
       this.progressIntent = intent
@@ -591,11 +617,11 @@ Page({
     }
     this.setData({ submitting: true, errorMessage: '' })
     try {
-      const payload = await this.progressPayload()
-      if (!this.pageAlive || currentUserId() !== requestedActorId) return false
+      const payload = await this.progressPayload(operation)
+      if (!this.writeStillCurrent(operation)) return false
       const usedRequestKey = this.progressRequestKey
       const progressResult = await businessService.submitFeedback({ ...payload, action, requestKey: usedRequestKey })
-      if (!this.pageAlive || currentUserId() !== requestedActorId) return false
+      if (!this.writeStillCurrent(operation)) return false
       if (action === 'save_progress') {
         if (!Number.isSafeInteger(progressResult && progressResult.nodeVersion) ||
             progressResult.nodeVersion <= payload.expectedNodeVersion) {
@@ -615,12 +641,12 @@ Page({
       await this.loadData()
       return true
     } catch (error) {
-      if (this.pageAlive && currentUserId() === requestedActorId) {
+      if (this.writeStillCurrent(operation)) {
         wx.showToast({ title: safeErrorMessage(error, '处理进度保存失败，请重试'), icon: 'none' })
       }
       return false
     } finally {
-      if (this.pageAlive && currentUserId() === requestedActorId) this.setData({ submitting: false })
+      if (this.writeStillCurrent(operation)) this.setData({ submitting: false })
     }
   },
 
@@ -643,7 +669,6 @@ Page({
       wx.showToast({ title: '提交审核前必须上传凭证', icon: 'none' })
       return
     }
-    const requestedActorId = currentUserId()
     if (this.progressIntent !== 'review-draft') {
       this.progressIntent = 'review-draft'
       this.progressRequestKey = useStoredDraft ? '' : savedProgress ? savedProgress.requestKey : requestKey('progress')
@@ -658,42 +683,67 @@ Page({
     if (!Number.isSafeInteger(this.progressExpectedNodeVersion)) {
       this.progressExpectedNodeVersion = this.data.expectedNodeVersion
     }
-    this.setData({ submitting: true, errorMessage: '' })
+    const reviewDraft = savedProgress
+      ? { ...savedProgress.payload, fieldValues: savedProgress.payload.fieldValues.map(item => ({ ...item })) }
+      : {
+          fieldValues: this.normalizedFieldValues().map(item => ({ ...item })),
+          comment: this.data.comment.trim()
+        }
+    const operation = Object.freeze({
+      actorId: currentUserId(),
+      sequence: ++this.writeSequence,
+      lineId: this.data.lineId,
+      nodeId: this.data.nodeId,
+      nodeVersion: this.data.expectedNodeVersion,
+      draftPayload: Object.freeze({
+        ...reviewDraft,
+        fieldValues: Object.freeze(reviewDraft.fieldValues.map(item => Object.freeze({ ...item })))
+      }),
+      progressRequestKey: this.progressRequestKey,
+      reviewRequestKey: this.reviewRequestKey,
+      progressExpectedNodeVersion: this.progressExpectedNodeVersion,
+      reviewExpectedNodeVersion: this.reviewExpectedNodeVersion
+    })
+    this.setData({ submitting: true, reviewDraftLocked: true, errorMessage: '' })
+    let reviewNodeVersion = operation.reviewExpectedNodeVersion
     try {
       if (!useStoredDraft) {
-        const payload = savedProgress ? { ...savedProgress.payload } : await this.progressPayload()
-        if (!this.pageAlive || currentUserId() !== requestedActorId) return
+        const payload = savedProgress ? operation.draftPayload : await this.progressPayload(operation)
+        if (!this.writeStillCurrent(operation)) return
         const progressResult = await businessService.submitFeedback({
           ...payload,
-          expectedNodeVersion: this.progressExpectedNodeVersion,
+          expectedNodeVersion: operation.progressExpectedNodeVersion,
           action: 'save_progress',
-          requestKey: this.progressRequestKey
+          requestKey: operation.progressRequestKey
         })
-        if (!this.pageAlive || currentUserId() !== requestedActorId) return
+        if (!this.writeStillCurrent(operation)) return
         if (!Number.isSafeInteger(progressResult && progressResult.nodeVersion) ||
-            progressResult.nodeVersion <= this.progressExpectedNodeVersion) {
+            progressResult.nodeVersion <= operation.progressExpectedNodeVersion) {
           throw new Error('处理进度保存结果无效，请刷新后重试')
         }
-        if (Number.isSafeInteger(this.reviewExpectedNodeVersion) &&
-            this.reviewExpectedNodeVersion !== progressResult.nodeVersion) {
+        if (Number.isSafeInteger(operation.reviewExpectedNodeVersion) &&
+            operation.reviewExpectedNodeVersion !== progressResult.nodeVersion) {
           throw new Error('节点版本已变化，请刷新后重试')
         }
-        this.reviewExpectedNodeVersion = progressResult.nodeVersion
+        reviewNodeVersion = progressResult.nodeVersion
+        this.reviewExpectedNodeVersion = reviewNodeVersion
         this.savedProgress = {
           payload: { ...payload },
-          requestKey: this.progressRequestKey,
-          expectedNodeVersion: this.progressExpectedNodeVersion,
+          requestKey: operation.progressRequestKey,
+          expectedNodeVersion: operation.progressExpectedNodeVersion,
           nodeVersion: progressResult.nodeVersion
         }
       }
-      this.setData({ reviewDraftLocked: true })
       await businessService.submitNodeForReview({
-        businessLineId: this.data.lineId,
-        nodeId: this.data.nodeId,
-        expectedNodeVersion: this.reviewExpectedNodeVersion,
-        requestKey: this.reviewRequestKey
+        businessLineId: operation.lineId,
+        nodeId: operation.nodeId,
+        expectedNodeVersion: reviewNodeVersion,
+        requestKey: operation.reviewRequestKey
       })
-      if (!this.pageAlive || currentUserId() !== requestedActorId) return
+      if (!this.writeStillCurrent(operation)) {
+        this.actorStillCurrent()
+        return
+      }
       this.progressRequestKey = ''
       this.progressIntent = ''
       this.reviewRequestKey = ''
@@ -704,11 +754,11 @@ Page({
       wx.showToast({ title: '已提交审核', icon: 'success' })
       if (typeof wx.navigateBack === 'function') wx.navigateBack()
     } catch (error) {
-      if (this.pageAlive && currentUserId() === requestedActorId) {
+      if (this.writeStillCurrent(operation)) {
         wx.showToast({ title: safeErrorMessage(error, '提交审核失败，请重试'), icon: 'none' })
       }
     } finally {
-      if (this.pageAlive && currentUserId() === requestedActorId) this.setData({ submitting: false })
+      if (this.writeStillCurrent(operation)) this.setData({ submitting: false })
     }
   },
 
@@ -735,28 +785,48 @@ Page({
       return
     }
     if (!this.feedbackRequestKey) this.feedbackRequestKey = requestKey()
+    const operation = Object.freeze({
+      actorId: currentUserId(),
+      sequence: ++this.writeSequence,
+      lineId: this.data.lineId,
+      nodeId: this.data.nodeId,
+      nodeVersion: this.data.expectedNodeVersion,
+      status,
+      fieldValues: Object.freeze(fieldValues.map(item => Object.freeze({ ...item }))),
+      comment: this.data.comment.trim(),
+      requestKey: this.feedbackRequestKey
+    })
     this.setData({ submitting: true })
     try {
-      const evidenceIds = await this.uploadAndRegisterEvidence()
+      const evidenceIds = await this.uploadAndRegisterEvidence(operation)
+      if (!this.writeStillCurrent(operation)) {
+        this.actorStillCurrent()
+        return
+      }
       await businessService.submitFeedback({
-        businessLineId: this.data.lineId,
-        nodeId: this.data.nodeId,
-        expectedNodeVersion: this.data.expectedNodeVersion,
-        status,
-        fieldValues,
-        comment: this.data.comment.trim(),
+        businessLineId: operation.lineId,
+        nodeId: operation.nodeId,
+        expectedNodeVersion: operation.nodeVersion,
+        status: operation.status,
+        fieldValues: operation.fieldValues,
+        comment: operation.comment,
         evidenceIds,
-        requestKey: this.feedbackRequestKey
+        requestKey: operation.requestKey
       })
-      if (!this.actorStillCurrent()) return
+      if (!this.writeStillCurrent(operation)) {
+        this.actorStillCurrent()
+        return
+      }
       wx.showToast({ title: '反馈成功', icon: 'success' })
       this.feedbackRequestKey = ''
       this.setData({ comment: '', files: [], selectedTotalBytes: 0, selectedTotalText: '0 B' })
       await this.loadData()
     } catch (error) {
-      wx.showToast({ title: error.message || '反馈失败，请重试', icon: 'none' })
+      if (this.writeStillCurrent(operation)) {
+        wx.showToast({ title: safeErrorMessage(error, '反馈失败，请重试'), icon: 'none' })
+      }
     } finally {
-      this.setData({ submitting: false })
+      if (this.writeStillCurrent(operation)) this.setData({ submitting: false })
     }
   }
 })

@@ -95,6 +95,7 @@ test('业务服务的六个审核方法只透传业务参数并安全映射错�
   }), error => error.message === '请填写驳回原因')
   await service.listMyPendingReviews({ page: 1, pageSize: 20 })
   await service.getReviewDetail('round-1')
+  await service.getEvidenceAccess('evidence-1')
   await service.listMyNotifications({ page: 1, pageSize: 20 })
   await service.markNotificationRead('notice-1')
 
@@ -103,6 +104,7 @@ test('业务服务的六个审核方法只透传业务参数并安全映射错�
     ['submitReviewVote', { reviewRoundId: 'round-1', expectedRoundVersion: 2, decision: 'reject', comment: '', requestKey: 'vote-1' }],
     ['listMyPendingReviews', { page: 1, pageSize: 20 }],
     ['getReviewDetail', { reviewRoundId: 'round-1' }],
+    ['getEvidenceAccess', { evidenceId: 'evidence-1' }],
     ['listMyNotifications', { page: 1, pageSize: 20 }],
     ['markNotificationRead', { notificationId: 'notice-1' }]
   ])
@@ -160,6 +162,92 @@ test('审核节点提交先幂等保存处理版本再提交审核，第二步�
   assert.equal(calls[3].input.expectedNodeVersion, 5)
   assert.equal(page.data.readOnly, true)
 })
+
+test('提交审核等待两步响应期间冻结草稿文件并保持不可变请求快照', async () => {
+  const progress = deferred()
+  const review = deferred()
+  const calls = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {}, reLaunch: () => {}, showToast: () => {}, navigateBack: () => {},
+    cloud: { uploadFile: async () => assert.fail('已登记凭证不应重复上传') }
+  }
+  const node = reviewNode()
+  const page = loadPage('pages/node-feedback/index.js', {
+    getBusinessLine: async () => ({ line: { _id: 'line-1', status: 'active', version: 8 }, nodes: [node] }),
+    getNodeHistory: async () => ({ node, canSubmit: true, history: [] }),
+    submitFeedback: input => { calls.push(['feedback', input]); return progress.promise },
+    submitNodeForReview: input => { calls.push(['review', input]); return review.promise }
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({
+    'fieldValues.summary': '提交前草稿', comment: '提交前说明',
+    files: [{ localKey: 'file-1', status: 'registered', evidenceId: 'evidence-1', size: 10 }]
+  })
+
+  const pending = page.onSubmitReview()
+  const progressKey = page.progressRequestKey
+  const reviewKey = page.reviewRequestKey
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '等待期篡改' } })
+  page.onComment({ detail: { value: '等待期说明' } })
+  page.addSelectedFiles([{ name: 'extra.pdf', path: 'wxfile://extra.pdf', size: 10, category: 'pdf' }])
+  page.removeFile({ currentTarget: { dataset: { index: 0 } } })
+
+  assert.equal(page.data.submitting, true)
+  assert.equal(page.data.reviewDraftLocked, true)
+  assert.equal(page.data.fieldValues.summary, '提交前草稿')
+  assert.equal(page.data.comment, '提交前说明')
+  assert.equal(page.data.files.length, 1)
+  assert.equal(page.progressRequestKey, progressKey)
+  assert.equal(page.reviewRequestKey, reviewKey)
+
+  progress.resolve({ feedbackId: 'feedback-1', nodeVersion: 5 })
+  await new Promise(resolve => setImmediate(resolve))
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '第二步篡改' } })
+  assert.equal(page.data.fieldValues.summary, '提交前草稿')
+  assert.equal(page.progressRequestKey, progressKey)
+  assert.equal(page.reviewRequestKey, reviewKey)
+  assert.deepEqual(calls.map(call => call[0]), ['feedback', 'review'])
+  assert.equal(calls[0][1].fieldValues[0].value, '提交前草稿')
+  assert.equal(calls[0][1].requestKey, progressKey)
+  assert.equal(calls[1][1].requestKey, reviewKey)
+
+  review.resolve({ reviewRoundId: 'round-1' })
+  await pending
+})
+
+for (const item of [
+  { name: '账号变化', invalidate: ({ app }) => { app.globalData.currentUser = activeUser('other-account') } },
+  { name: '页面卸载', invalidate: ({ page }) => page.onUnload() },
+  { name: '操作序号变化', invalidate: ({ page }) => { page.writeSequence += 1 } },
+  { name: '节点版本变化', invalidate: ({ page }) => page.setData({ expectedNodeVersion: 99 }) }
+]) {
+  test(`凭证上传失败在${item.name}后不写回旧文件状态`, async () => {
+    const app = { globalData: { currentUser: activeUser() } }
+    global.getApp = () => app
+    global.wx = {
+      setNavigationBarTitle: () => {}, reLaunch: () => {}, showToast: () => {},
+      cloud: { uploadFile: async () => {
+        item.invalidate({ app, page })
+        throw new Error('模拟上传失败')
+      } }
+    }
+    const node = reviewNode()
+    const page = loadPage('pages/node-feedback/index.js', {
+      getBusinessLine: async () => ({ line: { _id: 'line-1', status: 'active', version: 8 }, nodes: [node] }),
+      getNodeHistory: async () => ({ node, canSubmit: true, history: [] }),
+      registerEvidenceUpload: async () => assert.fail('上传失败后不应登记'),
+      submitFeedback: async () => assert.fail('上传失败后不应提交')
+    })
+    await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+    page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '有效草稿' } })
+    page.addSelectedFiles([{ name: 'proof.pdf', path: 'wxfile://proof.pdf', size: 10, category: 'pdf' }])
+    await page.onSaveProgress()
+
+    assert.equal(page.data.files[0].status, 'uploading', `${item.name}后旧异步失败不得写回`)
+    assert.equal(page.data.files[0].errorMessage, '')
+  })
+}
 
 test('待审核节点禁止字段、文件和所有处理写操作', async () => {
   let writes = 0
@@ -338,11 +426,9 @@ test('审核详情驳回必填、投票单飞并使用轮次版本和稳定请�
       reviewRoundId: id, businessLineId: 'line-1', businessName: '业务甲', businessCode: 'YW-1',
       nodeId: 'node-1', nodeName: '资料审核', nodeCode: 'YW-1-N001', reviewMode: 'all',
       reviewRoundNumber: 1, version: detailVersion, status: detailVersion === 2 ? 'pending' : 'rejected', fieldValues: [], evidences: [], votes: [],
-      reviewerDisplayNames: ['审核甲', '审核乙'], canApprove: true, canReject: true
+      processorDisplayNames: ['处理甲'], reviewerDisplayNames: ['审核甲', '审核乙'], canApprove: true, canReject: true
     }),
-    getBusinessLine: async () => ({ nodes: [{
-      _id: 'node-1', processorDisplayNames: ['处理甲'], reviewerDisplayNames: ['审核甲', '审核乙']
-    }] }),
+    getBusinessLine: async () => assert.fail('审核详情不得追加调用成员专用业务详情'),
     submitReviewVote: input => { calls.push(input); return pendingVote.promise }
   })
   await page.onLoad({ reviewRoundId: 'round-1', businessName: '伪造业务' })
@@ -363,4 +449,28 @@ test('审核详情驳回必填、投票单飞并使用轮次版本和稳定请�
   await duplicate
   assert.equal(page.data.status, 'rejected')
   assert.equal(page.data.submitting, false)
+})
+
+test('非业务成员超级管理员只凭审核详情安全投影加载且原始权限码不出现在页面', async () => {
+  global.getApp = () => ({ globalData: { currentUser: { ...activeUser('root-1'), role: 'super_admin' } } })
+  global.wx = { reLaunch: () => {}, setNavigationBarTitle: () => {} }
+  let businessReads = 0
+  const page = loadPage('pages/review-detail/index.js', {
+    getReviewDetail: async () => ({
+      reviewRoundId: 'round-1', businessLineId: 'line-1', businessName: '业务甲', businessCode: 'YW-1',
+      nodeId: 'node-1', nodeName: '资料审核', nodeCode: 'YW-1-N001', reviewMode: 'any',
+      reviewRoundNumber: 1, version: 2, status: 'pending', fieldValues: [], evidences: [], votes: [],
+      processorDisplayNames: ['处理甲'], reviewerDisplayNames: ['审核甲'], canApprove: false, canReject: false
+    }),
+    getBusinessLine: async () => { businessReads += 1; throw Object.assign(new Error('FORBIDDEN'), { code: 'FORBIDDEN' }) }
+  })
+
+  await page.onLoad({ reviewRoundId: 'round-1' })
+
+  assert.equal(businessReads, 0)
+  assert.equal(page.data.loading, false)
+  assert.equal(page.data.errorMessage, '')
+  assert.equal(page.data.processorNamesText, '处理甲')
+  assert.equal(page.data.reviewerNamesText, '审核甲')
+  assert.doesNotMatch(JSON.stringify(page.data), /FORBIDDEN/)
 })

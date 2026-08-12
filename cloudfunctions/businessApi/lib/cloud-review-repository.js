@@ -1265,6 +1265,16 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     }
   }
 
+  async function participantDisplayNames(ids) {
+    const names = []
+    for (const id of ids) {
+      const account = await readDocument(db, 'users', id)
+      if (!account || account._id !== id || account.status !== 'active') throw createError('FORBIDDEN')
+      names.push(reviewerDisplayName(account))
+    }
+    return names
+  }
+
   async function readAuthorizedDetailSnapshot(actor, reviewRoundId) {
     return db.runTransaction(async transaction => {
       const { account, role } = await requireCurrentAccount(transaction, actor)
@@ -1315,6 +1325,16 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       throw createError('FORBIDDEN')
     }
     const canAct = second.isReviewer && !second.hasVoted && second.round.status === 'pending'
+    const relationships = safeRoundRelationships(second.line, second.node, second.round)
+    const [processorDisplayNames, reviewerDisplayNames] = await Promise.all([
+      participantDisplayNames(relationships.processors),
+      participantDisplayNames(relationships.reviewers)
+    ])
+    const third = await readAuthorizedDetailSnapshot(actor, reviewRoundId)
+    if (second.line.version !== third.line.version || second.node.version !== third.node.version ||
+        second.round.version !== third.round.version || second.round.status !== third.round.status) {
+      throw createError('VERSION_CONFLICT')
+    }
     return {
       reviewRoundId: second.round._id,
       businessLineId: second.line._id,
@@ -1323,6 +1343,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       nodeId: second.node._id,
       nodeCode: validDisplayName(second.node.nodeCode, 100) || '',
       nodeName: validDisplayName(second.node.name, 200) || '',
+      processorDisplayNames,
+      reviewerDisplayNames,
       reviewMode: second.round.reviewMode,
       reviewRoundNumber: second.round.reviewRoundNumber,
       version: second.round.version,

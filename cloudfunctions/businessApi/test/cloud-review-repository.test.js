@@ -300,6 +300,8 @@ test('审核详情只允许当前审核人、业务管理员或超级管理员�
   assert.equal(detail.canReject, true)
   assert.equal(detail.version, 1, '客户端提交投票必须使用服务端审核轮次版本')
   assert.equal(detail.submittedAt.toISOString(), NOW.toISOString(), '审核详情必须显示服务端提交审核时间')
+  assert.deepEqual(detail.processorDisplayNames, ['处理人一'])
+  assert.deepEqual(detail.reviewerDisplayNames, ['审核人一', '审核人二'])
   assert.doesNotMatch(JSON.stringify(detail), /cloud:\/\/|secret-hash|secret-request|reservation|999/)
 
   await assert.rejects(repository.getReviewDetail({
@@ -308,9 +310,12 @@ test('审核详情只允许当前审核人、业务管理员或超级管理员�
   assert.equal((await repository.getReviewDetail({
     actor: { _id: 'manager-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
   })).reviewRoundId, 'review-feedback-current')
-  assert.equal((await repository.getReviewDetail({
+  const rootDetail = await repository.getReviewDetail({
     actor: { _id: 'root-1', status: 'active', role: 'super_admin' }, reviewRoundId: 'review-feedback-current'
-  })).reviewRoundId, 'review-feedback-current')
+  })
+  assert.equal(rootDetail.reviewRoundId, 'review-feedback-current')
+  assert.deepEqual(rootDetail.processorDisplayNames, ['处理人一'])
+  assert.deepEqual(rootDetail.reviewerDisplayNames, ['审核人一', '审核人二'])
   await assert.rejects(repository.getReviewDetail({
     actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'missing-round'
   }), error => error.code === 'FORBIDDEN')

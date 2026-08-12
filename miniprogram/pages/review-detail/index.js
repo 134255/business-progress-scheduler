@@ -69,10 +69,7 @@ Page({
     try {
       const detail = await businessService.getReviewDetail(this.data.reviewRoundId)
       if (!this.pageAlive || activeUserId() !== requestedActorId || requestSequence !== this.requestSequence) return
-      const business = await businessService.getBusinessLine(detail.businessLineId)
-      if (!this.pageAlive || activeUserId() !== requestedActorId || requestSequence !== this.requestSequence) return
-      const node = (business.nodes || []).find(item => item._id === detail.nodeId) || {}
-      const reviewers = Array.isArray(node.reviewerDisplayNames) ? node.reviewerDisplayNames : []
+      const reviewers = Array.isArray(detail.reviewerDisplayNames) ? detail.reviewerDisplayNames : []
       const votes = (detail.votes || []).map((vote, index) => ({
         ...vote,
         voteKey: `${index}-${vote.createdAt || ''}`,
@@ -88,7 +85,7 @@ Page({
         nodeName: detail.nodeName || '', nodeCode: detail.nodeCode || '', status: detail.status,
         reviewModeLabel: detail.reviewMode === 'all' ? '会签' : '或签',
         reviewRoundNumber: Number(detail.reviewRoundNumber || 0),
-        processorNamesText: Array.isArray(node.processorDisplayNames) ? node.processorDisplayNames.join('、') : '',
+        processorNamesText: Array.isArray(detail.processorDisplayNames) ? detail.processorDisplayNames.join('、') : '',
         reviewerNamesText: reviewers.join('、'),
         voteProgressText: `${votes.length}/${reviewers.length}`,
         submittedAtText: detail.submittedAt ? new Date(detail.submittedAt).toLocaleString('zh-CN') : '',

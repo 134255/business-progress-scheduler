@@ -107,7 +107,11 @@ function registerEvidenceUpload(input) {
 }
 
 function getEvidenceAccess(evidenceId) {
-  return callBusinessApi('getEvidenceAccess', { evidenceId })
+  return callProtected(
+    'getEvidenceAccess',
+    { evidenceId },
+    '凭证暂时无法打开'
+  )
 }
 
 function submitFeedback(input) {

@@ -18,7 +18,7 @@
   <view wx:if="{{canSubmit || workflowMode === 'review'}}" class="card">
     <view wx:if="{{legacyMode}}" class="field">
       <text class="field-label">节点状态</text>
-      <picker mode="selector" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatus">
+      <picker mode="selector" disabled="{{submitting || readOnly}}" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatus">
         <view class="input">{{statusOptions[statusIndex].label}}</view>
       </picker>
     </view>
@@ -26,20 +26,20 @@
     <view class="field dynamic-field" wx:for="{{fields}}" wx:key="fieldKey">
       <text class="field-label">{{item.name}}{{item.required ? ' *' : ''}}</text>
       <text wx:if="{{item.description}}" class="muted field-description">{{item.description}}</text>
-      <input wx:if="{{item.type === 'short_text'}}" class="input" disabled="{{readOnly || reviewDraftLocked}}" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindinput="onFieldInput" />
-      <textarea wx:elif="{{item.type === 'long_text'}}" class="textarea" disabled="{{readOnly || reviewDraftLocked}}" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindinput="onFieldInput" />
-      <input wx:elif="{{item.type === 'number'}}" class="input" disabled="{{readOnly || reviewDraftLocked}}" type="digit" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindinput="onNumberInput" />
-      <radio-group wx:elif="{{item.type === 'boolean'}}" class="boolean-options" disabled="{{readOnly || reviewDraftLocked}}" data-fieldkey="{{item.fieldKey}}" bindchange="onBooleanChange">
+      <input wx:if="{{item.type === 'short_text'}}" class="input" disabled="{{readOnly || reviewDraftLocked || submitting}}" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindinput="onFieldInput" />
+      <textarea wx:elif="{{item.type === 'long_text'}}" class="textarea" disabled="{{readOnly || reviewDraftLocked || submitting}}" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindinput="onFieldInput" />
+      <input wx:elif="{{item.type === 'number'}}" class="input" disabled="{{readOnly || reviewDraftLocked || submitting}}" type="digit" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindinput="onNumberInput" />
+      <radio-group wx:elif="{{item.type === 'boolean'}}" class="boolean-options" disabled="{{readOnly || reviewDraftLocked || submitting}}" data-fieldkey="{{item.fieldKey}}" bindchange="onBooleanChange">
         <label><radio value="true" checked="{{fieldValues[item.fieldKey] === true}}" />是</label>
         <label><radio value="false" checked="{{fieldValues[item.fieldKey] === false}}" />否</label>
       </radio-group>
-      <picker wx:elif="{{item.type === 'date'}}" mode="date" disabled="{{readOnly || reviewDraftLocked}}" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindchange="onDateChange">
+      <picker wx:elif="{{item.type === 'date'}}" mode="date" disabled="{{readOnly || reviewDraftLocked || submitting}}" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindchange="onDateChange">
         <view class="input">{{fieldValues[item.fieldKey] || '请选择日期'}}</view>
       </picker>
-      <picker wx:elif="{{item.type === 'single_select'}}" mode="selector" disabled="{{readOnly || reviewDraftLocked}}" range="{{item.constraints.options}}" data-fieldkey="{{item.fieldKey}}" bindchange="onSingleSelectChange">
+      <picker wx:elif="{{item.type === 'single_select'}}" mode="selector" disabled="{{readOnly || reviewDraftLocked || submitting}}" range="{{item.constraints.options}}" data-fieldkey="{{item.fieldKey}}" bindchange="onSingleSelectChange">
         <view class="input">{{fieldValues[item.fieldKey] || '请选择'}}</view>
       </picker>
-      <checkbox-group wx:elif="{{item.type === 'multi_select'}}" class="multi-options" disabled="{{readOnly || reviewDraftLocked}}" data-fieldkey="{{item.fieldKey}}" bindchange="onMultiSelectChange">
+      <checkbox-group wx:elif="{{item.type === 'multi_select'}}" class="multi-options" disabled="{{readOnly || reviewDraftLocked || submitting}}" data-fieldkey="{{item.fieldKey}}" bindchange="onMultiSelectChange">
         <label wx:for="{{item.optionItems}}" wx:for-item="option" wx:key="value">
           <checkbox value="{{option.value}}" checked="{{option.selected}}" />{{option.value}}
         </label>
@@ -48,7 +48,7 @@
 
     <view class="field">
       <text class="field-label">进度说明</text>
-      <textarea class="textarea" disabled="{{readOnly || reviewDraftLocked}}" value="{{comment}}" bindinput="onComment" placeholder="说明已完成事项、存在问题或下一步安排" />
+      <textarea class="textarea" disabled="{{readOnly || reviewDraftLocked || submitting}}" value="{{comment}}" bindinput="onComment" placeholder="说明已完成事项、存在问题或下一步安排" />
     </view>
     <view class="field">
       <view class="row-between">
@@ -56,8 +56,8 @@
         <text class="muted">合计 {{selectedTotalText}} / 20 MB</text>
       </view>
       <view class="evidence-actions">
-        <button size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked}}" bindtap="chooseMediaEvidence">选择图片或视频</button>
-        <button size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked}}" bindtap="choosePdfEvidence">选择 PDF</button>
+        <button size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked || submitting}}" bindtap="chooseMediaEvidence">选择图片或视频</button>
+        <button size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked || submitting}}" bindtap="choosePdfEvidence">选择 PDF</button>
       </view>
       <view class="local-file" wx:for="{{files}}" wx:key="localKey">
         <view class="local-file-main">
@@ -65,7 +65,7 @@
           <text class="muted">{{item.sizeText || item.size}} · {{item.statusLabel || item.status}}</text>
           <text wx:if="{{item.errorMessage}}" class="error-text">{{item.errorMessage}}</text>
         </view>
-        <text wx:if="{{!readOnly && !reviewDraftLocked && item.status !== 'uploading'}}" class="remove" data-index="{{index}}" bindtap="removeFile">移除</text>
+        <text wx:if="{{!readOnly && !reviewDraftLocked && !submitting && item.status !== 'uploading'}}" class="remove" data-index="{{index}}" bindtap="removeFile">移除</text>
       </view>
     </view>
     <button wx:if="{{legacyMode}}" class="primary-button" bindtap="submit" loading="{{submitting}}" disabled="{{submitting || readOnly}}">提交反馈</button>
