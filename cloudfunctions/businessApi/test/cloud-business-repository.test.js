@@ -122,15 +122,21 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(nodes[0].processingSlaWorkHours, 8)
   assert.equal(nodes[0].reviewSlaWorkHours, 4)
   assert.equal(nodes[0].processingRoundNumber, 1)
+  assert.equal(nodes[0].reviewRoundNumber, 0)
   assert.equal(nodes[0].processingDueStatus, 'calculated')
   assert.equal(nodes[0].processingDueAt.toISOString(), '2026-08-07T10:30:00.000Z')
   assert.equal(nodes[0].processingCalendarVersion, 'calendar-v1')
   assert.equal(nodes[0].processingStartedAt.toISOString(), '2026-08-07T02:30:00.000Z')
+  assert.equal(nodes[0].reviewDueStatus, 'not_started')
+  assert.equal(nodes[0].reviewDueAt, null)
   assert.equal(Object.hasOwn(nodes[0], 'assigneeUserIds'), false)
   assert.equal(Object.hasOwn(nodes[0], 'slaWorkHours'), false)
-  for (const field of ['processingDueStatus', 'processingDueAt', 'processingCalendarVersion', 'processingStartedAt']) {
-    assert.equal(Object.hasOwn(nodes[1], field), false)
-  }
+  assert.equal(nodes[1].processingRoundNumber, 1)
+  assert.equal(nodes[1].reviewRoundNumber, 0)
+  assert.equal(nodes[1].processingDueStatus, 'not_started')
+  assert.equal(nodes[1].processingDueAt, null)
+  assert.equal(nodes[1].reviewDueStatus, 'not_started')
+  assert.equal(nodes[1].reviewDueAt, null)
   assert.equal(nodes[0].sourceTemplateNodeKey, 'node-a')
   assert.deepEqual(nodes[0].fieldDefinitions, source.nodes[0].fields)
   assert.notEqual(nodes[0].fieldDefinitions, source.nodes[0].fields)
@@ -594,6 +600,55 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
   await assert.rejects(repository.getBusinessLine({
     actor: { _id: 'user-1', status: 'active' }, lineId: 'line-review'
   }), error => error.code === 'FORBIDDEN')
+})
+
+test('已创建的初始审核节点缺少截止状态时只把尚未开始阶段安全映射为 not_started', async () => {
+  const seed = seedDefinition({
+    extra: {
+      business_lines: [{
+        _id: 'line-initial-due', code: 'BL-20260812-0001', name: '初始截止状态', status: 'active',
+        managerUserIds: ['user-1'], memberUserIds: ['user-1', 'user-2', 'user-3', 'user-4'],
+        currentNodeId: 'node-current', currentNodeIndex: 0, version: 1
+      }],
+      business_nodes: [
+        {
+          _id: 'node-current', businessLineId: 'line-initial-due', nodeCode: 'BL-20260812-0001-N001',
+          sequence: 0, name: '当前处理', status: 'ready', workflowMode: 'review', version: 1,
+          processorUserIds: ['user-2'], reviewerUserIds: ['user-3'], reviewMode: 'any',
+          processingRoundNumber: 1, reviewRoundNumber: 0,
+          processingDueStatus: 'calculated', processingDueAt: new Date('2026-08-14T11:00:00.000Z'),
+          requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+        },
+        {
+          _id: 'node-waiting', businessLineId: 'line-initial-due', nodeCode: 'BL-20260812-0001-N002',
+          sequence: 1, name: '后续节点', status: 'waiting', workflowMode: 'review', version: 1,
+          processorUserIds: ['user-3'], reviewerUserIds: ['user-4'], reviewMode: 'any',
+          processingRoundNumber: 1, reviewRoundNumber: 0,
+          requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+        },
+        {
+          _id: 'node-corrupt-active', businessLineId: 'line-initial-due', nodeCode: 'BL-20260812-0001-N003',
+          sequence: 2, name: '异常活动阶段', status: 'pending_review', workflowMode: 'review', version: 2,
+          processorUserIds: ['user-2'], reviewerUserIds: ['user-4'], reviewMode: 'any',
+          processingRoundNumber: 1, reviewRoundNumber: 1,
+          reviewStartedAt: new Date('2026-08-12T11:00:00.000Z'),
+          requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+        }
+      ]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+
+  const result = await repository.getBusinessLine({
+    actor: { _id: 'user-1', status: 'active' }, lineId: 'line-initial-due'
+  })
+
+  assert.equal(result.nodes[0].processingDueStatus, 'calculated')
+  assert.equal(result.nodes[0].reviewDueStatus, 'not_started')
+  assert.equal(result.nodes[1].processingDueStatus, 'not_started')
+  assert.equal(result.nodes[1].reviewDueStatus, 'not_started')
+  assert.equal(result.nodes[2].processingDueStatus, undefined)
+  assert.equal(result.nodes[2].reviewDueStatus, undefined)
 })
 
 test('旧业务节点详情保留动态字段和必传凭证契约并剥离字段内部属性', async () => {

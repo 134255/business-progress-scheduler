@@ -386,6 +386,18 @@ function createCloudBusinessRepository({
       if (!processors || !reviewers || processors.some(id => reviewers.includes(id))) {
         throw createError('FORBIDDEN')
       }
+      const processingDueStatus = Object.prototype.hasOwnProperty.call(node, 'processingDueStatus')
+        ? node.processingDueStatus
+        : node.status === 'waiting' && !node.processingStartedAt
+          ? 'not_started'
+          : undefined
+      const reviewDueStatus = Object.prototype.hasOwnProperty.call(node, 'reviewDueStatus')
+        ? node.reviewDueStatus
+        : ['waiting', 'ready', 'in_progress', 'blocked'].includes(node.status) &&
+            (!Object.prototype.hasOwnProperty.call(node, 'reviewRoundNumber') || node.reviewRoundNumber === 0) &&
+            !node.reviewStartedAt && !node.activeReviewRoundId
+          ? 'not_started'
+          : undefined
       return {
         ...base,
         workflowMode: 'review',
@@ -394,10 +406,10 @@ function createCloudBusinessRepository({
         reviewMode: node.reviewMode,
         processingRoundNumber: node.processingRoundNumber,
         reviewRoundNumber: node.reviewRoundNumber,
-        processingDueStatus: node.processingDueStatus,
+        processingDueStatus,
         processingDueAt: clone(node.processingDueAt || null),
         processingOverdueWorkMinutes: Number(node.processingOverdueWorkMinutes || 0),
-        reviewDueStatus: node.reviewDueStatus,
+        reviewDueStatus,
         reviewDueAt: clone(node.reviewDueAt || null),
         reviewOverdueWorkMinutes: Number(node.reviewOverdueWorkMinutes || 0),
         reviewStartedAt: clone(node.reviewStartedAt || null),
@@ -1143,8 +1155,13 @@ function createCloudBusinessRepository({
               processingSlaWorkHours: source.processingSlaWorkHours,
               reviewSlaWorkHours: source.reviewSlaWorkHours,
               processingRoundNumber: 1,
+              reviewRoundNumber: 0,
               processingElapsedWorkMinutes: 0,
               processingOverdueWorkMinutes: 0,
+              processingDueStatus: 'not_started',
+              processingDueAt: null,
+              reviewDueStatus: 'not_started',
+              reviewDueAt: null,
               ...(index === 0 ? clone(firstProcessingDue) : {})
             }
           : {
