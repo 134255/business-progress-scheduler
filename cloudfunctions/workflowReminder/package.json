@@ -1,0 +1,12 @@
+{
+  "name": "workflow-reminder",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "wx-server-sdk": "4.0.2"
+  }
+}
