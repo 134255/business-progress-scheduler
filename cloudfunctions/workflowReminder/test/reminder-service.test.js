@@ -10,9 +10,14 @@ function harness({ processing = [], review = [], working = true, minutes = 90 } 
   const calls = { processing: [], review: [], cursors: [], limits: [] }
   const reminderRepository = {
     async listDueProcessingReminders({ limit }) { calls.limits.push(limit); return processing.slice(0, limit) },
-    async listDueReviewReminders({ limit }) { calls.limits.push(limit); return review.slice(0, limit) },
+    async listDueReviewReminders({ limit }) {
+      calls.limits.push(limit)
+      const items = review.slice(0, limit)
+      const lastId = items.length ? items.at(-1).reviewRoundId : null
+      return { items, lastScannedRawId: typeof lastId === 'string' ? lastId : null }
+    },
     async createProcessingReminder(value) { calls.processing.push(value); return { created: true } },
-    async createReviewReminder(value) { calls.review.push(value); return { created: true } },
+    async createReviewReminder(value) { calls.review.push(value); return { created: true, fulfilled: true } },
     async advanceReminderCursor(value) { calls.cursors.push(value) }
   }
   const workTimeService = {
@@ -52,17 +57,94 @@ test('未满下一累计小时或工作时间外均不创建提醒', async () =>
   })
 })
 
+test('秒和毫秒只在完整累计工作小时到达后提醒', async () => {
+  const candidate = {
+    nodeId: 'node-1', processingRoundNumber: 1,
+    processingStartedAt: new Date('2026-08-11T03:00:00.000Z'),
+    processingElapsedWorkMinutes: 0, nextReminderWorkHour: 1
+  }
+  const before = harness({ processing: [candidate], minutes: 59 + 59999 / 60000 })
+  assert.deepEqual(await before.service.runReminderCycle({ now: NOW, batchSize: 40 }), {
+    processingCreated: 0, reviewCreated: 0
+  })
+  const exact = harness({ processing: [candidate], minutes: 60 })
+  assert.deepEqual(await exact.service.runReminderCycle({ now: NOW, batchSize: 40 }), {
+    processingCreated: 1, reviewCreated: 0
+  })
+  const after = harness({ processing: [candidate], minutes: 60.5 })
+  assert.deepEqual(await after.service.runReminderCycle({ now: NOW, batchSize: 40 }), {
+    processingCreated: 1, reviewCreated: 0
+  })
+})
+
 test('会签只把未投票审核人交给事务创建并按审核人计数', async () => {
   const review = [{
     reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserIds: ['reviewer-a', 'reviewer-b'],
     votedReviewerUserIds: ['reviewer-a'], reviewStartedAt: new Date('2026-08-11T03:00:00.000Z'),
-    reviewElapsedWorkMinutes: 0, nextReminderWorkHour: 1
+    reviewElapsedWorkMinutes: 0, nextReminderWorkHour: 1,
+    voteCount: 1, approvedVoteCount: 1
   }]
   const { service, calls } = harness({ review, minutes: 90 })
   assert.deepEqual(await service.runReminderCycle({ now: NOW, batchSize: 40 }), {
     processingCreated: 0, reviewCreated: 1
   })
   assert.deepEqual(calls.review.map(item => item.reviewerUserId), ['reviewer-b'])
+  assert.equal(calls.review[0].expectedVoteCount, 1)
+  assert.equal(calls.review[0].expectedApprovedVoteCount, 1)
+  assert.equal(calls.review[0].advanceHour, true)
+})
+
+test('审核页即使全部过滤也按原始页末编号推进扫描游标', async () => {
+  const calls = { cursors: [] }
+  const service = createReminderService({
+    reminderRepository: {
+      async listDueProcessingReminders() { return [] },
+      async listDueReviewReminders() { return { items: [], lastScannedRawId: 'round-40' } },
+      async createProcessingReminder() { return { created: false } },
+      async createReviewReminder() { return { created: false } },
+      async advanceReminderCursor(value) { calls.cursors.push(value) }
+    },
+    workTimeService: {
+      async isWorkingInstant() { return { status: 'calculated', isWorking: true } },
+      async workingMinutesBetween() { return { status: 'calculated', minutes: 60 } }
+    }
+  })
+  assert.deepEqual(await service.runReminderCycle({ now: NOW, batchSize: 40 }), {
+    processingCreated: 0, reviewCreated: 0
+  })
+  assert.deepEqual(calls.cursors, [{ kind: 'review', cursorId: 'round-40' }])
+})
+
+test('前序审核人失败关闭时最后一人事务不得推进本小时游标', async () => {
+  const review = [{
+    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserIds: ['reviewer-a', 'reviewer-b'],
+    votedReviewerUserIds: [], reviewStartedAt: new Date('2026-08-11T03:00:00.000Z'),
+    reviewElapsedWorkMinutes: 0, nextReminderWorkHour: 1,
+    voteCount: 0, approvedVoteCount: 0
+  }]
+  const { calls } = harness({ review, minutes: 60 })
+  let attempt = 0
+  const original = calls.review
+  // 夹具仓储通过返回值模拟首名审核账号事务失败关闭。
+  const repositoryResults = [{ created: false, fulfilled: false }, { created: true, fulfilled: true }]
+  const serviceWithFailure = createReminderService({
+    reminderRepository: {
+      async listDueProcessingReminders() { return [] },
+      async listDueReviewReminders() { return { items: review, lastScannedRawId: 'round-1' } },
+      async createProcessingReminder() { return { created: false } },
+      async createReviewReminder(value) {
+        original.push(value)
+        return repositoryResults[attempt++]
+      },
+      async advanceReminderCursor() {}
+    },
+    workTimeService: {
+      async isWorkingInstant() { return { status: 'calculated', isWorking: true } },
+      async workingMinutesBetween() { return { status: 'calculated', minutes: 60 } }
+    }
+  })
+  await serviceWithFailure.runReminderCycle({ now: NOW, batchSize: 40 })
+  assert.deepEqual(calls.review.map(item => item.advanceHour), [false, false])
 })
 
 test('日历待补算候选在编排层失败关闭且每周期总候选不超过 40', async () => {

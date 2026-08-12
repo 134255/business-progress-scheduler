@@ -10,6 +10,12 @@ function safeMinutes(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
+function safeElapsedMinutes(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : null
+}
+
 function safeNextHour(value, baseMinutes) {
   if (Number.isSafeInteger(value) && value >= 1) return value
   return Math.floor(baseMinutes / 60) + 1
@@ -33,8 +39,11 @@ function createReminderService({ reminderRepository, workTimeService } = {}) {
     const baseMinutes = safeMinutes(candidate && candidate[elapsedKey])
     if (!validDate(startedAt) || baseMinutes === null || startedAt.getTime() > now.getTime()) return null
     const interval = await workTimeService.workingMinutesBetween(startedAt, now)
-    if (!interval || interval.status !== 'calculated' || safeMinutes(interval.minutes) === null) return null
-    const total = baseMinutes + interval.minutes
+    const intervalMinutes = interval && interval.status === 'calculated'
+      ? safeElapsedMinutes(interval.minutes)
+      : null
+    if (intervalMinutes === null) return null
+    const total = baseMinutes + intervalMinutes
     const nextHour = safeNextHour(candidate[nextHourKey], baseMinutes)
     return total >= nextHour * 60 ? nextHour : null
   }
@@ -54,10 +63,16 @@ function createReminderService({ reminderRepository, workTimeService } = {}) {
       throw new TypeError('processing candidates are invalid')
     }
     const reviewLimit = batchSize - processing.length
-    const review = reviewLimit
+    const reviewPage = reviewLimit
       ? await reminderRepository.listDueReviewReminders({ limit: reviewLimit })
-      : []
-    if (!Array.isArray(review) || review.length > reviewLimit) throw new TypeError('review candidates are invalid')
+      : { items: [], lastScannedRawId: null }
+    if (!reviewPage || !Array.isArray(reviewPage.items) || reviewPage.items.length > reviewLimit ||
+        reviewPage.lastScannedRawId !== null &&
+        (typeof reviewPage.lastScannedRawId !== 'string' ||
+         !/^[A-Za-z0-9_-]{1,128}$/.test(reviewPage.lastScannedRawId))) {
+      throw new TypeError('review candidates are invalid')
+    }
+    const review = reviewPage.items
 
     let processingCreated = 0
     for (const candidate of processing) {
@@ -89,19 +104,24 @@ function createReminderService({ reminderRepository, workTimeService } = {}) {
           ? candidate.votedReviewerUserIds
           : [])
         const reviewers = Array.isArray(candidate.reviewerUserIds) ? candidate.reviewerUserIds : []
-        for (const reviewerUserId of reviewers) {
-          if (voted.has(reviewerUserId)) continue
+        const pendingReviewers = reviewers.filter(reviewerUserId => !voted.has(reviewerUserId))
+        let hourCanAdvance = true
+        for (const [index, reviewerUserId] of pendingReviewers.entries()) {
           const result = await reminderRepository.createReviewReminder({
             reviewRoundId: candidate.reviewRoundId, nodeId: candidate.nodeId,
-            reviewerUserId, accumulatedWorkHour
+            reviewerUserId, accumulatedWorkHour,
+            expectedVoteCount: candidate.voteCount,
+            expectedApprovedVoteCount: candidate.approvedVoteCount,
+            advanceHour: hourCanAdvance && index === pendingReviewers.length - 1
           })
           if (result && result.created === true) reviewCreated += 1
+          if (!result || result.fulfilled !== true) hourCanAdvance = false
         }
       }
     }
-    if (review.length) {
+    if (reviewPage.lastScannedRawId !== null) {
       await reminderRepository.advanceReminderCursor({
-        kind: 'review', cursorId: review.at(-1).reviewRoundId
+        kind: 'review', cursorId: reviewPage.lastScannedRawId
       })
     }
     return { processingCreated, reviewCreated }

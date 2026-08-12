@@ -4,7 +4,10 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const { createFakeCloudDatabase } = require('../../businessApi/test/helpers/fake-cloud-database')
-const { createCloudReminderRepository } = require('../lib/cloud-reminder-repository')
+const {
+  createCloudReminderRepository,
+  reviewNotificationId
+} = require('../lib/cloud-reminder-repository')
 
 const START = new Date('2026-08-11T01:00:00.000Z')
 
@@ -108,22 +111,28 @@ function reviewSeed({ mode = 'all', status = 'pending', vote = true } = {}) {
   }]
   if (vote) data.node_review_votes = [{
     _id: `review-vote-${crypto.createHash('sha256').update('round-1\0reviewer-a').digest('hex')}`,
-    reviewRoundId: 'round-1', reviewerUserId: 'reviewer-a', decision: 'approved'
+    reviewRoundId: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    reviewerUserId: 'reviewer-a', decision: 'approved'
   }]
+  data.node_review_rounds[0].voteCount = data.node_review_votes.length
+  data.node_review_rounds[0].approvedVoteCount = data.node_review_votes.filter(item => item.decision === 'approved').length
   return data
 }
 
 test('会签只提醒未投票审核人并按轮次、审核人和小时去重', async () => {
   const { fake, repository } = harness(reviewSeed())
   assert.deepEqual(await repository.createReviewReminder({
-    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-a', accumulatedWorkHour: 1
+    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-a', accumulatedWorkHour: 1,
+    expectedVoteCount: 1, expectedApprovedVoteCount: 1, advanceHour: false
   }), { created: false })
   assert.deepEqual(await repository.createReviewReminder({
-    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1
-  }), { created: true })
+    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1,
+    expectedVoteCount: 1, expectedApprovedVoteCount: 1, advanceHour: false
+  }), { created: true, fulfilled: true })
   assert.deepEqual(await repository.createReviewReminder({
-    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1
-  }), { created: false })
+    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1,
+    expectedVoteCount: 1, expectedApprovedVoteCount: 1, advanceHour: false
+  }), { created: false, fulfilled: true })
   const note = fake.documents('notifications')[0]
   assert.deepEqual(note.recipientUserIds, ['reviewer-b'])
   assert.match(note._id, /^review-reminder-/)
@@ -133,7 +142,8 @@ test('或签结束、任一驳回后及换轮次均不再创建审核提醒', as
   for (const data of [reviewSeed({ mode: 'any', status: 'approved' }), reviewSeed({ status: 'rejected' })]) {
     const { fake, repository } = harness(data)
     assert.deepEqual(await repository.createReviewReminder({
-      reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1
+      reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1,
+      expectedVoteCount: 1, expectedApprovedVoteCount: 1, advanceHour: true
     }), { created: false })
     assert.equal(fake.documents('notifications').length, 0)
   }
@@ -141,7 +151,8 @@ test('或签结束、任一驳回后及换轮次均不再创建审核提醒', as
   changed.business_nodes[0].activeReviewRoundId = 'round-2'
   const { fake, repository } = harness(changed)
   assert.deepEqual(await repository.createReviewReminder({
-    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1
+    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1,
+    expectedVoteCount: 1, expectedApprovedVoteCount: 1, advanceHour: true
   }), { created: false })
   assert.equal(fake.documents('notifications').length, 0)
 })
@@ -159,10 +170,111 @@ test('审核提醒在轮次模式、轮次编号、截止时间或账号关系�
     const data = reviewSeed(); mutate(data)
     const { fake, repository } = harness(data)
     assert.deepEqual(await repository.createReviewReminder({
-      reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1
+      reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-b', accumulatedWorkHour: 1,
+      expectedVoteCount: 1, expectedApprovedVoteCount: 1, advanceHour: true
     }), { created: false })
     assert.equal(fake.documents('notifications').length, 0)
   }
+})
+
+test('或签已有通过票、任一模式已有驳回票及损坏票据均停止提醒', async () => {
+  const rejected = reviewSeed({ vote: false })
+  rejected.node_review_votes = [{
+    _id: `review-vote-${crypto.createHash('sha256').update('round-1\0reviewer-a').digest('hex')}`,
+    reviewRoundId: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    reviewerUserId: 'reviewer-a', decision: 'rejected'
+  }]
+  rejected.node_review_rounds[0].voteCount = 1
+  rejected.node_review_rounds[0].approvedVoteCount = 0
+  const anyApproved = reviewSeed({ mode: 'any' })
+  const corrupt = reviewSeed()
+  corrupt.node_review_votes[0].decision = 'unknown'
+  for (const data of [rejected, anyApproved, corrupt]) {
+    const { fake, repository } = harness(data)
+    const candidates = await repository.listDueReviewReminders({ limit: 40 })
+    assert.deepEqual(candidates.items, [])
+    const targetReviewer = data === corrupt ? 'reviewer-a' : 'reviewer-b'
+    assert.deepEqual(await repository.createReviewReminder({
+      reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: targetReviewer,
+      accumulatedWorkHour: 1,
+      expectedVoteCount: data.node_review_rounds[0].voteCount,
+      expectedApprovedVoteCount: data.node_review_rounds[0].approvedVoteCount,
+      advanceHour: true
+    }), { created: false })
+    assert.equal(fake.documents('notifications').length, 0)
+  }
+})
+
+test('审核票查询用权威总数拒绝超过审核人数的隐藏票', async () => {
+  const data = reviewSeed({ vote: false })
+  data.node_review_rounds[0].voteCount = 2
+  data.node_review_rounds[0].approvedVoteCount = 0
+  data.node_review_votes = ['reviewer-a', 'reviewer-b', 'reviewer-extra'].map(reviewerUserId => ({
+    _id: `review-vote-${crypto.createHash('sha256').update(`round-1\0${reviewerUserId}`).digest('hex')}`,
+    reviewRoundId: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    reviewerUserId, decision: 'rejected'
+  }))
+  const { repository } = harness(data)
+  const candidates = await repository.listDueReviewReminders({ limit: 40 })
+  assert.deepEqual(candidates.items, [])
+})
+
+test('审核候选整页损坏仍返回原始页末游标并在有限调用到达第41条', async () => {
+  const data = reviewSeed({ vote: false })
+  data.business_nodes = Array.from({ length: 41 }, (_, index) => ({
+    ...data.business_nodes[0], _id: `node-${String(index).padStart(2, '0')}`,
+    nodeCode: `BL-N${index}`, activeReviewRoundId: `round-${String(index).padStart(2, '0')}`
+  }))
+  data.node_review_rounds = Array.from({ length: 41 }, (_, index) => ({
+    ...data.node_review_rounds[0],
+    _id: `round-${String(index).padStart(2, '0')}`,
+    nodeId: `node-${String(index).padStart(2, '0')}`,
+    reviewerUserIds: index < 40 ? null : ['reviewer-a', 'reviewer-b'],
+    voteCount: 0, approvedVoteCount: 0
+  }))
+  data.node_review_votes = []
+  const { repository } = harness(data)
+  const first = await repository.listDueReviewReminders({ limit: 40 })
+  assert.deepEqual(first.items, [])
+  assert.equal(first.lastScannedRawId, 'round-39')
+  await repository.advanceReminderCursor({ kind: 'review', cursorId: first.lastScannedRawId })
+  const second = await repository.listDueReviewReminders({ limit: 40 })
+  assert.deepEqual(second.items.map(item => item.reviewRoundId), ['round-40'])
+  assert.equal(second.lastScannedRawId, 'round-40')
+})
+
+test('损坏审核扫描游标失败关闭', async () => {
+  const data = reviewSeed({ vote: false })
+  data.system_settings = [{
+    _id: 'workflow-reminder-review-cursor', kind: 'workflow_reminder_review', cursorId: '../unsafe'
+  }]
+  const { repository } = harness(data)
+  await assert.rejects(repository.listDueReviewReminders({ limit: 40 }), TypeError)
+})
+
+test('近100名审核人的单次提醒事务保持不超过100次固定文档操作', async () => {
+  const reviewers = Array.from({ length: 96 }, (_, index) => `reviewer-${String(index).padStart(2, '0')}`)
+  const data = reviewSeed({ vote: false })
+  data.users = data.users.filter(user => !user._id.startsWith('reviewer-')).concat(
+    reviewers.map(_id => ({ _id, status: 'active' })))
+  data.business_lines[0].memberUserIds = ['processor-a', 'processor-b', ...reviewers]
+  data.business_nodes[0].reviewerUserIds = reviewers
+  data.node_review_rounds[0].reviewerUserIds = reviewers
+  data.node_review_rounds[0].voteCount = 0
+  data.node_review_rounds[0].approvedVoteCount = 0
+  data.notifications = reviewers.slice(1).map(reviewerUserId => ({
+    _id: reviewNotificationId('round-1', reviewerUserId, 1),
+    type: 'review_reminder', recipientUserIds: [reviewerUserId],
+    businessLineId: 'line-1', nodeId: 'node-1', reviewRoundId: 'round-1',
+    accumulatedWorkHour: 1, status: 'pending', createdAt: START
+  }))
+  const { fake, repository } = harness(data)
+  assert.deepEqual(await repository.createReviewReminder({
+    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: reviewers[0],
+    accumulatedWorkHour: 1, expectedVoteCount: 0, expectedApprovedVoteCount: 0,
+    advanceHour: false
+  }), { created: true, fulfilled: true })
+  assert.ok(fake.transactionRuns.at(-1).operations <= 100)
 })
 
 test('候选读取与扫描游标均受 40 条硬上限约束', async () => {

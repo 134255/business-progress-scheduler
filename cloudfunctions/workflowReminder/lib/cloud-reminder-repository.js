@@ -3,6 +3,7 @@
 const crypto = require('node:crypto')
 
 const MAX_BATCH_SIZE = 40
+const MAX_REVIEWERS = 100
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const ACTIVE_LINE_STATUSES = new Set(['active'])
 const ACTIVE_PROCESSING_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
@@ -50,6 +51,15 @@ function safeHour(value) {
 
 function safeMinutes(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function safeVoteCounts(round, reviewerCount) {
+  const voteCount = round.voteCount === undefined ? 0 : round.voteCount
+  const approvedVoteCount = round.approvedVoteCount === undefined ? 0 : round.approvedVoteCount
+  if (!Number.isSafeInteger(voteCount) || voteCount < 0 ||
+      !Number.isSafeInteger(approvedVoteCount) || approvedVoteCount < 0 ||
+      approvedVoteCount > voteCount || voteCount > reviewerCount) return null
+  return { voteCount, approvedVoteCount }
 }
 
 function digest(parts) {
@@ -137,16 +147,42 @@ function createCloudReminderRepository({ db } = {}) {
         .where({ status: 'pending', reviewDueStatus: 'calculated' })
         .orderBy('_id', 'asc'), limit)
     }
+    const lastScannedRawId = raw.length ? raw.at(-1)._id : null
     const result = []
     for (const round of raw) {
       const reviewers = ownExactIds(round, 'reviewerUserIds', { nonEmpty: true })
-      if (!reviewers) continue
-      const votesResult = await db.collection('node_review_votes')
-        .where({ reviewRoundId: round._id }).limit(reviewers.length + 1).get()
+      const counts = reviewers && safeVoteCounts(round, reviewers.length)
+      if (!reviewers || reviewers.length > MAX_REVIEWERS || !counts ||
+          !['any', 'all'].includes(round.reviewMode) ||
+          typeof round._id !== 'string' || !DOCUMENT_ID.test(round._id) ||
+          typeof round.businessLineId !== 'string' || !DOCUMENT_ID.test(round.businessLineId) ||
+          typeof round.nodeId !== 'string' || !DOCUMENT_ID.test(round.nodeId)) continue
+      const votesQuery = db.collection('node_review_votes').where({ reviewRoundId: round._id })
+      const votesCount = await votesQuery.count()
+      if (!votesCount || votesCount.total !== counts.voteCount) continue
+      const votesResult = await votesQuery.limit(reviewers.length).get()
       const votes = Array.isArray(votesResult && votesResult.data) ? votesResult.data : []
-      if (votes.length > reviewers.length) continue
-      const votedReviewerUserIds = votes.map(vote => vote && vote.reviewerUserId)
-      if (!exactIds(votedReviewerUserIds) || votedReviewerUserIds.some(id => !reviewers.includes(id))) continue
+      if (votes.length !== counts.voteCount) continue
+      let corruptVote = false
+      let approvedVotes = 0
+      const votedReviewerUserIds = []
+      for (const vote of votes) {
+        const reviewerUserId = vote && vote.reviewerUserId
+        if (!vote || vote._id !== voteId(round._id, reviewerUserId) ||
+            vote.reviewRoundId !== round._id || vote.businessLineId !== round.businessLineId ||
+            vote.nodeId !== round.nodeId || !reviewers.includes(reviewerUserId) ||
+            !['approved', 'rejected'].includes(vote.decision) ||
+            votedReviewerUserIds.includes(reviewerUserId)) {
+          corruptVote = true
+          break
+        }
+        votedReviewerUserIds.push(reviewerUserId)
+        if (vote.decision === 'approved') approvedVotes += 1
+      }
+      if (corruptVote || approvedVotes !== counts.approvedVoteCount ||
+          counts.voteCount > counts.approvedVoteCount ||
+          round.reviewMode === 'any' && counts.approvedVoteCount > 0 ||
+          counts.approvedVoteCount === reviewers.length) continue
       result.push({
         reviewRoundId: round._id,
         nodeId: round.nodeId,
@@ -154,10 +190,12 @@ function createCloudReminderRepository({ db } = {}) {
         votedReviewerUserIds,
         reviewStartedAt: round.reviewStartedAt,
         reviewElapsedWorkMinutes: round.reviewElapsedWorkMinutes,
-        nextReminderWorkHour: round.nextReviewReminderWorkHour
+        nextReminderWorkHour: round.nextReviewReminderWorkHour,
+        voteCount: counts.voteCount,
+        approvedVoteCount: counts.approvedVoteCount
       })
     }
-    return result
+    return { items: result, lastScannedRawId }
   }
 
   async function createProcessingReminder(value = {}) {
@@ -215,9 +253,18 @@ function createCloudReminderRepository({ db } = {}) {
 
   async function createReviewReminder(value = {}) {
     const hour = safeHour(value.accumulatedWorkHour)
+    const expectedVoteCount = Number.isSafeInteger(value.expectedVoteCount) && value.expectedVoteCount >= 0
+      ? value.expectedVoteCount
+      : null
+    const expectedApprovedVoteCount = Number.isSafeInteger(value.expectedApprovedVoteCount) &&
+      value.expectedApprovedVoteCount >= 0
+      ? value.expectedApprovedVoteCount
+      : null
     if (typeof value.reviewRoundId !== 'string' || !DOCUMENT_ID.test(value.reviewRoundId) ||
         typeof value.nodeId !== 'string' || !DOCUMENT_ID.test(value.nodeId) ||
-        typeof value.reviewerUserId !== 'string' || !DOCUMENT_ID.test(value.reviewerUserId) || hour === null) {
+        typeof value.reviewerUserId !== 'string' || !DOCUMENT_ID.test(value.reviewerUserId) || hour === null ||
+        expectedVoteCount === null || expectedApprovedVoteCount === null ||
+        expectedApprovedVoteCount > expectedVoteCount || typeof value.advanceHour !== 'boolean') {
       throw new TypeError('review reminder input is invalid')
     }
     const notificationId = reviewNotificationId(value.reviewRoundId, value.reviewerUserId, hour)
@@ -240,13 +287,26 @@ function createCloudReminderRepository({ db } = {}) {
       const lineMembers = ownExactIds(line, 'memberUserIds', { nonEmpty: true })
       const lineManagers = ownExactIds(line, 'managerUserIds', { nonEmpty: true })
       if (!nodeReviewers || !roundReviewers || !lineMembers || !lineManagers ||
+          roundReviewers.length > MAX_REVIEWERS ||
           nodeReviewers.length !== roundReviewers.length ||
           nodeReviewers.some((id, index) => id !== roundReviewers[index]) ||
           !roundReviewers.includes(value.reviewerUserId) ||
           roundReviewers.some(id => !lineMembers.includes(id))) return { created: false }
+      const counts = safeVoteCounts(round, roundReviewers.length)
+      if (!counts || counts.voteCount !== expectedVoteCount ||
+          counts.approvedVoteCount !== expectedApprovedVoteCount ||
+          counts.voteCount > counts.approvedVoteCount ||
+          round.reviewMode === 'any' && counts.approvedVoteCount > 0 ||
+          counts.approvedVoteCount === roundReviewers.length) return { created: false }
       const account = await readDocument(transaction, 'users', value.reviewerUserId)
       if (!account || account.status !== 'active') return { created: false }
-      if (await readDocument(transaction, 'node_review_votes', voteId(round._id, value.reviewerUserId))) {
+      const targetVoteId = voteId(round._id, value.reviewerUserId)
+      const targetVote = await readDocument(transaction, 'node_review_votes', targetVoteId)
+      if (targetVote && (targetVote._id !== targetVoteId || targetVote.reviewRoundId !== round._id ||
+          targetVote.businessLineId !== line._id || targetVote.nodeId !== node._id ||
+          targetVote.reviewerUserId !== value.reviewerUserId ||
+          !['approved', 'rejected'].includes(targetVote.decision))) return { created: false }
+      if (targetVote) {
         return { created: false }
       }
       const baseMinutes = safeMinutes(round.reviewElapsedWorkMinutes)
@@ -255,6 +315,16 @@ function createCloudReminderRepository({ db } = {}) {
         : safeHour(round.nextReviewReminderWorkHour)
       if (storedNextHour === null || storedNextHour !== hour) return { created: false }
       const existing = await readDocument(transaction, 'notifications', notificationId)
+      if (existing) {
+        const recipients = ownExactIds(existing, 'recipientUserIds', { nonEmpty: true })
+        if (existing._id !== notificationId || existing.type !== 'review_reminder' ||
+            !recipients || recipients.length !== 1 || recipients[0] !== value.reviewerUserId ||
+            existing.businessLineId !== line._id || existing.nodeId !== node._id ||
+            existing.reviewRoundId !== round._id || existing.accumulatedWorkHour !== hour ||
+            existing.status !== 'pending') {
+          return { created: false }
+        }
+      }
       if (!existing) {
         await transaction.collection('notifications').doc(notificationId).set({ data: {
           type: 'review_reminder',
@@ -267,24 +337,13 @@ function createCloudReminderRepository({ db } = {}) {
           createdAt: db.serverDate()
         } })
       }
-      let hourComplete = true
-      for (const reviewerUserId of roundReviewers) {
-        const vote = await readDocument(transaction, 'node_review_votes', voteId(round._id, reviewerUserId))
-        if (vote) continue
-        const reviewerNotificationId = reviewNotificationId(round._id, reviewerUserId, hour)
-        if (reviewerNotificationId === notificationId && !existing) continue
-        if (!await readDocument(transaction, 'notifications', reviewerNotificationId)) {
-          hourComplete = false
-          break
-        }
-      }
-      if (hourComplete) {
+      if (value.advanceHour) {
         await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
           nextReviewReminderWorkHour: hour + 1,
           updatedAt: db.serverDate()
         } })
       }
-      return { created: !existing }
+      return { created: !existing, fulfilled: true }
     })
   }
 
