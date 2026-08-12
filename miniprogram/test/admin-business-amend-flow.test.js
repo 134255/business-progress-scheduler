@@ -295,6 +295,34 @@ test('冻结业务审计凭证预览失败只显示中文安全提示', async ()
   assert.doesNotMatch(JSON.stringify(toasts), /FORBIDDEN|cloud:\/\//)
 })
 
+for (const failure of [
+  {
+    name: '下载失败',
+    wx: { downloadFile: async () => { throw new Error('下载失败 errCode:-1 cloud://secret/download') } }
+  },
+  {
+    name: '打开失败',
+    wx: {
+      downloadFile: async () => ({ tempFilePath: 'wxfile://temporary.pdf' }),
+      openDocument: async () => { throw new Error('打开失败 errCode:1006 cloud://secret/open') }
+    }
+  }
+]) {
+  test(`冻结业务审计凭证${failure.name}固定显示中文兜底且不泄漏详情`, async () => {
+    const toasts = []
+    global.getApp = () => ({ globalData: { currentUser: activeUser('super_admin', 'root') } })
+    global.wx = { showToast: options => toasts.push(options), ...failure.wx }
+    const page = loadPage('pages/admin-business-amend/index.js', {
+      getEvidenceAccess: async () => ({ category: 'pdf', url: 'https://temporary/evidence.pdf' })
+    })
+
+    await page.previewEvidence({ currentTarget: { dataset: { evidenceid: 'evidence-1', status: 'available' } } })
+
+    assert.deepEqual(toasts, [{ title: '凭证暂时无法打开', icon: 'none' }])
+    assert.doesNotMatch(JSON.stringify(toasts), /errCode|cloud:\/\//)
+  })
+}
+
 test('普通用户不能打开超级管理员冻结修订页', async () => {
   const launches = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })

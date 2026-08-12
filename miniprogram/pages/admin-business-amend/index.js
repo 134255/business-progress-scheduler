@@ -1,5 +1,4 @@
 const businessService = require('../../services/business')
-const { safeErrorMessage } = require('../../utils/safe-error')
 
 const MEBIBYTE = 1024 * 1024
 const TOTAL_LIMIT = 20 * MEBIBYTE
@@ -301,7 +300,7 @@ Page({
         await wx.openDocument({ filePath: downloaded.tempFilePath, fileType: 'pdf', showMenu: true })
       }
     } catch (error) {
-      wx.showToast({ title: safeErrorMessage(error, '凭证暂时无法打开'), icon: 'none' })
+      wx.showToast({ title: '凭证暂时无法打开', icon: 'none' })
     }
   }
 })
