@@ -17,8 +17,12 @@ function invalidResponse() {
   return new Error('invalid holiday response')
 }
 
+function matchesRequestedYear(value, requestedYear) {
+  return value === requestedYear || value === String(requestedYear)
+}
+
 function normalizePayload(payload, requestedYear) {
-  if (!payload || typeof payload !== 'object' || payload.code !== 0 || payload.year !== requestedYear ||
+  if (!payload || typeof payload !== 'object' || payload.code !== 0 || !matchesRequestedYear(payload.year, requestedYear) ||
       !Number.isSafeInteger(payload.count) || !Array.isArray(payload.data) || payload.count !== payload.data.length) {
     throw invalidResponse()
   }

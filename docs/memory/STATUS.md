@@ -2,6 +2,8 @@
 
 Status captured: 2026-08-12 (Asia/Shanghai)
 
+- 2026-08-12 真实 CloudBase 人工工作日历同步发现 AILCC `allyear` 响应年份契约兼容问题：官方接口文档使用四位数字字符串（如 `"2026"`），原解析器只接受数字，导致合法响应被按年份安全归类为 `SYNC_FAILED`。本轮按 RED→GREEN 将解析边界收紧为“严格相等的安全整数或其精确十进制字符串”，继续拒绝空白、前导零、小数、符号、错年及其他类型；内部年份和持久化结构仍为数字，全年日期、计数、唯一性与 `is_holiday` 0/1 校验不变。RED 为聚焦 7 项中 1 项预期失败；GREEN 为聚焦 7/7、`calendarSync` 49/49、`businessApi` 490/490、`workflowReminder` 29/29、`evidenceRetention` 37/37、小程序 134/134、WXML 4/4。目标环境已人工确认四个云函数上传、`businessApi` 与 `calendarSync` 超时 60 秒，以及三个定时函数空触发器；修复后的 `calendarSync` 重新部署和真实 2026/2027 数据同步仍未验证，第三方接口不可用或下一年度数据未发布时应继续逐年安全失败。
+
 - 2026-08-12 节点独立审核流程 Task 11-R2 修复轮次 1 已解决旧版保留游标升级阻塞。新版游标明确区分 `schemaVersion: 2` 与独立乐观 `revision`；读取严格合法的旧 `{phase, afterId}` 时，在小事务内 CAS 自动迁移到同 phase 起点，不用旧编号推断到期排序值，只保存 SHA-256 摘要和安全迁移标志。并发迁移恰一写；CAS 竞争可安全重复交付已读页面但不额外扫描，确定性提醒/预约/租约保持幂等；损坏旧游标、新版游标损坏和修订溢出继续失败关闭。完整本地回归：`businessApi` 490/490、`calendarSync` 47/47、`workflowReminder` 29/29、`evidenceRetention` 37/37、小程序 134/134、WXML 4/4；真实 CloudBase 事务冲突行为、游标迁移、复合索引选择、云函数部署和触发器仍未验证，`evidenceRetention` 继续保持 `triggers: []`。完整证据记录在 `.superpowers/sdd/2026-08-11-node-review-workflow/task-11-r2-report.md`。
 
 - 2026-08-12 节点独立审核流程 Task 11-R2 已修复最终复审遗留的两项保留工作器 Important。生产入口、服务默认值与合法批次统一为 1—40，生产默认装配空扫描回归不再以 50 触发仓库拒绝；所有范围阶段按其权威到期/租约字段升序再按 `_id` 升序，持久游标保存严格可序列化的 `afterSortValue + afterId`，CloudBase 无元组 OR 时以两段有界查询实现严格后继且合计原始扫描不超过 40。回归覆盖相同到期值跨页不丢不重、排序值与编号混排、损坏游标失败关闭、40 条坏记录后第 41 条可达、页尾轮转/回绕、崩溃重交付及查询排序/手册索引一致。完整本地回归：`businessApi` 490/490、`calendarSync` 47/47、`workflowReminder` 29/29、`evidenceRetention` 32/32、小程序 134/134、WXML 4/4；真实 CloudBase 两段范围查询的复合索引选择、云函数部署和触发器仍未验证，`evidenceRetention` 继续保持 `triggers: []`。RED/GREEN 与最终证据记录在 `.superpowers/sdd/2026-08-11-node-review-workflow/task-11-r2-report.md`。

@@ -54,6 +54,22 @@ test('通过内置 HTTPS 获取并规范化完整全年数据', async () => {
   assert.match(result.sourceVersion, /^ailcc:2026:[a-f0-9]{64}$/)
 })
 
+test('接受 AILCC 文档定义的四位字符串年份并保持内部年份为数字', async () => {
+  const body = JSON.stringify(payload(2026, { year: '2026' }))
+  const client = createHolidayApiClient({ httpsModule: fakeHttps({ body }) })
+  const result = await client.fetchYear(2026)
+  assert.equal(result.year, 2026)
+  assert.equal(result.days.length, 365)
+})
+
+test('拒绝可被宽松转换但不符合接口契约的年份形式', async () => {
+  for (const year of [' 2026', '02026', '2026.0', '+2026', '', null, true]) {
+    const invalid = payload(2026, { year })
+    const client = createHolidayApiClient({ httpsModule: fakeHttps({ body: JSON.stringify(invalid) }) })
+    await assert.rejects(client.fetchYear(2026), /invalid holiday response/)
+  }
+})
+
 test('拒绝接口非零状态码和响应年份不一致', async () => {
   for (const invalid of [payload(2026, { code: 1 }), payload(2026, { year: 2025 })]) {
     const client = createHolidayApiClient({ httpsModule: fakeHttps({ body: JSON.stringify(invalid) }) })
