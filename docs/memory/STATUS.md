@@ -2,6 +2,8 @@
 
 Status captured: 2026-08-12 (Asia/Shanghai)
 
+- 2026-08-12 节点独立审核流程 Task 11 正式修复轮次 1 已完成。RED 稳定复现：部署手册曾在隔离验收后要求写入非空 `evidenceRetention` 触发器；新版审核当前节点仍可显示并调用旧“驳回上一节点”路径。GREEN 已删除本次所有非空 `evidenceRetention` 操作，仅允许核验或恢复 `triggers: []`，并将 `calendarSync` 每日同步、`workflowReminder` 小时提醒改为隔离验收后独立批准；备份允许尚未创建的审核/日历新集合并完整覆盖 `work_calendar_entries`、`work_calendar_years`、`calendar_sync_requests`，不再把 `work_calendar` 作为当前主存储；索引表按真实 `.where().orderBy()` 增补审核待办、投票、双提醒扫描、待补算扫描和通知分页复合索引，并由文档契约测试防漂移。真实反馈服务证明旧节点仍可完成，新审核节点的旧完成与旧驳回均在服务端失败关闭，业务详情也不再展示旧驳回；跨包测试使用真实处理/审核提醒编号及实际 `evidence-retention:` 前缀验证不碰撞。隔离验收矩阵新增末节点审核完成及轮次、投票、审计、结果通知、双 SLA、待补算恢复和原凭证引用的集中核对；发布记录为 `businessApi` 与 `evidenceRetention` 增加“未验证”。本地完整回归：`businessApi` 479/479、`calendarSync` 47/47、`workflowReminder` 28/28、`evidenceRetention` 19/19、小程序 134/134、WXML 4/4，7 个变更 JavaScript 语法检查、`git diff --check` 和项目记忆校验均通过（npm 仅输出既有 malformed user-config 警告）。真实 CloudBase 集合/索引/云函数/触发器、微信开发者工具、多账号并发和工作日历数据覆盖均未验证，必须由目标环境操作员按手册逐项验收。
+
 ## Verified state
 
 - 2026-08-12 节点独立审核流程 Task 11 完成最终兼容、安全回归与部署验收资料。本地兼容矩阵覆盖旧节点经受保护反馈流程读取且不补造审核轮次、新审核节点不出现旧直接完成/驳回入口且不能通过未知旧路由伪造轮次；提交、投票与幂等重试对账号停用、关系移除、角色/模式变化、业务冻结和版本变化均以既有安全错误失败关闭且不写入；审核详情投影不返回凭据、OpenID、云文件编号、哈希、租约或请求摘要；处理/审核提醒以不同确定性编号保留；日历缺失不阻断业务创建、审核提交、驳回返工或节点推进，只保留待补算边界。中文部署手册已补充 `node_review_rounds`、`node_review_votes`、`work_calendar`，`node_review_votes(reviewRoundId ASC, reviewerUserId ASC)` 唯一索引，审核轮次节点时间线/业务状态/审核人待办与投票业务节点时间线索引，以及 `businessApi`、`calendarSync`、`workflowReminder` 的上传、空触发器、隔离验收和回退顺序；`evidenceRetention` 继续保持 `triggers: []`。本地完整回归：`businessApi` 477/477、`calendarSync` 47/47、`workflowReminder` 28/28、`evidenceRetention` 19/19、小程序 133/133、WXML 4/4；5 个 JavaScript 语法检查、`git diff --check` 和项目记忆校验均通过（npm 仅输出既有 malformed user-config 警告）。真实 CloudBase 集合、索引、云函数、触发器、微信开发者工具、多账号并发和工作日历数据覆盖均未验证，必须由目标环境操作员按手册逐项验收。
@@ -796,7 +798,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. 由目标环境操作员按 `docs/deployment/template-node-fields-setup.md` 从备份可读性开始，依次完成唯一值检查、索引、`businessApi` 和 `evidenceRetention` 上传；每日触发器先保持停用。
-2. 使用隔离测试业务、测试账号和无敏感测试文件完成手册验收矩阵，确认重复调用幂等后再启用每日触发器；逐项把未验证结果更新为通过或失败。
-3. 继续节点独立审核流程 Task 8，将已完成的提交审核与投票流转接入受保护路由、审核待办和审核页面；提醒工作器仍按后续任务推进。
+1. 由目标环境操作员按 `docs/deployment/template-node-fields-setup.md` 从备份可读性开始，依次完成唯一值检查、全部精确复合索引与四个云函数上传；`calendarSync`、`workflowReminder`、`evidenceRetention` 均先核验或恢复为 `triggers: []`。
+2. 使用隔离测试业务、测试账号和无敏感测试文件完成手册验收矩阵，特别核对末节点审核完成、轮次/投票/审计/结果通知、双 SLA、待补算恢复与原凭证引用；逐项把未验证结果更新为通过或失败。
+3. 取得单独批准且隔离验收通过后，依次单独启用 `calendarSync` 每日同步和 `workflowReminder` 小时提醒并核对时区、下一次触发时间和脱敏日志；本次 `evidenceRetention` 保持 `triggers: []`。
 4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。

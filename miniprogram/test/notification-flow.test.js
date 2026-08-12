@@ -2,6 +2,10 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const {
+  processingNotificationId,
+  reviewNotificationId
+} = require('../../cloudfunctions/workflowReminder/lib/cloud-reminder-repository')
 
 const miniProgramRoot = path.resolve(__dirname, '..')
 
@@ -70,20 +74,34 @@ test('通知列表分页去重、进入时标记已读且导航只使用服务�
   assert.equal(page.data.items[0].body, undefined)
 })
 
-test('处理与审核提醒通知以不同服务端编号保留，不会在客户端列表互相覆盖', async () => {
+test('处理、审核和凭证保留提醒采用实际生产编号与类型且不会跨包碰撞', async () => {
+  const processingId = processingNotificationId('YW-1-N001', 1)
+  const reviewId = reviewNotificationId('round-1', 'user-1', 1)
+  const retentionSource = fs.readFileSync(path.resolve(miniProgramRoot,
+    '../cloudfunctions/evidenceRetention/lib/cloud-retention-repository.js'), 'utf8')
+  const retentionId = 'evidence-retention:line-1:15'
+
+  assert.match(processingId, /^processing-reminder-[a-f0-9]{48}$/)
+  assert.match(reviewId, /^review-reminder-[a-f0-9]{48}$/)
+  assert.notEqual(processingId, reviewId)
+  assert.ok(!processingId.startsWith('evidence-retention:'))
+  assert.ok(!reviewId.startsWith('evidence-retention:'))
+  assert.match(retentionSource, /`evidence-retention:\$\{candidateLine\._id\}:\$\{days\}`/)
+
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = { reLaunch: () => {}, navigateTo: () => {}, showToast: () => {} }
   const page = loadPage('pages/notification-list/index.js', {
     listMyNotifications: async () => ({ items: [
-      { notificationId: 'processing-reminder-node-1-hour-1', type: 'node_processing_reminder', read: false },
-      { notificationId: 'review-reminder-round-1-user-1-hour-1', type: 'node_review_reminder', read: false }
+      { notificationId: processingId, type: 'processing_reminder', read: false },
+      { notificationId: reviewId, type: 'review_reminder', read: false },
+      { notificationId: retentionId, type: 'evidence_retention', read: false }
     ], hasMore: false })
   })
 
   await page.onShow()
 
   assert.deepEqual(page.data.items.map(item => item.notificationId), [
-    'processing-reminder-node-1-hour-1', 'review-reminder-round-1-user-1-hour-1'
+    processingId, reviewId, retentionId
   ])
 })
 

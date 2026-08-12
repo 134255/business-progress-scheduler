@@ -116,6 +116,7 @@ Page({
     const isCurrentAssignee = Boolean(user && accountAssignees.includes(user._id))
     const canRejectPrevious = Boolean(
       line && line.status === 'active' && currentNode && previousNode &&
+      currentNode.workflowMode !== 'review' &&
       currentNode._id === line.currentNodeId && ACTIVE_NODE_STATUSES.has(currentNode.status) &&
       previousNode.status === 'completed' && isCurrentAssignee
     )

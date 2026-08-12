@@ -1,8 +1,11 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
 const Module = require('node:module')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 const { APPLICATION_ERROR_MARKER } = require('../lib/cloud-template-repository')
+const { createFeedbackService } = require('../lib/feedback-service')
 
 const originalLoad = Module._load
 const defaultFake = createFakeCloudDatabase({
@@ -23,6 +26,35 @@ Module._load = function loadWithCloudStub(request, parent, isMain) {
 }
 const { createBusinessApi, createDefaultLegacyRoutes, isPublicAction, main } = require('../index')
 Module._load = originalLoad
+
+test('部署手册与审核查询、触发器和实际日历集合保持契约一致', () => {
+  const repositoryRoot = path.resolve(__dirname, '../../..')
+  const manual = fs.readFileSync(path.join(repositoryRoot, 'docs/deployment/template-node-fields-setup.md'), 'utf8')
+  const reminderSource = fs.readFileSync(path.join(repositoryRoot,
+    'cloudfunctions/workflowReminder/lib/cloud-reminder-repository.js'), 'utf8')
+  const reviewSource = fs.readFileSync(path.join(repositoryRoot,
+    'cloudfunctions/businessApi/lib/cloud-review-repository.js'), 'utf8')
+
+  assert.doesNotMatch(manual, /evidence-retention-daily|evidenceRetention[\s\S]{0,120}(Cron|timer)/)
+  for (const collection of ['work_calendar_entries', 'work_calendar_years', 'calendar_sync_requests']) {
+    assert.match(manual, new RegExp('`' + collection + '`'))
+  }
+  for (const index of [
+    'reviewerUserIds` 升序、`status` 升序、`createdAt` 降序、`_id` 升序',
+    'reviewRoundId` 升序、`createdAt` 升序、`_id` 升序',
+    'workflowMode` 升序、`processingDueStatus` 升序、`_id` 升序',
+    'status` 升序、`reviewDueStatus` 升序、`_id` 升序',
+    'processingDueStatus` 升序、`_id` 升序',
+    'reviewDueStatus` 升序、`_id` 升序',
+    'recipientUserIds` 升序、`createdAt` 降序、`_id` 升序',
+    'audienceRole` 升序、`createdAt` 降序、`_id` 升序'
+  ]) assert.match(manual, new RegExp(index.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+
+  assert.match(reminderSource, /workflowMode: 'review', processingDueStatus: 'calculated'/)
+  assert.match(reminderSource, /status: 'pending', reviewDueStatus: 'calculated'/)
+  assert.match(reviewSource, /reviewerUserIds: account\._id, status: 'pending'/)
+  assert.match(reviewSource, /where\(\{ reviewRoundId \}\)[\s\S]*?orderBy\('createdAt', 'asc'\)[\s\S]*?orderBy\('_id', 'asc'\)/)
+})
 
 test('only session and credential-establishment actions are public', () => {
   assert.equal(isPublicAction('getSession'), true)
@@ -574,14 +606,25 @@ test('legacy feedback write and history handlers are absent after protected-rout
   assert.equal(Object.hasOwn(routes, 'getNodeHistory'), false)
 })
 
-test('旧节点可继续经受保护反馈入口运行，但新版审核节点不能借旧入口伪造审核轮次', async () => {
+test('旧节点可继续经真实反馈服务完成，新版审核节点拒绝旧完成和旧驳回入口', async () => {
   const calls = []
-  const feedbackService = {
-    async submitFeedback(value) {
-      calls.push(value)
-      return { feedbackId: 'legacy-feedback-1', revision: 1 }
+  const feedbackService = createFeedbackService({
+    repository: {
+      async findPublishedFeedback() { return null },
+      async getSubmissionContext({ nodeId }) {
+        return {
+          node: nodeId === 'review-node'
+            ? { _id: nodeId, workflowMode: 'review', fieldDefinitions: [], requiresEvidence: false }
+            : { _id: nodeId, fieldDefinitions: [], requiresEvidence: false },
+          evidences: []
+        }
+      },
+      async commitFeedback(value) {
+        calls.push(value)
+        return { feedbackId: 'legacy-feedback-1', revision: 1 }
+      }
     }
-  }
+  })
   const harness = createRouteHarness({ feedbackService })
   const legacyResult = await harness.api.main({
     action: 'submitFeedback',
@@ -595,10 +638,18 @@ test('旧节点可继续经受保护反馈入口运行，但新版审核节点�
       businessLineId: 'new-line', nodeId: 'review-node', expectedNodeVersion: 4, requestKey: 'forged-round'
     }
   })
+  const reviewCompletion = await harness.api.main({
+    action: 'submitFeedback',
+    payload: {
+      businessLineId: 'new-line', nodeId: 'review-node', expectedNodeVersion: 4,
+      status: 'completed', fieldValues: [], comment: '', evidenceIds: [], requestKey: 'review-complete'
+    }
+  })
 
   assert.equal(legacyResult.ok, true)
   assert.equal(calls.length, 1)
   assert.deepEqual(forgedRound, { ok: false, code: 'UNKNOWN_ACTION', message: 'Unsupported action' })
+  assert.equal(reviewCompletion.code, 'NODE_PENDING_REVIEW')
 })
 
 test('旧业务写入与删除入口在受保护生命周期接口接管后不可部署', () => {

@@ -71,6 +71,31 @@ function reviewNode(overrides = {}) {
   }
 }
 
+test('新版审核当前节点不提供旧的上一节点驳回入口，旧节点仍按既有权限判断', () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser('processor-1') } })
+  global.wx = { reLaunch: () => {} }
+  const page = loadPage('pages/business-detail/index.js', {})
+  const reviewProjection = page.presentDetail({
+    line: { _id: 'line-1', status: 'active', currentNodeId: 'current-review' },
+    nodes: [
+      { _id: 'previous', sequence: 1, status: 'completed', assigneeUserIds: ['processor-0'] },
+      { _id: 'current-review', sequence: 2, status: 'in_progress', workflowMode: 'review', assigneeUserIds: ['processor-1'] }
+    ]
+  })
+  const legacyProjection = page.presentDetail({
+    line: { _id: 'line-1', status: 'active', currentNodeId: 'current-legacy' },
+    nodes: [
+      { _id: 'previous', sequence: 1, status: 'completed', assigneeUserIds: ['processor-0'] },
+      { _id: 'current-legacy', sequence: 2, status: 'in_progress', assigneeUserIds: ['processor-1'] }
+    ]
+  })
+
+  assert.equal(reviewProjection.canRejectPrevious, false)
+  assert.equal(legacyProjection.canRejectPrevious, true)
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/business-detail/index.wxml'), 'utf8')
+  assert.match(wxml, /wx:if="\{\{canRejectPrevious\}\}"/)
+})
+
 test('业务服务的六个审核方法只透传业务参数并安全映射错误', async () => {
   const calls = []
   const cloud = {

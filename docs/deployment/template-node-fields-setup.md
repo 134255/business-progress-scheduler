@@ -38,7 +38,9 @@
 - `audit_logs`
 - `node_review_rounds`
 - `node_review_votes`
-- `work_calendar`
+- `work_calendar_entries`
+- `work_calendar_years`
+- `calendar_sync_requests`
 
 对每份导出执行以下检查：
 
@@ -47,7 +49,7 @@
 3. 对比控制台记录数与导出记录数；若导出工具采用分片，核对所有分片总数。
 4. 把备份保存到受控位置，不提交 Git，不通过普通聊天发送。
 
-任一集合导出失败、无法读取或数量不一致时停止部署。
+`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years` 与 `calendar_sync_requests` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
 
 ## 三、集合准备
 
@@ -67,7 +69,6 @@
 | `calendar_sync_requests` | 超级管理员人工同步的短效一次性票据 |
 | `node_review_rounds` | 节点处理提交后的独立审核轮次、双 SLA 快照和结论 |
 | `node_review_votes` | 每位审核人的确定性不可变投票 |
-| `work_calendar` | 目标环境兼容工作日历集合（若当前日历部署仍使用该名称） |
 | `system_settings` | 账号守卫及日历补算的无业务内容持久游标 |
 | `notifications` | 站内通知和凭证到期提醒 |
 | `audit_logs` | 模板、业务、反馈、修订和清理审计 |
@@ -112,14 +113,19 @@
 | `template_nodes` | `templateId` 升序、`sequence` 升序 | 否 | 模板节点有序读取 |
 | `business_nodes` | `nodeCode` 升序 | 是 | 节点编号最终防重 |
 | `business_nodes` | `businessLineId` 升序、`sequence` 升序 | 否 | 业务节点时间线 |
+| `business_nodes` | `workflowMode` 升序、`processingDueStatus` 升序、`_id` 升序 | 否 | 审核节点处理提醒有界扫描 |
 | `business_nodes` | `processingTimingStatus` 升序、`_id` 升序 | 否 | 待审核节点的处理工作分钟待补算扫描 |
+| `business_nodes` | `processingDueStatus` 升序、`_id` 升序 | 否 | 日历恢复后的处理截止时间补算扫描 |
 | `node_review_rounds` | `nodeId` 升序、`reviewRoundNumber` 升序 | 否 | 节点审核轮次时间线 |
 | `node_review_rounds` | `businessLineId` 升序、`status` 升序、`updatedAt` 降序 | 否 | 业务状态下的审核轮次查询 |
-| `node_review_rounds` | `reviewerUserIds` 升序、`status` 升序、`createdAt` 降序 | 否 | 审核人待办列表 |
+| `node_review_rounds` | `reviewerUserIds` 升序、`status` 升序、`createdAt` 降序、`_id` 升序 | 否 | 审核人待办列表 |
+| `node_review_rounds` | `status` 升序、`reviewDueStatus` 升序、`_id` 升序 | 否 | 审核提醒有界扫描 |
+| `node_review_rounds` | `reviewDueStatus` 升序、`_id` 升序 | 否 | 日历恢复后的审核截止时间补算扫描 |
 | `node_review_rounds` | `processingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的处理时长补算扫描 |
 | `node_review_rounds` | `reviewTimingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的审核时长补算扫描 |
 | `node_review_votes` | `businessLineId` 升序、`nodeId` 升序、`createdAt` 升序 | 否 | 业务节点投票时间线 |
 | `node_review_votes` | `reviewRoundId` 升序、`reviewerUserId` 升序 | 是 | 每名审核人每轮唯一投票 |
+| `node_review_votes` | `reviewRoundId` 升序、`createdAt` 升序、`_id` 升序 | 否 | 审核详情投票时间线 |
 | `node_feedback` | `nodeId` 升序、`revision` 降序 | 否 | 节点反馈历史 |
 | `evidences` | `businessLineId` 升序、`nodeId` 升序、`uploadedAt` 降序 | 否 | 业务节点凭证历史 |
 | `evidences` | `storageStatus` 升序、`purgeDueAt` 升序 | 否 | 到期凭证治理 |
@@ -128,6 +134,8 @@
 | `evidences` | `amendmentId` 升序、`_id` 升序 | 否 | 定时工作器分块恢复修订预约 |
 | `audit_logs` | `targetType` 升序、`targetId` 升序、`createdAt` 降序 | 否 | 对象审计历史 |
 | `audit_logs` | `targetId` 升序、`createdAt` 降序 | 否 | 冻结业务修订详情 |
+| `notifications` | `recipientUserIds` 升序、`createdAt` 降序、`_id` 升序 | 否 | 当前账号通知分页 |
+| `notifications` | `audienceRole` 升序、`createdAt` 降序、`_id` 升序 | 否 | 超级管理员广播通知分页 |
 | `work_calendar_entries` | `sourceYear` 升序、`generationId` 升序、`date` 升序 | 否 | 同版本全年完整性的有界分页校验 |
 
 `work_calendar_entries` 索引未在真实 CloudBase 验证前，不得将日历同步标记为可部署通过；索引错误应保留旧活动代际并返回安全失败。
@@ -193,20 +201,9 @@
 
 ## 十、配置触发器
 
-腾讯云定时触发器使用七段 Cron，顺序为“秒、分、时、日、月、周、年”，不能使用 Linux 五段格式。
+首次隔离验收前及本次节点审核部署验收期间，依次打开 `calendarSync`、`workflowReminder` 和 `evidenceRetention` 的“触发管理/触发器”，核对并保存为 `{"triggers": []}`。若发现遗留非空配置，仅恢复空数组并记录脱敏变更；本次不得为 `evidenceRetention` 创建、预创建或保存任何非空触发器配置。
 
-1. 先确认 `calendarSync`、`workflowReminder`、`evidenceRetention` 均为 `{"triggers": []}`。
-2. 进入 CloudBase 控制台“云函数 → `evidenceRetention` → 触发管理/触发器”。
-3. 若页面提供独立启停开关，可先创建名为 `evidence-retention-daily` 的停用触发器。目标环境当前展示的是内联 JSON 编辑器，没有独立启停开关；在隔离验收前必须保持 `{"triggers": []}` 并保存，不得预先写入会立即生效的 Cron。
-4. 隔离验收全部通过后，再在内联 JSON 中只添加一个 `name` 为 `evidence-retention-daily`、`type` 为 `timer` 的触发器。
-5. 在页面上确认并记录触发器时区：
-   - 若明确显示亚洲/上海或 UTC+8，每天 02:15 使用 `0 15 2 * * * *`。
-   - 若明确显示 UTC，每天中国时间 02:15 使用 `0 15 18 * * * *`。
-6. 只创建一个每日触发器，禁止同时保留 UTC 和 UTC+8 两个表达式。
-7. 保存后核对控制台显示的“下一次触发时间”确实对应中国时间 02:15。
-8. 完成本手册隔离验收后再保存非空触发器配置；若需立即停用，将配置恢复为 `{"triggers": []}` 并保存。
-
-验收全部通过后，按顺序分别批准 `calendarSync` 的每日同步触发器和 `workflowReminder` 的小时级提醒触发器；每次只启用一个函数并核对下一次触发时间、时区和脱敏日志，再继续下一项。`evidenceRetention` 的 `triggers: []` 在本次节点审核部署验收中保持不变。
+隔离验收全部通过并取得单独批准后，才可按顺序单独处理 `calendarSync` 的每日同步触发器和 `workflowReminder` 的小时级提醒触发器：每次只启用一个函数，使用已批准的目标时刻，在控制台核对时区、下一次触发时间和脱敏日志后，再决定下一项。`evidenceRetention` 在本次仍保持 `triggers: []`；需要改变其调度策略属于后续独立变更，不包含在本手册的部署范围。
 
 触发器会异步调用函数，平台可能重试，因此工作器以确定性提醒编号、短期清理租约和幂等状态转换防止重复处理。
 
@@ -230,10 +227,13 @@
 |---|---|---|---|
 | 节点独立审核 | 隔离模板配置处理人和不重叠审核人，处理人保存进度后提交审核 | 新节点不出现旧直接完成/旧驳回入口，审核轮次由服务端建立 | 未验证 |
 | 或签与会签 | 分别以隔离账号执行任一通过与全员通过 | 或签任一通过、会签全员通过；投票唯一且重复请求幂等 | 未验证 |
+| 末节点审核完成 | 让隔离业务的最后一个审核节点获得通过，并重新进入业务详情 | 仅在末节点审核通过后业务变为 `completed`，当前节点清空或呈现服务端终态；处理人、审核人均不能再走旧完成或旧驳回写入 | 未验证 |
 | 审核驳回返工 | 审核人驳回当前轮，再由处理人重新提交 | 新处理轮可继续，原处理/审核轮次、投票和凭证仍可审计 | 未验证 |
 | 双 SLA 与日历恢复 | 在日历缺失时提交、通过和驳回；随后同步恢复 | 不阻断流转；仅匹配版本及活动状态的截止时间补算 | 未验证 |
 | 冻结写保护 | 完成、取消、关闭或逻辑删除业务后尝试普通编辑 | 普通写入全部拒绝，历史仍可查看 | 未验证 |
 | 审计修订 | 超级管理员填写原因并修订允许字段 | 生成精确前后值和独立审计记录，原反馈不变化 | 未验证 |
+
+末节点通过后，以超级管理员或被授权业务成员从受保护查询入口集中核对同一隔离业务：`node_review_rounds` 的每轮次、`node_review_votes` 的每位审核人一票、审核与节点推进审计记录、处理完成/审核开始/审核结论通知、处理与审核两套 SLA 字段及逾期分钟、日历待补算状态恢复后的匹配版本结果，以及每条 `node_feedback` 历史对原 `evidences` 编号的引用。通过标准是每项都可由安全投影或控制台脱敏记录追溯、没有伪造或丢失的轮次/投票/引用，且终态后普通写入被拒绝。
 
 ### 11.3 凭证
 
@@ -291,10 +291,10 @@
 备份：通过 / 失败
 唯一索引前置检查：通过 / 失败
 索引：通过 / 失败
-businessApi 部署：通过 / 失败
+businessApi 部署：通过 / 失败 / 未验证
 calendarSync 部署与当前/下一年手工同步：通过 / 失败 / 未验证
 workflowReminder 部署：通过 / 失败 / 未验证
-evidenceRetention 部署：通过 / 失败
+evidenceRetention 部署：通过 / 失败 / 未验证
 触发器时区与下一次时间：已核对 / 未核对（首次验收保持空触发器）
 节点审核、双 SLA、日历待补算恢复验收：通过 / 失败 / 未验证
 多账号验收：通过 / 失败 / 未验证

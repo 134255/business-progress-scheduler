@@ -785,7 +785,7 @@ function createCloudBusinessRepository({
         return clone(existing.result)
       }
 
-      if (line.status !== 'active' || line.currentNodeId !== current._id ||
+      if (line.status !== 'active' || line.currentNodeId !== current._id || current.workflowMode === 'review' ||
           !['ready', 'in_progress', 'blocked'].includes(current.status) || current.feedbackClaimId) {
         throw createError('REJECTION_NOT_ALLOWED')
       }

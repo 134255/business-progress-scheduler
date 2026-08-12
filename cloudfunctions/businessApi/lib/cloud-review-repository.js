@@ -1216,7 +1216,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     const requested = query.page * query.pageSize
     if (!safeInteger(requested, 1) || requested > MAX_QUERY_WINDOW) throw createError('INVALID_PAGINATION')
     const response = await db.collection('node_review_rounds')
-      .where({ status: 'pending', reviewerUserIds: account._id })
+      .where({ reviewerUserIds: account._id, status: 'pending' })
       .orderBy('createdAt', 'desc')
       .orderBy('_id', 'asc')
       .limit(MAX_QUERY_WINDOW)

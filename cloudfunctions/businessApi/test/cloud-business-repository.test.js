@@ -1167,6 +1167,7 @@ test('驳回事务拒绝越权、非紧邻状态和并发版本变化且不产�
     ['非当前负责人', rejectionSeed(), rejectionInput({ actor: { _id: 'user-2', status: 'active' } }), 'FORBIDDEN'],
     ['业务线当前指针不匹配', rejectionSeed({ line: { currentNodeId: 'node-3' } }), rejectionInput(), 'REJECTION_NOT_ALLOWED'],
     ['当前节点已完成', rejectionSeed({ current: { status: 'completed' } }), rejectionInput(), 'REJECTION_NOT_ALLOWED'],
+    ['新版审核当前节点', rejectionSeed({ current: { workflowMode: 'review' } }), rejectionInput(), 'REJECTION_NOT_ALLOWED'],
     ['上一节点未完成', rejectionSeed({ previous: { status: 'in_progress' } }), rejectionInput(), 'REJECTION_NOT_ALLOWED'],
     ['当前节点版本冲突', rejectionSeed(), rejectionInput({ expectedCurrentVersion: 2 }), 'VERSION_CONFLICT'],
     ['上一节点版本冲突', rejectionSeed(), rejectionInput({ expectedPreviousVersion: 4 }), 'VERSION_CONFLICT']
