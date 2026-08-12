@@ -391,6 +391,7 @@ function createCloudBusinessRepository({
         reviewDueStatus: node.reviewDueStatus,
         reviewDueAt: clone(node.reviewDueAt || null),
         reviewOverdueWorkMinutes: Number(node.reviewOverdueWorkMinutes || 0),
+        reviewStartedAt: clone(node.reviewStartedAt || null),
         activeReviewRoundId: node.activeReviewRoundId || '',
         canFeedback: processors.includes(actor._id),
         ...evidencePolicy,

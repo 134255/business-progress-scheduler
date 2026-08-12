@@ -112,12 +112,14 @@ function increment(value) {
 }
 
 function publicResult(feedback) {
-  return {
+  const result = {
     feedbackId: feedback._id,
     revision: feedback.revision,
     nodeStatus: feedback.status,
     lineStatus: feedback.lineStatus
   }
+  if (safeInteger(feedback.nodeVersion, { minimum: 1 })) result.nodeVersion = feedback.nodeVersion
+  return result
 }
 
 function evidenceProjection(evidence, retention) {
@@ -617,9 +619,10 @@ function createCloudFeedbackRepository({
       const revision = reservation.plannedRevision
       const latestRevision = current.node.latestFeedbackRevision === undefined ? 0 : current.node.latestFeedbackRevision
       if (!safeInteger(revision, { minimum: 1 }) || revision !== increment(latestRevision)) throw createError('VERSION_CONFLICT')
+      const nodeVersion = increment(current.node.version)
       const nodeChanges = {
         status: value.input.status,
-        version: increment(current.node.version),
+        version: nodeVersion,
         latestFeedbackRevision: revision,
         latestFeedbackId: id.feedbackId,
         latestComment: value.input.comment,
@@ -672,6 +675,7 @@ function createCloudFeedbackRepository({
       }
       await transaction.collection(COLLECTIONS.feedback).doc(id.feedbackId).update({ data: {
         publishState: 'published', revision, lineStatus, submittedAt: reservation.transitionAt,
+        nodeVersion,
         claimExpiresAt: db.command.remove(), updatedAt: db.serverDate()
       } })
       await transaction.collection(COLLECTIONS.audit).doc(`${id.feedbackId}-submitted`).set({ data: {
@@ -680,7 +684,7 @@ function createCloudFeedbackRepository({
         resultStatus: value.input.status, evidenceCount: reservation.evidenceCount,
         createdAt: db.serverDate()
       } })
-      return { feedbackId: id.feedbackId, revision, nodeStatus: value.input.status, lineStatus }
+      return { feedbackId: id.feedbackId, revision, nodeStatus: value.input.status, lineStatus, nodeVersion }
     })
   }
 

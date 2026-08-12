@@ -89,6 +89,9 @@ test('business service creates only through the template route and builds dashbo
           total: 2
         }
       }
+      if (action === 'listMyPendingReviews' || action === 'listMyNotifications') {
+        return { items: [], hasMore: false }
+      }
       return { id: 'line-new', code: 'YW-20260807-0001' }
     }
   }
@@ -109,10 +112,15 @@ test('business service creates only through the template route and builds dashbo
       plannedStartDate: '2026-08-07', plannedEndDate: '2026-08-08', requestKey: 'attempt-1'
     }],
     ['listBusinessLines', { page: 1, pageSize: 20 }],
+    ['listMyPendingReviews', { page: 1, pageSize: 50 }],
+    ['listMyNotifications', { page: 1, pageSize: 50 }],
     ['updateBusinessMetadata', { businessLineId: 'line-new', expectedVersion: 1, name: '更新' }]
   ])
   assert.deepEqual(dashboard, {
-    stats: { active: 1, pendingMine: null, pendingMineAvailable: false, completed: 1 },
+    stats: {
+      active: 1, pendingMine: null, pendingMineAvailable: false,
+      pendingReviews: 0, unreadNotifications: 0, completed: 1
+    },
     recent: [{ _id: 'line-new', status: 'active' }, { _id: 'line-done', status: 'completed' }]
   })
 })

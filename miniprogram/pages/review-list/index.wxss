@@ -1,0 +1,6 @@
+.review-card { position: relative; }
+.item-title { max-width: 500rpx; font-size: 32rpx; font-weight: 650; }
+.mode { padding: 6rpx 14rpx; color: #0f766e; background: #ccfbf1; border-radius: 999rpx; }
+.block { display: block; margin-top: 12rpx; }
+.due { color: #92400e; }
+.action { color: #0f766e; text-align: right; }

@@ -298,6 +298,8 @@ test('审核详情只允许当前审核人、业务管理员或超级管理员�
   }])
   assert.equal(detail.canApprove, true)
   assert.equal(detail.canReject, true)
+  assert.equal(detail.version, 1, '客户端提交投票必须使用服务端审核轮次版本')
+  assert.equal(detail.submittedAt.toISOString(), NOW.toISOString(), '审核详情必须显示服务端提交审核时间')
   assert.doesNotMatch(JSON.stringify(detail), /cloud:\/\/|secret-hash|secret-request|reservation|999/)
 
   await assert.rejects(repository.getReviewDetail({

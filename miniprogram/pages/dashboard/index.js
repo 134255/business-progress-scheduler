@@ -1,8 +1,10 @@
 const businessService = require('../../services/business')
+const { safeErrorMessage } = require('../../utils/safe-error')
 
 Page({
   data: {
     loading: true,
+    errorMessage: '',
     profile: null,
     stats: { active: 0, pendingMine: null, pendingMineAvailable: false, completed: 0 },
     recent: []
@@ -30,13 +32,21 @@ Page({
   },
 
   async loadDashboard(expectedUserId) {
-    this.setData({ loading: true })
+    const requestSequence = (this.dashboardSequence || 0) + 1
+    this.dashboardSequence = requestSequence
+    this.setData({ loading: true, errorMessage: '' })
     try {
       const data = await businessService.dashboard()
-      if (!this.requireActiveUser(expectedUserId)) return
+      if (requestSequence !== this.dashboardSequence || !this.requireActiveUser(expectedUserId)) return
       this.setData({ stats: data.stats, recent: data.recent || [] })
+    } catch (error) {
+      if (requestSequence === this.dashboardSequence && this.requireActiveUser(expectedUserId)) {
+        this.setData({ errorMessage: safeErrorMessage(error, '业务概览加载失败，请稍后重试') })
+      }
     } finally {
-      if (this.requireActiveUser(expectedUserId)) this.setData({ loading: false })
+      if (requestSequence === this.dashboardSequence && this.requireActiveUser(expectedUserId)) {
+        this.setData({ loading: false })
+      }
     }
   },
 
@@ -50,6 +60,14 @@ Page({
 
   openTemplates() {
     wx.navigateTo({ url: '/pages/template-list/index' })
+  },
+
+  openReviews() {
+    wx.navigateTo({ url: '/pages/review-list/index' })
+  },
+
+  openNotifications() {
+    wx.navigateTo({ url: '/pages/notification-list/index' })
   },
 
   openAdminUsers() {

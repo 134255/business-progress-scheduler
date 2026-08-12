@@ -42,6 +42,8 @@ Task 11 已落地独立 `evidenceRetention` 定时云函数。它先分块回收
 
 Account deployment requires the `system_settings/account_admin_state` guard, deterministic `wechat_bindings/<sha256(openid)>` backfill, and removal of the legacy `users.openid` unique index only after a verified migration. The security-redacted operator procedure is `docs/deployment/account-admin-setup.md`.
 
+Task 9 已接入小程序端审核工作台：受保护的业务服务提供提交审核、提交投票、审核待办、审核详情、消息通知和标记已读六个方法；节点处理采用“幂等保存草稿后提交审核”的两步流程，服务端反馈结果返回并持久化最新节点版本，保证第二步按真实版本提交且失败可使用原请求键重试。审核、通知、概览和业务详情页面只使用服务端安全投影与编号导航，页面重新显示时刷新服务端状态，并在账号、页面请求或版本变化时丢弃旧异步响应。
+
 ## Environment
 
 - WeChat Mini Program AppID identifier: `wx6dcce945f944e52f`.

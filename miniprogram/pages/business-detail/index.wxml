@@ -19,7 +19,15 @@
       <view class="node-body">
         <view class="row-between"><text class="node-name">{{item.name}}</text><status-pill status="{{item.status}}" /></view>
         <text class="muted block">节点编号：{{item.nodeCode || '旧业务未编号'}}</text>
-        <text class="muted block">负责人：{{item.assigneeNamesText || '待分配'}}</text>
+        <view wx:if="{{item.workflowMode === 'review'}}" class="review-node-meta">
+          <text class="muted block">处理人：{{item.processorNamesText || '待分配'}}</text>
+          <text class="muted block">审核人：{{item.reviewerNamesText || '待分配'}}（{{item.reviewModeLabel}}）</text>
+          <text class="muted block">处理轮次：{{item.processingRoundNumber}} · 审核轮次：{{item.reviewRoundNumber}}</text>
+          <text class="muted block">处理截止：{{item.processingDueText}} · {{item.processingOverdueText}}</text>
+          <text wx:if="{{item.reviewStartedText}}" class="muted block">提交审核：{{item.reviewStartedText}}</text>
+          <text class="muted block">审核截止：{{item.reviewDueText}} · {{item.reviewOverdueText}}</text>
+        </view>
+        <text wx:else class="muted block">负责人：{{item.assigneeNamesText || '待分配'}}</text>
         <text class="muted block" wx:if="{{item.requiresEvidence}}">需上传凭证</text>
         <text class="action-tip">{{item.canFeedback ? '反馈进度并查看凭证' : '查看节点记录与凭证'}} →</text>
       </view>

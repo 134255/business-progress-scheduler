@@ -14,6 +14,9 @@
     "pages/business-detail/index",
     "pages/business-edit/index",
     "pages/node-feedback/index",
+    "pages/review-list/index",
+    "pages/review-detail/index",
+    "pages/notification-list/index",
     "pages/admin-business-amend/index",
     "pages/template-list/index",
     "pages/profile/index"

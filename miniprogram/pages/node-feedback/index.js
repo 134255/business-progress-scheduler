@@ -1,4 +1,5 @@
 const businessService = require('../../services/business')
+const { safeErrorMessage } = require('../../utils/safe-error')
 
 const FROZEN_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const STATUS_OPTIONS = Object.freeze([
@@ -18,8 +19,23 @@ function currentUserId() {
   return user && user.status === 'active' ? user._id : ''
 }
 
-function requestKey() {
-  return `feedback-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+function requestKey(prefix = 'feedback') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+}
+
+function dateTimeText(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN')
+}
+
+function dueText(status, value, overdueMinutes) {
+  if (status === 'pending_calendar') return '待工作日历补算'
+  if (status === 'not_started') return '尚未开始'
+  if (status !== 'calculated') return '待计算'
+  const text = dateTimeText(value) || '待计算'
+  const minutes = Number(overdueMinutes || 0)
+  return minutes > 0 ? `${text}（已逾期 ${minutes} 个工作分钟）` : text
 }
 
 function initialValue(field) {
@@ -101,6 +117,22 @@ Page({
     expectedNodeVersion: 0,
     lineVersion: 0,
     canSubmit: false,
+    legacyMode: true,
+    workflowMode: 'legacy',
+    reviewMode: '',
+    reviewModeLabel: '',
+    processorNamesText: '',
+    reviewerNamesText: '',
+    processingRoundNumber: 0,
+    reviewRoundNumber: 0,
+    processingDueText: '待计算',
+    reviewDueText: '尚未开始',
+    reviewStartedText: '',
+    readOnly: true,
+    reviewDraftLocked: false,
+    serverDraftAvailable: false,
+    serverDraftHasEvidence: false,
+    draftDirty: false,
     frozen: false,
     fields: [],
     fieldValues: {},
@@ -127,8 +159,21 @@ Page({
       return
     }
     this.loadActorId = actorId
+    this.pageAlive = true
+    this.loadSequence = 0
+    this.progressExpectedNodeVersion = null
+    this.reviewExpectedNodeVersion = null
     this.setData({ lineId: String(query.lineId || ''), nodeId: String(query.nodeId || '') })
     await this.loadData()
+  },
+
+  onShow() {
+    if (this.data.lineId && this.hasLoaded) return this.loadData()
+  },
+
+  onUnload() {
+    this.pageAlive = false
+    this.loadSequence += 1
   },
 
   actorStillCurrent() {
@@ -138,14 +183,16 @@ Page({
   },
 
   async loadData() {
+    const requestSequence = ++this.loadSequence
+    const requestedActorId = this.loadActorId || currentUserId()
     this.setData({ loadingHistory: true, errorMessage: '' })
     try {
       const detail = await businessService.getBusinessLine(this.data.lineId)
-      if (!this.actorStillCurrent()) return
+      if (!this.pageAlive || requestSequence !== this.loadSequence || currentUserId() !== requestedActorId) return
       const node = (detail.nodes || []).find(item => item._id === this.data.nodeId)
       if (!node) throw new Error('未找到节点')
       const historyResult = await businessService.getNodeHistory(this.data.lineId, this.data.nodeId)
-      if (!this.actorStillCurrent()) return
+      if (!this.pageAlive || requestSequence !== this.loadSequence || currentUserId() !== requestedActorId) return
       const fields = (Array.isArray(node.fieldDefinitions) ? node.fieldDefinitions : [])
         .slice().sort((left, right) => left.sequence - right.sequence)
         .map(field => ({
@@ -154,8 +201,27 @@ Page({
             ? field.constraints.options.map(value => ({ value, selected: false }))
             : []
         }))
-      const fieldValues = Object.fromEntries(fields.map(field => [field.fieldKey, initialValue(field)]))
+      const legacyMode = node.workflowMode !== 'review'
+      const latestDraft = !legacyMode && Array.isArray(historyResult.history) ? historyResult.history[0] : null
+      const latestValues = new Map(
+        latestDraft && Array.isArray(latestDraft.fieldValues)
+          ? latestDraft.fieldValues
+            .filter(field => field && typeof field.fieldKey === 'string')
+            .map(field => [field.fieldKey, field.value])
+          : []
+      )
+      const fieldValues = Object.fromEntries(fields.map(field => [
+        field.fieldKey,
+        latestValues.has(field.fieldKey) ? latestValues.get(field.fieldKey) : initialValue(field)
+      ]))
+      for (const field of fields) {
+        if (field.type !== 'multi_select') continue
+        const selected = Array.isArray(fieldValues[field.fieldKey]) ? fieldValues[field.fieldKey] : []
+        field.optionItems = field.optionItems.map(option => ({ ...option, selected: selected.includes(option.value) }))
+      }
       const frozen = FROZEN_STATUSES.has(detail.line && detail.line.status)
+      const canSubmit = Boolean(historyResult.canSubmit) && !frozen
+      const readOnly = frozen || !canSubmit || !legacyMode && node.status === 'pending_review'
       this.setData({
         nodeName: node.name || (historyResult.node && historyResult.node.name) || '',
         nodeCode: node.nodeCode || (historyResult.node && historyResult.node.nodeCode) || '',
@@ -166,14 +232,40 @@ Page({
         requiresEvidence: Boolean(node.requiresEvidence),
         allowedEvidenceTypes: Array.isArray(node.allowedEvidenceTypes) ? node.allowedEvidenceTypes.slice() : [],
         history: formattedHistory(historyResult.history),
-        canSubmit: Boolean(historyResult.canSubmit) && !frozen,
-        frozen
+        canSubmit,
+        frozen,
+        legacyMode,
+        workflowMode: legacyMode ? 'legacy' : 'review',
+        reviewMode: legacyMode ? '' : node.reviewMode,
+        reviewModeLabel: node.reviewMode === 'all' ? '会签' : node.reviewMode === 'any' ? '或签' : '',
+        processorNamesText: Array.isArray(node.processorDisplayNames) ? node.processorDisplayNames.join('、') : '',
+        reviewerNamesText: Array.isArray(node.reviewerDisplayNames) ? node.reviewerDisplayNames.join('、') : '',
+        processingRoundNumber: Number(node.processingRoundNumber || 0),
+        reviewRoundNumber: Number(node.reviewRoundNumber || 0),
+        processingDueText: dueText(node.processingDueStatus, node.processingDueAt, node.processingOverdueWorkMinutes),
+        reviewDueText: dueText(node.reviewDueStatus, node.reviewDueAt, node.reviewOverdueWorkMinutes),
+        reviewStartedText: dateTimeText(node.reviewStartedAt),
+        comment: latestDraft && typeof latestDraft.comment === 'string' ? latestDraft.comment : this.data.comment,
+        serverDraftAvailable: Boolean(latestDraft && ['in_progress', 'blocked'].includes(latestDraft.status)),
+        serverDraftHasEvidence: Boolean(latestDraft && Array.isArray(latestDraft.evidences) &&
+          latestDraft.evidences.some(evidence => evidence && evidence.storageStatus === 'available')),
+        draftDirty: false,
+        readOnly
       })
+      this.hasLoaded = true
       wx.setNavigationBarTitle({ title: node.name || '节点反馈' })
     } catch (error) {
-      if (this.actorStillCurrent()) this.setData({ errorMessage: error.message || '节点信息加载失败', canSubmit: false })
+      if (this.pageAlive && requestSequence === this.loadSequence && this.actorStillCurrent()) {
+        this.setData({
+          errorMessage: safeErrorMessage(error, '节点信息加载失败，请稍后重试'),
+          canSubmit: false,
+          readOnly: true
+        })
+      }
     } finally {
-      this.setData({ loadingHistory: false })
+      if (this.pageAlive && requestSequence === this.loadSequence && currentUserId() === requestedActorId) {
+        this.setData({ loadingHistory: false })
+      }
     }
   },
 
@@ -185,11 +277,25 @@ Page({
     this.setData({ statusIndex: Number(event.detail.value) })
   },
 
+  markDraftDirty() {
+    this.savedProgress = null
+    this.progressIntent = ''
+    this.progressRequestKey = ''
+    this.progressExpectedNodeVersion = null
+    this.reviewRequestKey = ''
+    this.reviewExpectedNodeVersion = null
+    this.setData({ draftDirty: true })
+  },
+
   onComment(event) {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    this.markDraftDirty()
     this.setData({ comment: event.detail.value })
   },
 
   onFieldInput(event) {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    this.markDraftDirty()
     this.setData({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: event.detail.value })
   },
 
@@ -198,6 +304,8 @@ Page({
   },
 
   onBooleanChange(event) {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    this.markDraftDirty()
     const raw = event.detail.value
     const value = raw === true || raw === 'true' ? true : raw === false || raw === 'false' ? false : null
     this.setData({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: value })
@@ -208,6 +316,8 @@ Page({
   },
 
   onSingleSelectChange(event) {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    this.markDraftDirty()
     const key = event.currentTarget.dataset.fieldkey
     const field = this.data.fields.find(item => item.fieldKey === key)
     const options = field && field.constraints && field.constraints.options
@@ -216,6 +326,8 @@ Page({
   },
 
   onMultiSelectChange(event) {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
+    this.markDraftDirty()
     const key = event.currentTarget.dataset.fieldkey
     const selected = event.detail.value.slice()
     const fields = this.data.fields.map(field => field.fieldKey === key
@@ -266,7 +378,9 @@ Page({
   },
 
   addSelectedFiles(selected) {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
     const files = this.data.files.slice()
+    const originalCount = files.length
     let total = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
     for (const source of selected) {
       const size = Number(source.size)
@@ -305,10 +419,12 @@ Page({
         errorMessage: ''
       })
     }
+    if (files.length !== originalCount) this.markDraftDirty()
     this.setData({ files, selectedTotalBytes: total, selectedTotalText: formatBytes(total) })
   },
 
   chooseMediaEvidence() {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
     wx.chooseMedia({
       count: 9,
       mediaType: ['image', 'video'],
@@ -328,6 +444,7 @@ Page({
   },
 
   choosePdfEvidence() {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
     wx.chooseMessageFile({
       count: 100,
       type: 'file',
@@ -342,9 +459,11 @@ Page({
   },
 
   removeFile(event) {
+    if (this.data.readOnly || this.data.reviewDraftLocked) return
     const index = Number(event.currentTarget.dataset.index)
     const current = this.data.files[index]
     if (!current || current.status === 'uploading') return
+    this.markDraftDirty()
     const files = this.data.files.slice()
     files.splice(index, 1)
     const total = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
@@ -358,6 +477,7 @@ Page({
   },
 
   async uploadAndRegisterEvidence() {
+    const requestedActorId = currentUserId()
     for (let index = 0; index < this.data.files.length; index += 1) {
       const file = this.data.files[index]
       if (file.status === 'registered' && file.evidenceId) continue
@@ -366,6 +486,7 @@ Page({
         const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || `evidence.${file.extension}`
         const cloudPath = `evidence/${this.data.lineId}/${this.data.nodeId}/${Date.now()}-${index}-${safeName}`
         const upload = await wx.cloud.uploadFile({ cloudPath, filePath: file.path })
+        if (!this.pageAlive || currentUserId() !== requestedActorId) throw new Error('账号状态已变化')
         const registered = await businessService.registerEvidenceUpload({
           businessLineId: this.data.lineId,
           nodeId: this.data.nodeId,
@@ -373,12 +494,13 @@ Page({
           fileName: file.name,
           declaredSize: file.size
         })
+        if (!this.pageAlive || currentUserId() !== requestedActorId) throw new Error('账号状态已变化')
         this.updateLocalFile(index, {
           status: 'registered', statusLabel: '已登记', evidenceId: registered.evidenceId, errorMessage: ''
         })
       } catch (error) {
         this.updateLocalFile(index, {
-          status: 'failed', statusLabel: '上传失败', errorMessage: error.message || '上传失败'
+          status: 'failed', statusLabel: '上传失败', errorMessage: safeErrorMessage(error, '上传失败，请重试')
         })
         throw error
       }
@@ -435,6 +557,158 @@ Page({
     } finally {
       wx.hideLoading()
       this.setData({ downloading: false })
+    }
+  },
+
+  canWriteReviewNode() {
+    return this.data.workflowMode === 'review' && this.data.canSubmit && !this.data.frozen && !this.data.readOnly
+  },
+
+  async progressPayload() {
+    const fieldValues = this.normalizedFieldValues()
+    const evidenceIds = await this.uploadAndRegisterEvidence()
+    return {
+      businessLineId: this.data.lineId,
+      nodeId: this.data.nodeId,
+      expectedNodeVersion: this.data.expectedNodeVersion,
+      fieldValues,
+      comment: this.data.comment.trim(),
+      evidenceIds
+    }
+  },
+
+  async performProgressAction(action) {
+    if (!this.canWriteReviewNode() || this.data.submitting || this.data.reviewDraftLocked) return false
+    if (action === 'mark_blocked' && !this.data.comment.trim()) {
+      wx.showToast({ title: '请填写受阻原因', icon: 'none' })
+      return false
+    }
+    const requestedActorId = currentUserId()
+    const intent = `progress:${action}`
+    if (this.progressIntent !== intent) {
+      this.progressIntent = intent
+      this.progressRequestKey = requestKey('progress')
+    }
+    this.setData({ submitting: true, errorMessage: '' })
+    try {
+      const payload = await this.progressPayload()
+      if (!this.pageAlive || currentUserId() !== requestedActorId) return false
+      const usedRequestKey = this.progressRequestKey
+      const progressResult = await businessService.submitFeedback({ ...payload, action, requestKey: usedRequestKey })
+      if (!this.pageAlive || currentUserId() !== requestedActorId) return false
+      if (action === 'save_progress') {
+        if (!Number.isSafeInteger(progressResult && progressResult.nodeVersion) ||
+            progressResult.nodeVersion <= payload.expectedNodeVersion) {
+          throw new Error('处理进度保存结果无效，请刷新后重试')
+        }
+        this.savedProgress = {
+          payload: { ...payload },
+          requestKey: usedRequestKey,
+          expectedNodeVersion: payload.expectedNodeVersion,
+          nodeVersion: progressResult.nodeVersion
+        }
+      }
+      this.progressRequestKey = ''
+      this.progressIntent = ''
+      this.setData({ files: [], selectedTotalBytes: 0, selectedTotalText: '0 B' })
+      wx.showToast({ title: action === 'mark_blocked' ? '已标记受阻' : '处理进度已保存', icon: 'success' })
+      await this.loadData()
+      return true
+    } catch (error) {
+      if (this.pageAlive && currentUserId() === requestedActorId) {
+        wx.showToast({ title: safeErrorMessage(error, '处理进度保存失败，请重试'), icon: 'none' })
+      }
+      return false
+    } finally {
+      if (this.pageAlive && currentUserId() === requestedActorId) this.setData({ submitting: false })
+    }
+  },
+
+  onSaveProgress() {
+    return this.performProgressAction('save_progress')
+  },
+
+  onMarkBlocked() {
+    return this.performProgressAction('mark_blocked')
+  },
+
+  async onSubmitReview() {
+    if (!this.canWriteReviewNode() || this.data.submitting) return
+    const savedProgress = this.savedProgress && !this.data.files.length ? this.savedProgress : null
+    const storedDraftReady = this.data.serverDraftAvailable &&
+      (!this.data.requiresEvidence || this.data.serverDraftHasEvidence)
+    const useStoredDraft = !this.data.draftDirty && !savedProgress && !this.data.files.length && storedDraftReady
+    const currentRoundHasEvidence = this.data.files.length || savedProgress || this.data.serverDraftHasEvidence
+    if (this.data.requiresEvidence && !currentRoundHasEvidence) {
+      wx.showToast({ title: '提交审核前必须上传凭证', icon: 'none' })
+      return
+    }
+    const requestedActorId = currentUserId()
+    if (this.progressIntent !== 'review-draft') {
+      this.progressIntent = 'review-draft'
+      this.progressRequestKey = useStoredDraft ? '' : savedProgress ? savedProgress.requestKey : requestKey('progress')
+      this.progressExpectedNodeVersion = useStoredDraft
+        ? null
+        : savedProgress ? savedProgress.expectedNodeVersion : null
+      this.reviewExpectedNodeVersion = useStoredDraft
+        ? this.data.expectedNodeVersion
+        : savedProgress ? savedProgress.nodeVersion : null
+    }
+    if (!this.reviewRequestKey) this.reviewRequestKey = requestKey('review')
+    if (!Number.isSafeInteger(this.progressExpectedNodeVersion)) {
+      this.progressExpectedNodeVersion = this.data.expectedNodeVersion
+    }
+    this.setData({ submitting: true, errorMessage: '' })
+    try {
+      if (!useStoredDraft) {
+        const payload = savedProgress ? { ...savedProgress.payload } : await this.progressPayload()
+        if (!this.pageAlive || currentUserId() !== requestedActorId) return
+        const progressResult = await businessService.submitFeedback({
+          ...payload,
+          expectedNodeVersion: this.progressExpectedNodeVersion,
+          action: 'save_progress',
+          requestKey: this.progressRequestKey
+        })
+        if (!this.pageAlive || currentUserId() !== requestedActorId) return
+        if (!Number.isSafeInteger(progressResult && progressResult.nodeVersion) ||
+            progressResult.nodeVersion <= this.progressExpectedNodeVersion) {
+          throw new Error('处理进度保存结果无效，请刷新后重试')
+        }
+        if (Number.isSafeInteger(this.reviewExpectedNodeVersion) &&
+            this.reviewExpectedNodeVersion !== progressResult.nodeVersion) {
+          throw new Error('节点版本已变化，请刷新后重试')
+        }
+        this.reviewExpectedNodeVersion = progressResult.nodeVersion
+        this.savedProgress = {
+          payload: { ...payload },
+          requestKey: this.progressRequestKey,
+          expectedNodeVersion: this.progressExpectedNodeVersion,
+          nodeVersion: progressResult.nodeVersion
+        }
+      }
+      this.setData({ reviewDraftLocked: true })
+      await businessService.submitNodeForReview({
+        businessLineId: this.data.lineId,
+        nodeId: this.data.nodeId,
+        expectedNodeVersion: this.reviewExpectedNodeVersion,
+        requestKey: this.reviewRequestKey
+      })
+      if (!this.pageAlive || currentUserId() !== requestedActorId) return
+      this.progressRequestKey = ''
+      this.progressIntent = ''
+      this.reviewRequestKey = ''
+      this.progressExpectedNodeVersion = null
+      this.reviewExpectedNodeVersion = null
+      this.savedProgress = null
+      this.setData({ readOnly: true, reviewDraftLocked: true, canSubmit: false })
+      wx.showToast({ title: '已提交审核', icon: 'success' })
+      if (typeof wx.navigateBack === 'function') wx.navigateBack()
+    } catch (error) {
+      if (this.pageAlive && currentUserId() === requestedActorId) {
+        wx.showToast({ title: safeErrorMessage(error, '提交审核失败，请重试'), icon: 'none' })
+      }
+    } finally {
+      if (this.pageAlive && currentUserId() === requestedActorId) this.setData({ submitting: false })
     }
   },
 

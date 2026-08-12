@@ -12,3 +12,4 @@
 .operation-card { margin-top: 24rpx; }
 .compact-title { margin: 0 0 12rpx; }
 .operation-card .textarea, .operation-card .input { margin: 18rpx 0; }
+.review-node-meta { margin-top: 12rpx; padding: 12rpx; border-radius: 12rpx; background: #f8fafc; }

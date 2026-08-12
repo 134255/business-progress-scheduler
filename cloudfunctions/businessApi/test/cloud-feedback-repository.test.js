@@ -18,7 +18,14 @@ test('completion claims more than one transaction of tiny evidence without a cou
   const { fake, repository } = createFeedbackHarness({ evidenceCount: 105 })
   const result = await repository.commitFeedback(submission({ evidenceIds, evidenceTotalBytes: 105 }))
 
-  assert.deepEqual(result, { feedbackId: result.feedbackId, revision: 1, nodeStatus: 'completed', lineStatus: 'active' })
+  assert.deepEqual(result, {
+    feedbackId: result.feedbackId,
+    revision: 1,
+    nodeStatus: 'completed',
+    lineStatus: 'active',
+    nodeVersion: 5
+  })
+  assert.equal(fake.documents('node_feedback')[0].nodeVersion, 5)
   const [feedback] = fake.documents('node_feedback')
   assert.equal(feedback.publishState, 'published')
   assert.equal(feedback.evidenceCount, 105)
@@ -375,7 +382,10 @@ test('same request is idempotent, changed payload conflicts, and another OR sign
   const { fake, repository } = createFeedbackHarness({ evidenceCount: 0 })
   const original = submission()
   const first = await repository.commitFeedback(original)
-  assert.deepEqual(await repository.commitFeedback(original), first)
+  const retry = await repository.commitFeedback(original)
+  assert.deepEqual(retry, first)
+  assert.equal(retry.nodeVersion, first.nodeVersion)
+  assert.equal(Number.isSafeInteger(retry.nodeVersion), true)
   await assert.rejects(
     repository.commitFeedback(submission({ input: { comment: 'different' } })),
     error => error.code === 'VERSION_CONFLICT'

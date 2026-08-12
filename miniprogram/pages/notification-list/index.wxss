@@ -1,0 +1,9 @@
+.notice { display: flex; align-items: center; gap: 16rpx; }
+.notice-main { flex: 1; min-width: 0; }
+.notice.read { opacity: .72; }
+.notice.unread { border-color: #99f6e4; }
+.notice-title { font-weight: 650; }
+.dot { padding: 4rpx 12rpx; color: #be123c; background: #fff1f2; border-radius: 999rpx; font-size: 22rpx; }
+.block { display: block; margin-top: 12rpx; }
+.action { color: #0f766e; }
+.read-button { flex: none; margin: 0; }

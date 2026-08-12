@@ -95,6 +95,23 @@ function findUnsafeAccountDatasets(source) {
   return errors;
 }
 
+function findLoopsWithoutKeys(source) {
+  const errors = [];
+  const tokenPattern = /<!--[\s\S]*?-->|<[^>]+>/g;
+  let match;
+
+  while ((match = tokenPattern.exec(source))) {
+    const token = match[0];
+    if (token.startsWith('<!--') || token.startsWith('</') || token.startsWith('<?') || token.startsWith('<!')) {
+      continue;
+    }
+    if (/\bwx:for\s*=/.test(token) && !/\bwx:key\s*=/.test(token)) {
+      errors.push({ line: source.slice(0, match.index).split(/\r?\n/).length });
+    }
+  }
+  return errors;
+}
+
 test('wx:else 和 wx:elif 必须紧邻同级 wx:if 或 wx:elif', () => {
   const failures = listWxmlFiles(miniProgramRoot).flatMap((file) =>
     findInvalidConditionalSiblings(fs.readFileSync(file, 'utf8')).map((error) => ({
@@ -126,4 +143,16 @@ test('节点账号选择 dataset 只能携带内部账号编号', () => {
   assert.deepEqual(findUnsafeAccountDatasets('<label data-account="{{selectedAccount}}" bindtap="onReviewerToggle">'), [
     { attributes: 'data-account="{{selectedAccount}}" bindtap="onReviewerToggle"' },
   ]);
+});
+
+test('所有 wx:for 循环都必须声明稳定 wx:key', () => {
+  const failures = listWxmlFiles(miniProgramRoot).flatMap((file) =>
+    findLoopsWithoutKeys(fs.readFileSync(file, 'utf8')).map((error) => ({
+      file: path.relative(projectRoot, file),
+      ...error,
+    })),
+  );
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(findLoopsWithoutKeys('<view wx:for="{{items}}">{{item}}</view>'), [{ line: 1 }]);
 });

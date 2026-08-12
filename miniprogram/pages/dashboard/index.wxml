@@ -17,6 +17,17 @@
     <view class="stat card"><text class="stat-value">{{stats.completed}}</text><text class="muted">已完成</text></view>
   </view>
 
+  <view class="quick-actions">
+    <view class="card quick-action" bindtap="openReviews">
+      <text class="quick-value">{{stats.pendingReviews || 0}}</text>
+      <text>待我审核</text>
+    </view>
+    <view class="card quick-action" bindtap="openNotifications">
+      <text class="quick-value">{{stats.unreadNotifications || 0}}</text>
+      <text>消息通知</text>
+    </view>
+  </view>
+
   <view class="row-between section-head">
     <view class="section-title">最近业务</view>
     <view class="admin-links">
@@ -25,6 +36,8 @@
       <text class="link" bindtap="openTemplates">可用模板</text>
     </view>
   </view>
+
+  <view wx:if="{{errorMessage}}" class="dashboard-error">{{errorMessage}}</view>
 
   <view wx:if="{{recent.length}}">
     <view class="card line-card" wx:for="{{recent}}" wx:key="_id" data-id="{{item._id}}" bindtap="openDetail">

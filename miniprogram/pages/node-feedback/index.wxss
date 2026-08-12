@@ -18,3 +18,8 @@
 .video-mask { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; padding: 30rpx; background: rgba(15, 23, 42, .72); }
 .video-panel { width: 100%; padding: 24rpx; border-radius: 20rpx; background: white; }
 .video-player { width: 100%; margin-top: 20rpx; }
+.block { display: block; margin-top: 10rpx; }
+.review-summary { margin-top: 20rpx; padding-top: 14rpx; border-top: 1rpx solid #e5e7eb; }
+.review-actions { display: grid; gap: 14rpx; }
+.review-actions button { width: 100%; margin: 0; }
+.readonly-tip { display: block; margin-top: 8rpx; text-align: center; }

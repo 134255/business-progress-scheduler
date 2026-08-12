@@ -1,4 +1,5 @@
 const businessService = require('../../services/business')
+const { safeErrorMessage } = require('../../utils/safe-error')
 
 const FROZEN_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
@@ -10,6 +11,28 @@ function newRequestKey() {
 function activeUser() {
   const user = getApp().globalData.currentUser
   return user && user.status === 'active' ? user : null
+}
+
+function dateTimeText(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN')
+}
+
+function workMinutesText(value) {
+  const minutes = Number(value || 0)
+  if (!Number.isFinite(minutes) || minutes <= 0) return '未逾期'
+  const hours = Math.floor(minutes / 60)
+  const remainder = minutes % 60
+  if (!hours) return `${remainder} 个工作分钟`
+  return remainder ? `${hours} 小时 ${remainder} 个工作分钟` : `${hours} 小时`
+}
+
+function dueText(status, value) {
+  if (status === 'pending_calendar') return '待工作日历补算'
+  if (status === 'not_started') return '尚未开始'
+  if (status !== 'calculated') return '待计算'
+  return dateTimeText(value) || '待计算'
 }
 
 Page({
@@ -45,7 +68,14 @@ Page({
       return
     }
     this.actorId = user._id
+    this.pageAlive = true
+    this.detailSequence = 0
     this.setData({ id: String(query.id || '') })
+  },
+
+  onUnload() {
+    this.pageAlive = false
+    this.detailSequence += 1
   },
 
   onShow() {
@@ -63,7 +93,19 @@ Page({
     const user = activeUser()
     const line = data.line || null
     const nodes = (data.nodes || []).slice().sort((left, right) =>
-      Number(left.sequence) - Number(right.sequence))
+      Number(left.sequence) - Number(right.sequence)).map(node => node.workflowMode === 'review'
+      ? {
+          ...node,
+          processorNamesText: Array.isArray(node.processorDisplayNames) ? node.processorDisplayNames.join('、') : '',
+          reviewerNamesText: Array.isArray(node.reviewerDisplayNames) ? node.reviewerDisplayNames.join('、') : '',
+          reviewModeLabel: node.reviewMode === 'all' ? '会签' : '或签',
+          processingDueText: dueText(node.processingDueStatus, node.processingDueAt),
+          reviewDueText: dueText(node.reviewDueStatus, node.reviewDueAt),
+          reviewStartedText: dateTimeText(node.reviewStartedAt),
+          processingOverdueText: workMinutesText(node.processingOverdueWorkMinutes),
+          reviewOverdueText: workMinutesText(node.reviewOverdueWorkMinutes)
+        }
+      : node)
     const frozen = Boolean(line && FROZEN_STATUSES.has(line.status))
     const currentIndex = line ? nodes.findIndex(node => node._id === line.currentNodeId) : -1
     const currentNode = currentIndex >= 0 ? nodes[currentIndex] : null
@@ -92,15 +134,21 @@ Page({
   },
 
   async loadDetail() {
+    const requestSequence = ++this.detailSequence
+    const requestedActorId = this.actorId
     this.setData({ loading: true, errorMessage: '' })
     try {
       const data = await businessService.getBusinessLine(this.data.id)
-      if (!this.actorStillCurrent()) return
+      if (!this.pageAlive || requestSequence !== this.detailSequence ||
+          !this.actorStillCurrent() || activeUser()._id !== requestedActorId) return
       this.setData(this.presentDetail(data))
     } catch (error) {
-      if (this.actorStillCurrent()) this.setData({ errorMessage: error.message || '业务详情加载失败' })
+      if (this.pageAlive && requestSequence === this.detailSequence && this.actorStillCurrent()) {
+        this.setData({ errorMessage: safeErrorMessage(error, '业务详情加载失败，请稍后重试') })
+      }
     } finally {
-      this.setData({ loading: false })
+      if (this.pageAlive && requestSequence === this.detailSequence && activeUser() &&
+          activeUser()._id === requestedActorId) this.setData({ loading: false })
     }
   },
 
@@ -129,6 +177,9 @@ Page({
       return
     }
     if (!this.rejectionRequestKey) this.rejectionRequestKey = newRequestKey()
+    const requestedActorId = this.actorId
+    const requestedBusinessLineId = this.data.id
+    const requestedCurrentVersion = this.data.currentNode.version
     this.setData({ rejecting: true })
     try {
       await businessService.rejectPreviousNode({
@@ -139,20 +190,24 @@ Page({
         reason,
         requestKey: this.rejectionRequestKey
       })
-      if (!this.actorStillCurrent()) return
+      if (!this.pageAlive || !this.actorStillCurrent() || activeUser()._id !== requestedActorId ||
+          this.data.id !== requestedBusinessLineId || this.data.currentNode.version !== requestedCurrentVersion) return
       this.rejectionRequestKey = ''
       this.setData({ rejectionReason: '' })
       wx.showToast({ title: '已驳回上一节点', icon: 'success' })
       await this.loadDetail()
     } catch (error) {
+      if (!this.pageAlive || !activeUser() || activeUser()._id !== requestedActorId ||
+          this.data.id !== requestedBusinessLineId) return
       if (error.code === 'VERSION_CONFLICT') {
         await this.loadDetail()
         wx.showToast({ title: '节点版本已变化，请核对后重试', icon: 'none' })
       } else {
-        wx.showToast({ title: error.message || '驳回失败', icon: 'none' })
+        wx.showToast({ title: safeErrorMessage(error, '驳回失败，请稍后重试'), icon: 'none' })
       }
     } finally {
-      this.setData({ rejecting: false })
+      if (this.pageAlive && activeUser() && activeUser()._id === requestedActorId &&
+          this.data.id === requestedBusinessLineId) this.setData({ rejecting: false })
     }
   },
 
@@ -172,6 +227,9 @@ Page({
       return
     }
     const outcome = this.data.closureOptions[this.data.closureIndex].value
+    const requestedActorId = this.actorId
+    const requestedBusinessLineId = this.data.id
+    const requestedLineVersion = this.data.line.version
     this.setData({ closing: true })
     try {
       await businessService.closeBusinessLine({
@@ -180,15 +238,24 @@ Page({
         outcome,
         reason
       })
-      if (!this.actorStillCurrent()) return
+      if (!this.pageAlive || !this.actorStillCurrent() || activeUser()._id !== requestedActorId ||
+          this.data.id !== requestedBusinessLineId || this.data.line.version !== requestedLineVersion) return
       this.setData({ closureReason: '' })
       wx.showToast({ title: '业务状态已更新', icon: 'success' })
       await this.loadDetail()
     } catch (error) {
+      if (!this.pageAlive || !activeUser() || activeUser()._id !== requestedActorId ||
+          this.data.id !== requestedBusinessLineId) return
       if (error.code === 'VERSION_CONFLICT') await this.loadDetail()
-      wx.showToast({ title: error.code === 'VERSION_CONFLICT' ? '业务版本已变化，请核对后重试' : (error.message || '操作失败'), icon: 'none' })
+      wx.showToast({
+        title: error.code === 'VERSION_CONFLICT'
+          ? '业务版本已变化，请核对后重试'
+          : safeErrorMessage(error, '操作失败，请稍后重试'),
+        icon: 'none'
+      })
     } finally {
-      this.setData({ closing: false })
+      if (this.pageAlive && activeUser() && activeUser()._id === requestedActorId &&
+          this.data.id === requestedBusinessLineId) this.setData({ closing: false })
     }
   },
 
