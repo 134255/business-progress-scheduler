@@ -2,6 +2,7 @@
 
 Status captured: 2026-08-13 (Asia/Shanghai)
 
+- 2026-08-13 隔离业务的审核与流转通知已由操作员脱敏核对通过：排除每账号已读回执后，共三条 `review_started`、一条 `node_review_rejected`、一条 `node_processing_started` 和一条 `business_completed`，数量与三轮审核、一次返工、一次下节点激活及末节点完成严格对应。六条通知均含状态、创建时间、节点、审核轮次和非空内部账号收件人数组，且不包含处理说明、字段内容、凭证信息、OpenID 或请求键原文。该结果验证真实 CloudBase 通知确定性去重、受众关联和内容最小化符合设计；双 SLA 终态数据仍待继续核对。
 - 2026-08-13 隔离业务的审核审计记录已由操作员脱敏核对通过：`SUBMIT_NODE_FOR_REVIEW` 三条、`SUBMIT_REVIEW_VOTE` 三条，投票审计决策分布为一次 `rejected` 与两次 `approved`；六条记录均以 `node_review_round` 为目标类型并含非空目标编号和创建时间。审计中未出现密码、OpenID、云文件路径或文件编号、请求键原文、凭证哈希，验证真实 CloudBase 审计数量、轮次关联和敏感数据最小化符合设计；结果通知仍待继续核对。
 - 2026-08-13 隔离业务的独立审核投票记录已由操作员脱敏核对通过：`node_review_votes` 共三条并分别唯一对应三个审核轮次，没有同轮重复票；第一节点第 1 轮为 `decision=rejected` 且评论存在，另外两轮为 `decision=approved` 且允许空评论；三条投票均保存 `reviewerDisplayName` 不可变显示名快照和 `createdAt`。该结果验证确定性一轮一审核人一票、持久决策枚举和显示名快照在真实 CloudBase 生效；审核提交/投票审计与结果通知仍待继续核对。
 - 2026-08-13 隔离业务的审核轮次数据库记录已由操作员脱敏核对通过：共三条不可变轮次；第一节点第 1 轮为 `rejected/rejected` 且驳回原因仍存在，返工后的第 2 轮为 `approved/approved`，第二节点第 1 轮为 `approved/approved`；三条记录的 `voteCount` 均为 1 且 `decidedAt` 均存在。该结果验证返工不会覆盖旧轮次、每轮或签单票终结计数正确、末节点终态轮次完整；独立 `node_review_votes`、审计与通知记录仍待继续核对。
