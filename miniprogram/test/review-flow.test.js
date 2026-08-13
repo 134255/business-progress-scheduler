@@ -494,13 +494,18 @@ test('审核详情驳回必填、投票单飞并使用轮次版本和稳定请�
     getReviewDetail: async id => ({
       reviewRoundId: id, businessLineId: 'line-1', businessName: '业务甲', businessCode: 'YW-1',
       nodeId: 'node-1', nodeName: '资料审核', nodeCode: 'YW-1-N001', reviewMode: 'all',
-      reviewRoundNumber: 1, version: detailVersion, status: detailVersion === 2 ? 'pending' : 'rejected', fieldValues: [], evidences: [], votes: [],
+      reviewRoundNumber: 1, version: detailVersion, status: detailVersion === 2 ? 'pending' : 'rejected',
+      processingComment: '无敏感内容', fieldValues: [], evidences: [], votes: [],
       processorDisplayNames: ['处理甲'], reviewerDisplayNames: ['审核甲', '审核乙'], canApprove: true, canReject: true
     }),
     getBusinessLine: async () => assert.fail('审核详情不得追加调用成员专用业务详情'),
     submitReviewVote: input => { calls.push(input); return pendingVote.promise }
   })
   await page.onLoad({ reviewRoundId: 'round-1', businessName: '伪造业务' })
+  assert.equal(page.data.processingCommentText, '无敏感内容')
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/review-detail/index.wxml'), 'utf8')
+  assert.match(wxml, /处理说明/)
+  assert.match(wxml, /\{\{processingCommentText\}\}/)
   await page.onReject()
   assert.equal(page.data.errorMessage, '请填写驳回原因')
 
@@ -542,4 +547,21 @@ test('非业务成员超级管理员只凭审核详情安全投影加载且原�
   assert.equal(page.data.processorNamesText, '处理甲')
   assert.equal(page.data.reviewerNamesText, '审核甲')
   assert.doesNotMatch(JSON.stringify(page.data), /FORBIDDEN/)
+})
+
+test('旧审核轮次缺少处理说明时页面只读显示固定占位', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser('reviewer-1') } })
+  global.wx = { reLaunch: () => {}, setNavigationBarTitle: () => {} }
+  const page = loadPage('pages/review-detail/index.js', {
+    getReviewDetail: async () => ({
+      reviewRoundId: 'round-old', businessLineId: 'line-1', nodeId: 'node-1',
+      version: 1, status: 'pending', reviewMode: 'any', processingComment: '',
+      fieldValues: [], evidences: [], votes: [], processorDisplayNames: ['处理人'],
+      reviewerDisplayNames: ['审核人'], canApprove: true, canReject: true
+    })
+  })
+
+  await page.onLoad({ reviewRoundId: 'round-old' })
+
+  assert.equal(page.data.processingCommentText, '暂无处理说明')
 })

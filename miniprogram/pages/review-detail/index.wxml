@@ -13,6 +13,11 @@
       <text class="due block">审核截止：{{dueText}}</text>
     </view>
 
+    <view class="section-title">处理说明</view>
+    <view class="card">
+      <text class="block">{{processingCommentText}}</text>
+    </view>
+
     <view class="section-title">字段快照</view>
     <view class="card field-row" wx:for="{{fields}}" wx:key="fieldKey">
       <text class="muted">{{item.name}}</text><text>{{item.valueText}}</text>

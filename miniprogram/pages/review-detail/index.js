@@ -33,7 +33,8 @@ Page({
     reviewRoundId: '', roundVersion: 0, businessLineId: '', nodeId: '',
     businessName: '', businessCode: '', nodeName: '', nodeCode: '', status: '',
     reviewModeLabel: '', reviewRoundNumber: 0, processorNamesText: '', reviewerNamesText: '',
-    voteProgressText: '', submittedAtText: '', dueText: '待计算', fields: [], evidences: [], votes: [],
+    voteProgressText: '', submittedAtText: '', dueText: '待计算',
+    processingCommentText: '暂无处理说明', fields: [], evidences: [], votes: [],
     canApprove: false, canReject: false, comment: '', loading: true, submitting: false,
     errorMessage: '', videoPreview: null
   },
@@ -90,6 +91,9 @@ Page({
         voteProgressText: `${votes.length}/${reviewers.length}`,
         submittedAtText: detail.submittedAt ? new Date(detail.submittedAt).toLocaleString('zh-CN') : '',
         dueText: dueText(detail),
+        processingCommentText: typeof detail.processingComment === 'string' && detail.processingComment
+          ? detail.processingComment
+          : '暂无处理说明',
         fields: (detail.fieldValues || []).map(field => ({ ...field, valueText: valueText(field.value) })),
         evidences: (detail.evidences || []).map((item, index) => ({ ...item, sequence: index + 1 })),
         votes,
