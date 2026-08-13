@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 
 const { createReviewService } = require('../lib/review-service')
+const { createWorkTimeService } = require('../lib/work-time-service')
 
 const ACTOR = { _id: 'processor-1', status: 'active' }
 
@@ -31,6 +32,16 @@ function draft(overrides = {}) {
     evidenceTotalBytes: 1024,
     ...overrides
   }
+}
+
+function realWorkTimeService() {
+  return createWorkTimeService({
+    calendarRepository: {
+      async getDayRule(date) {
+        return { date, isWorkday: true, calendarVersion: 'calendar-real-seconds' }
+      }
+    }
+  })
 }
 
 function harness(overrides = {}) {
@@ -118,8 +129,8 @@ function harness(overrides = {}) {
     service: createReviewService({
       feedbackRepository,
       reviewRepository,
-      workTimeService,
-      clock: () => new Date('2026-08-11T03:00:00.000Z')
+      workTimeService: overrides.workTimeService || workTimeService,
+      clock: overrides.clock || (() => new Date('2026-08-11T03:00:00.000Z'))
     })
   }
 }
@@ -137,6 +148,25 @@ test('提交审核采用当前轮最新字段与全部有效凭证并计算双�
   assert.equal(create.requestKeyHash.length, 64)
   assert.equal(create.inputHash.length, 64)
   assert.equal(JSON.stringify(create).includes('review-request-1'), false)
+})
+
+test('真实秒级处理时长可以提交审核并冻结完整分钟快照', async () => {
+  const baseDraft = draft()
+  const { calls, service } = harness({
+    workTimeService: realWorkTimeService(),
+    clock: () => new Date('2026-08-11T11:00:30.000+08:00'),
+    draft: draft({
+      node: {
+        ...baseDraft.node,
+        processingStartedAt: new Date('2026-08-11T09:00:00.000+08:00')
+      }
+    })
+  })
+
+  await service.submitNodeForReview({ actor: ACTOR, input: input() })
+  const timing = calls.find(call => call[0] === 'create')[1].timing
+  assert.equal(timing.processingElapsedWorkMinutes, 120)
+  assert.equal(Number.isSafeInteger(timing.processingElapsedWorkMinutes), true)
 })
 
 test('服务入口对已锁定审核轮次执行重新授权的同请求幂等预检', async () => {
@@ -225,6 +255,37 @@ test('审核通过为下一节点计算处理截止且请求键只传递摘要',
   assert.equal(submitted.requestKeyHash.length, 64)
   assert.equal(submitted.inputHash.length, 64)
   assert.equal(JSON.stringify(submitted).includes('vote-request-1'), false)
+})
+
+test('真实秒级审核时长只结算完整分钟', async () => {
+  const { calls, service } = harness({
+    workTimeService: realWorkTimeService(),
+    clock: () => new Date('2026-08-11T11:00:30.000+08:00'),
+    voteContext: {
+      transition: 'next_node',
+      processingWorkMinutes: 1320,
+      reviewStartedAt: new Date('2026-08-11T09:00:00.000+08:00'),
+      reviewTotalWorkMinutes: 480,
+      reviewBaseElapsedWorkMinutes: 0
+    }
+  })
+
+  await service.submitReviewVote({
+    actor: { _id: 'reviewer-1', status: 'active' },
+    input: {
+      reviewRoundId: 'review-feedback-current',
+      expectedRoundVersion: 1,
+      decision: 'approve',
+      comment: '确认',
+      requestKey: 'vote-seconds-1'
+    }
+  })
+
+  const timing = calls.at(-1)[1].timing
+  assert.equal(timing.reviewElapsedWorkMinutes, 120)
+  assert.equal(timing.reviewRemainingWorkMinutes, 360)
+  assert.equal(timing.reviewOverdueWorkMinutes, 0)
+  assert.equal(Number.isSafeInteger(timing.reviewElapsedWorkMinutes), true)
 })
 
 test('驳回返工继承剩余处理分钟且日历缺失不阻断投票', async () => {

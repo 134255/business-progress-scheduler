@@ -109,6 +109,36 @@ test('nextWorkInstant 跳过休息日并保留所用日历版本', async () => {
   })
 })
 
+test('工作时长只累计已经完整经过的分钟', async () => {
+  const service = createWorkTimeService({ calendarRepository: allWorkdays() })
+  const start = new Date('2026-08-13T09:00:00.000+08:00')
+
+  const beforeHour = await service.workingMinutesBetween(
+    start,
+    new Date('2026-08-13T09:59:59.999+08:00')
+  )
+  const exactHour = await service.workingMinutesBetween(
+    start,
+    new Date('2026-08-13T10:00:00.000+08:00')
+  )
+
+  assert.equal(beforeHour.minutes, 59)
+  assert.equal(exactHour.minutes, 60)
+  assert.equal(Number.isSafeInteger(beforeHour.minutes), true)
+  assert.equal(Number.isSafeInteger(exactHour.minutes), true)
+})
+
+test('跨工作日先累计秒级交集再统一折算完整分钟', async () => {
+  const service = createWorkTimeService({ calendarRepository: allWorkdays() })
+  const result = await service.workingMinutesBetween(
+    new Date('2026-08-13T19:59:29.500+08:00'),
+    new Date('2026-08-14T09:00:30.500+08:00')
+  )
+
+  assert.equal(result.minutes, 1)
+  assert.equal(Number.isSafeInteger(result.minutes), true)
+})
+
 test('损坏的日历规则按缺失处理而不抛出节点创建异常', async () => {
   const service = createWorkTimeService({ calendarRepository: rules({
     '2026-08-11': { date: '2026-08-10', isWorkday: true }

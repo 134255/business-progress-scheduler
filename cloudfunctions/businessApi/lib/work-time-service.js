@@ -143,7 +143,15 @@ function createWorkTimeService({ calendarRepository } = {}) {
       recordVersion(versions, rule)
       if (rule.isWorkday) minutes += (overlapEnd - overlapStart) / MINUTE_MS
     }
-    return { status: 'calculated', minutes, calendarVersion: combinedVersion(versions) }
+    const completeMinutes = Math.floor(minutes)
+    if (!Number.isSafeInteger(completeMinutes) || completeMinutes < 0) {
+      throw new RangeError('working minutes exceed the safe integer range')
+    }
+    return {
+      status: 'calculated',
+      minutes: completeMinutes,
+      calendarVersion: combinedVersion(versions)
+    }
   }
 
   return { tryAddWorkMinutes, workingMinutesBetween, nextWorkInstant }
