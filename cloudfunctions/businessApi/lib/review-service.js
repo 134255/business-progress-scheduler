@@ -105,7 +105,7 @@ function hashDraft(actorId, input, draft) {
   return sha256(JSON.stringify([
     actorId, input.businessLineId, input.nodeId, input.expectedNodeVersion,
     draft.feedbackId, draft.feedbackRevision, draft.processingRoundNumber,
-    draft.fieldSnapshots, draft.evidenceIds, draft.evidenceTotalBytes
+    draft.processingComment, draft.fieldSnapshots, draft.evidenceIds, draft.evidenceTotalBytes
   ]))
 }
 

@@ -27,6 +27,7 @@ function draft(overrides = {}) {
     },
     feedbackId: 'feedback-current',
     feedbackRevision: 2,
+    processingComment: '最新处理说明',
     fieldSnapshots: [{ fieldKey: 'summary', name: '摘要', type: 'short_text', value: '最新版' }],
     evidenceIds: ['evidence-a', 'evidence-b'],
     evidenceTotalBytes: 1024,
@@ -148,6 +149,20 @@ test('提交审核采用当前轮最新字段与全部有效凭证并计算双�
   assert.equal(create.requestKeyHash.length, 64)
   assert.equal(create.inputHash.length, 64)
   assert.equal(JSON.stringify(create).includes('review-request-1'), false)
+})
+
+test('处理说明属于审核草稿摘要且不同说明生成不同摘要', async () => {
+  const first = harness({ draft: draft({ processingComment: '说明甲' }) })
+  const second = harness({ draft: draft({ processingComment: '说明乙' }) })
+
+  await first.service.submitNodeForReview({ actor: ACTOR, input: input() })
+  await second.service.submitNodeForReview({ actor: ACTOR, input: input() })
+
+  const firstCreate = first.calls.find(call => call[0] === 'create')[1]
+  const secondCreate = second.calls.find(call => call[0] === 'create')[1]
+  assert.equal(firstCreate.draft.processingComment, '说明甲')
+  assert.equal(secondCreate.draft.processingComment, '说明乙')
+  assert.notEqual(firstCreate.draftHash, secondCreate.draftHash)
 })
 
 test('真实秒级处理时长可以提交审核并冻结完整分钟快照', async () => {

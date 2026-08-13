@@ -1370,6 +1370,7 @@ test('当前处理轮草稿分页采用最新字段并按首次版本顺序聚�
       _id: feedbackId, businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
       revision, status: 'in_progress', action: 'save_progress', processingRoundNumber: 1,
       submittedBy: 'account-a', submittedAt: new Date(NOW.getTime() + revision),
+      comment: `第 ${revision} 版处理说明`,
       fieldValues: [{ fieldKey: 'summary', name: '摘要', type: 'short_text', value: `版本-${revision}` }]
     })
     data.evidences.push({
@@ -1391,6 +1392,7 @@ test('当前处理轮草稿分页采用最新字段并按首次版本顺序聚�
 
   assert.equal(result.feedbackId, 'feedback-101')
   assert.equal(result.feedbackRevision, 101)
+  assert.equal(result.processingComment, '第 101 版处理说明')
   assert.equal(result.fieldSnapshots[0].value, '版本-101')
   assert.equal(result.evidenceIds.length, 101)
   assert.deepEqual(result.evidenceIds.slice(0, 2), ['evidence-001', 'evidence-002'])
@@ -1402,7 +1404,7 @@ test('当前处理轮草稿保留同一反馈内凭证的首次选择顺序', as
   data.node_feedback = [{
     _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
     revision: 1, status: 'in_progress', action: 'save_progress', processingRoundNumber: 1,
-    submittedBy: 'account-a', submittedAt: NOW, fieldValues: []
+    submittedBy: 'account-a', submittedAt: NOW, comment: '顺序测试说明', fieldValues: []
   }]
   data.business_nodes[0].latestFeedbackId = 'feedback-current'
   data.business_nodes[0].latestFeedbackRevision = 1
@@ -1432,7 +1434,7 @@ test('凭证顺序字段存在时必须是自有数据安全整数且不得重�
     data.node_feedback = [{
       _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
       revision: 1, action: 'save_progress', processingRoundNumber: 1, submittedBy: 'account-a',
-      submittedAt: NOW, fieldValues: []
+      submittedAt: NOW, comment: '顺序字段测试说明', fieldValues: []
     }]
     data.business_nodes[0].latestFeedbackId = 'feedback-current'
     data.business_nodes[0].latestFeedbackRevision = 1
@@ -1455,7 +1457,7 @@ test('凭证顺序字段存在时必须是自有数据安全整数且不得重�
     data.node_feedback = [{
       _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
       revision: 1, action: 'save_progress', processingRoundNumber: 1, submittedBy: 'account-a',
-      submittedAt: NOW, fieldValues: []
+      submittedAt: NOW, comment: '关系结构测试说明', fieldValues: []
     }]
     data.business_nodes[0].latestFeedbackId = 'feedback-current'
     data.business_nodes[0].latestFeedbackRevision = 1
@@ -1510,7 +1512,7 @@ test('待审核节点只能按活动轮次重建已锁定处理草稿', async ()
   data.node_feedback = [{
     _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
     revision: 1, action: 'save_progress', processingRoundNumber: 1, submittedBy: 'account-a',
-    submittedAt: NOW, fieldValues: []
+    submittedAt: NOW, comment: '锁定草稿说明', fieldValues: []
   }]
   data.node_review_rounds = [{
     _id: 'review-feedback-current', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending',
@@ -1603,12 +1605,65 @@ test('节点历史只在对象及原型链都没有账号关系标记时兼容�
   assert.equal(getterCalls, 0)
 })
 
+test('当前处理轮草稿只接受最新反馈的自有字符串处理说明且不执行访问器', async () => {
+  let getterCalls = 0
+  const cases = [
+    {
+      name: '缺少字段',
+      transformRead: ({ data }) => data
+    },
+    {
+      name: '访问器字段',
+      transformRead: ({ collection, data }) => {
+        if (collection === 'node_feedback') {
+          Object.defineProperty(data, 'comment', {
+            get() { getterCalls += 1; return '不得读取' }
+          })
+        }
+        return data
+      }
+    },
+    {
+      name: '继承字段',
+      transformRead: ({ collection, data }) => {
+        if (collection === 'node_feedback') Object.setPrototypeOf(data, { comment: '不得继承' })
+        return data
+      }
+    },
+    {
+      name: '超长字段',
+      ownComment: 'x'.repeat(1001),
+      transformRead: ({ data }) => data
+    }
+  ]
+
+  for (const item of cases) {
+    const data = reviewWorkflowSeed()
+    data.node_feedback = [{
+      _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1',
+      publishState: 'published', revision: 1, status: 'in_progress', action: 'save_progress',
+      processingRoundNumber: 1, submittedBy: 'account-a', submittedAt: NOW, fieldValues: [],
+      ...(item.ownComment === undefined ? {} : { comment: item.ownComment })
+    }]
+    data.business_nodes[0].latestFeedbackId = 'feedback-current'
+    data.business_nodes[0].latestFeedbackRevision = 1
+    data.evidences = []
+    const { repository } = createFeedbackHarness({ seed: data, transformRead: item.transformRead })
+
+    await assert.rejects(repository.getCurrentProcessingRoundDraft({
+      actor: { _id: 'account-a', status: 'active' },
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4
+    }), error => error.code === 'VERSION_CONFLICT', item.name)
+  }
+  assert.equal(getterCalls, 0)
+})
+
 test('当前处理轮草稿拒绝跨轮次、错误归属和超过20MB的凭证集合', async () => {
   const data = reviewWorkflowSeed()
   data.node_feedback = [{
     _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
     revision: 1, status: 'in_progress', action: 'save_progress', processingRoundNumber: 1,
-    submittedBy: 'account-a', submittedAt: NOW, fieldValues: []
+    submittedBy: 'account-a', submittedAt: NOW, comment: '凭证聚合测试说明', fieldValues: []
   }]
   data.business_nodes[0].latestFeedbackId = 'feedback-current'
   data.business_nodes[0].latestFeedbackRevision = 1

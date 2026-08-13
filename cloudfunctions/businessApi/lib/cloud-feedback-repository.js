@@ -901,6 +901,11 @@ function createCloudFeedbackRepository({
         context.node.latestFeedbackRevision !== latest.revision || !Array.isArray(latest.fieldValues)) {
       throw createError('VERSION_CONFLICT')
     }
+    const latestComment = ownDataValue(latest, 'comment')
+    if (!latestComment.valid || typeof latestComment.value !== 'string' ||
+        latestComment.value.length > 1000) {
+      throw createError('VERSION_CONFLICT')
+    }
     const feedbackById = new Map(feedback.map(item => [item._id, item]))
     const evidenceRows = await readAll(() => db.collection(COLLECTIONS.evidences).where({ nodeId }))
     const at = now().getTime()
@@ -960,6 +965,7 @@ function createCloudFeedbackRepository({
     return {
       line: clone(context.line), node: clone(context.node), feedbackId: latest._id,
       feedbackRevision: latest.revision, processingRoundNumber,
+      processingComment: latestComment.value,
       fieldSnapshots: clone(latest.fieldValues), evidenceIds, evidenceTotalBytes
     }
   }
