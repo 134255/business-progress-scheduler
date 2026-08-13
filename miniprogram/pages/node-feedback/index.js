@@ -17,12 +17,19 @@ const ALL_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'm
 
 function effectiveClientEvidenceTypes(requiresEvidence, allowedTypes) {
   if (typeof requiresEvidence !== 'boolean' || !Array.isArray(allowedTypes)) return null
-  for (let index = 0; index < allowedTypes.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(allowedTypes, index) ||
-        typeof allowedTypes[index] !== 'string' || !ALL_EVIDENCE_TYPES.includes(allowedTypes[index])) return null
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(allowedTypes, 'length')
+  if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')) return null
+  const types = []
+  const seenTypes = new Set()
+  for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(allowedTypes, String(index))
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+        typeof descriptor.value !== 'string' || !ALL_EVIDENCE_TYPES.includes(descriptor.value) ||
+        seenTypes.has(descriptor.value)) return null
+    seenTypes.add(descriptor.value)
+    types.push(descriptor.value)
   }
-  if (new Set(allowedTypes).size !== allowedTypes.length) return null
-  if (allowedTypes.length) return allowedTypes.slice()
+  if (types.length) return types
   return requiresEvidence ? null : ALL_EVIDENCE_TYPES.slice()
 }
 
@@ -521,11 +528,21 @@ Page({
       if (file.status === 'registered' && file.evidenceId) continue
       if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
       this.updateLocalFile(index, { status: 'uploading', statusLabel: '上传中', errorMessage: '' })
+      let upload
       try {
         const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || `evidence.${file.extension}`
         const cloudPath = `evidence/${operation.lineId}/${operation.nodeId}/${Date.now()}-${index}-${safeName}`
-        const upload = await wx.cloud.uploadFile({ cloudPath, filePath: file.path })
+        upload = await wx.cloud.uploadFile({ cloudPath, filePath: file.path })
         if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
+      } catch (error) {
+        if (this.writeStillCurrent(operation)) {
+          this.updateLocalFile(index, {
+            status: 'failed', statusLabel: '上传失败', errorMessage: '上传失败，请重试'
+          })
+        }
+        throw error
+      }
+      try {
         const registered = await businessService.registerEvidenceUpload({
           businessLineId: operation.lineId,
           nodeId: operation.nodeId,
