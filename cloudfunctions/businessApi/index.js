@@ -238,7 +238,13 @@ function createEvidenceRoutes(evidenceService) {
 
 function createFeedbackRoutes(feedbackService) {
   return {
-    submitFeedback: ({ actor, payload }) => feedbackService.submitFeedback({ actor, input: payload }),
+    submitFeedback: ({ actor, payload }) => {
+      const actionDescriptor = payload && Object.getOwnPropertyDescriptor(payload, 'action')
+      const method = actionDescriptor && Object.prototype.hasOwnProperty.call(actionDescriptor, 'value')
+        ? 'saveNodeProgress'
+        : 'submitFeedback'
+      return feedbackService[method]({ actor, input: payload })
+    },
     getNodeHistory: ({ actor, payload }) => feedbackService.getNodeHistory({
       actor,
       businessLineId: payload.businessLineId,

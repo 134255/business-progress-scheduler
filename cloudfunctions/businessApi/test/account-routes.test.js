@@ -579,6 +579,7 @@ test('default feedback routes use the trusted account and protect both writes an
   const calls = []
   const feedbackService = {
     async submitFeedback(value) { calls.push(['submit', value]); return { feedbackId: 'feedback-1', revision: 1 } },
+    async saveNodeProgress(value) { calls.push(['save-progress', value]); return { feedbackId: 'feedback-2', revision: 2 } },
     async getNodeHistory(value) { calls.push(['history', value]); return { history: [] } }
   }
   const harness = createRouteHarness({ feedbackService })
@@ -588,6 +589,11 @@ test('default feedback routes use the trusted account and protect both writes an
     actor: { _id: 'forged' }
   }
   assert.equal((await harness.api.main({ action: 'submitFeedback', payload })).ok, true)
+  const progressPayload = {
+    businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 2,
+    action: 'save_progress', fieldValues: [], comment: '', evidenceIds: [], requestKey: 'request-2'
+  }
+  assert.equal((await harness.api.main({ action: 'submitFeedback', payload: progressPayload })).ok, true)
   assert.equal((await harness.api.main({ action: 'getNodeHistory', payload: {
     businessLineId: 'line-1', nodeId: 'node-1', actorId: 'forged'
   } })).ok, true)
@@ -596,6 +602,7 @@ test('default feedback routes use the trusted account and protect both writes an
   }
   assert.deepEqual(calls, [
     ['submit', { actor, input: payload }],
+    ['save-progress', { actor, input: progressPayload }],
     ['history', { actor, businessLineId: 'line-1', nodeId: 'node-1' }]
   ])
 })
@@ -633,6 +640,13 @@ test('旧节点可继续经真实反馈服务完成，新版审核节点拒绝�
       status: 'completed', fieldValues: [], comment: '', evidenceIds: [], requestKey: 'legacy-feedback'
     }
   })
+  const reviewProgress = await harness.api.main({
+    action: 'submitFeedback',
+    payload: {
+      businessLineId: 'new-line', nodeId: 'review-node', expectedNodeVersion: 4,
+      action: 'save_progress', fieldValues: [], comment: '', evidenceIds: [], requestKey: 'review-progress'
+    }
+  })
   const forgedRound = await harness.api.main({
     action: 'createReviewRound', payload: {
       businessLineId: 'new-line', nodeId: 'review-node', expectedNodeVersion: 4, requestKey: 'forged-round'
@@ -647,7 +661,9 @@ test('旧节点可继续经真实反馈服务完成，新版审核节点拒绝�
   })
 
   assert.equal(legacyResult.ok, true)
-  assert.equal(calls.length, 1)
+  assert.equal(reviewProgress.ok, true)
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1].input.action, 'save_progress')
   assert.deepEqual(forgedRound, { ok: false, code: 'UNKNOWN_ACTION', message: 'Unsupported action' })
   assert.equal(reviewCompletion.code, 'NODE_PENDING_REVIEW')
 })
