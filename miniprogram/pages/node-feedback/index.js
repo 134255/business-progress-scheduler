@@ -522,6 +522,12 @@ Page({
       this.data.nodeId === operation.nodeId && this.data.expectedNodeVersion === operation.nodeVersion
   },
 
+  operationStillOwnsPage(operation) {
+    return Boolean(operation) && this.pageAlive && currentUserId() === operation.actorId &&
+      this.writeSequence === operation.sequence && this.data.lineId === operation.lineId &&
+      this.data.nodeId === operation.nodeId
+  },
+
   async uploadAndRegisterEvidence(operation) {
     for (let index = 0; index < this.data.files.length; index += 1) {
       const file = this.data.files[index]
@@ -699,7 +705,7 @@ Page({
       }
       return false
     } finally {
-      if (this.writeStillCurrent(operation)) this.setData({ submitting: false })
+      if (this.operationStillOwnsPage(operation)) this.setData({ submitting: false })
     }
   },
 

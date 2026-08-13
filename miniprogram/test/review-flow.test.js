@@ -347,22 +347,30 @@ test('新版审核节点页面不展示旧直接完成或旧驳回入口', () =>
 })
 
 test('单独保存处理进度后清除已登记本地文件并恢复服务端最新字段草稿', async () => {
+  let detailReads = 0
   let historyReads = 0
   const calls = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = { setNavigationBarTitle: () => {}, reLaunch: () => {}, showToast: () => {} }
-  const node = reviewNode({ requiresEvidence: true })
+  const initialNode = reviewNode({ requiresEvidence: true, version: 4 })
+  const refreshedNode = reviewNode({ requiresEvidence: true, version: 5 })
   const savedHistory = [{
     feedbackId: 'feedback-1', revision: 1, status: 'in_progress', comment: '已保存说明',
     fieldValues: [{ fieldKey: 'summary', name: '摘要', type: 'short_text', value: '服务端草稿' }],
     evidences: [{ evidenceId: 'evidence-1', storageStatus: 'available' }]
   }]
   const page = loadPage('pages/node-feedback/index.js', {
-    getBusinessLine: async () => ({ line: { _id: 'line-1', status: 'active', version: 8 }, nodes: [node] }),
+    getBusinessLine: async () => {
+      detailReads += 1
+      return {
+        line: { _id: 'line-1', status: 'active', version: 7 + detailReads },
+        nodes: [detailReads === 1 ? initialNode : refreshedNode]
+      }
+    },
     getNodeHistory: async () => {
       historyReads += 1
       return {
-        node,
+        node: detailReads === 1 ? initialNode : refreshedNode,
         canSubmit: true,
         history: historyReads === 1 ? [] : savedHistory
       }
@@ -380,7 +388,13 @@ test('单独保存处理进度后清除已登记本地文件并恢复服务端�
 
   assert.equal(page.data.fieldValues.summary, '服务端草稿')
   assert.equal(page.data.comment, '已保存说明')
+  assert.equal(page.data.expectedNodeVersion, 5)
+  assert.equal(page.data.submitting, false)
   assert.deepEqual(page.data.files, [])
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/node-feedback/index.wxml'), 'utf8')
+  assert.match(wxml, /loading="\{\{submitting\}\}"[^>]*>保存处理进度<\/button>/)
+  assert.match(wxml, /loading="\{\{submitting\}\}"[^>]*>标记受阻<\/button>/)
+  assert.match(wxml, /loading="\{\{submitting\}\}"[^>]*>提交审核<\/button>/)
 
   const reloadedNode = reviewNode({ requiresEvidence: true, version: 5 })
   const reloadedPage = loadPage('pages/node-feedback/index.js', {
