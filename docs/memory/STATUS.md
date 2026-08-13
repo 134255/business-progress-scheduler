@@ -2,6 +2,8 @@
 
 Status captured: 2026-08-13 (Asia/Shanghai)
 
+- 2026-08-13 工作时长完整分钟折算已完成本地实现与自动化验证。真实秒/毫秒时间戳会使原工作时间服务输出小数分钟，审核服务因只接受安全整数而在创建审核轮次前返回 `VERSION_CONFLICT`；修复在权威 `workingMinutesBetween` 完成所有工作日秒级交集累计后统一向下折算一次，保留精确时间戳、日历缺失语义及 `workflowReminder` 秒级提醒阈值。TDD RED：工作时间测试 11 项中 9 通过、2 失败，实际得到 `59.999983…` 与 `1.016666…`；审核服务测试 11 项中 9 通过、2 项以 `VERSION_CONFLICT` 失败。GREEN：两文件聚焦 22/22。完整门禁：`businessApi` 506/506、`calendarSync` 49/49、`workflowReminder` 29/29、`evidenceRetention` 37/37、小程序 144/144、WXML 4/4，均为 0 失败；生产文件语法和实现差异检查通过。实现提交为 `de3f680`，只包含工作时间服务及两份测试；用户自己的 `project.config.json` 修改未暂存、未提交。真实 CloudBase 尚未部署本提交，真机复用现有已保存草稿再次提交审核、生成审核轮次并确认原凭证引用保持不变仍为 `unverified`。
+
 - 2026-08-13 工作时长完整分钟折算设计已由项目所有者确认，实施计划已写入 `docs/superpowers/plans/2026-08-13-work-minute-rounding.md`。计划把修复限制在 `businessApi` 权威工作时间服务的累计输出边界，并以真实工作时间服务组合测试覆盖提交审核与审核投票的秒级时间；生产代码尚未修改，RED/GREEN、全量回归、重新部署和真机复验仍为 `unverified`。执行时必须保留用户未提交的 `project.config.json` 修改。
 - 2026-08-13 真实 CloudBase 隔离验收中，处理进度、最新反馈指针、反馈修订、凭证关联与节点版本均核对正常，但提交审核稳定返回 `VERSION_CONFLICT`，且 `node_review_rounds` 保持空。根因已定位为 `businessApi` 工作时间服务会从真实秒/毫秒时间戳计算出非整数工作分钟，而审核服务与审核事务只接受安全整数的已用、剩余和逾期分钟，导致合法时长在审核轮次落库前被误判为快照冲突。项目所有者已批准方案 A：需要持久化的工作时长统一按已经完整经过的分钟向下取整，精确时间戳保留，`workflowReminder` 的秒级阈值语义不变；设计见 `docs/superpowers/specs/2026-08-13-work-minute-rounding-design.md`。生产实现、自动化回归、`businessApi` 重新部署及复用现有草稿提交审核仍为 `unverified`；不得手工修改现有节点、反馈或凭证记录。用户已有 `project.config.json` 修改继续保持未暂存、未提交。
 
