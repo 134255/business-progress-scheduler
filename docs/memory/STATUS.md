@@ -2,6 +2,7 @@
 
 Status captured: 2026-08-13 (Asia/Shanghai)
 
+- 2026-08-13 工作时长完整分钟折算设计已由项目所有者确认，实施计划已写入 `docs/superpowers/plans/2026-08-13-work-minute-rounding.md`。计划把修复限制在 `businessApi` 权威工作时间服务的累计输出边界，并以真实工作时间服务组合测试覆盖提交审核与审核投票的秒级时间；生产代码尚未修改，RED/GREEN、全量回归、重新部署和真机复验仍为 `unverified`。执行时必须保留用户未提交的 `project.config.json` 修改。
 - 2026-08-13 真实 CloudBase 隔离验收中，处理进度、最新反馈指针、反馈修订、凭证关联与节点版本均核对正常，但提交审核稳定返回 `VERSION_CONFLICT`，且 `node_review_rounds` 保持空。根因已定位为 `businessApi` 工作时间服务会从真实秒/毫秒时间戳计算出非整数工作分钟，而审核服务与审核事务只接受安全整数的已用、剩余和逾期分钟，导致合法时长在审核轮次落库前被误判为快照冲突。项目所有者已批准方案 A：需要持久化的工作时长统一按已经完整经过的分钟向下取整，精确时间戳保留，`workflowReminder` 的秒级阈值语义不变；设计见 `docs/superpowers/specs/2026-08-13-work-minute-rounding-design.md`。生产实现、自动化回归、`businessApi` 重新部署及复用现有草稿提交审核仍为 `unverified`；不得手工修改现有节点、反馈或凭证记录。用户已有 `project.config.json` 修改继续保持未暂存、未提交。
 
 - 2026-08-13 真机隔离验收在 JPG 云存储上传及 `evidences` 元数据登记成功后，“保存处理进度”曾返回 `VALIDATION_ERROR`。根因定位为受保护动作 `submitFeedback` 的默认路由无条件调用旧版 `feedbackService.submitFeedback`，导致带 `action: save_progress` 的新版审核节点载荷在旧输入白名单处被拒绝；上传、凭证登记和可选凭证格式策略本身均已通过该次验收。修复保持客户端协议不变：含自有数据属性 `action` 的载荷进入 `saveNodeProgress`，无 `action` 的旧节点载荷仍进入旧 `submitFeedback`，节点类型、当前账号、节点版本与业务状态继续由服务端权威校验。RED 为路由聚焦 40 项中 38 通过、2 项失败，准确复现错误分派和真实服务 `VALIDATION_ERROR`；GREEN 为路由聚焦 40/40，完整 `businessApi` 502/502、WXML 4/4、生产入口语法与 `git diff --check` 通过。修复版 `businessApi` 已重新部署，目标真机再次保存处理进度成功：页面生成“处理中・第 1 版”反馈历史，处理说明持久化，已登记 JPG 出现在该版本且提供查看入口；保存后待上传区清空为 0 B，符合“本地待提交文件已消费、历史引用保留”的设计。下一步为不重新选择文件，直接提交审核并验证服务端聚合本处理轮已保存凭证；用户已有 `project.config.json` 修改未暂存、未提交。
