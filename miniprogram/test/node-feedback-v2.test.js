@@ -363,6 +363,104 @@ test('凭证按顺序上传并立即登记，失败重试不重复上传成功�
   assert.equal(Object.prototype.hasOwnProperty.call(feedbackInput, 'evidences'), false)
 })
 
+test('可选空白名单允许七种受支持格式，有限名单仍在本地拒绝未允许格式', async () => {
+  const toasts = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showToast: options => toasts.push(options)
+  }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: [] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  assert.deepEqual(page.data.allowedEvidenceTypes, ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+  page.addSelectedFiles(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'].map(extension => ({
+    name: `evidence.${extension}`,
+    path: `wxfile://evidence.${extension}`,
+    size: 1,
+    category: ['jpg', 'jpeg', 'png'].includes(extension) ? 'image' : extension === 'pdf' ? 'pdf' : 'video'
+  })))
+  assert.deepEqual(page.data.files.map(file => file.extension), ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+  assert.ok(page.data.files.every(file => file.status === 'pending'))
+
+  const restricted = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: ['pdf'] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+  })
+  await restricted.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  restricted.addSelectedFiles([{ name: 'evidence.jpg', path: 'wxfile://evidence.jpg', size: 1, category: 'image' }])
+  assert.equal(restricted.data.files.length, 0)
+  assert.equal(toasts.at(-1).title, '当前节点不允许 JPG 格式')
+})
+
+test('必传空白名单与损坏格式快照均失败关闭为只读', async () => {
+  const toasts = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showToast: options => toasts.push(options)
+  }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], requiresEvidence: true, allowedEvidenceTypes: [] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  assert.equal(page.data.readOnly, true)
+  assert.equal(page.data.canSubmit, false)
+  assert.equal(page.data.errorMessage, '当前节点凭证配置无效，请联系管理员')
+  page.addSelectedFiles([{ name: 'evidence.jpg', path: 'wxfile://evidence.jpg', size: 1, category: 'image' }])
+  assert.equal(page.data.files.length, 0)
+
+  const malformed = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: ['pdf', 'pdf'] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+  })
+  await malformed.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  assert.equal(malformed.data.readOnly, true)
+  assert.equal(malformed.data.errorMessage, '当前节点凭证配置无效，请联系管理员')
+
+  for (const invalidNode of [
+    nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: 'pdf' }),
+    nodeFixture({ fieldDefinitions: [], requiresEvidence: 'false', allowedEvidenceTypes: ['pdf'] }),
+    nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: ['exe'] }),
+    Object.create(nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: ['pdf'] }))
+  ]) {
+    const candidate = loadPage({
+      getBusinessLine: async () => businessFixture(invalidNode),
+      getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+    })
+    await candidate.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+    assert.equal(candidate.data.readOnly, true)
+    assert.equal(candidate.data.errorMessage, '当前节点凭证配置无效，请联系管理员')
+  }
+  assert.equal(toasts.length, 0)
+})
+
+test('凭证登记失败仅保存服务层固定中文安全错误', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showToast: () => {},
+    cloud: { uploadFile: async () => ({ fileID: 'cloud://masked/upload' }) }
+  }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: ['pdf'] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] }),
+    registerEvidenceUpload: async () => { throw Object.assign(new Error('文件格式不受支持，请重新选择'), { code: 'UNSUPPORTED_FILE_TYPE' }) },
+    submitFeedback: async () => assert.fail('登记失败时不得提交反馈')
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({ statusIndex: 2, files: [{ localKey: 'one', name: 'evidence.pdf', path: 'wxfile://evidence.pdf', size: 1, category: 'pdf', extension: 'pdf', status: 'pending' }] })
+  await page.submit()
+  assert.equal(page.data.files[0].status, 'failed')
+  assert.equal(page.data.files[0].errorMessage, '文件格式不受支持，请重新选择')
+})
+
 test('凭证预览先获取短期授权，图片、PDF、视频分别使用安全查看方式', async () => {
   const calls = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })

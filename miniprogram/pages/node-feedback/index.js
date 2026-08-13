@@ -13,6 +13,22 @@ const STATUS_LABELS = Object.freeze({
 const MEBIBYTE = 1024 * 1024
 const FEEDBACK_TOTAL_LIMIT = 20 * MEBIBYTE
 const CATEGORY_LIMITS = Object.freeze({ image: 5 * MEBIBYTE, pdf: 20 * MEBIBYTE, video: 20 * MEBIBYTE })
+const ALL_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+
+function effectiveClientEvidenceTypes(requiresEvidence, allowedTypes) {
+  if (typeof requiresEvidence !== 'boolean' || !Array.isArray(allowedTypes) || new Set(allowedTypes).size !== allowedTypes.length ||
+      allowedTypes.some(value => !ALL_EVIDENCE_TYPES.includes(value))) return null
+  if (allowedTypes.length) return allowedTypes.slice()
+  return requiresEvidence ? null : ALL_EVIDENCE_TYPES.slice()
+}
+
+function ownDataValue(record, key) {
+  if (!record || typeof record !== 'object') return { present: false, value: undefined }
+  const descriptor = Object.getOwnPropertyDescriptor(record, key)
+  return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ? { present: true, value: descriptor.value }
+    : { present: Boolean(descriptor), value: undefined }
+}
 
 function currentUserId() {
   const user = getApp().globalData.currentUser
@@ -194,6 +210,11 @@ Page({
       if (!node) throw new Error('未找到节点')
       const historyResult = await businessService.getNodeHistory(this.data.lineId, this.data.nodeId)
       if (!this.pageAlive || requestSequence !== this.loadSequence || currentUserId() !== requestedActorId) return
+      const requiresEvidenceField = ownDataValue(node, 'requiresEvidence')
+      const allowedEvidenceTypesField = ownDataValue(node, 'allowedEvidenceTypes')
+      const requiresEvidence = requiresEvidenceField.present ? requiresEvidenceField.value : false
+      const allowedEvidenceTypes = effectiveClientEvidenceTypes(requiresEvidence, allowedEvidenceTypesField.value)
+      if (!allowedEvidenceTypes) throw new Error('当前节点凭证配置无效，请联系管理员')
       const fields = (Array.isArray(node.fieldDefinitions) ? node.fieldDefinitions : [])
         .slice().sort((left, right) => left.sequence - right.sequence)
         .map(field => ({
@@ -230,8 +251,8 @@ Page({
         lineVersion: detail.line.version,
         fields,
         fieldValues,
-        requiresEvidence: Boolean(node.requiresEvidence),
-        allowedEvidenceTypes: Array.isArray(node.allowedEvidenceTypes) ? node.allowedEvidenceTypes.slice() : [],
+        requiresEvidence,
+        allowedEvidenceTypes,
         history: formattedHistory(historyResult.history),
         canSubmit,
         frozen,
@@ -394,7 +415,7 @@ Page({
         wx.showToast({ title: '文件格式或大小无效', icon: 'none' })
         continue
       }
-      if (this.data.allowedEvidenceTypes.length && !this.data.allowedEvidenceTypes.includes(extension)) {
+      if (!this.data.allowedEvidenceTypes.includes(extension)) {
         wx.showToast({ title: `当前节点不允许 ${extension.toUpperCase()} 格式`, icon: 'none' })
         continue
       }

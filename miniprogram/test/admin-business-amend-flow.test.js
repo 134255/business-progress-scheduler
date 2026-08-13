@@ -73,7 +73,7 @@ function activeDetail() {
 test('业务服务仅调用受保护的反馈、驳回、关闭和冻结修订动作', async () => {
   const calls = []
   const service = withFakeModule('utils/cloud.js', {
-    callBusinessApi: async (action, payload) => { calls.push([action, payload]); return { ok: true } }
+    callBusinessApi: async (action, payload, options) => { calls.push([action, payload, options]); return { ok: true } }
   }, () => {
     const file = path.join(miniProgramRoot, 'services/business.js')
     delete require.cache[require.resolve(file)]
@@ -90,15 +90,40 @@ test('业务服务仅调用受保护的反馈、驳回、关闭和冻结修订�
   await service.amendFrozenBusiness({ businessLineId: 'line-1' })
 
   assert.deepEqual(calls, [
-    ['registerEvidenceUpload', { fileId: 'cloud://e/a' }],
-    ['getEvidenceAccess', { evidenceId: 'evidence-1' }],
-    ['submitFeedback', { nodeId: 'node-1' }],
-    ['rejectPreviousNode', { currentNodeId: 'node-2' }],
-    ['closeBusinessLine', { businessLineId: 'line-1' }],
-    ['listFrozenBusinessesForAdmin', { keyword: '开户' }],
-    ['getFrozenBusinessForAdmin', { businessLineId: 'line-1' }],
-    ['amendFrozenBusiness', { businessLineId: 'line-1' }]
+    ['registerEvidenceUpload', { fileId: 'cloud://e/a' }, { silent: true }],
+    ['getEvidenceAccess', { evidenceId: 'evidence-1' }, { silent: true }],
+    ['submitFeedback', { nodeId: 'node-1' }, undefined],
+    ['rejectPreviousNode', { currentNodeId: 'node-2' }, undefined],
+    ['closeBusinessLine', { businessLineId: 'line-1' }, undefined],
+    ['listFrozenBusinessesForAdmin', { keyword: '开户' }, undefined],
+    ['getFrozenBusinessForAdmin', { businessLineId: 'line-1' }, undefined],
+    ['amendFrozenBusiness', { businessLineId: 'line-1' }, undefined]
   ])
+})
+
+test('凭证登记错误映射为固定中文消息并保留错误代码', async () => {
+  const calls = []
+  const service = withFakeModule('utils/cloud.js', {
+    callBusinessApi: async (action, payload, options) => {
+      calls.push([action, payload, options])
+      throw Object.assign(new Error('UNSUPPORTED_FILE_TYPE: cloud://secret/path'), { code: 'UNSUPPORTED_FILE_TYPE' })
+    }
+  }, () => {
+    const file = path.join(miniProgramRoot, 'services/business.js')
+    delete require.cache[require.resolve(file)]
+    return require(file)
+  })
+
+  await assert.rejects(
+    () => service.registerEvidenceUpload({ fileId: 'cloud://masked/input' }),
+    error => {
+      assert.equal(error.message, '文件格式不受支持，请重新选择')
+      assert.equal(error.code, 'UNSUPPORTED_FILE_TYPE')
+      assert.doesNotMatch(JSON.stringify({ message: error.message, code: error.code }), /cloud:\/\/|UNSUPPORTED_FILE_TYPE:/)
+      return true
+    }
+  )
+  assert.deepEqual(calls, [['registerEvidenceUpload', { fileId: 'cloud://masked/input' }, { silent: true }]])
 })
 
 test('业务详情只用标识打开节点，并仅向当前节点负责人显示紧邻驳回表单', async () => {

@@ -22,7 +22,10 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   BUSINESS_NOT_ACTIVE: '业务已结束，不能继续操作',
   BLOCKED_REASON_REQUIRED: '请填写受阻原因',
   FORBIDDEN: '你没有权限执行此操作',
-  VALIDATION_ERROR: '提交内容不符合要求，请检查后重试'
+  VALIDATION_ERROR: '提交内容不符合要求，请检查后重试',
+  UNSUPPORTED_FILE_TYPE: '文件格式不受支持，请重新选择',
+  FILE_TOO_LARGE: '文件大小超过限制，请重新选择',
+  EVIDENCE_NOT_ATTACHABLE: '当前凭证无法登记，请刷新后重试'
 })
 
 function safeServiceError(error, fallback) {
@@ -103,7 +106,7 @@ function getNodeHistory(businessLineId, nodeId) {
 }
 
 function registerEvidenceUpload(input) {
-  return callBusinessApi('registerEvidenceUpload', input)
+  return callProtected('registerEvidenceUpload', input, '凭证上传失败，请重试')
 }
 
 function getEvidenceAccess(evidenceId) {
