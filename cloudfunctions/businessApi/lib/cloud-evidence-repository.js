@@ -120,6 +120,7 @@ function effectiveAllowedEvidenceTypes(node, accountSchema) {
   const field = ownDataValue(node, accountSchema ? 'allowedEvidenceTypes' : 'evidenceTypes')
   const required = ownDataValue(node, 'requiresEvidence')
   if (!field.present || !Array.isArray(field.value) ||
+      !required.present && node && typeof node === 'object' && 'requiresEvidence' in node ||
       required.present && typeof required.value !== 'boolean' ||
       new Set(field.value).size !== field.value.length ||
       field.value.some(value => !ALL_EVIDENCE_TYPES.includes(value))) {

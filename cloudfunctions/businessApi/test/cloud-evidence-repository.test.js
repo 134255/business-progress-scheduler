@@ -31,8 +31,8 @@ function seed(overrides = {}) {
   }
 }
 
-function createHarness({ documents = seed(), download, temporary, idFactory } = {}) {
-  const fake = createFakeCloudDatabase(documents)
+function createHarness({ documents = seed(), download, temporary, idFactory, transformRead } = {}) {
+  const fake = createFakeCloudDatabase(documents, { transformRead })
   const calls = []
   const cloud = {
     async downloadFile(input) {
@@ -581,6 +581,45 @@ test('effective evidence allowlists fail closed for malformed own data and inher
   assert.deepEqual(effectiveAllowedEvidenceTypes({
     allowedEvidenceTypes: [], requiresEvidence: false
   }, true), ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+})
+
+test('effective evidence allowlists reject inherited or accessor requiresEvidence', () => {
+  const inherited = Object.assign(Object.create({ requiresEvidence: true }), {
+    allowedEvidenceTypes: []
+  })
+  const accessor = Object.defineProperty({ allowedEvidenceTypes: [] }, 'requiresEvidence', {
+    get: () => true,
+    enumerable: true
+  })
+
+  for (const node of [inherited, accessor]) {
+    assert.throws(() => effectiveAllowedEvidenceTypes(node, true), assertCode('UNSUPPORTED_FILE_TYPE'))
+  }
+})
+
+test('registration rejects inherited or accessor requiresEvidence before download or persistence', async () => {
+  for (const shape of ['inherited', 'accessor']) {
+    const harness = createHarness({
+      documents: seed({ business_nodes: [{
+        _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+        assigneeUserIds: ['account-1'], allowedEvidenceTypes: []
+      }] }),
+      transformRead: ({ collection, data }) => {
+        if (collection !== 'business_nodes') return data
+        if (shape === 'inherited') {
+          return Object.assign(Object.create({ requiresEvidence: true }), data)
+        }
+        return Object.defineProperty(data, 'requiresEvidence', {
+          get: () => true,
+          enumerable: true
+        })
+      }
+    })
+
+    await assert.rejects(harness.repository.registerUpload(registration()), assertCode('UNSUPPORTED_FILE_TYPE'))
+    assert.deepEqual(harness.calls, [])
+    assert.equal(harness.fake.documents('evidences').length, 0)
+  }
 })
 
 test('registration reauthorizes the effective allowlist before evidence metadata is written', async () => {
