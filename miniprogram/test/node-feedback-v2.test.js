@@ -532,6 +532,41 @@ test('云文件上传中文前缀异常不会进入文件状态', async () => {
   assert.doesNotMatch(page.data.files[0].errorMessage, /errCode|cloud:\/\//)
 })
 
+test('审核处理上传异常不会向保存进度或提交审核的外层提示泄漏详情', async () => {
+  for (const action of ['onSaveProgress', 'onSubmitReview']) {
+    const toasts = []
+    global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+    global.wx = {
+      setNavigationBarTitle: () => {},
+      reLaunch: () => assert.fail('有效账号不应被重定向'),
+      showToast: options => toasts.push(options),
+      cloud: {
+        uploadFile: async () => {
+          throw new Error('网络异常 errCode=600001 cloud://private/upload')
+        }
+      }
+    }
+    const page = loadPage({
+      getBusinessLine: async () => businessFixture(nodeFixture({
+        fieldDefinitions: [], workflowMode: 'review', status: 'in_progress',
+        allowedEvidenceTypes: ['pdf']
+      })),
+      getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] }),
+      registerEvidenceUpload: async () => assert.fail('上传失败时不得登记凭证'),
+      submitFeedback: async () => assert.fail('上传失败时不得保存处理进度'),
+      submitNodeForReview: async () => assert.fail('上传失败时不得提交审核')
+    })
+    await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+    page.setData({ files: [{ localKey: 'one', name: 'evidence.pdf', path: 'wxfile://evidence.pdf', size: 1, category: 'pdf', extension: 'pdf', status: 'pending' }] })
+
+    await page[action]()
+
+    assert.equal(page.data.files[0].errorMessage, '上传失败，请重试')
+    assert.equal(toasts.at(-1).title, '上传失败，请重试')
+    assert.doesNotMatch(toasts.at(-1).title, /errCode|cloud:\/\//)
+  }
+})
+
 test('凭证下载中文前缀异常只显示固定安全提示', async () => {
   const toasts = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })

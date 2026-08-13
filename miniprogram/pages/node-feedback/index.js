@@ -540,7 +540,7 @@ Page({
             status: 'failed', statusLabel: '上传失败', errorMessage: '上传失败，请重试'
           })
         }
-        throw error
+        throw Object.assign(new Error('上传失败，请重试'), { code: 'EVIDENCE_UPLOAD_FAILED' })
       }
       try {
         const registered = await businessService.registerEvidenceUpload({
