@@ -53,6 +53,20 @@ function safeInteger(value, minimum = 0) {
   return Number.isSafeInteger(value) && value >= minimum
 }
 
+function processingComment(value, { allowMissing = false, errorCode = 'VERSION_CONFLICT' } = {}) {
+  if (!value || typeof value !== 'object') throw createError(errorCode)
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'processingComment')
+  if (!descriptor) {
+    if (allowMissing && !('processingComment' in value)) return ''
+    throw createError(errorCode)
+  }
+  if (!Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+      typeof descriptor.value !== 'string' || descriptor.value.length > 1000) {
+    throw createError(errorCode)
+  }
+  return descriptor.value
+}
+
 function increment(value) {
   if (!safeInteger(value) || value === Number.MAX_SAFE_INTEGER) throw createError('VERSION_CONFLICT')
   return value + 1
@@ -608,9 +622,13 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
 
   function validateDraft(value, node, feedback) {
     const { draft } = value
+    const draftComment = ownDataValue(draft, 'processingComment')
+    const feedbackComment = ownDataValue(feedback, 'comment')
     if (!draft || typeof draft.feedbackId !== 'string' || !DOCUMENT_ID.test(draft.feedbackId) ||
         !safeInteger(draft.feedbackRevision, 1) ||
         draft.processingRoundNumber !== node.processingRoundNumber ||
+        !draftComment.valid || typeof draftComment.value !== 'string' ||
+        draftComment.value.length > 1000 ||
         !Array.isArray(draft.fieldSnapshots) || !Array.isArray(draft.evidenceIds) ||
         draft.evidenceIds.some(id => typeof id !== 'string' || !DOCUMENT_ID.test(id)) ||
         new Set(draft.evidenceIds).size !== draft.evidenceIds.length ||
@@ -620,6 +638,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         feedback.businessLineId !== value.input.businessLineId || feedback.nodeId !== value.input.nodeId ||
         feedback.revision !== draft.feedbackRevision ||
         feedback.processingRoundNumber !== draft.processingRoundNumber ||
+        !feedbackComment.valid || typeof feedbackComment.value !== 'string' ||
+        feedbackComment.value.length > 1000 || feedbackComment.value !== draftComment.value ||
         !['save_progress', 'mark_blocked'].includes(feedback.action)) {
       throw createError('VERSION_CONFLICT')
     }
@@ -660,6 +680,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         round.feedbackId !== value.draft.feedbackId ||
         round.feedbackRevision !== value.draft.feedbackRevision ||
         round.processingRoundNumber !== value.draft.processingRoundNumber ||
+        processingComment(round) !== value.draft.processingComment ||
         round.evidenceTotalBytes !== value.draft.evidenceTotalBytes ||
         JSON.stringify(round.fieldValues) !== JSON.stringify(value.draft.fieldSnapshots) ||
         JSON.stringify(round.evidenceIds) !== JSON.stringify(value.draft.evidenceIds)) {
@@ -725,7 +746,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       const recomputedDraftHash = hash(JSON.stringify([
         actor._id, value.input.businessLineId, value.input.nodeId, value.input.expectedNodeVersion,
         value.draft.feedbackId, value.draft.feedbackRevision, value.draft.processingRoundNumber,
-        value.draft.fieldSnapshots, value.draft.evidenceIds, value.draft.evidenceTotalBytes
+        value.draft.processingComment, value.draft.fieldSnapshots,
+        value.draft.evidenceIds, value.draft.evidenceTotalBytes
       ]))
       if (recomputedDraftHash !== value.draftHash) throw createError('VERSION_CONFLICT')
       assertIdempotentRound(round, node, value, value.reviewRoundId)
@@ -781,6 +803,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         reviewerDisplayNames,
         feedbackId: value.draft.feedbackId,
         feedbackRevision: value.draft.feedbackRevision,
+        processingComment: value.draft.processingComment,
         fieldValues: clone(value.draft.fieldSnapshots),
         evidenceIds: clone(value.draft.evidenceIds),
         evidenceTotalBytes: value.draft.evidenceTotalBytes,
@@ -1374,6 +1397,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       version: second.round.version,
       status: second.round.status,
       submittedAt: safeDate(second.round.reviewStartedAt),
+      processingComment: processingComment(second.round, { allowMissing: true, errorCode: 'FORBIDDEN' }),
       fieldValues: safeFieldValues(second.round.fieldValues),
       evidences: safeEvidenceIds(second.round.evidenceIds),
       votes,

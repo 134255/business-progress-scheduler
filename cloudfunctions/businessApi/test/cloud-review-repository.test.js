@@ -31,7 +31,7 @@ function seed(overrides = {}) {
     node_feedback: overrides.feedback || [{
       _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1',
       publishState: 'published', revision: 2, processingRoundNumber: 1,
-      action: 'save_progress', submittedBy: 'processor-1'
+      action: 'save_progress', submittedBy: 'processor-1', comment: '处理说明快照'
     }],
     node_review_rounds: overrides.rounds || [],
     notifications: overrides.notifications || [],
@@ -51,6 +51,7 @@ function request(overrides = {}) {
     },
     draft: {
       feedbackId: 'feedback-current', feedbackRevision: 2, processingRoundNumber: 1,
+      processingComment: '处理说明快照',
       fieldSnapshots: [{ fieldKey: 'summary', name: '摘要', type: 'short_text', value: '完成' }],
       evidenceIds: ['evidence-a', 'evidence-b'], evidenceTotalBytes: 1024
     },
@@ -74,7 +75,8 @@ function retryValue(value) {
   const draftHash = crypto.createHash('sha256').update(JSON.stringify([
     value.actor._id, safeInput.businessLineId, safeInput.nodeId, safeInput.expectedNodeVersion,
     value.draft.feedbackId, value.draft.feedbackRevision, value.draft.processingRoundNumber,
-    value.draft.fieldSnapshots, value.draft.evidenceIds, value.draft.evidenceTotalBytes
+    value.draft.processingComment, value.draft.fieldSnapshots,
+    value.draft.evidenceIds, value.draft.evidenceTotalBytes
   ])).digest('hex')
   return {
     actor: value.actor, input: safeInput, requestKeyHash: value.requestKeyHash,
@@ -129,6 +131,7 @@ function votingSeed({ mode = 'all', terminal = false } = {}) {
     processorDisplayNames: ['处理人一'], reviewerDisplayNames: ['审核人一', '审核人二'],
     submittedBy: 'processor-1', submittedNodeVersion: 4, lockedNodeVersion: 5,
     feedbackId: 'feedback-current', feedbackRevision: 2,
+    processingComment: '处理说明快照',
     fieldValues: [], evidenceIds: [], evidenceTotalBytes: 0,
     processingTimingStatus: 'calculated', processingElapsedWorkMinutes: 120,
     processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0,
@@ -187,6 +190,7 @@ test('提交审核在一个事务内创建轮次、锁定节点并写确定性�
   assert.equal(round.reviewRoundNumber, 1)
   assert.deepEqual(round.reviewerUserIds, ['reviewer-1', 'reviewer-2'])
   assert.deepEqual(round.fieldValues, request().draft.fieldSnapshots)
+  assert.equal(round.processingComment, '处理说明快照')
   assert.equal(round.requestKeyHash, request().requestKeyHash)
   assert.equal(round.processingTimingStatus, 'calculated')
   assert.equal(round.processingElapsedWorkMinutes, 120)
@@ -293,6 +297,7 @@ test('审核详情只允许当前审核人、业务管理员或超级管理员�
   assert.deepEqual(detail.fieldValues, [{
     fieldKey: 'summary', name: '摘要', type: 'short_text', value: '仅业务内容'
   }])
+  assert.equal(detail.processingComment, '处理说明快照')
   assert.deepEqual(detail.evidences, [{ evidenceId: 'evidence-a' }])
   assert.deepEqual(detail.votes, [{
     reviewerDisplayName: '审核人二', decision: 'approved', createdAt: NOW
@@ -320,6 +325,63 @@ test('审核详情只允许当前审核人、业务管理员或超级管理员�
   await assert.rejects(repository.getReviewDetail({
     actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'missing-round'
   }), error => error.code === 'FORBIDDEN')
+})
+
+test('审核详情只对完全缺失的旧轮次兼容空处理说明并拒绝非法结构', async () => {
+  const legacy = votingSeed({ mode: 'all' })
+  delete legacy.node_review_rounds[0].processingComment
+  const legacyRepository = harness({ seed: legacy }).repository
+  const legacyDetail = await legacyRepository.getReviewDetail({
+    actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  })
+  assert.equal(legacyDetail.processingComment, '')
+
+  let getterCalls = 0
+  const cases = [
+    {
+      name: '数字',
+      transformRead({ collection, data }) {
+        if (collection === 'node_review_rounds') data.processingComment = 7
+        return data
+      }
+    },
+    {
+      name: '超长字符串',
+      transformRead({ collection, data }) {
+        if (collection === 'node_review_rounds') data.processingComment = 'x'.repeat(1001)
+        return data
+      }
+    },
+    {
+      name: '访问器',
+      transformRead({ collection, data }) {
+        if (collection === 'node_review_rounds') {
+          delete data.processingComment
+          Object.defineProperty(data, 'processingComment', {
+            get() { getterCalls += 1; return '不得读取' }
+          })
+        }
+        return data
+      }
+    },
+    {
+      name: '继承属性',
+      transformRead({ collection, data }) {
+        if (collection === 'node_review_rounds') {
+          delete data.processingComment
+          Object.setPrototypeOf(data, { processingComment: '不得继承' })
+        }
+        return data
+      }
+    }
+  ]
+  for (const item of cases) {
+    const { repository } = harness({ seed: votingSeed({ mode: 'all' }), transformRead: item.transformRead })
+    await assert.rejects(repository.getReviewDetail({
+      actor: { _id: 'reviewer-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+    }), error => error.code === 'FORBIDDEN', item.name)
+  }
+  assert.equal(getterCalls, 0)
 })
 
 test('审核轮次固化参与人显示名，历史参与人停用或改名不改变详情', async () => {
@@ -810,6 +872,7 @@ test('幂等重试必须用重新构建的完整草稿拒绝审核轮次摘要�
     round => { round.draftHash = 'f'.repeat(64) },
     round => { round.feedbackId = 'feedback-other' },
     round => { round.feedbackRevision = 3 },
+    round => { round.processingComment = '被篡改的处理说明' },
     round => { round.fieldValues = [{ fieldKey: 'summary', value: '篡改' }] },
     round => { round.evidenceIds = ['evidence-b', 'evidence-a'] },
     round => { round.evidenceTotalBytes = 2048 }
@@ -824,6 +887,28 @@ test('幂等重试必须用重新构建的完整草稿拒绝审核轮次摘要�
     await assert.rejects(repository.findReviewRoundRetry(retryValue(value)), error =>
       error.code === 'VERSION_CONFLICT')
   }
+})
+
+test('审核轮次创建与幂等确认都拒绝草稿说明和原反馈说明不一致', async () => {
+  const data = seed()
+  data.node_feedback[0].comment = '原反馈已变化'
+  const { repository } = harness({ seed: data })
+  const value = request()
+  value.draftHash = retryValue(value).draftHash
+
+  await assert.rejects(repository.createReviewRound(value), error => error.code === 'VERSION_CONFLICT')
+
+  const created = harness()
+  const valid = request()
+  valid.draftHash = retryValue(valid).draftHash
+  await created.repository.createReviewRound(valid)
+  created.fake.replace('node_feedback', 'feedback-current', {
+    ...created.fake.documents('node_feedback')[0], comment: '响应丢失后反馈被篡改'
+  })
+  await assert.rejects(
+    created.repository.findReviewRoundRetry(retryValue(valid)),
+    error => error.code === 'VERSION_CONFLICT'
+  )
 })
 
 test('事务内重新校验账号、处理角色、节点版本、当前节点和活动轮次完整性', async () => {
