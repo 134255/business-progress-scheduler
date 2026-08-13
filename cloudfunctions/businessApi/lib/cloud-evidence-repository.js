@@ -108,11 +108,26 @@ function isCurrentNode(line, node) {
     Number(node.sequence) === line.currentNodeIndex
 }
 
-function allowedTypes(node, accountSchema) {
-  const source = accountSchema || Object.prototype.hasOwnProperty.call(node, 'allowedEvidenceTypes')
-    ? node.allowedEvidenceTypes
-    : node.evidenceTypes
-  return Array.isArray(source) ? source.filter(value => typeof value === 'string') : []
+function ownDataValue(record, key) {
+  if (!record || typeof record !== 'object') return { present: false, value: undefined }
+  const descriptor = Object.getOwnPropertyDescriptor(record, key)
+  return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ? { present: true, value: descriptor.value }
+    : { present: Boolean(descriptor), value: undefined }
+}
+
+function effectiveAllowedEvidenceTypes(node, accountSchema) {
+  const field = ownDataValue(node, accountSchema ? 'allowedEvidenceTypes' : 'evidenceTypes')
+  const required = ownDataValue(node, 'requiresEvidence')
+  if (!field.present || !Array.isArray(field.value) ||
+      required.present && typeof required.value !== 'boolean' ||
+      new Set(field.value).size !== field.value.length ||
+      field.value.some(value => !ALL_EVIDENCE_TYPES.includes(value))) {
+    throw createError('UNSUPPORTED_FILE_TYPE')
+  }
+  if (field.value.length) return field.value.slice()
+  if (required.present && required.value === true) throw createError('UNSUPPORTED_FILE_TYPE')
+  return ALL_EVIDENCE_TYPES.slice()
 }
 
 function parseOptionalTimestamp(value) {
@@ -191,7 +206,7 @@ function createCloudEvidenceRepository({
     if (!authorization.valid || !isOwner(line, actor, accountSchema) && !authorization.authorized) {
       throw createError('FORBIDDEN')
     }
-    return { actor, line, node, allowedTypes: allowedTypes(node, accountSchema) }
+    return { actor, line, node, allowedTypes: effectiveAllowedEvidenceTypes(node, accountSchema) }
   }
 
   async function authorizeAmendmentRegistration(database, actorId, businessLineId) {
@@ -386,6 +401,7 @@ module.exports = {
   ORPHAN_LIFETIME_MS,
   RETENTION_SCOPES,
   RETENTION_SOURCES,
+  effectiveAllowedEvidenceTypes,
   hasOwnAccountRelationship,
   createCloudEvidenceRepository
 }

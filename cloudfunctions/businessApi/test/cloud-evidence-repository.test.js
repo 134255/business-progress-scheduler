@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 
 const {
   createCloudEvidenceRepository,
+  effectiveAllowedEvidenceTypes,
   hasOwnAccountRelationship
 } = require('../lib/cloud-evidence-repository')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
@@ -498,6 +499,109 @@ test('rejects a declared size above 20 MB before authorization or cloud download
   })), assertCode('FILE_TOO_LARGE'))
   assert.deepEqual(harness.calls, [])
   assert.equal(harness.fake.transactionRuns.length, 0)
+  assert.equal(harness.fake.documents('evidences').length, 0)
+})
+
+test('optional evidence nodes with an empty allowlist accept every supported signed format', async () => {
+  for (const fixture of [
+    { extension: 'jpg', bytes: Buffer.from([0xff, 0xd8, 0xff, 0x00]) },
+    { extension: 'jpeg', bytes: Buffer.from([0xff, 0xd8, 0xff, 0x00]) },
+    { extension: 'png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
+    { extension: 'pdf', bytes: Buffer.from('%PDF-safe-fixture') },
+    { extension: 'mp4', bytes: Buffer.from('0000ftyp0000') },
+    { extension: 'mov', bytes: Buffer.from('0000ftyp0000') },
+    { extension: 'm4v', bytes: Buffer.from('0000ftyp0000') }
+  ]) {
+    const documents = seed({ business_nodes: [{
+      _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+      assigneeUserIds: ['account-1'], requiresEvidence: false, allowedEvidenceTypes: []
+    }] })
+    const harness = createHarness({
+      documents,
+      download: async () => ({ fileContent: fixture.bytes })
+    })
+
+    const result = await harness.repository.registerUpload(registration({
+      fileName: `evidence.${fixture.extension}`,
+      declaredSize: fixture.bytes.length
+    }))
+
+    assert.equal(result.metadata.extension, fixture.extension)
+    assert.equal(harness.fake.documents('evidences')[0].extension, fixture.extension)
+  }
+})
+
+test('a non-empty optional allowlist remains a strict evidence-type restriction', async () => {
+  const documents = seed({ business_nodes: [{
+    _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+    assigneeUserIds: ['account-1'], requiresEvidence: false, allowedEvidenceTypes: ['pdf']
+  }] })
+  const pdf = createHarness({ documents })
+  assert.equal((await pdf.repository.registerUpload(registration())).metadata.extension, 'pdf')
+
+  const jpg = createHarness({
+    documents: seed({ business_nodes: [{
+      _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+      assigneeUserIds: ['account-1'], requiresEvidence: false, allowedEvidenceTypes: ['pdf']
+    }] }),
+    download: async () => ({ fileContent: Buffer.from([0xff, 0xd8, 0xff, 0x00]) })
+  })
+  await assert.rejects(jpg.repository.registerUpload(registration({
+    fileName: 'photo.jpg', declaredSize: 4
+  })), assertCode('UNSUPPORTED_FILE_TYPE'))
+  assert.equal(jpg.fake.documents('evidences').length, 0)
+})
+
+test('required evidence with an empty allowlist fails before download or persistence', async () => {
+  const harness = createHarness({ documents: seed({ business_nodes: [{
+    _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+    assigneeUserIds: ['account-1'], requiresEvidence: true, allowedEvidenceTypes: []
+  }] }) })
+
+  await assert.rejects(harness.repository.registerUpload(registration()), assertCode('UNSUPPORTED_FILE_TYPE'))
+  assert.deepEqual(harness.calls, [])
+  assert.equal(harness.fake.documents('evidences').length, 0)
+})
+
+test('effective evidence allowlists fail closed for malformed own data and inherited or accessor fields', () => {
+  const malformed = [
+    { allowedEvidenceTypes: 'pdf' },
+    { allowedEvidenceTypes: ['pdf', 'pdf'] },
+    { allowedEvidenceTypes: ['exe'] },
+    Object.defineProperty({}, 'allowedEvidenceTypes', { get: () => ['pdf'], enumerable: true }),
+    Object.create({ allowedEvidenceTypes: ['pdf'] })
+  ]
+
+  for (const node of malformed) {
+    assert.throws(() => effectiveAllowedEvidenceTypes(node, true), assertCode('UNSUPPORTED_FILE_TYPE'))
+  }
+  assert.throws(() => effectiveAllowedEvidenceTypes({
+    allowedEvidenceTypes: ['pdf'], requiresEvidence: 'false'
+  }, true), assertCode('UNSUPPORTED_FILE_TYPE'))
+  assert.deepEqual(effectiveAllowedEvidenceTypes({
+    allowedEvidenceTypes: [], requiresEvidence: false
+  }, true), ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+})
+
+test('registration reauthorizes the effective allowlist before evidence metadata is written', async () => {
+  const documents = seed({ business_nodes: [{
+    _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+    assigneeUserIds: ['account-1'], requiresEvidence: false, allowedEvidenceTypes: []
+  }] })
+  const harness = createHarness({
+    documents,
+    download: async (input, fake) => {
+      fake.replace('business_nodes', 'node-1', {
+        businessLineId: 'business-1', sequence: 0, status: 'ready', assigneeUserIds: ['account-1'],
+        requiresEvidence: false, allowedEvidenceTypes: ['pdf']
+      })
+      return { fileContent: Buffer.from([0xff, 0xd8, 0xff, 0x00]) }
+    }
+  })
+
+  await assert.rejects(harness.repository.registerUpload(registration({
+    fileName: 'photo.jpg', declaredSize: 4
+  })), assertCode('UNSUPPORTED_FILE_TYPE'))
   assert.equal(harness.fake.documents('evidences').length, 0)
 })
 
