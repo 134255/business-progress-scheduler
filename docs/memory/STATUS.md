@@ -2,6 +2,7 @@
 
 Status captured: 2026-08-13 (Asia/Shanghai)
 
+- 2026-08-13 隔离业务的审核审计记录已由操作员脱敏核对通过：`SUBMIT_NODE_FOR_REVIEW` 三条、`SUBMIT_REVIEW_VOTE` 三条，投票审计决策分布为一次 `rejected` 与两次 `approved`；六条记录均以 `node_review_round` 为目标类型并含非空目标编号和创建时间。审计中未出现密码、OpenID、云文件路径或文件编号、请求键原文、凭证哈希，验证真实 CloudBase 审计数量、轮次关联和敏感数据最小化符合设计；结果通知仍待继续核对。
 - 2026-08-13 隔离业务的独立审核投票记录已由操作员脱敏核对通过：`node_review_votes` 共三条并分别唯一对应三个审核轮次，没有同轮重复票；第一节点第 1 轮为 `decision=rejected` 且评论存在，另外两轮为 `decision=approved` 且允许空评论；三条投票均保存 `reviewerDisplayName` 不可变显示名快照和 `createdAt`。该结果验证确定性一轮一审核人一票、持久决策枚举和显示名快照在真实 CloudBase 生效；审核提交/投票审计与结果通知仍待继续核对。
 - 2026-08-13 隔离业务的审核轮次数据库记录已由操作员脱敏核对通过：共三条不可变轮次；第一节点第 1 轮为 `rejected/rejected` 且驳回原因仍存在，返工后的第 2 轮为 `approved/approved`，第二节点第 1 轮为 `approved/approved`；三条记录的 `voteCount` 均为 1 且 `decidedAt` 均存在。该结果验证返工不会覆盖旧轮次、每轮或签单票终结计数正确、末节点终态轮次完整；独立 `node_review_votes`、审计与通知记录仍待继续核对。
 - 2026-08-13 末节点完成后的业务线数据库终态已由操作员脱敏核对：`status=completed`、`progress=100`、`completedAt` 与 `retentionStartedAt` 均存在，`purgeDueAt` 比保留起点晚约 60 个自然日。`currentNodeId` 仍指向最终已完成节点符合当前实现契约：末节点通过事务保留最终节点只读指针以支持终态详情、审计与凭证历史定位，不代表仍有活动节点；业务终态和节点终态继续阻断普通写入。此前把“当前节点编号为空”作为唯一预期过窄，部署手册实际允许清空或呈现服务端终态，本项无需代码修复。由于用户一次只反馈了五组结果，`purgeDueAt` 是否单独明确存在已可由“比 retentionStartedAt 晚约 60 天”推出；其余投票、审计、通知和双 SLA 终态仍待核对。
