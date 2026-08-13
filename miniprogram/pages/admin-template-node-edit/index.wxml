@@ -43,8 +43,9 @@
     </view>
     <view class="field">
       <text class="field-label">凭证要求</text>
-      <switch checked="{{requiresEvidence}}" disabled="{{readOnly}}" bindchange="onRequiresEvidenceChange" />
-      <checkbox-group wx:if="{{requiresEvidence}}" class="evidence-options" bindchange="onEvidenceTypesChange">
+      <label><switch checked="{{requiresEvidence}}" disabled="{{readOnly}}" bindchange="onRequiresEvidenceChange" />提交审核时必须上传凭证</label>
+      <text class="muted">未勾选时凭证可选；未选择格式表示不限格式（仅限系统已支持格式）。</text>
+      <checkbox-group class="evidence-options" bindchange="onEvidenceTypesChange">
         <label wx:for="{{evidenceTypeOptions}}" wx:key="value">
           <checkbox value="{{item.value}}" checked="{{item.selected}}" disabled="{{readOnly}}" />{{item.label}}
         </label>

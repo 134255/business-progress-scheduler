@@ -275,6 +275,46 @@ test('node editor rejects SLA hours that cannot be represented as whole minutes'
   delete global.wx
 })
 
+test('node editor preserves optional evidence formats and rejects a required empty format list', async () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  const reviewer = { _id: 'reviewer-1', displayName: '审核人', username: 'reviewer' }
+  const optionalAll = createNodeEditor({ users: [processor, reviewer] })
+  optionalAll.setData({
+    name: '可选全部格式', processorUserIds: [processor._id], reviewerUserIds: [reviewer._id],
+    requiresEvidence: false, allowedEvidenceTypes: []
+  })
+  assert.deepEqual(optionalAll.buildNodeForSave().allowedEvidenceTypes, [])
+
+  const optionalPdf = createNodeEditor({ users: [processor, reviewer] })
+  optionalPdf.setData({
+    name: '可选 PDF', processorUserIds: [processor._id], reviewerUserIds: [reviewer._id],
+    requiresEvidence: false, allowedEvidenceTypes: ['pdf']
+  })
+  assert.deepEqual(optionalPdf.buildNodeForSave().allowedEvidenceTypes, ['pdf'])
+
+  let accepted = 0
+  const requiredWithoutFormats = createNodeEditor({
+    users: [processor, reviewer],
+    acceptNodeFromEditor: () => { accepted += 1 }
+  })
+  requiredWithoutFormats.setData({
+    name: '必传凭证', processorUserIds: [processor._id], reviewerUserIds: [reviewer._id],
+    requiresEvidence: true, allowedEvidenceTypes: []
+  })
+  await requiredWithoutFormats.submit()
+  assert.equal(requiredWithoutFormats.data.errorMessage, '要求凭证时至少选择一种凭证类型')
+  assert.equal(accepted, 0)
+
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8')
+  assert.match(wxml, /提交审核时必须上传凭证/)
+  assert.doesNotMatch(wxml, /checkbox-group[^>]*wx:if="{{requiresEvidence}}"/)
+  assert.match(wxml, /不限格式（仅限系统已支持格式）/)
+
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
 test('node editor keeps enabled-template nodes read-only', async () => {
   const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
   const reviewer = { _id: 'reviewer-1', displayName: '审核人', username: 'reviewer' }
