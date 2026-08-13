@@ -2,6 +2,8 @@
 
 Status captured: 2026-08-13 (Asia/Shanghai)
 
+- 2026-08-13 可选凭证规则方案 A 已完成本地实现与完整回归：仅严格合法的“非必传 + 空白名单”扩展为 JPG/JPEG/PNG/PDF/MP4/MOV/M4V 七种系统支持格式；必传空白名单、非空白名单之外的格式，以及缺失、继承、访问器、重复或未知策略值均失败关闭。服务端首次授权和下载后的写入事务都会重新推导白名单；模板前后端继续双重拒绝必传空白名单；小程序只映射固定中文安全错误，不泄露云路径或底层错误；既有业务无需迁移，60 天保留协议不变。RED：服务端初始 3/6 通过、3 项预期失败；模板初始 3/4 通过、1 项预期失败；小程序初始 40/43 通过、3 项预期失败。GREEN：服务端聚焦 51/51、模板聚焦 4/4、小程序聚焦 43/43、WXML 4/4。完整门禁：`businessApi` 498/498、`calendarSync` 49/49、`workflowReminder` 29/29、`evidenceRetention` 37/37、小程序 140/140、WXML 4/4；三份变更 JavaScript 的 `node --check`、`git diff --check` 与项目记忆校验均通过。实现提交为 `a0aade2`、`cd11b70`、`772246f`、`a009b48`、`9a4a838`、`a3c4da5`。`businessApi` 重新上传、微信开发者工具重新编译、目标真机以非敏感 JPG 复验凭证登记与“保存处理进度”、真实 CloudBase 数据/并发及遗留无元数据测试云文件的人工清理仍为 `unverified`；`project.config.json` 未改动、未暂存也未提交。
+
 - 2026-08-13 真机隔离验收确认可选凭证规则不一致：`requiresEvidence: false` 且 `allowedEvidenceTypes: []` 的节点在小程序可选择文件，但服务端登记返回 `UNSUPPORTED_FILE_TYPE`；云存储已有测试文件而 `evidences` 无新记录，因此根因确认为“非必传的空白名单在前后端语义不一致”，不是手机图片编码或云存储故障。用户已批准方案 A：非必传 + 空白名单表示凭证可选且允许全部已支持格式；非必传 + 非空白名单仍只允许指定格式；必传凭证仍要求非空白名单。设计见 `docs/superpowers/specs/2026-08-13-optional-evidence-policy-design.md`；生产实现、自动化回归、云函数部署和真机复验仍未验证，诊断产生的无元数据测试云文件待手动清理。
 
 - 2026-08-12 隔离验收发现新版业务初始截止状态显示不准确：业务创建时首节点处理已经按创建时刻启动并正确计算截止时间，但快照未显式保存 `reviewRoundNumber: 0`、审核 `not_started` 状态及后续节点处理 `not_started` 状态，页面因而显示“待计算”。本轮按 RED→GREEN 修复：新快照明确保存初始处理/审核状态，首节点原 `processingStartedAt` 与已计算或待补算处理截止保持不变；对修复前已创建的记录，仅当后续节点仍为 `waiting` 且未开始处理，或审核轮次为 0 且未开始审核时，安全投影兼容为 `not_started`，活动阶段缺失状态继续失败关闭。RED 为业务仓储 70 项中 2 项预期失败；GREEN 为业务仓储 70/70，完整回归 `businessApi` 491/491、`calendarSync` 49/49、`workflowReminder` 29/29、`evidenceRetention` 37/37、小程序 134/134、WXML 4/4。真实 CloudBase 修复版 `businessApi` 重新部署及开发者工具页面刷新仍未验证；本地 `project.config.json` 操作员修改继续排除在本次提交之外。

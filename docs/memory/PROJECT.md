@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact review: 2026-08-12 (Asia/Shanghai)
+Last stable-fact review: 2026-08-13 (Asia/Shanghai)
 
 ## Product
 
@@ -16,6 +16,7 @@ Approved V1 rules include:
 - China workday calculations from a locally cached holiday adapter; default working hours are 09:00–20:00 without lunch break. Default node SLA is two workdays (22 work hours), and template nodes may override it.
 - In-app notifications as the fallback channel and a future Enterprise WeChat self-built application as the strong-reminder channel. Unfinished nodes are reminded every accumulated work hour during working time.
 - Evidence supports JPG/JPEG/PNG up to 5 MB each, PDF up to 20 MB each, and MP4/MOV/M4V up to 20 MB each. A feedback may contain multiple files but no more than 20 MB in total.
+- For optional evidence, a strictly valid empty format allowlist means evidence is optional and every one of the seven system-supported formats is allowed. Required evidence still requires a non-empty allowlist; a non-empty allowlist always remains a strict format restriction. Malformed, inherited, accessor, duplicate, or unsupported policy values fail closed.
 - Evidence objects remain available for 60 calendar days after a business line is completed, cancelled, or closed. A scheduled idempotent cleanup then removes only the cloud file object while preserving metadata, hashes, feedback revisions, and audit history.
 
 The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-business-progress-v1-design.md`. The approved template, node, field, rejection, freeze, numbering, and evidence-retention refinement is in `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`. Account-administration execution steps are in `docs/superpowers/plans/2026-08-05-account-admin.md`.
