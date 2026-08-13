@@ -2,7 +2,8 @@
 
 Status captured: 2026-08-13 (Asia/Shanghai)
 
-- 2026-08-13 隔离业务三条审核轮次的双 SLA 终态已由操作员脱敏核对通过：处理与审核计时状态均为 `calculated`，处理/审核的已用、剩余、逾期六类工作分钟均为非负整数，处理与审核日历版本均存在，且没有残留 `pending_calendar`。该结果验证目标环境工作日历、完整分钟折算及三轮处理/审核终态计时在真实 CloudBase 一致生效；轮次对原反馈与凭证的引用一致性仍待最后核对。
+- 2026-08-13 隔离业务的审核轮次—反馈—凭证引用一致性已由操作员完成脱敏核对：三条审核轮次的 `feedbackId` 均能定位到同业务、同节点、对应处理轮次且 `publishState=published` 的 `node_feedback`，轮次保存的反馈修订号与反馈记录一致；第一节点返工前后两轮引用各自独立的处理反馈，第二节点审核轮次聚合了处理期间形成的两份凭证。所有被引用凭证均为 `storageStatus=available`、`attachmentState=attached`，其反馈编号和修订号与所属反馈一致，且不存在轮次或反馈引用不到凭证记录的悬空编号。该结果关闭了本次隔离业务主链路最后一项核心数据一致性核对，证明返工、多次保存、跨轮聚合和末节点完成没有覆盖旧反馈、丢失凭证或错误归属；`workflowReminder` 与 `evidenceRetention` 的独立工作器矩阵、首次自动触发和真实清理仍未验证，三个定时函数继续保持空触发器。
+- 2026-08-13 隔离业务三条审核轮次的双 SLA 终态已由操作员脱敏核对通过：处理与审核计时状态均为 `calculated`，处理/审核的已用、剩余、逾期六类工作分钟均为非负整数，处理与审核日历版本均存在，且没有残留 `pending_calendar`。该结果验证目标环境工作日历、完整分钟折算及三轮处理/审核终态计时在真实 CloudBase 一致生效；轮次对原反馈与凭证的引用一致性已在同日后续核对通过。
 - 2026-08-13 隔离业务的审核与流转通知已由操作员脱敏核对通过：排除每账号已读回执后，共三条 `review_started`、一条 `node_review_rejected`、一条 `node_processing_started` 和一条 `business_completed`，数量与三轮审核、一次返工、一次下节点激活及末节点完成严格对应。六条通知均含状态、创建时间、节点、审核轮次和非空内部账号收件人数组，且不包含处理说明、字段内容、凭证信息、OpenID 或请求键原文。该结果验证真实 CloudBase 通知确定性去重、受众关联和内容最小化符合设计；双 SLA 终态数据仍待继续核对。
 - 2026-08-13 隔离业务的审核审计记录已由操作员脱敏核对通过：`SUBMIT_NODE_FOR_REVIEW` 三条、`SUBMIT_REVIEW_VOTE` 三条，投票审计决策分布为一次 `rejected` 与两次 `approved`；六条记录均以 `node_review_round` 为目标类型并含非空目标编号和创建时间。审计中未出现密码、OpenID、云文件路径或文件编号、请求键原文、凭证哈希，验证真实 CloudBase 审计数量、轮次关联和敏感数据最小化符合设计；结果通知仍待继续核对。
 - 2026-08-13 隔离业务的独立审核投票记录已由操作员脱敏核对通过：`node_review_votes` 共三条并分别唯一对应三个审核轮次，没有同轮重复票；第一节点第 1 轮为 `decision=rejected` 且评论存在，另外两轮为 `decision=approved` 且允许空评论；三条投票均保存 `reviewerDisplayName` 不可变显示名快照和 `createdAt`。该结果验证确定性一轮一审核人一票、持久决策枚举和显示名快照在真实 CloudBase 生效；审核提交/投票审计与结果通知仍待继续核对。
@@ -831,7 +832,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. 由目标环境操作员按 `docs/deployment/template-node-fields-setup.md` 从备份可读性开始，依次完成唯一值检查、全部精确复合索引与四个云函数上传；`calendarSync`、`workflowReminder`、`evidenceRetention` 均先核验或恢复为 `triggers: []`。
-2. 使用隔离测试业务、测试账号和无敏感测试文件完成手册验收矩阵，特别核对末节点审核完成、轮次/投票/审计/结果通知、双 SLA、待补算恢复与原凭证引用；逐项把未验证结果更新为通过或失败。
-3. 取得单独批准且隔离验收通过后，依次单独启用 `calendarSync` 每日同步和 `workflowReminder` 小时提醒并核对时区、下一次触发时间和脱敏日志；本次 `evidenceRetention` 保持 `triggers: []`。
+1. 保持 `calendarSync`、`workflowReminder` 与 `evidenceRetention` 的触发器为空；主业务隔离验收已经覆盖末节点完成、轮次/投票/审计/结果通知、双 SLA 和原凭证引用，下一步按部署手册 11.4 使用专用隔离数据手工验收 `workflowReminder`，不得使用真实业务记录。
+2. 在再次备份专用测试记录并确认云对象只属于无敏感测试数据后，单独批准并手工调用 `evidenceRetention` 两次，核对提醒、孤立文件、普通保留期、修订保留期、幂等、失败重试和日志脱敏；未完成该破坏性矩阵前不得启用任何清理触发器，本次 `evidenceRetention` 仍固定保持 `triggers: []`。
+3. 上述两个工作器矩阵全部通过并分别取得单独批准后，依次只启用 `calendarSync` 每日同步和 `workflowReminder` 小时提醒；每次只启用一个并核对时区、下一次触发时间、首次自动调用来源、耗时与脱敏计数，再决定下一项。
 4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。
