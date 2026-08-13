@@ -622,6 +622,144 @@ test('registration rejects inherited or accessor requiresEvidence before downloa
   }
 })
 
+test('有效格式白名单逐索引拒绝稀疏、继承和访问器元素且不执行getter', () => {
+  const sparse = new Array(1)
+  const inherited = new Array(1)
+  Object.setPrototypeOf(inherited, Object.assign(Object.create(Array.prototype), { 0: 'pdf' }))
+  let getterCalls = 0
+  const accessor = new Array(1)
+  Object.defineProperty(accessor, '0', {
+    get() {
+      getterCalls += 1
+      return 'pdf'
+    },
+    enumerable: true
+  })
+
+  for (const allowedEvidenceTypes of [sparse, inherited, accessor]) {
+    assert.throws(() => effectiveAllowedEvidenceTypes({
+      allowedEvidenceTypes,
+      requiresEvidence: false
+    }, true), assertCode('UNSUPPORTED_FILE_TYPE'))
+  }
+  assert.equal(getterCalls, 0)
+})
+
+test('登记在下载前拒绝损坏的白名单索引且不执行getter或持久化', async () => {
+  for (const shape of ['sparse', 'inherited', 'accessor']) {
+    let getterCalls = 0
+    const harness = createHarness({
+      documents: seed({ business_nodes: [{
+        _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+        assigneeUserIds: ['account-1'], requiresEvidence: false, allowedEvidenceTypes: []
+      }] }),
+      transformRead: ({ collection, data }) => {
+        if (collection !== 'business_nodes') return data
+        const allowedEvidenceTypes = new Array(1)
+        if (shape === 'inherited') {
+          Object.setPrototypeOf(allowedEvidenceTypes,
+            Object.assign(Object.create(Array.prototype), { 0: 'pdf' }))
+        } else if (shape === 'accessor') {
+          Object.defineProperty(allowedEvidenceTypes, '0', {
+            get() {
+              getterCalls += 1
+              return 'pdf'
+            },
+            enumerable: true
+          })
+        }
+        data.allowedEvidenceTypes = allowedEvidenceTypes
+        return data
+      }
+    })
+
+    await assert.rejects(harness.repository.registerUpload(registration()), assertCode('UNSUPPORTED_FILE_TYPE'))
+    assert.equal(getterCalls, 0)
+    assert.deepEqual(harness.calls, [])
+    assert.equal(harness.fake.documents('evidences').length, 0)
+  }
+})
+
+test('有效格式策略拒绝新旧Schema字段混存且不执行对侧getter', () => {
+  const cases = [
+    { accountSchema: true, selected: 'allowedEvidenceTypes', opposite: 'evidenceTypes' },
+    { accountSchema: false, selected: 'evidenceTypes', opposite: 'allowedEvidenceTypes' }
+  ]
+  for (const { accountSchema, selected, opposite } of cases) {
+    for (const shape of ['own', 'inherited', 'accessor']) {
+      let getterCalls = 0
+      const node = { [selected]: ['pdf'], requiresEvidence: false }
+      if (shape === 'own') node[opposite] = ['pdf']
+      if (shape === 'inherited') Object.setPrototypeOf(node, { [opposite]: ['pdf'] })
+      if (shape === 'accessor') {
+        Object.defineProperty(node, opposite, {
+          get() {
+            getterCalls += 1
+            return ['pdf']
+          },
+          enumerable: true
+        })
+      }
+
+      assert.throws(() => effectiveAllowedEvidenceTypes(node, accountSchema),
+        assertCode('UNSUPPORTED_FILE_TYPE'))
+      assert.equal(getterCalls, 0)
+    }
+  }
+
+  assert.deepEqual(effectiveAllowedEvidenceTypes({
+    allowedEvidenceTypes: ['pdf'], requiresEvidence: false
+  }, true), ['pdf'])
+  assert.deepEqual(effectiveAllowedEvidenceTypes({
+    evidenceTypes: ['pdf'], requiresEvidence: false
+  }, false), ['pdf'])
+})
+
+test('登记在下载前拒绝新旧Schema字段混存且不执行对侧getter或持久化', async () => {
+  for (const shape of ['own', 'inherited', 'accessor']) {
+    let getterCalls = 0
+    const harness = createHarness({
+      documents: seed({ business_nodes: [{
+        _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
+        assigneeUserIds: ['account-1'], requiresEvidence: false, allowedEvidenceTypes: ['pdf']
+      }] }),
+      transformRead: ({ collection, data }) => {
+        if (collection !== 'business_nodes') return data
+        if (shape === 'own') data.evidenceTypes = ['pdf']
+        if (shape === 'inherited') Object.setPrototypeOf(data, { evidenceTypes: ['pdf'] })
+        if (shape === 'accessor') {
+          Object.defineProperty(data, 'evidenceTypes', {
+            get() {
+              getterCalls += 1
+              return ['pdf']
+            },
+            enumerable: true
+          })
+        }
+        return data
+      }
+    })
+
+    await assert.rejects(harness.repository.registerUpload(registration()), assertCode('UNSUPPORTED_FILE_TYPE'))
+    assert.equal(getterCalls, 0)
+    assert.deepEqual(harness.calls, [])
+    assert.equal(harness.fake.documents('evidences').length, 0)
+  }
+
+  const legacyDocuments = seed({
+    business_lines: [{
+      _id: 'business-1', status: 'active', currentNodeIndex: 0,
+      managerIds: [], memberIds: ['wx-current']
+    }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'in_progress',
+      assigneeIds: ['wx-current'], requiresEvidence: false, evidenceTypes: ['pdf']
+    }]
+  })
+  const legacy = createHarness({ documents: legacyDocuments })
+  assert.equal((await legacy.repository.registerUpload(registration())).metadata.extension, 'pdf')
+})
+
 test('registration reauthorizes the effective allowlist before evidence metadata is written', async () => {
   const documents = seed({ business_nodes: [{
     _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',

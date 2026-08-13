@@ -116,17 +116,32 @@ function ownDataValue(record, key) {
     : { present: Boolean(descriptor), value: undefined }
 }
 
+function ownDataArrayValues(value) {
+  if (!Array.isArray(value)) return null
+  const values = []
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return null
+    values.push(descriptor.value)
+  }
+  return values
+}
+
 function effectiveAllowedEvidenceTypes(node, accountSchema) {
-  const field = ownDataValue(node, accountSchema ? 'allowedEvidenceTypes' : 'evidenceTypes')
+  const key = accountSchema ? 'allowedEvidenceTypes' : 'evidenceTypes'
+  const oppositeKey = accountSchema ? 'evidenceTypes' : 'allowedEvidenceTypes'
+  const field = ownDataValue(node, key)
   const required = ownDataValue(node, 'requiresEvidence')
-  if (!field.present || !Array.isArray(field.value) ||
+  const values = ownDataArrayValues(field.value)
+  if (!field.present || values === null ||
+      node && typeof node === 'object' && oppositeKey in node ||
       !required.present && node && typeof node === 'object' && 'requiresEvidence' in node ||
       required.present && typeof required.value !== 'boolean' ||
-      new Set(field.value).size !== field.value.length ||
-      field.value.some(value => !ALL_EVIDENCE_TYPES.includes(value))) {
+      new Set(values).size !== values.length ||
+      values.some(value => !ALL_EVIDENCE_TYPES.includes(value))) {
     throw createError('UNSUPPORTED_FILE_TYPE')
   }
-  if (field.value.length) return field.value.slice()
+  if (values.length) return values
   if (required.present && required.value === true) throw createError('UNSUPPORTED_FILE_TYPE')
   return ALL_EVIDENCE_TYPES.slice()
 }
