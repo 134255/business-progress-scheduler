@@ -440,6 +440,38 @@ test('必传空白名单与损坏格式快照均失败关闭为只读', async ()
   assert.equal(toasts.length, 0)
 })
 
+test('继承或访问器凭证配置以及稀疏白名单均在真实页面加载时失败关闭', async () => {
+  const writes = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showToast: () => {}
+  }
+  const inheritedRequired = Object.create(nodeFixture({ fieldDefinitions: [], requiresEvidence: true }))
+  Object.defineProperty(inheritedRequired, 'allowedEvidenceTypes', { value: [], enumerable: true })
+  const accessorRequired = nodeFixture({ fieldDefinitions: [], allowedEvidenceTypes: [] })
+  delete accessorRequired.requiresEvidence
+  Object.defineProperty(accessorRequired, 'requiresEvidence', { get: () => true, enumerable: true })
+  const sparseAllowedTypes = nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: new Array(1) })
+
+  for (const node of [inheritedRequired, accessorRequired, sparseAllowedTypes]) {
+    const page = loadPage({
+      getBusinessLine: async () => businessFixture(node),
+      getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] }),
+      submitFeedback: async () => writes.push('submit')
+    })
+    await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+    assert.equal(page.data.readOnly, true)
+    assert.equal(page.data.canSubmit, false)
+    assert.equal(page.data.errorMessage, '当前节点凭证配置无效，请联系管理员')
+    page.addSelectedFiles([{ name: 'evidence.jpg', path: 'wxfile://evidence.jpg', size: 1, category: 'image' }])
+    await page.submit()
+    assert.equal(page.data.files.length, 0)
+  }
+  assert.deepEqual(writes, [])
+})
+
 test('凭证登记失败仅保存服务层固定中文安全错误', async () => {
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = {

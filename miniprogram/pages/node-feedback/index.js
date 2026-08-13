@@ -16,18 +16,24 @@ const CATEGORY_LIMITS = Object.freeze({ image: 5 * MEBIBYTE, pdf: 20 * MEBIBYTE,
 const ALL_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
 
 function effectiveClientEvidenceTypes(requiresEvidence, allowedTypes) {
-  if (typeof requiresEvidence !== 'boolean' || !Array.isArray(allowedTypes) || new Set(allowedTypes).size !== allowedTypes.length ||
-      allowedTypes.some(value => !ALL_EVIDENCE_TYPES.includes(value))) return null
+  if (typeof requiresEvidence !== 'boolean' || !Array.isArray(allowedTypes)) return null
+  for (let index = 0; index < allowedTypes.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(allowedTypes, index) ||
+        typeof allowedTypes[index] !== 'string' || !ALL_EVIDENCE_TYPES.includes(allowedTypes[index])) return null
+  }
+  if (new Set(allowedTypes).size !== allowedTypes.length) return null
   if (allowedTypes.length) return allowedTypes.slice()
   return requiresEvidence ? null : ALL_EVIDENCE_TYPES.slice()
 }
 
 function ownDataValue(record, key) {
-  if (!record || typeof record !== 'object') return { present: false, value: undefined }
+  if (!record || typeof record !== 'object') return { state: 'invalid', value: undefined }
   const descriptor = Object.getOwnPropertyDescriptor(record, key)
   return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value')
-    ? { present: true, value: descriptor.value }
-    : { present: Boolean(descriptor), value: undefined }
+    ? { state: 'value', value: descriptor.value }
+    : descriptor || key in record
+      ? { state: 'invalid', value: undefined }
+      : { state: 'missing', value: undefined }
 }
 
 function currentUserId() {
@@ -212,8 +218,10 @@ Page({
       if (!this.pageAlive || requestSequence !== this.loadSequence || currentUserId() !== requestedActorId) return
       const requiresEvidenceField = ownDataValue(node, 'requiresEvidence')
       const allowedEvidenceTypesField = ownDataValue(node, 'allowedEvidenceTypes')
-      const requiresEvidence = requiresEvidenceField.present ? requiresEvidenceField.value : false
-      const allowedEvidenceTypes = effectiveClientEvidenceTypes(requiresEvidence, allowedEvidenceTypesField.value)
+      const requiresEvidence = requiresEvidenceField.state === 'missing' ? false : requiresEvidenceField.value
+      const allowedEvidenceTypes = requiresEvidenceField.state === 'invalid' || allowedEvidenceTypesField.state !== 'value'
+        ? null
+        : effectiveClientEvidenceTypes(requiresEvidence, allowedEvidenceTypesField.value)
       if (!allowedEvidenceTypes) throw new Error('当前节点凭证配置无效，请联系管理员')
       const fields = (Array.isArray(node.fieldDefinitions) ? node.fieldDefinitions : [])
         .slice().sort((left, right) => left.sequence - right.sequence)
