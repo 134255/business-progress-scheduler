@@ -13,18 +13,21 @@ function safeError(code, message) {
 function createWorkflowReminderHandler({
   service,
   getContext = () => ({}),
+  getTriggerSource = () => '',
   clock = () => new Date(),
   logger = console
 } = {}) {
   if (!service || typeof service.runReminderCycle !== 'function') {
     throw new TypeError('service.runReminderCycle is required')
   }
-  if (typeof getContext !== 'function' || typeof clock !== 'function') {
-    throw new TypeError('getContext and clock are required')
+  if (typeof getContext !== 'function' || typeof getTriggerSource !== 'function' || typeof clock !== 'function') {
+    throw new TypeError('getContext, getTriggerSource and clock are required')
   }
   return async function workflowReminderHandler() {
     const context = getContext() || {}
-    if (typeof context.OPENID === 'string' && context.OPENID || context.TRIGGER_SRC !== 'timer') {
+    const openid = context.OPENID
+    const hasClientIdentity = openid !== undefined && openid !== null && openid !== ''
+    if (hasClientIdentity || getTriggerSource() !== 'timer') {
       throw safeError('FORBIDDEN', '提醒任务调用未经授权')
     }
     const now = clock()
@@ -55,7 +58,11 @@ function createDefaultHandler() {
     reminderRepository: repository,
     workTimeService: createWorkTimeService({ calendarRepository: repository })
   })
-  return createWorkflowReminderHandler({ service, getContext: () => cloud.getWXContext() })
+  return createWorkflowReminderHandler({
+    service,
+    getContext: () => cloud.getWXContext(),
+    getTriggerSource: () => process.env.TRIGGER_SRC
+  })
 }
 
 let defaultHandler

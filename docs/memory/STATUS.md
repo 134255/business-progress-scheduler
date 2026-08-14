@@ -1,6 +1,8 @@
 # Current Status
 
-Status captured: 2026-08-13 (Asia/Shanghai)
+Status captured: 2026-08-14 (Asia/Shanghai)
+
+- 2026-08-14 真实 `workflowReminder` 一次性 Timer 验收暴露可信来源读取错误：控制台定时器按分钟触发并由平台重试，但每次都在服务运行前返回“提醒任务调用未经授权”，`processing_reminder` 与 `review_reminder` 均未写入；操作员已立即恢复 `triggers: []`，刷新后配置为空且日志停止新增。根因是平台把可信来源提供为服务端 `process.env.TRIGGER_SRC=timer`，锁定版 `wx-server-sdk` 不会自动映射到原代码读取的 `getWXContext().TRIGGER_SRC`。项目所有者批准方案 A 后，`workflowReminder` 与同类 `calendarSync` 已改为只信任严格服务端来源并继续拒绝非空 `OPENID`；事件载荷和微信上下文同名字段均不能授权，人工日历同步票据路径不变。TDD RED：`workflowReminder` 4 项中 1 通过、3 失败，`calendarSync` 5 项中 3 通过、2 失败；GREEN：聚焦分别 4/4、5/5。完整本地回归：`businessApi` 510/510、`calendarSync` 50/50、`workflowReminder` 30/30、`evidenceRetention` 37/37、小程序 145/145、WXML 4/4，生产与测试 JavaScript 语法检查通过。设计和决策分别见 `docs/superpowers/specs/2026-08-14-trusted-timer-source-design.md` 与 `docs/memory/decisions/ADR-0007-trusted-timer-source.md`。两个修复版云函数重新部署、空触发器核对及新的单次真实 Timer 成功执行仍为 `unverified`；正式触发器不得提前启用，用户自己的 `project.config.json` 修改继续排除在本任务之外。
 
 - 2026-08-13 隔离业务的审核轮次—反馈—凭证引用一致性已由操作员完成脱敏核对：三条审核轮次的 `feedbackId` 均能定位到同业务、同节点、对应处理轮次且 `publishState=published` 的 `node_feedback`，轮次保存的反馈修订号与反馈记录一致；第一节点返工前后两轮引用各自独立的处理反馈，第二节点审核轮次聚合了处理期间形成的两份凭证。所有被引用凭证均为 `storageStatus=available`、`attachmentState=attached`，其反馈编号和修订号与所属反馈一致，且不存在轮次或反馈引用不到凭证记录的悬空编号。该结果关闭了本次隔离业务主链路最后一项核心数据一致性核对，证明返工、多次保存、跨轮聚合和末节点完成没有覆盖旧反馈、丢失凭证或错误归属；`workflowReminder` 与 `evidenceRetention` 的独立工作器矩阵、首次自动触发和真实清理仍未验证，三个定时函数继续保持空触发器。
 - 2026-08-13 隔离业务三条审核轮次的双 SLA 终态已由操作员脱敏核对通过：处理与审核计时状态均为 `calculated`，处理/审核的已用、剩余、逾期六类工作分钟均为非负整数，处理与审核日历版本均存在，且没有残留 `pending_calendar`。该结果验证目标环境工作日历、完整分钟折算及三轮处理/审核终态计时在真实 CloudBase 一致生效；轮次对原反馈与凭证的引用一致性已在同日后续核对通过。
@@ -826,13 +828,13 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 - Administrator password reset manual acceptance is deferred because the current editable reset modal cannot mask the temporary password. The backend reset path remains automated-test covered; the client must move password entry to masked fields before manual use.
 - First-login binding, unbinding, rebinding with another identity, and ordinary-user route denial remain unverified because they require a second WeChat identity. These do not block the next core feature phase.
-- 当前工作树的 `project.config.json` 使用已提交的 `trial` 基础库设置，且没有未提交的操作员改动。真实发布前必须在微信开发者工具中明确选择目标基础库版本并单独记录，不把工具自动改写混入功能提交。
+- 当前工作树存在操作员自己的 `project.config.json` 未提交修改；本任务不读取其业务含义、不修改、不暂存也不提交。真实发布前必须在微信开发者工具中明确选择目标基础库版本并单独记录，不把工具自动改写混入功能提交。
 - `npm audit` reports six transitive findings (one moderate, five high) through the official `wx-server-sdk@4.0.2` dependency tree. npm proposes a major downgrade to 2.5.3; it was not applied because it would invalidate the reviewed transaction behavior. Track the upstream SDK and reassess on a reviewed release.
 - Enterprise WeChat production identifiers and secret remain intentionally unavailable; strong-message delivery is deferred.
 
 ## Next actions
 
-1. 保持 `calendarSync`、`workflowReminder` 与 `evidenceRetention` 的触发器为空；主业务隔离验收已经覆盖末节点完成、轮次/投票/审计/结果通知、双 SLA 和原凭证引用，下一步按部署手册 11.4 使用专用隔离数据手工验收 `workflowReminder`，不得使用真实业务记录。
+1. 保持 `calendarSync`、`workflowReminder` 与 `evidenceRetention` 的触发器为空；先重新部署本次修复版 `calendarSync` 与 `workflowReminder` 并核对基础配置不变，再为 `workflowReminder` 创建新的单次 Timer，确认日志不再出现“未经授权”、只返回脱敏计数且提醒记录符合专用隔离数据预期，完成后立即恢复空触发器。随后用同一可信来源边界单独验收 `calendarSync` 计划入口；不得使用真实业务记录。
 2. 在再次备份专用测试记录并确认云对象只属于无敏感测试数据后，单独批准并手工调用 `evidenceRetention` 两次，核对提醒、孤立文件、普通保留期、修订保留期、幂等、失败重试和日志脱敏；未完成该破坏性矩阵前不得启用任何清理触发器，本次 `evidenceRetention` 仍固定保持 `triggers: []`。
 3. 上述两个工作器矩阵全部通过并分别取得单独批准后，依次只启用 `calendarSync` 每日同步和 `workflowReminder` 小时提醒；每次只启用一个并核对时区、下一次触发时间、首次自动调用来源、耗时与脱敏计数，再决定下一项。
 4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。

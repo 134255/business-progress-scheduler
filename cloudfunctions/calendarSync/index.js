@@ -15,18 +15,23 @@ function createCalendarSyncHandler({
   service,
   manualAuthorizer = null,
   getContext = () => ({}),
+  getTriggerSource = () => '',
   clock = () => new Date(),
   logger = console
 } = {}) {
   if (!service || typeof service.run !== 'function') throw new TypeError('service.run is required')
-  if (typeof clock !== 'function') throw new TypeError('clock is required')
+  if (typeof getContext !== 'function' || typeof getTriggerSource !== 'function' || typeof clock !== 'function') {
+    throw new TypeError('getContext, getTriggerSource and clock are required')
+  }
   return async function calendarSyncHandler(event = {}) {
     const context = getContext() || {}
-    if (typeof context.OPENID === 'string' && context.OPENID) throw safeError('FORBIDDEN', '禁止客户端直接调用日历同步')
+    const openid = context.OPENID
+    const hasClientIdentity = openid !== undefined && openid !== null && openid !== ''
+    if (hasClientIdentity) throw safeError('FORBIDDEN', '禁止客户端直接调用日历同步')
     const now = clock()
     if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new TypeError('clock must return a valid Date')
     let mode
-    if (context.TRIGGER_SRC === 'timer' && !event.manualRequestId) {
+    if (getTriggerSource() === 'timer' && !event.manualRequestId) {
       mode = 'scheduled'
     } else if (event && typeof event.manualRequestId === 'string' && event.manualRequestId && manualAuthorizer &&
         await manualAuthorizer.consume(event.manualRequestId, now)) {
@@ -67,7 +72,12 @@ function createDefaultHandler() {
       })
     }
   }
-  return createCalendarSyncHandler({ service, manualAuthorizer, getContext: () => cloud.getWXContext() })
+  return createCalendarSyncHandler({
+    service,
+    manualAuthorizer,
+    getContext: () => cloud.getWXContext(),
+    getTriggerSource: () => process.env.TRIGGER_SRC
+  })
 }
 
 let defaultHandler
