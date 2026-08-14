@@ -209,6 +209,15 @@ function createCloudBusinessRepository({
     throw createError('FORBIDDEN')
   }
 
+  function safeParticipantDisplayName(account) {
+    const status = ownDataValue(account, 'status')
+    if (!status.valid || !['active', 'disabled'].includes(status.value)) {
+      throw createError('FORBIDDEN')
+    }
+    const name = safeDisplayName(account)
+    return status.value === 'disabled' ? `${name}（已停用）` : name
+  }
+
   async function requireCurrentReader(actor) {
     if (!actor || typeof actor._id !== 'string') throw createError('FORBIDDEN')
     const current = await readDocument(db, COLLECTIONS.users, actor._id)
@@ -270,8 +279,8 @@ function createCloudBusinessRepository({
     const ids = exactDisplayAccountIds(nodes, accountSchema)
     const pairs = await Promise.all(ids.map(async id => {
       const account = id === actor._id ? actor : await readDocument(db, COLLECTIONS.users, id)
-      if (!account || account._id !== id || account.status !== 'active') throw createError('FORBIDDEN')
-      return [id, safeDisplayName(account)]
+      if (!account || account._id !== id) throw createError('FORBIDDEN')
+      return [id, safeParticipantDisplayName(account)]
     }))
     return new Map(pairs)
   }

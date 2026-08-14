@@ -602,6 +602,141 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
   }), error => error.code === 'FORBIDDEN')
 })
 
+test('停用节点参与人不阻断已完成业务详情并显示停用标记', async () => {
+  const seed = seedDefinition({
+    users: [
+      { _id: 'manager-1', status: 'active', displayName: '业务管理员' },
+      { _id: 'processor-1', status: 'disabled', displayName: '历史处理人' },
+      { _id: 'reviewer-1', status: 'active', displayName: '历史审核人' }
+    ],
+    extra: {
+      business_lines: [{
+        _id: 'line-completed', code: 'BL-HISTORY-001', name: '已完成业务',
+        status: 'completed', version: 4, progress: 100,
+        managerUserIds: ['manager-1'],
+        memberUserIds: ['manager-1', 'processor-1', 'reviewer-1'],
+        currentNodeId: 'node-completed', currentNodeIndex: 0, nodeCount: 1
+      }],
+      business_nodes: [{
+        _id: 'node-completed', businessLineId: 'line-completed',
+        nodeCode: 'BL-HISTORY-001-N001', sequence: 0, name: '历史节点',
+        status: 'completed', version: 3, workflowMode: 'review',
+        processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
+        reviewMode: 'any', processingRoundNumber: 1, reviewRoundNumber: 1,
+        processingDueStatus: 'calculated', reviewDueStatus: 'calculated',
+        requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+      }]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+
+  const result = await repository.getBusinessLine({
+    actor: { _id: 'manager-1' }, lineId: 'line-completed'
+  })
+
+  assert.deepEqual(result.nodes[0].processorDisplayNames, ['历史处理人（已停用）'])
+  assert.deepEqual(result.nodes[0].reviewerDisplayNames, ['历史审核人'])
+})
+
+test('业务详情对损坏或缺失的节点参与账号继续失败关闭', async t => {
+  function historySeed(processor) {
+    return seedDefinition({
+      users: [
+        { _id: 'manager-1', status: 'active', displayName: '业务管理员' },
+        ...(processor ? [processor] : []),
+        { _id: 'reviewer-1', status: 'active', displayName: '历史审核人' }
+      ],
+      extra: {
+        business_lines: [{
+          _id: 'line-history-invalid', code: 'BL-HISTORY-INVALID', name: '历史异常业务',
+          status: 'completed', version: 4, progress: 100,
+          managerUserIds: ['manager-1'],
+          memberUserIds: ['manager-1', 'processor-1', 'reviewer-1'],
+          currentNodeId: 'node-history-invalid', currentNodeIndex: 0, nodeCount: 1
+        }],
+        business_nodes: [{
+          _id: 'node-history-invalid', businessLineId: 'line-history-invalid',
+          nodeCode: 'BL-HISTORY-INVALID-N001', sequence: 0, name: '历史异常节点',
+          status: 'completed', version: 3, workflowMode: 'review',
+          processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
+          reviewMode: 'any', processingRoundNumber: 1, reviewRoundNumber: 1,
+          processingDueStatus: 'calculated', reviewDueStatus: 'calculated',
+          requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+        }]
+      }
+    })
+  }
+
+  for (const item of [
+    { name: '状态缺失', processor: { _id: 'processor-1', displayName: '历史处理人' } },
+    { name: '未知状态', processor: { _id: 'processor-1', status: 'locked', displayName: '历史处理人' } },
+    { name: '账号缺失', processor: null }
+  ]) {
+    await t.test(item.name, async () => {
+      const { repository } = createRepositoryHarness(historySeed(item.processor))
+      await assert.rejects(repository.getBusinessLine({
+        actor: { _id: 'manager-1' }, lineId: 'line-history-invalid'
+      }), error => error.code === 'FORBIDDEN')
+    })
+  }
+
+  await t.test('名称访问器不执行', async () => {
+    const getterReads = { count: 0 }
+    const { repository } = createRepositoryHarness(historySeed({
+      _id: 'processor-1', status: 'disabled', displayName: '占位名称'
+    }), {
+      fakeOptions: {
+        transformRead({ collection, data }) {
+          if (collection === 'users' && data._id === 'processor-1') {
+            delete data.username
+            Object.defineProperty(data, 'displayName', {
+              enumerable: true,
+              get() {
+                getterReads.count += 1
+                return '不应读取'
+              }
+            })
+          }
+          return data
+        }
+      }
+    })
+
+    await assert.rejects(repository.getBusinessLine({
+      actor: { _id: 'manager-1' }, lineId: 'line-history-invalid'
+    }), error => error.code === 'FORBIDDEN')
+    assert.equal(getterReads.count, 0)
+  })
+
+  await t.test('状态访问器不执行', async () => {
+    const getterReads = { count: 0 }
+    const { repository } = createRepositoryHarness(historySeed({
+      _id: 'processor-1', status: 'disabled', displayName: '历史处理人'
+    }), {
+      fakeOptions: {
+        transformRead({ collection, data }) {
+          if (collection === 'users' && data._id === 'processor-1') {
+            delete data.status
+            Object.defineProperty(data, 'status', {
+              enumerable: true,
+              get() {
+                getterReads.count += 1
+                return 'disabled'
+              }
+            })
+          }
+          return data
+        }
+      }
+    })
+
+    await assert.rejects(repository.getBusinessLine({
+      actor: { _id: 'manager-1' }, lineId: 'line-history-invalid'
+    }), error => error.code === 'FORBIDDEN')
+    assert.equal(getterReads.count, 0)
+  })
+})
+
 test('已创建的初始审核节点缺少截止状态时只把尚未开始阶段安全映射为 not_started', async () => {
   const seed = seedDefinition({
     extra: {
