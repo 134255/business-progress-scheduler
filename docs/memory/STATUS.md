@@ -2,7 +2,8 @@
 
 Status captured: 2026-08-14 (Asia/Shanghai)
 
-- 2026-08-14 修复版 `workflowReminder` 已由操作员上传目标 CloudBase，并完成真实一次性 Timer 验收。部署后先确认 `triggers: []`，再使用仅运行一次的定时器触发；日志不再出现“提醒任务调用未经授权”，服务正常返回脱敏汇总 `processingCreated=0`、`reviewCreated=0`，约 3.4 秒结束且没有失败重试。零创建表示当轮没有符合累计工作小时提醒条件的活动处理或审核候选，不是执行失败；本次没有写入提醒记录。操作员随后恢复 `triggers: []` 并确认配置为空。该结果验证 `process.env.TRIGGER_SRC=timer` 在目标环境可用、Timer 能进入真实提醒编排且响应最小化；提醒候选为非零时的真实通知创建、正式小时触发器启用和 `calendarSync` 修复版部署/计划入口仍为 `unverified`。
+- 2026-08-14 修复版 `calendarSync` 已由操作员上传目标 CloudBase，并完成真实一次性 Timer 验收。部署后先确认 `triggers: []`，再通过单次定时器运行；日志返回 `mode=scheduled`，2026 与 2027 两个完整年份均同步成功且各 365 天，待补算汇总的检查、更新、跳过、待处理与失败计数均为 0，约 4.6 秒正常结束，没有未经授权、失败重试或底层数据库/外部接口错误泄漏。操作员随后恢复并刷新确认 `triggers: []`。该结果验证修复后的服务端可信来源、当前/下一年计划同步和安全汇总在真实 CloudBase 生效；正式每日触发器仍未启用。
+- 2026-08-14 修复版 `workflowReminder` 已由操作员上传目标 CloudBase，并完成真实一次性 Timer 验收。部署后先确认 `triggers: []`，再使用仅运行一次的定时器触发；日志不再出现“提醒任务调用未经授权”，服务正常返回脱敏汇总 `processingCreated=0`、`reviewCreated=0`，约 3.4 秒结束且没有失败重试。零创建表示当轮没有符合累计工作小时提醒条件的活动处理或审核候选，不是执行失败；本次没有写入提醒记录。操作员随后恢复 `triggers: []` 并确认配置为空。该结果验证 `process.env.TRIGGER_SRC=timer` 在目标环境可用、Timer 能进入真实提醒编排且响应最小化；提醒候选为非零时的真实通知创建和正式小时触发器启用仍为 `unverified`。
 - 2026-08-14 真实 `workflowReminder` 一次性 Timer 验收曾暴露可信来源读取错误：控制台定时器按分钟触发并由平台重试，但每次都在服务运行前返回“提醒任务调用未经授权”，`processing_reminder` 与 `review_reminder` 均未写入；操作员立即恢复 `triggers: []`。根因是平台把可信来源提供为服务端 `process.env.TRIGGER_SRC=timer`，锁定版 `wx-server-sdk` 不会自动映射到原代码读取的 `getWXContext().TRIGGER_SRC`。项目所有者批准方案 A 后，`workflowReminder` 与同类 `calendarSync` 已改为只信任严格服务端来源并继续拒绝非空 `OPENID`；事件载荷和微信上下文同名字段均不能授权，人工日历同步票据路径不变。TDD RED：`workflowReminder` 4 项中 1 通过、3 失败，`calendarSync` 5 项中 3 通过、2 失败；GREEN：聚焦分别 4/4、5/5。完整本地回归：`businessApi` 510/510、`calendarSync` 50/50、`workflowReminder` 30/30、`evidenceRetention` 37/37、小程序 145/145、WXML 4/4，生产与测试 JavaScript 语法检查通过。设计和决策分别见 `docs/superpowers/specs/2026-08-14-trusted-timer-source-design.md` 与 `docs/memory/decisions/ADR-0007-trusted-timer-source.md`。修复提交为 `44bffcf`；`workflowReminder` 修复版部署和空候选真实 Timer 已在同日后续验证通过，`calendarSync` 修复版部署和计划入口仍为 `unverified`，用户自己的 `project.config.json` 修改继续排除在本任务之外。
 
 - 2026-08-13 隔离业务的审核轮次—反馈—凭证引用一致性已由操作员完成脱敏核对：三条审核轮次的 `feedbackId` 均能定位到同业务、同节点、对应处理轮次且 `publishState=published` 的 `node_feedback`，轮次保存的反馈修订号与反馈记录一致；第一节点返工前后两轮引用各自独立的处理反馈，第二节点审核轮次聚合了处理期间形成的两份凭证。所有被引用凭证均为 `storageStatus=available`、`attachmentState=attached`，其反馈编号和修订号与所属反馈一致，且不存在轮次或反馈引用不到凭证记录的悬空编号。该结果关闭了本次隔离业务主链路最后一项核心数据一致性核对，证明返工、多次保存、跨轮聚合和末节点完成没有覆盖旧反馈、丢失凭证或错误归属；`workflowReminder` 与 `evidenceRetention` 的独立工作器矩阵、首次自动触发和真实清理仍未验证，三个定时函数继续保持空触发器。
@@ -835,7 +836,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. 保持 `calendarSync`、`workflowReminder` 与 `evidenceRetention` 的触发器为空；`workflowReminder` 修复版空候选 Timer 已通过并恢复空触发器，下一步重新部署修复版 `calendarSync`、核对配置不变，再创建单次 Timer 验证计划入口使用服务端来源并返回安全同步/补算汇总；完成后立即恢复空触发器，不得使用真实业务记录。
+1. 保持 `calendarSync`、`workflowReminder` 与 `evidenceRetention` 的触发器为空；两个修复版计划入口均已通过单次真实 Timer 并恢复空触发器。下一步只使用专用隔离业务准备 `workflowReminder` 非零处理/审核候选，核对确定性通知、同小时幂等和终态/撤权停止条件，不得使用真实业务记录或手工篡改工作时长快照。
 2. 在再次备份专用测试记录并确认云对象只属于无敏感测试数据后，单独批准并手工调用 `evidenceRetention` 两次，核对提醒、孤立文件、普通保留期、修订保留期、幂等、失败重试和日志脱敏；未完成该破坏性矩阵前不得启用任何清理触发器，本次 `evidenceRetention` 仍固定保持 `triggers: []`。
 3. 上述两个工作器矩阵全部通过并分别取得单独批准后，依次只启用 `calendarSync` 每日同步和 `workflowReminder` 小时提醒；每次只启用一个并核对时区、下一次触发时间、首次自动调用来源、耗时与脱敏计数，再决定下一项。
 4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。
