@@ -385,3 +385,31 @@ test('审核查询与通知服务严格校验当前账号、分页和文档编�
     await assert.rejects(operation(), error => ['FORBIDDEN', 'INVALID_PAGINATION', 'VALIDATION_ERROR'].includes(error.code))
   }
 })
+
+test('通知已读入口只额外接受严格的凭证保留提醒编号', async () => {
+  const { calls, service } = harness()
+  const actor = { _id: 'reviewer-1', status: 'active' }
+
+  for (const days of [1, 7, 15]) {
+    const notificationId = `evidence-retention:business-1:${days}`
+    const result = await service.markNotificationRead({ actor, notificationId })
+    assert.deepEqual(result, { notificationId, read: true })
+    assert.deepEqual(calls.at(-1), ['mark-notification', { actor, notificationId }])
+  }
+
+  for (const notificationId of [
+    'evidence_retention:business-1:15',
+    'evidence-retention::15',
+    'evidence-retention:business-1:0',
+    'evidence-retention:business-1:2',
+    'evidence-retention:business-1:16',
+    'evidence-retention:../business-1:15',
+    'evidence-retention:business-1:15:extra',
+    `evidence-retention:${'a'.repeat(129)}:15`
+  ]) {
+    await assert.rejects(
+      service.markNotificationRead({ actor, notificationId }),
+      error => error && error.code === 'VALIDATION_ERROR'
+    )
+  }
+})

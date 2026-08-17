@@ -1,6 +1,7 @@
 const crypto = require('node:crypto')
 
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
+const { isNotificationId } = require('./notification-id')
 
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const REQUEST_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
@@ -35,6 +36,11 @@ function requireActiveActor(actor) {
 
 function normalizeDocumentId(value) {
   if (typeof value !== 'string' || !DOCUMENT_ID.test(value)) throw createError('VALIDATION_ERROR')
+  return value
+}
+
+function normalizeNotificationId(value) {
+  if (!isNotificationId(value)) throw createError('VALIDATION_ERROR')
   return value
 }
 
@@ -391,7 +397,7 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
     requireActiveActor(actor)
     return reviewRepository.markNotificationRead({
       actor,
-      notificationId: normalizeDocumentId(notificationId)
+      notificationId: normalizeNotificationId(notificationId)
     })
   }
 
