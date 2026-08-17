@@ -2,6 +2,8 @@
 
 Status captured: 2026-08-17 (Asia/Shanghai)
 
+- 2026-08-17 第二批次已按项目所有者此前确认的产品边界形成中文设计和三份独立实施计划：真实“待我处理”与概览、超级管理员运营看板与安全 CSV 导出、最长七日的小程序公开只读节点快照。公开快照采用至少 256 位随机能力令牌，接收者无需登录，正文和凭证顺序在创建时固化，凭证仅返回短期地址；微信只能由发送者通过原生分享面板手动选择好友或群。开发将在隔离分支 `codex/second-batch` 中按 TDD 顺序推进，当前 `main` 上操作员自己的 `project.config.json` 修改保持未触碰。基线实测 `businessApi`、`calendarSync`、`workflowReminder`、`evidenceRetention`、小程序与 WXML 六套测试均退出 0；真实 CloudBase 新集合、索引、部署、真机分享与七日到期仍为 `unverified`。
+
 - 2026-08-17 凭证保留提醒通知编号兼容已完成真实 CloudBase 验收。操作员部署最新 `businessApi` 后，原先由 `evidenceRetention` 创建且无需迁移或重建的 15 天提醒已在目标活动收件账号的通知中心直接可见；点击后能进入对应业务安全页面，没有 `FORBIDDEN`、`VALIDATION_ERROR`，也未显示永久文件编号、`cloud://` 路径、凭证哈希、OpenID、请求键或内部租约。返回并刷新通知中心后已读状态保持；数据库中只新增一条与原提醒编号和当前内部账号对应的确定性 `notification_read_marker`，`createdAt` 存在，同一提醒与账号组合无重复，原 `evidence_retention` 通知仍保留且未被覆盖。该结果关闭通知编号兼容的真实部署边界；三个定时工作器继续保持空触发器，下一次 `evidenceRetention` 幂等运行仍须单独批准。
 
 - 2026-08-17 凭证保留提醒通知编号兼容已按确认设计完成本地 TDD 修复。真实 `evidenceRetention` Timer 已成功创建一条合法 15 天 `evidence_retention` 通知，收件账号、状态和脱敏内容均正确，但旧 `businessApi` 把确定性编号 `evidence-retention:<businessLineId>:15` 套用到不允许冒号的通用文档编号规则，导致通知列表二次授权投影时隐藏该记录，已读入口也会提前返回 `VALIDATION_ERROR`。修复新增共享纯函数，只接受既有普通通知编号或严格的 `evidence-retention:[A-Za-z0-9_-]{1,128}:(1|7|15)`；服务入口和仓储投影共用该规则，业务、节点、轮次、凭证和其他文档编号规则不变。RED：服务测试 13 项中 12 通过、1 失败，仓储测试 53 项中 52 通过、1 失败；GREEN：服务与仓储组合聚焦 66/66。完整门禁：`businessApi` 519/519、`evidenceRetention` 40/40、小程序通知 5/5、WXML 4/4，三份生产 JavaScript 语法、`git diff --check` 与项目记忆校验均通过。下一步只需重新部署 `businessApi`，无需迁移或重建现有通知，也不得再次运行清理 Timer；部署后使用当前活动收件账号核对原 15 天提醒直接可见、可安全跳转并能生成该账号的独立已读回执。真实通知中心显示、跳转与已读仍为 `unverified`，`calendarSync`、`workflowReminder`、`evidenceRetention` 继续保持 `triggers: []`；用户自己的 `project.config.json` 修改未暂存、未提交。

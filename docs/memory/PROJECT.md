@@ -20,6 +20,7 @@ Approved V1 rules include:
 - Evidence supports JPG/JPEG/PNG up to 5 MB each, PDF up to 20 MB each, and MP4/MOV/M4V up to 20 MB each. A feedback may contain multiple files but no more than 20 MB in total.
 - For optional evidence, a strictly valid empty format allowlist means evidence is optional and every one of the seven system-supported formats is allowed. Required evidence still requires a non-empty allowlist; a non-empty allowlist always remains a strict format restriction. Malformed, inherited, accessor, duplicate, or unsupported policy values fail closed.
 - Evidence objects remain available for 60 calendar days after a business line is completed, cancelled, or closed. A scheduled idempotent cleanup then removes only the cloud file object while preserving metadata, hashes, feedback revisions, and audit history.
+- 第二批次采用短期能力令牌分享已完成节点的固定结果快照：发送者通过微信原生分享面板选择好友或群，接收者无需登录或业务成员权限，快照最长有效七个二十四小时；公开投影只含固化字段、处理说明和短期凭证地址，不暴露永久文件编号、身份值或内部预约数据。详细决策见 `docs/memory/decisions/ADR-0008-public-node-share-capabilities.md`。
 
 The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-business-progress-v1-design.md`. The approved template, node, field, rejection, freeze, numbering, and evidence-retention refinement is in `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`. Account-administration execution steps are in `docs/superpowers/plans/2026-08-05-account-admin.md`.
 
