@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact review: 2026-08-14 (Asia/Shanghai)
+Last stable-fact review: 2026-08-17 (Asia/Shanghai)
 
 ## Product
 
@@ -21,6 +21,8 @@ Approved V1 rules include:
 - For optional evidence, a strictly valid empty format allowlist means evidence is optional and every one of the seven system-supported formats is allowed. Required evidence still requires a non-empty allowlist; a non-empty allowlist always remains a strict format restriction. Malformed, inherited, accessor, duplicate, or unsupported policy values fail closed.
 - Evidence objects remain available for 60 calendar days after a business line is completed, cancelled, or closed. A scheduled idempotent cleanup then removes only the cloud file object while preserving metadata, hashes, feedback revisions, and audit history.
 - 第二批次采用短期能力令牌分享已完成节点的固定结果快照：发送者通过微信原生分享面板选择好友或群，接收者无需登录或业务成员权限，快照最长有效七个二十四小时；公开投影只含固化字段、处理说明和短期凭证地址，不暴露永久文件编号、身份值或内部预约数据。详细决策见 `docs/memory/decisions/ADR-0008-public-node-share-capabilities.md`。
+- 概览页的“待我处理”由服务端权威查询提供；新版审核节点按当前处理账号关系查询，纯旧节点只在没有任何新账号关系标记时兼容 OpenID。结果返回前重新校验活动账号、业务、当前节点和处理关系；超过 2,000 条安全扫描边界时只返回诚实下界。
+- 活动超级管理员可使用受保护运营看板和安全 CSV 导出。统计按上海自然日和权威状态计算；导出只含业务/节点编号、名称、固化参与人显示名、工作流、轮次、截止时间和累计/逾期分钟，并阻断电子表格公式注入。
 
 The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-business-progress-v1-design.md`. The approved template, node, field, rejection, freeze, numbering, and evidence-retention refinement is in `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`. Account-administration execution steps are in `docs/superpowers/plans/2026-08-05-account-admin.md`.
 
@@ -35,7 +37,7 @@ The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-bus
 - `calendarSync` 使用 Node.js 内置 HTTPS 客户端，把每个完整验证的 AILCC 年份作为具有唯一编号的不可变代际写入 `work_calendar_entries`；只有全年每个自然日均写入成功后，`work_calendar_years` 才原子切换活动代际。过期工作器只能继续写自己的未选中代际，不能覆盖后继工作器。同版本跳过前会以每页最多 100 条、每年最多四页的方式核对所有日期和工作日标记；该查询依赖 `work_calendar_entries(sourceYear ASC, generationId ASC, date ASC)` 组合索引。`calendarSync`、`workflowReminder` 与 `evidenceRetention` 的计划入口只信任平台注入的服务端环境变量 `process.env.TRIGGER_SRC === 'timer'`，拒绝非空客户端 `OPENID`，并只使用服务端状态与时钟；事件载荷和 `getWXContext().TRIGGER_SRC` 均不能授权。人工日历同步只能通过已认证超级管理员接口签发并由服务端一次性消费短期票据；`evidenceRetention` 不提供人工 API，破坏性验收必须使用单独批准的一次性 Timer。持久边界见 `docs/memory/decisions/ADR-0007-trusted-timer-source.md`。
 - Enterprise WeChat sending must remain behind an adapter and disabled until approved secure configuration is supplied.
 
-Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `node_review_rounds`, `node_review_votes`, `evidences`, `work_calendar_entries`, `work_calendar_years`, `calendar_sync_requests`, `notifications`, notification-delivery records, and `audit_logs`. 当前日历运行时只使用三个按代际拆分的日历集合；`work_calendar` 不是当前主存储，也不应作为本次部署创建或备份的必备集合。
+Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `node_review_rounds`, `node_review_votes`, `evidences`, `work_calendar_entries`, `work_calendar_years`, `calendar_sync_requests`, `notifications`, notification-delivery records, `audit_logs`, `public_node_shares`, and `public_node_share_chunks`. 当前日历运行时只使用三个按代际拆分的日历集合；`work_calendar` 不是当前主存储，也不应作为本次部署创建或备份的必备集合。
 
 Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 Unbounded-count feedback evidence attachment uses hidden, deterministic, chunked reservations under the existing `node_feedback` and `evidences` collections; the invariant and Task 11 recovery obligation are recorded in `docs/memory/decisions/ADR-0003-feedback-evidence-reservations.md`.
@@ -43,6 +45,8 @@ For ordinary feedback evidence, a strict non-null completed-line `purgeDueAt` is
 Task 9 已落地业务驳回、关闭冻结和超级管理员审计修订。普通凭证继续继承业务线统一清理期限；审计修订附件从各自上传时间起独立保留 60 个自然日，并通过确定性、分块、可重试的 `audit_logs` 预约完成认领与发布。中断预约的 Task 11 回收义务记录在 `docs/memory/decisions/ADR-0004-business-lifecycle-amendment-reservations.md`。
 Task 10 已落地原生小程序动态反馈和凭证交互。节点页从受保护接口重新读取字段快照、版本、提交权限与历史；凭证只能通过云存储上传后登记为 `evidenceId`，所有查看和下载先申请短期地址。超级管理员使用独立受保护接口全局检索冻结业务和查看脱敏修订历史，普通业务成员读取边界保持不变。
 Task 11 已落地独立 `evidenceRetention` 定时云函数。它先分块回收反馈和审计修订的过期预约，再处理 24 小时孤立凭证、提前 15/7/1 天提醒和两种 60 天保留来源；文件清理使用带随机令牌的短期事务租约，云端删除成功或对象已不存在后才写入 `purged`，失败只保存安全分类与重试计数。真实定时触发器和目标环境索引由部署任务配置。完整的安全部署、索引、回滚和脱敏验收顺序记录在 `docs/deployment/template-node-fields-setup.md`。
+
+第二批次公开分享把头记录写入 `public_node_shares`，凭证顺序按每块最多 40 条写入 `public_node_share_chunks`。创建令牌由仅存在于 `businessApi` 环境变量的高熵密钥执行 HMAC-SHA256 派生；同一账号、业务、节点和幂等请求键恢复同一预约。有效分享通过 `publicShareHoldUntil` 暂缓凭证清理；到期后由 `evidenceRetention` 有界删除分享块和头记录。首版不提供手动提前撤销。
 
 所有必需多键索引中的账号数组采用最多 50 项且可见 BSON 编码不超过 768 字节的保守预算；业务成员数组另为最长 128 字节创建者预留一项，并与 100 次事务操作预算同时生效。新审核轮次固化处理人/审核人显示名，旧轮次缺失快照时只显示安全固定占位。`evidenceRetention` 的生产与服务批次上限统一为 40；精确状态/到期组合查询按权威排序字段与 `_id` 使用带明确 schema 和独立乐观修订的持久复合 keyset 游标，每条路径单次最多扫描 40 条原始记录；严格合法的旧 `{phase, afterId}` 游标由函数自动审计迁移到同阶段起点。详细决策见 `docs/memory/decisions/ADR-0006-index-budget-history-snapshots-and-retention-cursors.md`。
 

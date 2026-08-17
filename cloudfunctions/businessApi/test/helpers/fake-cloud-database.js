@@ -160,6 +160,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       if (value && value.__operator === 'gte') return document[key] !== undefined && document[key] >= value.value
       if (value && value.__operator === 'lt') return document[key] !== undefined && document[key] < value.value
       if (value && value.__operator === 'lte') return document[key] !== undefined && document[key] <= value.value
+      if (value && value.__operator === 'in') return Array.isArray(value.values) && value.values.includes(document[key])
       return Array.isArray(document[key]) ? document[key].includes(value) : document[key] === value
     })
   }
@@ -255,7 +256,8 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       gt: value => ({ __operator: 'gt', value }),
       gte: value => ({ __operator: 'gte', value }),
       lt: value => ({ __operator: 'lt', value }),
-      lte: value => ({ __operator: 'lte', value })
+      lte: value => ({ __operator: 'lte', value }),
+      in: values => ({ __operator: 'in', values })
     },
     collection(name) {
       return createQuery(name, false)

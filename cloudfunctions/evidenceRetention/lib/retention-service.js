@@ -116,6 +116,12 @@ function createRetentionService({ repository, storage, clock = () => new Date(),
       now,
       failures
     })
+    const publicSharesCleaned = await recoverReservations({
+      listName: 'listExpiredPublicShares',
+      recoverName: 'cleanupExpiredPublicShare',
+      now,
+      failures
+    })
     const orphansPurged = await purgeCandidates({
       listName: 'listExpiredOrphans',
       mode: 'orphan',
@@ -136,6 +142,7 @@ function createRetentionService({ repository, storage, clock = () => new Date(),
     return {
       feedbackReservationsRecovered,
       amendmentReservationsRecovered,
+      publicSharesCleaned,
       remindersCreated,
       objectsPurged,
       orphansPurged,

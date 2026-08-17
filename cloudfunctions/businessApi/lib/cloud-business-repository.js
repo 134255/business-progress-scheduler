@@ -5,7 +5,11 @@ const { createCloudWorkCalendarRepository } = require('./cloud-work-calendar-rep
 const { createWorkTimeService } = require('./work-time-service')
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { parseStrictTimestamp } = require('./evidence-retention')
-const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
+const {
+  hasAccountRelationshipMarker,
+  ownDataValue,
+  ownExactAccountIds
+} = require('./account-relationship-schema')
 const { normalizeFieldDefinition } = require('./field-domain')
 const { ALLOWED_EVIDENCE_TYPES } = require('./template-domain')
 const {
@@ -23,6 +27,7 @@ const COLLECTIONS = Object.freeze({
   templates: 'templates',
   templateNodes: 'template_nodes',
   users: 'users',
+  bindings: 'wechat_bindings',
   counters: 'sequence_counters',
   lines: 'business_lines',
   nodes: 'business_nodes',
@@ -38,6 +43,8 @@ const CLOSURE_OUTCOMES = new Set(['cancelled', 'closed', 'deleted'])
 const RETENTION_MS = 60 * 24 * 60 * 60 * 1000
 const AMENDMENT_EVIDENCE_CHUNK_SIZE = 40
 const AMENDMENT_CLAIM_LIFETIME_MS = 15 * 60 * 1000
+const DASHBOARD_SCAN_LIMIT = 2000
+const PENDING_PROCESSING_STATUSES = Object.freeze(['ready', 'in_progress', 'blocked'])
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -169,14 +176,15 @@ function createCloudBusinessRepository({
     return { template, nodes: await readTemplateNodes(templateId) }
   }
 
-  async function readAll(buildQuery) {
+  async function readAll(buildQuery, maximum = Number.MAX_SAFE_INTEGER) {
     const results = []
-    for (let offset = 0; ; offset += QUERY_PAGE_SIZE) {
-      const response = await buildQuery().skip(offset).limit(QUERY_PAGE_SIZE).get()
+    for (let offset = 0; results.length < maximum; offset += QUERY_PAGE_SIZE) {
+      const response = await buildQuery().skip(offset).limit(Math.min(QUERY_PAGE_SIZE, maximum - results.length)).get()
       const page = response.data || []
       results.push(...page)
-      if (page.length < QUERY_PAGE_SIZE) return results
+      if (page.length < QUERY_PAGE_SIZE || results.length >= maximum) return results
     }
+    return results
   }
 
   function membershipArray(value) {
@@ -216,6 +224,14 @@ function createCloudBusinessRepository({
     }
     const name = safeDisplayName(account)
     return status.value === 'disabled' ? `${name}（已停用）` : name
+  }
+
+  function snapshotDisplayName(account) {
+    try {
+      return safeDisplayName(account)
+    } catch (_) {
+      return '历史账号'
+    }
   }
 
   async function requireCurrentReader(actor) {
@@ -424,6 +440,7 @@ function createCloudBusinessRepository({
         reviewStartedAt: clone(node.reviewStartedAt || null),
         activeReviewRoundId: node.activeReviewRoundId || '',
         canFeedback: processors.includes(actor._id),
+        canShareResult: node.status === 'completed' && (canManage || processors.includes(actor._id)),
         ...evidencePolicy,
         fieldDefinitions
       }
@@ -568,6 +585,191 @@ function createCloudBusinessRepository({
       pageSize,
       total: visible.length,
       hasMore: offset + pageSize < visible.length
+    }
+  }
+
+  function timestampValue(value) {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getTime()
+    const parsed = new Date(value).getTime()
+    return Number.isFinite(parsed) ? parsed : null
+  }
+
+  function comparePendingProcessing(left, right) {
+    const leftDue = timestampValue(left.processingDueAt)
+    const rightDue = timestampValue(right.processingDueAt)
+    if (leftDue === null && rightDue !== null) return 1
+    if (leftDue !== null && rightDue === null) return -1
+    if (leftDue !== null && rightDue !== null && leftDue !== rightDue) return leftDue - rightDue
+    const leftUpdated = timestampValue(left.updatedAt) || 0
+    const rightUpdated = timestampValue(right.updatedAt) || 0
+    return rightUpdated - leftUpdated || String(left._id).localeCompare(String(right._id))
+  }
+
+  function pendingCursor(item) {
+    return Buffer.from(JSON.stringify([
+      timestampValue(item.processingDueAt),
+      timestampValue(item.updatedAt) || 0,
+      item._id
+    ])).toString('base64url')
+  }
+
+  function decodePendingCursor(value) {
+    if (value === undefined || value === null || value === '') return null
+    if (typeof value !== 'string' || value.length > 512) throw createError('VALIDATION_ERROR')
+    try {
+      const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+      if (!Array.isArray(parsed) || parsed.length !== 3 ||
+          !(parsed[0] === null || Number.isFinite(parsed[0])) ||
+          !Number.isFinite(parsed[1]) || typeof parsed[2] !== 'string' || !parsed[2]) {
+        throw new Error('invalid cursor')
+      }
+      return parsed
+    } catch {
+      throw createError('VALIDATION_ERROR')
+    }
+  }
+
+  function isAfterPendingCursor(item, cursor) {
+    if (!cursor) return true
+    const candidate = {
+      processingDueAt: cursor[0] === null ? null : new Date(cursor[0]),
+      updatedAt: new Date(cursor[1]),
+      _id: cursor[2]
+    }
+    return comparePendingProcessing(item, candidate) > 0
+  }
+
+  function safePendingRelationships(line, node, actor, legacyBindingValid = false) {
+    const accountSchema = hasAccountRelationshipMarker(line) || hasAccountRelationshipMarker(node)
+    if (accountSchema) {
+      const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
+      const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
+      const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
+      const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+      return Boolean(managers && members && processors && reviewers &&
+        (managers.includes(actor._id) || members.includes(actor._id)) &&
+        processors.includes(actor._id) && !processors.some(id => reviewers.includes(id)))
+    }
+    const assignees = ownExactAccountIds(node, 'assigneeIds')
+    return Boolean(legacyBindingValid && actor.openid && assignees && assignees.includes(actor.openid) &&
+      isLegacyLineMember(line, actor.openid))
+  }
+
+  async function readPendingCandidates(actor) {
+    const statusFilter = db.command.in(PENDING_PROCESSING_STATUSES)
+    const groups = [await readAll(() => db.collection(COLLECTIONS.nodes)
+      .where({ processorUserIds: actor._id, status: statusFilter })
+      .orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1)]
+    if (actor.openid) {
+      groups.push(await readAll(() => db.collection(COLLECTIONS.nodes)
+        .where({ assigneeIds: actor.openid, status: statusFilter })
+        .orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1))
+    }
+    const byId = new Map(groups.flat().map(node => [node._id, node]))
+    return {
+      items: [...byId.values()].slice(0, DASHBOARD_SCAN_LIMIT + 1),
+      complete: byId.size <= DASHBOARD_SCAN_LIMIT
+    }
+  }
+
+  async function authorizePendingCandidate(actor, candidate) {
+    return db.runTransaction(async transaction => {
+      const currentActor = await readDocument(transaction, COLLECTIONS.users, actor._id)
+      const line = candidate && await readDocument(transaction, COLLECTIONS.lines, candidate.businessLineId)
+      const node = candidate && await readDocument(transaction, COLLECTIONS.nodes, candidate._id)
+      const accountSchema = hasAccountRelationshipMarker(line) || hasAccountRelationshipMarker(node)
+      let legacyBindingValid = false
+      if (currentActor && !accountSchema && typeof actor.openid === 'string' && actor.openid) {
+        const binding = await readDocument(transaction, COLLECTIONS.bindings, hash(actor.openid))
+        const bindingUserId = ownDataValue(binding, 'userId')
+        legacyBindingValid = bindingUserId.valid && bindingUserId.value === currentActor._id
+      }
+      if (!currentActor || currentActor.status !== 'active' || !line || !node ||
+          line.status !== 'active' || line.currentNodeId !== node._id ||
+          node.businessLineId !== line._id || !PENDING_PROCESSING_STATUSES.includes(node.status) ||
+          !safePendingRelationships(
+            line, node, { ...currentActor, openid: actor.openid }, legacyBindingValid
+          )) return null
+      return {
+        _id: node._id,
+        nodeId: node._id,
+        businessLineId: line._id,
+        businessCode: line.code || '',
+        businessName: line.name || '',
+        nodeCode: node.nodeCode || '',
+        nodeName: node.name || '',
+        status: node.status,
+        processingRoundNumber: Number(node.processingRoundNumber || 0),
+        processingDueAt: clone(node.processingDueAt || null),
+        processingOverdueWorkMinutes: Number(node.processingOverdueWorkMinutes || 0),
+        updatedAt: clone(node.updatedAt || line.updatedAt || null)
+      }
+    })
+  }
+
+  async function collectPendingProcessing(actor) {
+    const currentActor = await requireCurrentReader(actor)
+    const candidates = await readPendingCandidates(currentActor)
+    const visible = []
+    for (const candidate of candidates.items.slice(0, DASHBOARD_SCAN_LIMIT)) {
+      const item = await authorizePendingCandidate(currentActor, candidate)
+      if (item) visible.push(item)
+    }
+    return { items: visible.sort(comparePendingProcessing), complete: candidates.complete }
+  }
+
+  async function listMyPendingProcessing({ actor, query = {} }) {
+    const pageSize = query.pageSize === undefined ? 20 : query.pageSize
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) {
+      throw createError('VALIDATION_ERROR')
+    }
+    const cursor = decodePendingCursor(query.cursor)
+    const collected = await collectPendingProcessing(actor)
+    const remaining = collected.items.filter(item => isAfterPendingCursor(item, cursor))
+    const items = remaining.slice(0, pageSize)
+    return {
+      items,
+      cursor: items.length ? pendingCursor(items[items.length - 1]) : '',
+      hasMore: remaining.length > items.length,
+      total: collected.items.length,
+      complete: collected.complete
+    }
+  }
+
+  async function getMyBusinessSummary({ actor }) {
+    const currentActor = await requireCurrentReader(actor)
+    const groups = [
+      await readAll(() => db.collection(COLLECTIONS.lines)
+        .where({ memberUserIds: currentActor._id }).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1),
+      await readAll(() => db.collection(COLLECTIONS.lines)
+        .where({ managerUserIds: currentActor._id }).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1)
+    ]
+    if (currentActor.openid) {
+      groups.push(
+        await readAll(() => db.collection(COLLECTIONS.lines)
+          .where({ memberIds: currentActor.openid }).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1),
+        await readAll(() => db.collection(COLLECTIONS.lines)
+          .where({ managerIds: currentActor.openid }).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1)
+      )
+    }
+    const byId = new Map(groups.flat().map(line => [line._id, line]))
+    const complete = byId.size <= DASHBOARD_SCAN_LIMIT
+    const visible = [...byId.values()].slice(0, DASHBOARD_SCAN_LIMIT)
+      .filter(line => usesAccountMembership(line)
+        ? safeNewLineMember(line, currentActor._id)
+        : isLegacyLineMember(line, currentActor.openid))
+      .filter(line => line.status !== 'creating' && line.status !== 'deleted')
+      .sort(compareUpdatedDesc)
+    const pending = await collectPendingProcessing(currentActor)
+    await requireCurrentReader(currentActor)
+    return {
+      stats: {
+        active: visible.filter(line => line.status === 'active').length,
+        completed: visible.filter(line => line.status === 'completed').length,
+        pendingProcessing: pending.items.length
+      },
+      recent: visible.slice(0, 5).map(publicLineProjection),
+      complete: complete && pending.complete
     }
   }
 
@@ -1145,7 +1347,7 @@ function createCloudBusinessRepository({
     return `${lineId}-node-${String(sequence + 1).padStart(3, '0')}`
   }
 
-  function preparedSnapshot(lineId, code, sourceNodes, firstProcessingDue) {
+  function preparedSnapshot(lineId, code, sourceNodes, firstProcessingDue, displayNames) {
     return sourceNodes.slice().sort(compareNodes).map((source, index) => ({
       id: nodeId(lineId, index),
       data: {
@@ -1160,6 +1362,8 @@ function createCloudBusinessRepository({
               workflowMode: 'review',
               processorUserIds: clone(source.processorUserIds),
               reviewerUserIds: clone(source.reviewerUserIds),
+              processorDisplayNames: source.processorUserIds.map(id => displayNames.get(id) || '历史账号'),
+              reviewerDisplayNames: source.reviewerUserIds.map(id => displayNames.get(id) || '历史账号'),
               reviewMode: source.reviewMode,
               processingSlaWorkHours: source.processingSlaWorkHours,
               reviewSlaWorkHours: source.reviewSlaWorkHours,
@@ -1175,6 +1379,7 @@ function createCloudBusinessRepository({
             }
           : {
               assigneeUserIds: clone(source.assigneeUserIds),
+              assigneeNames: source.assigneeUserIds.map(id => displayNames.get(id) || '历史账号'),
               slaWorkHours: source.slaWorkHours
             }),
         requiresEvidence: source.requiresEvidence,
@@ -1366,21 +1571,25 @@ function createCloudBusinessRepository({
           }
           const creator = await readDocument(transaction, COLLECTIONS.users, actor._id)
           if (!creator || creator.status !== 'active') throw createError('FORBIDDEN')
+          const displayNames = new Map([[actor._id, snapshotDisplayName(creator)]])
           for (const userId of processorIds) {
             if (userId === actor._id) continue
             const user = await readDocument(transaction, COLLECTIONS.users, userId)
             if (!user || user.status !== 'active') throw createError('PROCESSOR_INACTIVE')
+            displayNames.set(userId, snapshotDisplayName(user))
           }
           for (const userId of reviewerIds.filter(userId => !processorIds.includes(userId))) {
             if (userId === actor._id) continue
             const user = await readDocument(transaction, COLLECTIONS.users, userId)
             if (!user || user.status !== 'active') throw createError('REVIEWER_INACTIVE')
+            displayNames.set(userId, snapshotDisplayName(user))
           }
           for (const userId of legacyAssigneeIds.filter(userId =>
             !processorIds.includes(userId) && !reviewerIds.includes(userId))) {
             if (userId === actor._id) continue
             const user = await readDocument(transaction, COLLECTIONS.users, userId)
             if (!user || user.status !== 'active') throw createError('ASSIGNEE_INACTIVE')
+            displayNames.set(userId, snapshotDisplayName(user))
           }
 
           const counter = await readDocument(transaction, COLLECTIONS.counters, counterId)
@@ -1391,7 +1600,7 @@ function createCloudBusinessRepository({
           }
           attemptedSequence = Math.max(currentSequence + 1, minimumSequence)
           const code = formatBusinessCode(at, attemptedSequence)
-          prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue)
+          prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue, displayNames)
           await transaction.collection(COLLECTIONS.counters).doc(counterId).set({
             data: { sequence: attemptedSequence, dateKey: dayKey, updatedAt: db.serverDate() }
           })
@@ -1450,6 +1659,8 @@ function createCloudBusinessRepository({
     findCreationResult,
     createBusinessSnapshot,
     listBusinessLines,
+    listMyPendingProcessing,
+    getMyBusinessSummary,
     getBusinessLine,
     updateBusinessMetadata,
     listFrozenBusinessesForAdmin,

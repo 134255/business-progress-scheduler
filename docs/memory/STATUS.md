@@ -2,7 +2,7 @@
 
 Status captured: 2026-08-17 (Asia/Shanghai)
 
-- 2026-08-17 第二批次已按项目所有者此前确认的产品边界形成中文设计和三份独立实施计划：真实“待我处理”与概览、超级管理员运营看板与安全 CSV 导出、最长七日的小程序公开只读节点快照。公开快照采用至少 256 位随机能力令牌，接收者无需登录，正文和凭证顺序在创建时固化，凭证仅返回短期地址；微信只能由发送者通过原生分享面板手动选择好友或群。开发将在隔离分支 `codex/second-batch` 中按 TDD 顺序推进，当前 `main` 上操作员自己的 `project.config.json` 修改保持未触碰。基线实测 `businessApi`、`calendarSync`、`workflowReminder`、`evidenceRetention`、小程序与 WXML 六套测试均退出 0；真实 CloudBase 新集合、索引、部署、真机分享与七日到期仍为 `unverified`。
+- 2026-08-17 第二批次三项能力已在隔离分支 `codex/second-batch` 完成实现并通过本地全量门禁：真实“待我处理”与概览、活动超级管理员运营看板和安全 CSV、最长七日的小程序公开只读节点快照。公开令牌由 `PUBLIC_NODE_SHARE_HMAC_SECRET` 对活动账号、业务、节点和幂等请求键执行 HMAC-SHA256 派生；中断重试恢复原预约和原过期时间，凭证按 40 条分块且有效期内由 `publicShareHoldUntil` 阻止清理。快照公开读取无需登录，只返回固化正文和五分钟 HTTPS 凭证地址；发送者通过微信原生面板手动选择好友或群。待我处理的新版账号路径在固定文档事务中重验活动账号、业务、当前节点和账号关系；纯旧 OpenID 兼容路径还会重读 `wechat_bindings`，查询后并发撤绑不会返回旧待办。最新实测：`businessApi` 540/540、`calendarSync` 50/50、`workflowReminder` 30/30、`evidenceRetention` 42/42、小程序 150/150、WXML 4/4，均 0 失败；运营聚焦 49/49、分享聚焦 29/29。当前 `main` 上操作员自己的 `project.config.json` 修改保持未触碰。真实 CloudBase 新集合、组合索引、分享密钥配置、云函数部署、真机图片/视频/PDF 预览、好友/群分享、七日到期和清理仍为 `unverified`；`evidenceRetention` 周期触发器未启用，GitHub 未推送。
 
 - 2026-08-17 凭证保留提醒通知编号兼容已完成真实 CloudBase 验收。操作员部署最新 `businessApi` 后，原先由 `evidenceRetention` 创建且无需迁移或重建的 15 天提醒已在目标活动收件账号的通知中心直接可见；点击后能进入对应业务安全页面，没有 `FORBIDDEN`、`VALIDATION_ERROR`，也未显示永久文件编号、`cloud://` 路径、凭证哈希、OpenID、请求键或内部租约。返回并刷新通知中心后已读状态保持；数据库中只新增一条与原提醒编号和当前内部账号对应的确定性 `notification_read_marker`，`createdAt` 存在，同一提醒与账号组合无重复，原 `evidence_retention` 通知仍保留且未被覆盖。该结果关闭通知编号兼容的真实部署边界；三个定时工作器继续保持空触发器，下一次 `evidenceRetention` 幂等运行仍须单独批准。
 
@@ -848,7 +848,7 @@ Executed on 2026-08-06 for Task 6 formal-review fix round one based on `345a972`
 
 ## Next actions
 
-1. 保持 `calendarSync`、`workflowReminder` 与 `evidenceRetention` 的触发器为空；`workflowReminder` 的非零处理/审核提醒及同小时去重已通过真实 Timer 验收。下一步继续使用专用隔离业务核对提醒停止条件：业务或节点终态、审核通过/驳回、账号停用、成员/处理人/审核人关系移除、工作流模式变化及 `pending_calendar` 均不得产生不应发送的提醒；不得使用真实业务记录或手工篡改权威工作时长快照。
-2. 先重新部署带可信 Timer 授权的 `evidenceRetention` 并保持 `triggers: []`。再次备份专用测试记录、确认云对象只属于无敏感测试数据并列明精确删除目标后，单独批准两个一次性 Timer；每次执行后立即恢复空触发器，核对提醒、孤立文件、普通保留期、修订保留期、幂等、失败重试和日志脱敏。未完成该破坏性矩阵前不得启用周期清理触发器，也不得点击控制台“测试”直接调用。
-3. `workflowReminder` 停止条件矩阵与 `evidenceRetention` 破坏性隔离矩阵全部通过并分别取得单独批准后，依次只启用 `calendarSync` 每日同步和 `workflowReminder` 小时提醒；每次只启用一个并核对时区、下一次触发时间、首次自动调用来源、耗时与脱敏计数，再决定下一项。
+1. 完成第二批次分支的最终差异、安全和项目记忆门禁后，本地快进合并回 `main`；不得包含操作员自己的 `project.config.json` 修改，也不得在未获明确授权时推送 GitHub。随后按部署手册创建 `public_node_shares`、`public_node_share_chunks`、组合索引和仅云函数权限，安全设置 `PUBLIC_NODE_SHARE_HMAC_SECRET`，部署 `businessApi` 与 `evidenceRetention`，再做待办、运营导出和七日公开分享的真机验收。
+2. 保持 `evidenceRetention` 的周期触发器为空。现有真实验收已覆盖到期孤立凭证清理、15 天提醒、通知显示/跳转/已读和非目标普通/修订凭证不误删；仍须对已备份隔离数据分别完成第二次幂等运行、普通业务凭证到期清理、审计修订凭证到期清理、失败重试和日志脱敏。任何真实删除都必须再次确认精确候选和备份。
+3. `calendarSync` 与 `workflowReminder` 的可信一次性 Timer、非零提醒、同小时去重和停止条件矩阵已通过。只有凭证保留的剩余破坏性矩阵完成后，才依次启用日历每日同步和每小时提醒；每次只启用一个并核对时区、下次触发时间和首次自动执行。`evidenceRetention` 周期清理继续单独决策。
 4. 将管理员重置密码的可编辑弹窗替换为掩码输入，再完成需要第二个微信身份的绑定/解绑验收。

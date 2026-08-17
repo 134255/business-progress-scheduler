@@ -35,6 +35,10 @@ const { createReviewService } = require('./lib/review-service')
 const { createCloudReviewRepository } = require('./lib/cloud-review-repository')
 const { hashPassword } = require('./lib/password')
 const { createCalendarAdminService } = require('./lib/calendar-admin-service')
+const { createOperationsService } = require('./lib/operations-service')
+const { createCloudOperationsRepository } = require('./lib/cloud-operations-repository')
+const { createShareService } = require('./lib/share-service')
+const { createCloudShareRepository } = require('./lib/cloud-share-repository')
 
 const COLLECTIONS = {
   users: 'users',
@@ -52,7 +56,8 @@ const PUBLIC_ACTIONS = new Set([
   'login',
   'completeFirstLogin',
   'initializeSuperAdmin',
-  'recoverSuperAdmin'
+  'recoverSuperAdmin',
+  'getPublicNodeShare'
 ])
 
 const ACCOUNT_ACTIONS = new Set([
@@ -123,6 +128,7 @@ const LOGGABLE_ERROR_CODES = new Set([
   'PASSWORD_CHANGE_REQUIRED',
   'REJECTION_NOT_ALLOWED',
   'REVIEW_COMMENT_REQUIRED',
+  'SHARE_UNAVAILABLE',
   'TEMPLATE_INVALID',
   'TEMPLATE_LIMIT_EXCEEDED',
   'TEMPLATE_NOT_EDITABLE',
@@ -189,6 +195,14 @@ function createTemplateRoutes(templateService) {
 function createBusinessRoutes(businessService) {
   return {
     listBusinessLines: ({ actor, payload }) => businessService.listBusinessLines({ actor, query: payload }),
+    listMyPendingProcessing: ({ actor, payload }) => businessService.listMyPendingProcessing({
+      actor,
+      query: selectProtectedPayload(payload, new Set(['cursor', 'pageSize']))
+    }),
+    getMyDashboardSummary: ({ actor, payload }) => {
+      selectProtectedPayload(payload, new Set())
+      return businessService.getMyDashboardSummary({ actor })
+    },
     getBusinessLine: ({ actor, payload }) => businessService.getBusinessLine({ actor, lineId: payload.id }),
     updateBusinessMetadata: ({ actor, payload }) => businessService.updateMetadata({ actor, input: payload }),
     createBusinessFromTemplate: ({ actor, payload }) => businessService.createFromTemplate({
@@ -259,6 +273,34 @@ function createCalendarAdminRoutes(calendarAdminService) {
   } : null
 }
 
+function createOperationsRoutes(operationsService) {
+  if (!operationsService) return null
+  const keys = new Set(['startDate', 'endDate', 'status', 'cursor', 'pageSize'])
+  return {
+    getOperationsDashboard: ({ actor, payload }) => operationsService.getDashboard({
+      actor,
+      query: selectProtectedPayload(payload, keys)
+    }),
+    exportOperationsRows: ({ actor, payload }) => operationsService.exportRows({
+      actor,
+      query: selectProtectedPayload(payload, keys)
+    })
+  }
+}
+
+function createShareRoutes(shareService) {
+  if (!shareService) return null
+  return {
+    createNodeShareSnapshot: ({ actor, payload }) => shareService.createNodeShareSnapshot({
+      actor,
+      input: selectProtectedPayload(payload, new Set(['businessLineId', 'nodeId', 'requestKey']))
+    }),
+    getPublicNodeShare: ({ payload }) => shareService.getPublicNodeShare({
+      input: selectProtectedPayload(payload, new Set(['token', 'cursor', 'pageSize']))
+    })
+  }
+}
+
 const CLIENT_IDENTITY_KEYS = new Set(['actor', 'actorId', 'openid', 'openId', 'role'])
 
 function selectProtectedPayload(payload, allowedKeys) {
@@ -321,6 +363,8 @@ function createBusinessApi({
   feedbackService,
   reviewService,
   calendarAdminService,
+  operationsService,
+  shareService,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
   getContext,
@@ -336,6 +380,8 @@ function createBusinessApi({
     feedbackService ? createFeedbackRoutes(feedbackService) : null,
     createReviewRoutes(reviewService),
     createCalendarAdminRoutes(calendarAdminService),
+    createOperationsRoutes(operationsService),
+    createShareRoutes(shareService),
     protectedRoutes
   )
 
@@ -720,6 +766,15 @@ function createDefaultBusinessApi() {
     clock: () => new Date(),
     requestIdFactory: () => crypto.randomBytes(24).toString('hex')
   })
+  const operationsService = createOperationsService({
+    repository: createCloudOperationsRepository({ db }),
+    clock: () => new Date()
+  })
+  const shareService = createShareService({
+    repository: createCloudShareRepository({ db, cloud, clock: () => new Date() }),
+    clock: () => new Date(),
+    tokenFactory: () => crypto.randomBytes(32).toString('base64url')
+  })
   return createBusinessApi({
     repository,
     authService,
@@ -731,6 +786,8 @@ function createDefaultBusinessApi() {
     feedbackService,
     reviewService,
     calendarAdminService,
+    operationsService,
+    shareService,
     getContext: () => cloud.getWXContext(),
     clock,
     legacyRoutes: createDefaultLegacyRoutes()

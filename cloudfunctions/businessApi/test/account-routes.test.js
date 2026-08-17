@@ -63,6 +63,7 @@ test('only session and credential-establishment actions are public', () => {
   assert.equal(isPublicAction('completeFirstLogin'), true)
   assert.equal(isPublicAction('initializeSuperAdmin'), true)
   assert.equal(isPublicAction('recoverSuperAdmin'), true)
+  assert.equal(isPublicAction('getPublicNodeShare'), true)
   assert.equal(isPublicAction('dashboard'), false)
   assert.equal(isPublicAction('listUsers'), false)
 })
@@ -84,6 +85,8 @@ function createRouteHarness({
   evidenceService,
   feedbackService,
   reviewService,
+  operationsService,
+  shareService,
   calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
@@ -136,6 +139,8 @@ function createRouteHarness({
     evidenceService,
     feedbackService,
     reviewService,
+    operationsService,
+    shareService,
     calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
@@ -144,6 +149,33 @@ function createRouteHarness({
   })
   return { api, authService, calls, errors }
 }
+
+test('公开分享读取无需登录而创建分享必须使用当前活动账号', async () => {
+  const calls = []
+  const shareService = {
+    async getPublicNodeShare(input) { calls.push(['get', input]); return { title: '公开快照' } },
+    async createNodeShareSnapshot(input) { calls.push(['create', input]); return { path: '/share' } }
+  }
+  const publicHarness = createRouteHarness({ user: null, credential: null, shareService, contextOpenid: '' })
+  const publicResult = await publicHarness.api.main({
+    action: 'getPublicNodeShare', payload: { token: Buffer.alloc(32, 1).toString('base64url'), cursor: '', pageSize: 40 }
+  })
+  assert.equal(publicResult.ok, true)
+  assert.equal(calls[0][1].actor, undefined)
+
+  const protectedHarness = createRouteHarness({ shareService })
+  const created = await protectedHarness.api.main({
+    action: 'createNodeShareSnapshot', payload: {
+      businessLineId: 'line-1', nodeId: 'node-1', requestKey: 'share-request-1',
+      actorId: 'forged', openid: 'wx-forged'
+    }
+  })
+  assert.equal(created.ok, true)
+  assert.equal(calls[1][1].actor._id, 'actor-1')
+  assert.deepEqual(calls[1][1].input, {
+    businessLineId: 'line-1', nodeId: 'node-1', requestKey: 'share-request-1'
+  })
+})
 
 test('审核与通知路由只传递解析后的当前账号和白名单输入', async () => {
   const calls = []
@@ -401,6 +433,56 @@ test('business list and detail routes pass the trusted actor to the dual-schema 
   assert.deepEqual(calls, [
     ['listBusinessLines', { actor, query: { page: 2 } }],
     ['getBusinessLine', { actor, lineId: 'business-1' }]
+  ])
+})
+
+test('待处理与概览路由剥离客户端身份并委托受保护服务', async () => {
+  const calls = []
+  const businessService = {
+    async listMyPendingProcessing(input) {
+      calls.push(['listMyPendingProcessing', input])
+      return { items: [] }
+    },
+    async getMyDashboardSummary(input) {
+      calls.push(['getMyDashboardSummary', input])
+      return { stats: {} }
+    }
+  }
+  const harness = createRouteHarness({ businessService })
+  await harness.api.main({
+    action: 'listMyPendingProcessing',
+    payload: { cursor: '', pageSize: 20, actorId: 'forged' }
+  })
+  await harness.api.main({ action: 'getMyDashboardSummary', payload: { actor: { _id: 'forged' } } })
+
+  const actor = {
+    _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+  }
+  assert.deepEqual(calls, [
+    ['listMyPendingProcessing', { actor, query: { cursor: '', pageSize: 20 } }],
+    ['getMyDashboardSummary', { actor }]
+  ])
+})
+
+test('运营看板与导出路由只传递受信管理员及白名单日期分页参数', async () => {
+  const calls = []
+  const operationsService = {
+    async getDashboard(input) { calls.push(['getOperationsDashboard', input]); return { stats: {} } },
+    async exportRows(input) { calls.push(['exportOperationsRows', input]); return { items: [] } }
+  }
+  const harness = createRouteHarness({ operationsService })
+  await harness.api.main({
+    action: 'getOperationsDashboard',
+    payload: { startDate: '2026-08-01', endDate: '2026-08-17', actorId: 'forged' }
+  })
+  await harness.api.main({
+    action: 'exportOperationsRows',
+    payload: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 50, role: 'forged' }
+  })
+  const actor = { _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound' }
+  assert.deepEqual(calls, [
+    ['getOperationsDashboard', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17' } }],
+    ['exportOperationsRows', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 50 } }]
   ])
 })
 

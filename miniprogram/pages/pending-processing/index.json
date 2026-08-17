@@ -1,0 +1,6 @@
+{
+  "navigationBarTitleText": "待我处理",
+  "usingComponents": {
+    "status-pill": "/components/status-pill/index"
+  }
+}

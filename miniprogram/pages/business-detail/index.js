@@ -4,8 +4,8 @@ const { safeErrorMessage } = require('../../utils/safe-error')
 const FROZEN_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 
-function newRequestKey() {
-  return `reject-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+function newRequestKey(prefix = 'reject') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
 }
 
 function activeUser() {
@@ -58,6 +58,7 @@ Page({
     closureIndex: 0,
     closureReason: '',
     closing: false,
+    shareCreatingNodeId: '',
     errorMessage: ''
   },
 
@@ -159,6 +160,34 @@ Page({
     wx.navigateTo({
       url: `/pages/node-feedback/index?lineId=${encodeURIComponent(this.data.id)}&nodeId=${encodeURIComponent(node._id)}`
     })
+  },
+
+  async createNodeShare(event) {
+    const index = Number(event.currentTarget.dataset.index)
+    const node = this.data.nodes[index]
+    if (!node || !node.canShareResult || this.data.shareCreatingNodeId) return
+    const actorId = this.actorId
+    const lineId = this.data.id
+    if (!this.shareRequestKeys) this.shareRequestKeys = new Map()
+    const requestKey = this.shareRequestKeys.get(node._id) || newRequestKey('share')
+    this.shareRequestKeys.set(node._id, requestKey)
+    this.setData({ shareCreatingNodeId: node._id })
+    try {
+      const result = await businessService.createNodeShareSnapshot({
+        businessLineId: lineId, nodeId: node._id, requestKey
+      })
+      if (!this.pageAlive || !this.actorStillCurrent() || this.actorId !== actorId || this.data.id !== lineId) return
+      this.shareRequestKeys.delete(node._id)
+      wx.navigateTo({ url: result.path })
+    } catch (error) {
+      if (this.pageAlive && this.actorStillCurrent() && this.actorId === actorId && this.data.id === lineId) {
+        wx.showToast({ title: safeErrorMessage(error, '生成分享快照失败，请稍后重试'), icon: 'none' })
+      }
+    } finally {
+      if (this.pageAlive && activeUser() && activeUser()._id === actorId && this.data.id === lineId) {
+        this.setData({ shareCreatingNodeId: '' })
+      }
+    }
   },
 
   editLine() {

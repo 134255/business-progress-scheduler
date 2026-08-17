@@ -96,6 +96,26 @@ test('新版审核当前节点不提供旧的上一节点驳回入口，旧节�
   assert.match(wxml, /wx:if="\{\{canRejectPrevious\}\}"/)
 })
 
+test('已完成节点可生成固定分享快照并进入公开只读页', async () => {
+  const navigations = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser('processor-1') } })
+  global.wx = { navigateTo: options => navigations.push(options), showToast: () => {} }
+  const page = loadPage('pages/business-detail/index.js', {
+    async createNodeShareSnapshot(input) {
+      assert.equal(input.businessLineId, 'line-1')
+      assert.equal(input.nodeId, 'node-1')
+      assert.match(input.requestKey, /^share-[A-Za-z0-9-]+$/)
+      return { path: '/pages/public-node-share/index?token=safe-token' }
+    }
+  })
+  page.pageAlive = true
+  page.actorId = 'processor-1'
+  page.setData({ id: 'line-1', nodes: [reviewNode({ status: 'completed', canShareResult: true })] })
+  await page.createNodeShare({ currentTarget: { dataset: { index: 0 } } })
+  assert.deepEqual(navigations, [{ url: '/pages/public-node-share/index?token=safe-token' }])
+  assert.equal(page.data.shareCreatingNodeId, '')
+})
+
 test('业务服务的六个审核方法只透传业务参数并安全映射错误', async () => {
   const calls = []
   const cloud = {

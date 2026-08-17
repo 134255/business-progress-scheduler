@@ -66,6 +66,10 @@ Page({
     wx.navigateTo({ url: '/pages/review-list/index' })
   },
 
+  openPendingProcessing() {
+    wx.navigateTo({ url: '/pages/pending-processing/index' })
+  },
+
   openNotifications() {
     wx.navigateTo({ url: '/pages/notification-list/index' })
   },
@@ -78,6 +82,11 @@ Page({
   openAdminTemplates() {
     if (!this.data.profile || this.data.profile.role !== 'super_admin' || this.data.profile.status !== 'active') return
     wx.navigateTo({ url: '/pages/admin-templates/index' })
+  },
+
+  openAdminOperations() {
+    if (!this.data.profile || this.data.profile.role !== 'super_admin' || this.data.profile.status !== 'active') return
+    wx.navigateTo({ url: '/pages/admin-operations/index' })
   },
 
   openProfile() {

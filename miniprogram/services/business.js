@@ -54,23 +54,44 @@ async function listAll(method, pageSize = 50) {
 }
 
 async function dashboard() {
-  const [result, pendingReviews, notifications] = await Promise.all([
-    callBusinessApi('listBusinessLines', { page: 1, pageSize: 20 }),
+  const [summary, pendingReviews, notifications] = await Promise.all([
+    callBusinessApi('getMyDashboardSummary', {}),
     listAll(listMyPendingReviews),
     listAll(listMyNotifications)
   ])
-  const items = Array.isArray(result.items) ? result.items : []
+  const stats = summary && summary.stats || {}
   return {
     stats: {
-      active: items.filter(item => item.status === 'active').length,
-      pendingMine: null,
-      pendingMineAvailable: false,
+      active: Number(stats.active || 0),
+      pendingMine: Number(stats.pendingProcessing || 0),
+      pendingMineAvailable: true,
       pendingReviews: pendingReviews.length,
       unreadNotifications: notifications.filter(item => !item.read).length,
-      completed: items.filter(item => item.status === 'completed').length
+      completed: Number(stats.completed || 0),
+      complete: summary && summary.complete !== false
     },
-    recent: items.slice(0, 5)
+    recent: Array.isArray(summary && summary.recent) ? summary.recent : []
   }
+}
+
+function listMyPendingProcessing(query) {
+  return callProtected('listMyPendingProcessing', query || {}, '待处理任务加载失败，请稍后重试')
+}
+
+function getOperationsDashboard(query) {
+  return callProtected('getOperationsDashboard', query || {}, '运营看板加载失败，请稍后重试')
+}
+
+function exportOperationsRows(query) {
+  return callProtected('exportOperationsRows', query || {}, '运营数据导出失败，请稍后重试')
+}
+
+function createNodeShareSnapshot(input) {
+  return callProtected('createNodeShareSnapshot', input, '生成分享快照失败，请稍后重试')
+}
+
+function getPublicNodeShare(query) {
+  return callProtected('getPublicNodeShare', query, '分享内容已失效或暂时无法查看')
 }
 
 function listBusinessLines(filters) {
@@ -169,6 +190,11 @@ module.exports = {
   bootstrap,
   updateUserProfile,
   dashboard,
+  listMyPendingProcessing,
+  getOperationsDashboard,
+  exportOperationsRows,
+  createNodeShareSnapshot,
+  getPublicNodeShare,
   listBusinessLines,
   getBusinessLine,
   createBusinessFromTemplate,

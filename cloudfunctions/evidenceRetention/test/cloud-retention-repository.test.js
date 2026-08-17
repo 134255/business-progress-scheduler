@@ -187,6 +187,54 @@ test('事务清理租约阻止并发认领并要求原令牌确认成功或失�
   assert.equal(stored.purgedObjectWasAbsent, true)
 })
 
+test('公开分享有效期内的普通与孤立凭证均不得进入或通过清理认领', async () => {
+  const holdUntil = new Date(NOW.getTime() + 7 * 86400000)
+  const { repository } = repositoryFor({
+    business_lines: [{ _id: 'line-due', status: 'completed', purgeDueAt: NOW }],
+    evidences: [
+      {
+        _id: 'held-retention', businessLineId: 'line-due', feedbackId: 'feedback-1',
+        fileId: 'cloud://env/held-retention', storageStatus: 'available',
+        retentionScope: 'business_line', retentionSource: 'node_feedback', publicShareHoldUntil: holdUntil
+      },
+      {
+        _id: 'held-orphan', fileId: 'cloud://env/held-orphan', storageStatus: 'available',
+        orphanExpiresAt: NOW, feedbackId: null, amendmentId: null, attachmentState: 'unattached',
+        publicShareHoldUntil: holdUntil
+      }
+    ]
+  })
+  assert.deepEqual(await repository.listDueEvidence({ now: NOW, limit: 40 }), [])
+  assert.deepEqual(await repository.listExpiredOrphans({ now: NOW, limit: 40 }), [])
+  assert.equal(await repository.claimEvidenceForPurge({ evidenceId: 'held-retention', mode: 'retention', now: NOW }), null)
+  assert.equal(await repository.claimEvidenceForPurge({ evidenceId: 'held-orphan', mode: 'orphan', now: NOW }), null)
+})
+
+test('过期公开分享元数据按最多四十个分块有界回收且不会提前删除头记录', async () => {
+  const chunks = Array.from({ length: 41 }, (_, index) => ({
+    _id: `share-expired-chunk-${String(index).padStart(3, '0')}`, shareId: 'share-expired', index
+  }))
+  const { fake, repository } = repositoryFor({
+    public_node_shares: [{
+      _id: 'share-expired', publishState: 'published', expiresAt: NOW
+    }, {
+      _id: 'share-live', publishState: 'published', expiresAt: new Date(NOW.getTime() + 1)
+    }],
+    public_node_share_chunks: chunks
+  })
+  assert.deepEqual(await repository.listExpiredPublicShares({ now: NOW, limit: 40 }), ['share-expired'])
+  assert.equal(await repository.cleanupExpiredPublicShare({ id: 'share-expired', now: NOW }), true)
+  assert.equal(fake.documents('public_node_share_chunks').length, 1)
+  assert.equal(fake.documents('public_node_shares').some(item => item._id === 'share-expired'), true)
+  assert.equal(await repository.cleanupExpiredPublicShare({ id: 'share-expired', now: NOW }), true)
+  assert.equal(fake.documents('public_node_share_chunks').length, 0)
+  assert.equal(fake.documents('public_node_shares').some(item => item._id === 'share-expired'), false)
+  const audit = fake.documents('audit_logs').find(item => item.targetId === 'share-expired')
+  assert.equal(audit.action, 'EXPIRE_PUBLIC_NODE_SHARE')
+  assert.equal(audit.actorType, 'system')
+  assert.equal(Math.max(...fake.transactionRuns.map(run => run.operations)) <= 100, true)
+})
+
 test('过期反馈预约按固定关系回滚凭证并清除仍指向它的节点锁', async () => {
   const { fake, repository } = repositoryFor({
     node_feedback: [

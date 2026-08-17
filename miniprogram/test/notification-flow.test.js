@@ -134,7 +134,11 @@ test('概览从服务端审核与通知分页计算真实数量并提供审核�
   const cloud = {
     callBusinessApi: async (action, payload) => {
       calls.push([action, payload])
-      if (action === 'listBusinessLines') return { items: [{ _id: 'line-1', status: 'active' }, { _id: 'line-2', status: 'completed' }] }
+      if (action === 'getMyDashboardSummary') return {
+        stats: { active: 1, completed: 1, pendingProcessing: 0 },
+        recent: [{ _id: 'line-1', status: 'active' }, { _id: 'line-2', status: 'completed' }],
+        complete: true
+      }
       if (action === 'listMyPendingReviews') return { items: [{ reviewRoundId: 'round-1' }, { reviewRoundId: 'round-2' }], hasMore: false }
       if (action === 'listMyNotifications') return { items: [{ notificationId: 'n-1', read: false }, { notificationId: 'n-2', read: true }], hasMore: false }
       throw new Error('意外调用')
@@ -146,7 +150,7 @@ test('概览从服务端审核与通知分页计算真实数量并提供审核�
   })
   const result = await service.dashboard()
   assert.deepEqual(result.stats, {
-    active: 1, pendingMine: null, pendingMineAvailable: false, pendingReviews: 2, unreadNotifications: 1, completed: 1
+    active: 1, pendingMine: 0, pendingMineAvailable: true, pendingReviews: 2, unreadNotifications: 1, completed: 1, complete: true
   })
 
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })

@@ -29,6 +29,7 @@ test('生产默认装配使用仓库合法批次完成一次空扫描', async ()
     assert.deepEqual(result, {
       feedbackReservationsRecovered: 0,
       amendmentReservationsRecovered: 0,
+      publicSharesCleaned: 0,
       remindersCreated: 0,
       objectsPurged: 0,
       orphansPurged: 0,

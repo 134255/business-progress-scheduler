@@ -1,0 +1,15 @@
+<view class="page">
+  <view class="section-title">待我处理</view>
+  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view class="card task-card" wx:for="{{items}}" wx:key="nodeId" data-line-id="{{item.businessLineId}}" data-node-id="{{item.nodeId}}" bindtap="openItem">
+    <view class="row-between"><text class="item-title">{{item.businessName}}</text><status-pill status="{{item.status}}" /></view>
+    <text class="muted block">业务编号：{{item.businessCode || '未编号'}}</text>
+    <text class="block">{{item.nodeName}} · 第 {{item.processingRoundNumber}} 轮处理</text>
+    <text class="muted block">{{item.nodeCode}}</text>
+    <text class="due block">{{item.dueText}}</text>
+    <text class="action block">继续处理 →</text>
+  </view>
+  <view wx:if="{{!loading && !errorMessage && !items.length}}" class="empty">暂无待我处理事项</view>
+  <view wx:if="{{loading}}" class="empty">正在加载待处理事项…</view>
+  <button wx:if="{{hasMore}}" class="secondary-button" bindtap="loadMore" loading="{{loadingMore}}" disabled="{{loadingMore}}">加载更多</button>
+</view>

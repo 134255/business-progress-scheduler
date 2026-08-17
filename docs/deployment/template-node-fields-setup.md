@@ -41,6 +41,8 @@
 - `work_calendar_entries`
 - `work_calendar_years`
 - `calendar_sync_requests`
+- `public_node_shares`
+- `public_node_share_chunks`
 
 对每份导出执行以下检查：
 
@@ -49,7 +51,7 @@
 3. 对比控制台记录数与导出记录数；若导出工具采用分片，核对所有分片总数。
 4. 把备份保存到受控位置，不提交 Git，不通过普通聊天发送。
 
-`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years` 与 `calendar_sync_requests` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
+`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years`、`calendar_sync_requests`、`public_node_shares` 与 `public_node_share_chunks` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
 
 ## 三、集合准备
 
@@ -72,6 +74,8 @@
 | `system_settings` | 账号守卫及日历补算的无业务内容持久游标 |
 | `notifications` | 站内通知和凭证到期提醒 |
 | `audit_logs` | 模板、业务、反馈、修订和清理审计 |
+| `public_node_shares` | 七日公开节点固定快照头与发布状态 |
+| `public_node_share_chunks` | 每块最多 40 条的公开凭证快照 |
 
 集合权限使用“仅云函数/服务端可读写”或等效的最严格配置。不要为了调试开放全体用户读写。
 
@@ -111,9 +115,12 @@
 | `business_lines` | `memberUserIds` 升序、`updatedAt` 降序 | 否 | 新账号成员业务列表 |
 | `business_lines` | `managerUserIds` 升序、`updatedAt` 降序 | 否 | 新账号管理员业务列表 |
 | `business_lines` | `status` 升序、`purgeDueAt` 升序、`_id` 升序 | 否 | 冻结业务 15/7/1 日提醒的精确到期扫描 |
+| `business_lines` | `createdAt` 降序、`_id` 升序 | 否 | 超级管理员运营看板日期范围扫描 |
 | `template_nodes` | `templateId` 升序、`sequence` 升序 | 否 | 模板节点有序读取 |
 | `business_nodes` | `nodeCode` 升序 | 是 | 节点编号最终防重 |
-| `business_nodes` | `businessLineId` 升序、`sequence` 升序 | 否 | 业务节点时间线 |
+| `business_nodes` | `businessLineId` 升序、`sequence` 升序、`_id` 升序 | 否 | 业务节点时间线与运营导出 |
+| `business_nodes` | `processorUserIds` 升序、`status` 升序、`updatedAt` 降序 | 否 | 新账号“待我处理”候选扫描 |
+| `business_nodes` | `assigneeIds` 升序、`status` 升序、`updatedAt` 降序 | 否 | 纯旧 OpenID 节点“待我处理”兼容扫描；无旧业务时可记录为不适用 |
 | `business_nodes` | `workflowMode` 升序、`processingDueStatus` 升序、`_id` 升序 | 否 | 审核节点处理提醒有界扫描 |
 | `business_nodes` | `processingTimingStatus` 升序、`_id` 升序 | 否 | 待审核节点的处理工作分钟待补算扫描 |
 | `business_nodes` | `processingDueStatus` 升序、`_id` 升序 | 否 | 日历恢复后的处理截止时间补算扫描 |
@@ -126,6 +133,7 @@
 | `node_review_rounds` | `reviewDueStatus` 升序、`_id` 升序 | 否 | 日历恢复后的审核截止时间补算扫描 |
 | `node_review_rounds` | `processingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的处理时长补算扫描 |
 | `node_review_rounds` | `reviewTimingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的审核时长补算扫描 |
+| `node_review_rounds` | `status` 升序、`createdAt` 降序、`_id` 升序 | 否 | 运营看板待审核统计 |
 | `node_review_votes` | `businessLineId` 升序、`nodeId` 升序、`createdAt` 升序 | 否 | 业务节点投票时间线 |
 | `node_review_votes` | `reviewRoundId` 升序、`reviewerUserId` 升序 | 是 | 每名审核人每轮唯一投票 |
 | `node_review_votes` | `reviewRoundId` 升序、`createdAt` 升序、`_id` 升序 | 否 | 审核详情投票时间线 |
@@ -149,6 +157,8 @@
 | `notifications` | `recipientUserIds` 升序、`createdAt` 降序、`_id` 升序 | 否 | 当前账号通知分页 |
 | `notifications` | `audienceRole` 升序、`createdAt` 降序、`_id` 升序 | 否 | 超级管理员广播通知分页 |
 | `work_calendar_entries` | `sourceYear` 升序、`generationId` 升序、`date` 升序 | 否 | 同版本全年完整性的有界分页校验 |
+| `public_node_shares` | `expiresAt` 升序、`_id` 升序 | 否 | 到期公开分享有界清理 |
+| `public_node_share_chunks` | `shareId` 升序、`_id` 升序 | 否 | 单个分享的凭证块有界清理 |
 
 `work_calendar_entries` 索引未在真实 CloudBase 验证前，不得将日历同步标记为可部署通过；索引错误应保留旧活动代际并返回安全失败。
 
@@ -177,6 +187,7 @@
 2. 选择“上传并部署：云端安装依赖（不上传 `node_modules`）”。
 3. 等待部署完成，不要在上传进度未结束时重复点击。
 4. 在 CloudBase 控制台确认函数更新时间、Node.js 运行时和环境变量。
+   为 `businessApi` 在安全配置界面新增 `PUBLIC_NODE_SHARE_HMAC_SECRET`：使用密码管理器生成至少 32 字节高熵随机值，只粘贴到目标环境，不写入仓库、终端历史、截图或验收记录。缺失或过短时只有“生成分享快照”失败关闭，其他接口不受影响。
 5. 查看一次函数日志，确认没有依赖安装错误、权限错误或集合/索引错误。
 6. 暂不删除旧云函数版本，保留部署前记录的可回退版本。
 
@@ -284,6 +295,16 @@
 另以隔离业务和账号手工调用 `workflowReminder`：处理提醒和审核提醒使用不同确定性编号且不互相覆盖；相同小时重试不重复发送；审核通过、驳回、轮次变更、账号停用、关系移除、角色模式变化、业务冻结或日历待补算时不再创建提醒。以上真实环境项目均为“未验证”，直到操作员保留脱敏验收记录。
 
 全部通过后，分别批准日历每日同步触发器和小时级提醒触发器，并在首次自动触发后检查调用来源、开始时间、耗时、脱敏计数和下一次触发时间；`evidenceRetention` 继续保持 `triggers: []`。
+
+### 11.5 第二批次待办、运营导出与公开分享
+
+| 验收项 | 操作 | 通过标准 | 初始状态 |
+|---|---|---|---|
+| 待我处理 | 以当前节点处理人进入概览和待办页，再撤销其处理关系或停用账号 | 数量与列表一致；撤权后重新显示即隐藏，超出扫描上限只显示安全下界 | 未验证 |
+| 运营看板 | 活动超级管理员切换日期和业务状态 | 业务、冻结、待处理、待审核、逾期和日历待补算指标与权威记录一致；普通账号拒绝 | 未验证 |
+| CSV 导出 | 导出含逗号、双引号、换行和 `=+-@` 开头名称的隔离数据 | UTF-8 中文正常，列完整，不含账号编号、凭证或内部字段，公式前缀被安全转义 | 未验证 |
+| 固定分享 | 已完成节点的管理员或处理人生成分享并从微信原生面板发送给未登录账号 | 接收者无需登录即可查看固定字段、说明和短期图片/视频/PDF；源记录后续变化不改变快照 | 未验证 |
+| 分享中断与到期 | 制造一次创建中断后用同一操作重试，并在隔离环境等待或调整到期测试数据 | 同一请求返回同一路径且沿用原到期时间；到期后统一提示不可用，保留工作器有界删除分享元数据 | 未验证 |
 
 ## 十二、回滚
 

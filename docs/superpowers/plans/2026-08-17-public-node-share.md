@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 分享编号为 32 随机字节的 base64url；禁止日志、审计正文和其他列表返回全文。
+- 分享编号为服务端 HMAC-SHA256 派生的 32 字节 base64url；同一幂等请求稳定恢复，禁止日志、审计正文和其他列表返回全文。
 - 固定有效期 `7 * 24 * 60 * 60 * 1000` 毫秒，只使用服务端时钟。
 - 只分享已完成节点最终结果；快照创建后源业务修改不得改变分享正文。
 - 凭证块最多 40 条；任何事务不超过 100 次文档操作。
@@ -54,7 +54,7 @@
 **Interfaces:**
 - Produces: 无登录动作 `getPublicNodeShare({ token,cursor,pageSize })`。
 
-- [ ] **Step 1: 写无登录成功、过期/撤销/损坏统一拒绝、字段脱敏和短期 URL RED**
+- [x] **Step 1: 写无登录成功、过期/未发布/损坏统一拒绝、字段脱敏和短期 URL RED**
 - [ ] **Step 2: 运行 RED**
 - [ ] **Step 3: 实现独立 public route；不得经过账号 bootstrap 或自动建号**
 - [ ] **Step 4: 运行路由、分享和完整 businessApi GREEN**

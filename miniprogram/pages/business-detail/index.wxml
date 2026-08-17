@@ -30,6 +30,7 @@
         <text wx:else class="muted block">负责人：{{item.assigneeNamesText || '待分配'}}</text>
         <text class="muted block" wx:if="{{item.requiresEvidence}}">需上传凭证</text>
         <text class="action-tip">{{item.canFeedback ? '反馈进度并查看凭证' : '查看节点记录与凭证'}} →</text>
+        <button wx:if="{{item.canShareResult}}" class="secondary-button" data-index="{{index}}" catchtap="createNodeShare" loading="{{shareCreatingNodeId === item._id}}" disabled="{{!!shareCreatingNodeId}}">生成固定分享快照</button>
       </view>
     </view>
   </view>

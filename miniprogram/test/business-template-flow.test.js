@@ -89,6 +89,16 @@ test('business service creates only through the template route and builds dashbo
           total: 2
         }
       }
+      if (action === 'getMyDashboardSummary') {
+        return {
+          stats: { active: 1, completed: 1, pendingProcessing: 2 },
+          recent: [
+            { _id: 'line-new', status: 'active' },
+            { _id: 'line-done', status: 'completed' }
+          ],
+          complete: true
+        }
+      }
       if (action === 'listMyPendingReviews' || action === 'listMyNotifications') {
         return { items: [], hasMore: false }
       }
@@ -111,24 +121,24 @@ test('business service creates only through the template route and builds dashbo
       templateId: 'template-1', name: '交付', description: '',
       plannedStartDate: '2026-08-07', plannedEndDate: '2026-08-08', requestKey: 'attempt-1'
     }],
-    ['listBusinessLines', { page: 1, pageSize: 20 }],
+    ['getMyDashboardSummary', {}],
     ['listMyPendingReviews', { page: 1, pageSize: 50 }],
     ['listMyNotifications', { page: 1, pageSize: 50 }],
     ['updateBusinessMetadata', { businessLineId: 'line-new', expectedVersion: 1, name: '更新' }]
   ])
   assert.deepEqual(dashboard, {
     stats: {
-      active: 1, pendingMine: null, pendingMineAvailable: false,
-      pendingReviews: 0, unreadNotifications: 0, completed: 1
+      active: 1, pendingMine: 2, pendingMineAvailable: true,
+      pendingReviews: 0, unreadNotifications: 0, completed: 1, complete: true
     },
     recent: [{ _id: 'line-new', status: 'active' }, { _id: 'line-done', status: 'completed' }]
   })
 })
 
-test('dashboard presents an unavailable pending assignment count honestly', () => {
+test('dashboard presents the protected pending assignment count', () => {
   const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/dashboard/index.wxml'), 'utf8')
-  assert.match(wxml, /pendingMineAvailable\s*\?\s*stats\.pendingMine\s*:\s*'—'/)
-  assert.match(wxml, /pendingMineAvailable[^}]+暂不可用/)
+  assert.doesNotMatch(wxml, /暂不可用/)
+  assert.match(wxml, /stats\.pendingMine/)
 })
 
 test('ordinary template list loads server availability and navigates with only an available template id', async () => {

@@ -1,0 +1,22 @@
+<view class="page">
+  <view class="section-title">运营看板</view>
+  <view class="card filters">
+    <view class="row-between"><text>开始日期</text><picker mode="date" value="{{startDate}}" bindchange="onStartDateChange"><text>{{startDate}}</text></picker></view>
+    <view class="row-between"><text>结束日期</text><picker mode="date" value="{{endDate}}" bindchange="onEndDateChange"><text>{{endDate}}</text></picker></view>
+    <view class="row-between"><text>业务状态</text><picker mode="selector" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatusChange"><text>{{statusOptions[statusIndex].label}}</text></picker></view>
+    <button class="secondary-button" bindtap="applyRange" disabled="{{loading}}" loading="{{loading}}">应用日期范围</button>
+  </view>
+  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view class="metrics">
+    <view class="card metric"><text class="value">{{stats.businesses || 0}}</text><text>业务总数</text></view>
+    <view class="card metric"><text class="value">{{stats.active || 0}}</text><text>进行中</text></view>
+    <view class="card metric"><text class="value">{{stats.completed || 0}}</text><text>已完成</text></view>
+    <view class="card metric"><text class="value">{{stats.frozen || 0}}</text><text>其他冻结终态</text></view>
+    <view class="card metric"><text class="value">{{stats.pendingProcessing || 0}}</text><text>待处理</text></view>
+    <view class="card metric"><text class="value">{{stats.pendingReview || 0}}</text><text>待审核</text></view>
+    <view class="card metric"><text class="value">{{stats.overdueProcessing || 0}}</text><text>处理逾期</text></view>
+    <view class="card metric"><text class="value">{{stats.overdueReview || 0}}</text><text>审核逾期</text></view>
+    <view class="card metric"><text class="value">{{stats.pendingCalendar || 0}}</text><text>日历待补算</text></view>
+  </view>
+  <button class="primary-button" bindtap="exportCsv" loading="{{exporting}}" disabled="{{exporting}}">导出 CSV</button>
+</view>

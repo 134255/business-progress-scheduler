@@ -8,6 +8,7 @@ function harness(overrides = {}) {
   const pages = {
     feedback: [['feedback-expired'], []],
     amendment: [['amendment-expired'], []],
+    shares: [['share-expired'], []],
     due: [[{ evidenceId: 'due-1' }, { evidenceId: 'due-missing' }, { evidenceId: 'due-fail' }], []],
     orphan: [[{ evidenceId: 'orphan-1' }], []]
   }
@@ -16,6 +17,8 @@ function harness(overrides = {}) {
     async recoverExpiredFeedbackReservation(input) { calls.push(['recoverFeedback', input]); return true },
     async listExpiredAmendmentReservations(input) { calls.push(['listAmendment', input]); return pages.amendment.shift() || [] },
     async recoverExpiredAmendmentReservation(input) { calls.push(['recoverAmendment', input]); return true },
+    async listExpiredPublicShares(input) { calls.push(['listShares', input]); return pages.shares.shift() || [] },
+    async cleanupExpiredPublicShare(input) { calls.push(['cleanupShare', input]); return true },
     async createDueReminders(input) { calls.push(['reminders', input]); return 3 },
     async listDueEvidence(input) { calls.push(['listDue', input]); return pages.due.shift() || [] },
     async listExpiredOrphans(input) { calls.push(['listOrphans', input]); return pages.orphan.shift() || [] },
@@ -51,6 +54,7 @@ test('按固定顺序回收预约、创建提醒并清理到期和孤立凭证',
   assert.deepEqual(result, {
     feedbackReservationsRecovered: 1,
     amendmentReservationsRecovered: 1,
+    publicSharesCleaned: 1,
     remindersCreated: 3,
     objectsPurged: 2,
     orphansPurged: 1,
@@ -59,6 +63,8 @@ test('按固定顺序回收预约、创建提醒并清理到期和孤立凭证',
   assert.deepEqual(calls.filter(call => call[0] === 'recoverFeedback')[0], ['recoverFeedback', { id: 'feedback-expired', now }])
   assert.equal(calls.findIndex(call => call[0] === 'recoverAmendment') > calls.findIndex(call => call[0] === 'recoverFeedback'), true)
   assert.equal(calls.findIndex(call => call[0] === 'listOrphans') > calls.findIndex(call => call[0] === 'recoverAmendment'), true)
+  assert.equal(calls.findIndex(call => call[0] === 'cleanupShare') > calls.findIndex(call => call[0] === 'recoverAmendment'), true)
+  assert.equal(calls.findIndex(call => call[0] === 'listOrphans') > calls.findIndex(call => call[0] === 'cleanupShare'), true)
   assert.equal(calls.findIndex(call => call[0] === 'reminders') > calls.findIndex(call => call[0] === 'listOrphans'), true)
   assert.equal(calls.findIndex(call => call[0] === 'listDue') > calls.findIndex(call => call[0] === 'reminders'), true)
 })
@@ -110,7 +116,7 @@ test('无效依赖、时钟和批次在执行前失败', async () => {
 test('每条维护路径单次只读取一个有界候选页', async () => {
   const { service, calls } = harness()
   await service.runOnce()
-  for (const name of ['listFeedback', 'listAmendment', 'listOrphans', 'listDue']) {
+  for (const name of ['listFeedback', 'listAmendment', 'listShares', 'listOrphans', 'listDue']) {
     assert.equal(calls.filter(call => call[0] === name).length, 1, name)
   }
 })

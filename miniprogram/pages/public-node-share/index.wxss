@@ -1,0 +1,9 @@
+.snapshot-label { color: #0f8478; font-size: 24rpx; font-weight: 700; margin-bottom: 12rpx; }
+.node-name { font-size: 34rpx; font-weight: 700; margin: 24rpx 0 8rpx; }
+.expiry { color: #9a5b18; margin-top: 12rpx; }
+.field, .evidence { display: flex; justify-content: space-between; gap: 24rpx; }
+.field-name { color: #65737d; min-width: 180rpx; }
+.link { color: #0f8478; }
+.share-button { margin-top: 32rpx; }
+.notice { color: #7b8790; font-size: 24rpx; text-align: center; margin: 20rpx 0 40rpx; }
+.error { color: #b42318; }

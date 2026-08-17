@@ -64,6 +64,14 @@ function createBusinessHarness({
     async getBusinessLine(input) {
       calls.push(['getBusinessLine', clone(input)])
       return { line: { _id: input.lineId }, nodes: [] }
+    },
+    async listMyPendingProcessing(input) {
+      calls.push(['listMyPendingProcessing', clone(input)])
+      return { items: [], cursor: '', hasMore: false, total: 0 }
+    },
+    async getMyBusinessSummary(input) {
+      calls.push(['getMyBusinessSummary', clone(input)])
+      return { stats: { active: 0, completed: 0, pendingProcessing: 0 }, recent: [], complete: true }
     }
   }
   const service = createBusinessService({

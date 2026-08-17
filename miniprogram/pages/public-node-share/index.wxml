@@ -1,0 +1,33 @@
+<view class="page">
+  <view wx:if="{{errorMessage}}" class="card error">{{errorMessage}}</view>
+  <view wx:elif="{{loading}}" class="empty">公开只读快照加载中…</view>
+  <block wx:else>
+    <view class="card">
+      <view class="snapshot-label">公开只读快照</view>
+      <view class="title">{{businessName}}</view>
+      <text class="muted block">业务编号：{{businessCode}}</text>
+      <view class="node-name">{{nodeName}}</view>
+      <text class="muted block">节点编号：{{nodeCode}}</text>
+      <text class="muted block">完成时间：{{completedAtText}}</text>
+      <text class="expiry block">分享有效至：{{expiresAtText}}</text>
+    </view>
+
+    <view class="section-title">处理说明</view>
+    <view class="card"><text>{{processingComment || '暂无处理说明'}}</text></view>
+
+    <view class="section-title">字段结果</view>
+    <view wx:if="{{fields.length}}" class="card field" wx:for="{{fields}}" wx:key="fieldKey">
+      <text class="field-name">{{item.name}}</text><text>{{item.value}}</text>
+    </view>
+    <view wx:else class="empty">本次没有字段结果</view>
+
+    <view class="section-title">节点凭证</view>
+    <view wx:if="{{evidences.length}}" class="card evidence" wx:for="{{evidences}}" wx:key="url" data-index="{{index}}" bindtap="openEvidence">
+      <text>{{item.fileName}}</text><text class="link">安全查看 →</text>
+    </view>
+    <view wx:else class="empty">本次没有凭证</view>
+    <button wx:if="{{hasMore}}" class="secondary-button" loading="{{loadingMore}}" bindtap="loadMore">加载更多凭证</button>
+    <button class="primary-button share-button" open-type="share">发送给微信好友或群聊</button>
+    <text class="notice block">接收者无需登录；页面将在有效期结束后自动失效。</text>
+  </block>
+</view>

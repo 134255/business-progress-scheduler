@@ -78,6 +78,10 @@ function purgeCandidateStatus(evidence, now) {
     (evidence.storageStatus === 'purge_pending' && due(evidence.purgeClaimExpiresAt, now))
 }
 
+function heldByPublicShare(evidence, now) {
+  return validDate(evidence.publicShareHoldUntil) && evidence.publicShareHoldUntil.getTime() > now.getTime()
+}
+
 function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFactory } = {}) {
   if (!db || typeof db.runTransaction !== 'function') throw new TypeError('db is required')
   if (typeof clock !== 'function') throw new TypeError('clock is required')
@@ -416,7 +420,7 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
         }
       },
       async project(evidence, phase) {
-        if (!purgeCandidateStatus(evidence, now)) return null
+        if (!purgeCandidateStatus(evidence, now) || heldByPublicShare(evidence, now)) return null
         if (phase.startsWith('business_line:') && evidence.retentionSource === RETENTION_SOURCE && evidence.feedbackId) {
           const line = await readDocument(db, 'business_lines', evidence.businessLineId)
           if (line && FROZEN_STATUSES.has(line.status) && due(line.purgeDueAt, now)) return { evidenceId: evidence._id }
@@ -450,7 +454,7 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
         }
       },
       project(evidence) {
-        return purgeCandidateStatus(evidence, now) && due(evidence.orphanExpiresAt, now) &&
+        return purgeCandidateStatus(evidence, now) && !heldByPublicShare(evidence, now) && due(evidence.orphanExpiresAt, now) &&
           !evidence.feedbackId && !evidence.amendmentId &&
           [undefined, null, 'unattached'].includes(evidence.attachmentState)
           ? { evidenceId: evidence._id }
@@ -479,7 +483,7 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
       if (!evidence || typeof evidence.fileId !== 'string' || !evidence.fileId) return null
       const reclaimable = ['available', 'purge_failed'].includes(evidence.storageStatus) ||
         (evidence.storageStatus === 'purge_pending' && due(evidence.purgeClaimExpiresAt, now))
-      if (!reclaimable) return null
+      if (!reclaimable || heldByPublicShare(evidence, now)) return null
       const eligible = mode === 'orphan'
         ? due(evidence.orphanExpiresAt, now) && !evidence.feedbackId && !evidence.amendmentId &&
           [undefined, null, 'unattached'].includes(evidence.attachmentState)
@@ -494,6 +498,53 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
         updatedAt: db.serverDate()
       } })
       return { evidenceId, fileId: evidence.fileId, claimToken }
+    })
+  }
+
+  async function listExpiredPublicShares({ now, limit }) {
+    requireScanLimit(limit)
+    const result = await db.collection('public_node_shares')
+      .where({ expiresAt: db.command.lte(now) })
+      .orderBy('expiresAt', 'asc')
+      .orderBy('_id', 'asc')
+      .limit(limit)
+      .get()
+    return (result.data || [])
+      .filter(share => validDate(share.expiresAt) && share.expiresAt <= now &&
+        ['reserved', 'published', 'aborted'].includes(share.publishState))
+      .map(share => share._id)
+  }
+
+  async function cleanupExpiredPublicShare({ id, now }) {
+    const result = await db.collection('public_node_share_chunks')
+      .where({ shareId: id })
+      .orderBy('_id', 'asc')
+      .limit(40)
+      .get()
+    const candidates = Array.isArray(result.data) ? result.data : []
+    return db.runTransaction(async transaction => {
+      const share = await readDocument(transaction, 'public_node_shares', id)
+      if (!share) return true
+      if (!validDate(share.expiresAt) || share.expiresAt > now ||
+          !['reserved', 'published', 'aborted'].includes(share.publishState)) return false
+      for (const candidate of candidates) {
+        const chunk = await readDocument(transaction, 'public_node_share_chunks', candidate._id)
+        if (chunk && chunk.shareId === id) {
+          await transaction.collection('public_node_share_chunks').doc(candidate._id).remove()
+        }
+      }
+      if (candidates.length < 40) {
+        await transaction.collection('audit_logs').doc(`${id}-expired`).set({ data: {
+          actorType: 'system',
+          action: 'EXPIRE_PUBLIC_NODE_SHARE',
+          targetType: 'public_node_share',
+          targetId: id,
+          resultCode: 'PUBLIC_NODE_SHARE_EXPIRED',
+          createdAt: now
+        } })
+        await transaction.collection('public_node_shares').doc(id).remove()
+      }
+      return true
     })
   }
 
@@ -728,6 +779,8 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     createDueReminders,
     listDueEvidence,
     listExpiredOrphans,
+    listExpiredPublicShares,
+    cleanupExpiredPublicShare,
     claimEvidenceForPurge,
     markEvidencePurged,
     markEvidencePurgeFailed,

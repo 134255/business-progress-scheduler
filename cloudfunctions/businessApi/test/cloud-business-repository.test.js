@@ -1,5 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 
 const { createCloudBusinessRepository } = require('../lib/cloud-business-repository')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
@@ -118,6 +119,8 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(nodes[0].workflowMode, 'review')
   assert.deepEqual(nodes[0].processorUserIds, ['user-2'])
   assert.deepEqual(nodes[0].reviewerUserIds, ['user-3'])
+  assert.deepEqual(nodes[0].processorDisplayNames, ['用户二'])
+  assert.deepEqual(nodes[0].reviewerDisplayNames, ['用户三'])
   assert.equal(nodes[0].reviewMode, 'any')
   assert.equal(nodes[0].processingSlaWorkHours, 8)
   assert.equal(nodes[0].reviewSlaWorkHours, 4)
@@ -146,9 +149,131 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(fake.documents('business_nodes')[0].fieldDefinitions[0].name, '摘要')
   assert.deepEqual(fake.documents('business_nodes')[0].processorUserIds, ['user-2'])
   assert.deepEqual(fake.documents('business_nodes')[0].reviewerUserIds, ['user-3'])
+  assert.deepEqual(fake.documents('business_nodes')[0].processorDisplayNames, ['用户二'])
+  assert.deepEqual(fake.documents('business_nodes')[0].reviewerDisplayNames, ['用户三'])
   assert.equal(fake.documents('sequence_counters')[0].sequence, 1)
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.deepEqual(fake.transactionQueries, [])
+})
+
+test('待我处理查询只返回当前业务节点，并按处理截止时间稳定排序', async () => {
+  const { repository } = createRepositoryHarness({
+    users: [{ _id: 'user-1', status: 'active', displayName: '处理人' }],
+    business_lines: [
+      {
+        _id: 'line-late', code: 'BL-LATE', name: '较晚业务', status: 'active',
+        currentNodeId: 'node-late', currentNodeName: '较晚节点', progress: 0,
+        managerUserIds: ['user-1'], memberUserIds: ['user-1'], updatedAt: new Date('2026-08-17T02:00:00Z')
+      },
+      {
+        _id: 'line-early', code: 'BL-EARLY', name: '较早业务', status: 'active',
+        currentNodeId: 'node-early', currentNodeName: '较早节点', progress: 20,
+        managerUserIds: ['user-1'], memberUserIds: ['user-1'], updatedAt: new Date('2026-08-17T01:00:00Z')
+      },
+      {
+        _id: 'line-stale', code: 'BL-STALE', name: '旧节点业务', status: 'active',
+        currentNodeId: 'node-current', managerUserIds: ['user-1'], memberUserIds: ['user-1'],
+        updatedAt: new Date('2026-08-17T03:00:00Z')
+      },
+      {
+        _id: 'line-done', code: 'BL-DONE', name: '已完成业务', status: 'completed',
+        currentNodeId: 'node-done', managerUserIds: ['user-1'], memberUserIds: ['user-1'],
+        updatedAt: new Date('2026-08-17T04:00:00Z')
+      }
+    ],
+    business_nodes: [
+      {
+        _id: 'node-late', businessLineId: 'line-late', name: '较晚节点', status: 'in_progress',
+        workflowMode: 'review', processorUserIds: ['user-1'], reviewerUserIds: ['user-2'],
+        processingRoundNumber: 1, processingDueAt: new Date('2026-08-18T02:00:00Z'),
+        updatedAt: new Date('2026-08-17T02:00:00Z')
+      },
+      {
+        _id: 'node-early', businessLineId: 'line-early', name: '较早节点', status: 'ready',
+        workflowMode: 'review', processorUserIds: ['user-1'], reviewerUserIds: ['user-2'],
+        processingRoundNumber: 2, processingDueAt: new Date('2026-08-17T08:00:00Z'),
+        updatedAt: new Date('2026-08-17T01:00:00Z')
+      },
+      {
+        _id: 'node-stale', businessLineId: 'line-stale', name: '旧节点', status: 'blocked',
+        workflowMode: 'review', processorUserIds: ['user-1'], reviewerUserIds: ['user-2'],
+        processingRoundNumber: 1, processingDueAt: null, updatedAt: new Date('2026-08-17T03:00:00Z')
+      },
+      {
+        _id: 'node-done', businessLineId: 'line-done', name: '完成节点', status: 'ready',
+        workflowMode: 'review', processorUserIds: ['user-1'], reviewerUserIds: ['user-2'],
+        processingRoundNumber: 1, processingDueAt: null, updatedAt: new Date('2026-08-17T04:00:00Z')
+      }
+    ]
+  })
+
+  const result = await repository.listMyPendingProcessing({
+    actor: { _id: 'user-1', status: 'active' }, query: { pageSize: 10 }
+  })
+
+  assert.deepEqual(result.items.map(item => item.nodeId), ['node-early', 'node-late'])
+  assert.equal(result.items[0].processingRoundNumber, 2)
+  assert.equal(result.hasMore, false)
+  assert.equal(result.total, 2)
+})
+
+test('旧节点待处理查询在事务内重验当前 OpenID 绑定', async () => {
+  const openid = 'wx-legacy-processor'
+  const bindingId = crypto.createHash('sha256').update(openid).digest('hex')
+  const { fake, repository } = createRepositoryHarness({
+    users: [{ _id: 'user-1', status: 'active', displayName: '旧节点处理人' }],
+    wechat_bindings: [{ _id: bindingId, userId: 'user-1' }],
+    business_lines: [{
+      _id: 'legacy-line', code: 'BL-LEGACY', name: '旧节点业务', status: 'active',
+      currentNodeId: 'legacy-node', managerIds: [openid], memberIds: [openid],
+      updatedAt: new Date('2026-08-17T02:00:00Z')
+    }],
+    business_nodes: [{
+      _id: 'legacy-node', businessLineId: 'legacy-line', name: '旧节点', status: 'ready',
+      assigneeIds: [openid], processingRoundNumber: 1,
+      updatedAt: new Date('2026-08-17T02:00:00Z')
+    }]
+  })
+
+  fake.beforeNextTransaction(() => {
+    fake.replace('wechat_bindings', bindingId, { userId: 'different-user' })
+  })
+
+  const result = await repository.listMyPendingProcessing({
+    actor: { _id: 'user-1', status: 'active', openid }, query: { pageSize: 10 }
+  })
+
+  assert.deepEqual(result.items, [])
+  assert.equal(result.total, 0)
+})
+
+test('业务概览统计覆盖全部可见业务并返回真实待处理数量', async () => {
+  const lines = Array.from({ length: 25 }, (_, index) => ({
+    _id: `line-${index}`, code: `BL-${index}`, name: `业务${index}`,
+    status: index < 22 ? 'active' : 'completed',
+    currentNodeId: index < 2 ? `node-${index}` : '',
+    currentNodeName: index < 2 ? `节点${index}` : '',
+    managerUserIds: ['user-1'], memberUserIds: ['user-1'],
+    updatedAt: new Date(2026, 7, 17, 0, index)
+  }))
+  const nodes = [0, 1].map(index => ({
+    _id: `node-${index}`, businessLineId: `line-${index}`, name: `节点${index}`,
+    status: index === 0 ? 'ready' : 'in_progress', workflowMode: 'review',
+    processorUserIds: ['user-1'], reviewerUserIds: ['user-2'],
+    processingRoundNumber: 1, processingDueAt: null, updatedAt: new Date(2026, 7, 17, 0, index)
+  }))
+  const { repository } = createRepositoryHarness({
+    users: [{ _id: 'user-1', status: 'active', displayName: '处理人' }],
+    business_lines: lines,
+    business_nodes: nodes
+  })
+
+  const result = await repository.getMyBusinessSummary({ actor: { _id: 'user-1', status: 'active' } })
+
+  assert.deepEqual(result.stats, { active: 22, completed: 3, pendingProcessing: 2 })
+  assert.equal(result.complete, true)
+  assert.equal(result.recent.length, 5)
+  assert.equal(result.recent[0]._id, 'line-24')
 })
 
 test('snapshot creation and publication roll back safely and resume through the same reservation', async () => {
@@ -563,7 +688,7 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
     processingOverdueWorkMinutes: 30, reviewDueStatus: 'calculated',
     reviewDueAt: new Date('2026-08-11T09:00:00.000Z'), reviewOverdueWorkMinutes: 10,
     reviewStartedAt: new Date('2026-08-11T07:30:00.000Z'),
-    activeReviewRoundId: 'round-1', canFeedback: false,
+    activeReviewRoundId: 'round-1', canFeedback: false, canShareResult: false,
     requiresEvidence: true, allowedEvidenceTypes: ['pdf', 'mp4'],
     fieldDefinitions: [
       {

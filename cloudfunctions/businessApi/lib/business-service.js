@@ -86,6 +86,21 @@ function normalizeMetadataInput(input) {
   }
 }
 
+function normalizePendingQuery(query = {}) {
+  if (!query || typeof query !== 'object' || Array.isArray(query) ||
+      Object.keys(query).some(key => !['cursor', 'pageSize'].includes(key))) {
+    throw createError('VALIDATION_ERROR')
+  }
+  const pageSize = query.pageSize === undefined ? 20 : query.pageSize
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) {
+    throw createError('VALIDATION_ERROR')
+  }
+  if (query.cursor !== undefined && typeof query.cursor !== 'string') {
+    throw createError('VALIDATION_ERROR')
+  }
+  return { cursor: query.cursor || '', pageSize }
+}
+
 function requireEnabledDefinition(definition) {
   if (!definition || !definition.template || definition.template.status !== 'enabled') {
     throw createError('TEMPLATE_NOT_ENABLED')
@@ -170,13 +185,30 @@ function createBusinessService({ repository, workTimeService, clock = () => new 
     return repository.getBusinessLine({ actor, lineId: requireText(lineId) })
   }
 
+  async function listMyPendingProcessing({ actor, query = {} }) {
+    requireActiveActor(actor)
+    return repository.listMyPendingProcessing({ actor, query: normalizePendingQuery(query) })
+  }
+
+  async function getMyDashboardSummary({ actor }) {
+    requireActiveActor(actor)
+    return repository.getMyBusinessSummary({ actor })
+  }
+
   async function updateMetadata({ actor, input }) {
     requireActiveActor(actor)
     const normalized = normalizeMetadataInput(input)
     return repository.updateBusinessMetadata({ actor, ...normalized })
   }
 
-  return { createFromTemplate, listBusinessLines, getBusinessLine, updateMetadata }
+  return {
+    createFromTemplate,
+    listBusinessLines,
+    listMyPendingProcessing,
+    getMyDashboardSummary,
+    getBusinessLine,
+    updateMetadata
+  }
 }
 
 module.exports = { createBusinessService }

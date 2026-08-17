@@ -166,6 +166,24 @@ test('business reads use the trusted account actor and validated identifiers', a
   )
 })
 
+test('待处理与概览查询只接受受信活动账号和严格分页参数', async () => {
+  const harness = createBusinessHarness()
+  await harness.service.listMyPendingProcessing({
+    actor: harness.actor,
+    query: { cursor: '', pageSize: 20 }
+  })
+  await harness.service.getMyDashboardSummary({ actor: harness.actor })
+
+  assert.deepEqual(harness.calls.slice(-2), [
+    ['listMyPendingProcessing', { actor: harness.actor, query: { cursor: '', pageSize: 20 } }],
+    ['getMyBusinessSummary', { actor: harness.actor }]
+  ])
+  await assert.rejects(
+    harness.service.listMyPendingProcessing({ actor: harness.actor, query: { pageSize: 1000 } }),
+    error => error.code === 'VALIDATION_ERROR'
+  )
+})
+
 test('metadata update accepts only normalized metadata and an expected version', async () => {
   const calls = []
   const repository = {
