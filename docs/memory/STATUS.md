@@ -2,6 +2,8 @@
 
 Status captured: 2026-08-17 (Asia/Shanghai)
 
+- 2026-08-17 凭证保留提醒通知编号兼容已按确认设计完成本地 TDD 修复。真实 `evidenceRetention` Timer 已成功创建一条合法 15 天 `evidence_retention` 通知，收件账号、状态和脱敏内容均正确，但旧 `businessApi` 把确定性编号 `evidence-retention:<businessLineId>:15` 套用到不允许冒号的通用文档编号规则，导致通知列表二次授权投影时隐藏该记录，已读入口也会提前返回 `VALIDATION_ERROR`。修复新增共享纯函数，只接受既有普通通知编号或严格的 `evidence-retention:[A-Za-z0-9_-]{1,128}:(1|7|15)`；服务入口和仓储投影共用该规则，业务、节点、轮次、凭证和其他文档编号规则不变。RED：服务测试 13 项中 12 通过、1 失败，仓储测试 53 项中 52 通过、1 失败；GREEN：服务与仓储组合聚焦 66/66。完整门禁：`businessApi` 519/519、`evidenceRetention` 40/40、小程序通知 5/5、WXML 4/4，三份生产 JavaScript 语法、`git diff --check` 与项目记忆校验均通过。下一步只需重新部署 `businessApi`，无需迁移或重建现有通知，也不得再次运行清理 Timer；部署后使用当前活动收件账号核对原 15 天提醒直接可见、可安全跳转并能生成该账号的独立已读回执。真实通知中心显示、跳转与已读仍为 `unverified`，`calendarSync`、`workflowReminder`、`evidenceRetention` 继续保持 `triggers: []`；用户自己的 `project.config.json` 修改未暂存、未提交。
+
 - 2026-08-17 `evidenceRetention` 调用授权缺口已按批准范围完成本地 TDD 修复。根因是计划工作器入口只校验 `service.runOnce` 后无条件执行，既未读取平台可信来源，也未拒绝小程序 `OPENID`，因此直接调用可进入真实预约恢复、提醒和云文件删除。RED：入口聚焦 5 项中 4 项通过、1 项失败，客户端、匿名调用及伪造事件均错误执行服务；GREEN：入口只接受严格 `process.env.TRIGGER_SRC === 'timer'` 且无非空 `OPENID`，事件载荷和微信上下文同名字段不能授权，可信 Timer 继续返回原脱敏汇总，清理算法与批次未改。随后新增生产默认装配回归，并通过临时移除 `getWXContext` 装配观察到该测试准确失败，恢复装配后聚焦 6/6、`evidenceRetention` 完整套件 40/40 通过。目标 CloudBase 重新部署、一次性 Timer 来源及破坏性隔离矩阵仍为 `unverified`；函数继续保持 `triggers: []`，在再次备份和逐项批准前不得点击控制台“测试”或创建清理触发器。
 
 - 2026-08-14 停用参与人历史业务详情读取修复已完成真实 CloudBase 多账号验收。操作员重新部署提交 `160383d` 对应的 `businessApi` 后停用专用普通测试账号，并确认：活动且原本有权的超级管理员仍可打开包含该账号的已完成业务；节点参与人名称显示固定“（已停用）”标记；原反馈和凭证历史仍可查看；停用账号自身访问受保护页面被拒绝。业务终态、进度和只读边界保持不变，审核轮次姓名继续使用提交时固化的历史快照。该结果证明修复只恢复授权访问者的历史只读投影，没有恢复停用账号的登录、写入或审核权限。
