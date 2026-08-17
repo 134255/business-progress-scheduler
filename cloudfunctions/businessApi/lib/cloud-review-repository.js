@@ -5,6 +5,7 @@ const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
 const { deterministicVoteId } = require('./review-domain')
 const { fitsIndexedAccountArray } = require('./index-key-budget')
+const { isNotificationId } = require('./notification-id')
 
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_LINE_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
@@ -302,8 +303,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
   }
 
   function safeNotificationShape(notification, account) {
-    if (!notification || typeof notification._id !== 'string' ||
-        !DOCUMENT_ID.test(notification._id) || !NOTIFICATION_TYPES.has(notification.type)) return null
+    if (!notification || !isNotificationId(notification._id) ||
+        !NOTIFICATION_TYPES.has(notification.type)) return null
     const recipientsField = ownDataValue(notification, 'recipientUserIds')
     const roleField = ownDataValue(notification, 'audienceRole')
     const recipients = recipientsField.present

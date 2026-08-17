@@ -705,6 +705,52 @@ test('超级管理员可见纯旧业务安全降级的凭证保留通知', async
   assert.equal(result.items[0].notificationId, 'legacy-retention')
 })
 
+test('凭证保留提醒严格编号可见可幂等已读且其他冒号编号失败关闭', async () => {
+  const data = votingSeed({ mode: 'all' })
+  const validIds = [
+    'evidence-retention:line-1:1',
+    'evidence-retention:line-1:7',
+    'evidence-retention:line-1:15'
+  ]
+  const invalidIds = [
+    'evidence_retention:line-1:15',
+    'evidence-retention::15',
+    'evidence-retention:line-1:2',
+    'evidence-retention:../line-1:15',
+    'evidence-retention:line-1:15:extra',
+    'other-prefix:line-1:15'
+  ]
+  data.notifications = [...validIds, ...invalidIds].map((notificationId, index) => ({
+    _id: notificationId,
+    type: 'evidence_retention',
+    recipientUserIds: ['reviewer-1'],
+    businessLineId: 'line-1',
+    status: 'pending',
+    createdAt: new Date(NOW.getTime() + index)
+  }))
+  const { fake, repository } = harness({ seed: data })
+
+  const listed = await repository.listNotifications({
+    actor: { _id: 'reviewer-1', status: 'active' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(new Set(listed.items.map(item => item.notificationId)), new Set(validIds))
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.deepEqual(await repository.markNotificationRead({
+      actor: { _id: 'reviewer-1', status: 'active' }, notificationId: validIds[2]
+    }), { notificationId: validIds[2], read: true })
+  }
+  assert.equal(fake.documents('notifications').filter(item =>
+    item.type === 'notification_read_marker' && item.parentNotificationId === validIds[2] &&
+    item.userId === 'reviewer-1').length, 1)
+
+  for (const notificationId of invalidIds) {
+    await assert.rejects(repository.markNotificationRead({
+      actor: { _id: 'reviewer-1', status: 'active' }, notificationId
+    }), error => error && error.code === 'FORBIDDEN')
+  }
+})
+
 test('驳回后审核人仍可读取已固化轮次但处理人不能借历史轮次越权', async () => {
   const data = votingSeed({ mode: 'all' })
   data.business_lines[0].code = 'BL-20260811-0001'
