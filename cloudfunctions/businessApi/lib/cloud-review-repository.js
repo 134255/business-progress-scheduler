@@ -103,6 +103,19 @@ function reviewerDisplayName(actor) {
   throw createError('VERSION_CONFLICT')
 }
 
+function processorAssignmentMode(node) {
+  const descriptor = node && Object.getOwnPropertyDescriptor(node, 'processorAssignmentMode')
+  if (!descriptor) {
+    if (node && !('processorAssignmentMode' in node)) return 'fixed_accounts'
+    throw createError('VERSION_CONFLICT')
+  }
+  if (!Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+      !['fixed_accounts', 'business_creator'].includes(descriptor.value)) {
+    throw createError('VERSION_CONFLICT')
+  }
+  return descriptor.value
+}
+
 function lineMember(line, actorId) {
   const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
   const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
@@ -653,6 +666,10 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         !safeInteger(timing.processingElapsedWorkMinutes) ||
         !safeInteger(timing.processingRemainingWorkMinutes) ||
         !safeInteger(timing.processingOverdueWorkMinutes) || !validDate(timing.reviewStartedAt) ||
+        !['calculated', 'pending_calendar'].includes(timing.processingRoundTimingStatus) ||
+        !validDate(timing.processingRoundStartedAt) || !validDate(timing.processingRoundEndedAt) ||
+        !sameDateValue(timing.processingRoundStartedAt, node.processingStartedAt) ||
+        !sameDateValue(timing.processingRoundEndedAt, timing.reviewStartedAt) ||
         !safeInteger(timing.reviewRemainingWorkMinutes, 1) ||
         !['calculated', 'pending_calendar'].includes(timing.reviewDueStatus) ||
         !safeInteger(timing.reviewElapsedWorkMinutes) || !safeInteger(timing.reviewOverdueWorkMinutes) ||
@@ -663,12 +680,65 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         timing.reviewOverdueWorkMinutes !== 0) {
       throw createError('VERSION_CONFLICT')
     }
+    const previous = node.processingElapsedWorkMinutes === undefined
+      ? 0
+      : node.processingElapsedWorkMinutes
+    if (!safeInteger(previous)) throw createError('VERSION_CONFLICT')
+    if (timing.processingRoundTimingStatus === 'calculated') {
+      if (!safeInteger(timing.processingRoundWorkMinutes) ||
+          timing.processingElapsedWorkMinutes !== previous + timing.processingRoundWorkMinutes ||
+          timing.processingRoundCalendarVersion !== timing.processingCalendarVersion) {
+        throw createError('VERSION_CONFLICT')
+      }
+    } else if (timing.processingRoundWorkMinutes !== null ||
+        timing.processingRoundCalendarVersion !== null ||
+        timing.processingTimingStatus !== 'pending_calendar' ||
+        timing.processingElapsedWorkMinutes !== previous) {
+      throw createError('VERSION_CONFLICT')
+    }
     if (timing.reviewDueStatus === 'calculated') {
       if (!validDate(timing.reviewDueAt)) throw createError('VERSION_CONFLICT')
     } else if (timing.reviewDueAt !== null) throw createError('VERSION_CONFLICT')
   }
 
   function assertIdempotentRound(round, node, value, roundId) {
+    const processingSnapshotFields = [
+      'submittedByDisplayName', 'processorAssignmentMode',
+      'processingRoundTimingStatus', 'processingRoundWorkMinutes',
+      'processingRoundCalendarVersion', 'processingRoundStartedAt',
+      'processingRoundEndedAt', 'processingAttributionHash'
+    ]
+    const presentProcessingSnapshotFields = processingSnapshotFields.filter(key =>
+      Object.prototype.hasOwnProperty.call(round || {}, key))
+    const legacyProcessingSnapshot = presentProcessingSnapshotFields.length === 0
+    if (!legacyProcessingSnapshot) {
+      const calculated = round.processingRoundTimingStatus === 'calculated'
+      const pending = round.processingRoundTimingStatus === 'pending_calendar'
+      if (presentProcessingSnapshotFields.length !== processingSnapshotFields.length ||
+          !validDisplayName(round.submittedByDisplayName, 100) ||
+          round.processorAssignmentMode !== processorAssignmentMode(node) ||
+          !sameDateValue(round.processingRoundStartedAt, node.processingStartedAt) ||
+          !sameDateValue(round.processingRoundEndedAt, round.reviewStartedAt) ||
+          !['calculated', 'pending_calendar'].includes(round.processingTimingStatus) ||
+          round.processingTimingStatus !== node.processingTimingStatus ||
+          round.processingElapsedWorkMinutes !== node.processingElapsedWorkMinutes ||
+          round.processingRemainingWorkMinutes !== node.processingRemainingWorkMinutes ||
+          round.processingOverdueWorkMinutes !== node.processingOverdueWorkMinutes ||
+          round.processingCalendarVersion !== node.processingCalendarVersion ||
+          calculated && (!safeInteger(round.processingRoundWorkMinutes) ||
+            round.processingRoundCalendarVersion !== round.processingCalendarVersion) ||
+          pending && (round.processingRoundWorkMinutes !== null ||
+            round.processingRoundCalendarVersion !== null ||
+            round.processingTimingStatus !== 'pending_calendar') ||
+          round.processingAttributionHash !== hash(JSON.stringify([
+            round.submittedBy, round.submittedByDisplayName, round.processorAssignmentMode,
+            round.processingRoundTimingStatus, round.processingRoundWorkMinutes,
+            round.processingRoundCalendarVersion,
+            round.processingRoundStartedAt.toISOString(), round.processingRoundEndedAt.toISOString()
+          ]))) {
+        throw createError('VERSION_CONFLICT')
+      }
+    }
     if (!round || round._id !== roundId || round.businessLineId !== value.input.businessLineId ||
         round.nodeId !== value.input.nodeId || round.status !== 'pending' ||
         round.requestKeyHash !== value.requestKeyHash || round.inputHash !== value.inputHash ||
@@ -810,6 +880,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         evidenceTotalBytes: value.draft.evidenceTotalBytes,
         status: 'pending',
         submittedBy: actor._id,
+        submittedByDisplayName: reviewerDisplayName(actor),
+        processorAssignmentMode: processorAssignmentMode(node),
         submittedNodeVersion: node.version,
         lockedNodeVersion,
         requestKeyHash: value.requestKeyHash,
@@ -828,11 +900,22 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         processingRemainingWorkMinutes: value.timing.processingRemainingWorkMinutes,
         processingOverdueWorkMinutes: value.timing.processingOverdueWorkMinutes,
         processingCalendarVersion: value.timing.processingCalendarVersion || null,
+        processingRoundTimingStatus: value.timing.processingRoundTimingStatus,
+        processingRoundWorkMinutes: value.timing.processingRoundWorkMinutes,
+        processingRoundCalendarVersion: value.timing.processingRoundCalendarVersion,
+        processingRoundStartedAt: new Date(value.timing.processingRoundStartedAt),
+        processingRoundEndedAt: new Date(value.timing.processingRoundEndedAt),
         calendarNotificationStatus: value.timing.reviewDueStatus === 'pending_calendar' ? 'pending' : 'not_required',
         version: 1,
         createdAt: db.serverDate(),
         updatedAt: db.serverDate()
       }
+      round.processingAttributionHash = hash(JSON.stringify([
+        round.submittedBy, round.submittedByDisplayName, round.processorAssignmentMode,
+        round.processingRoundTimingStatus, round.processingRoundWorkMinutes,
+        round.processingRoundCalendarVersion,
+        round.processingRoundStartedAt.toISOString(), round.processingRoundEndedAt.toISOString()
+      ]))
       await transaction.collection('node_review_rounds').doc(roundId).set({ data: round })
       await transaction.collection('business_nodes').doc(node._id).update({ data: {
         status: 'pending_review',

@@ -16,6 +16,43 @@ function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
 }
 
+function processingAttributionHash(round, overrides = {}) {
+  const submittedBy = round && round.submittedBy
+  const displayName = round && round.submittedByDisplayName
+  const mode = round && round.processorAssignmentMode
+  const status = overrides.status === undefined ? round && round.processingRoundTimingStatus : overrides.status
+  const minutes = overrides.minutes === undefined ? round && round.processingRoundWorkMinutes : overrides.minutes
+  const calendarVersion = overrides.calendarVersion === undefined
+    ? round && round.processingRoundCalendarVersion
+    : overrides.calendarVersion
+  if (typeof submittedBy !== 'string' || !DOCUMENT_ID.test(submittedBy) ||
+      typeof displayName !== 'string' || !displayName.trim() || displayName.length > 100 ||
+      !['fixed_accounts', 'business_creator'].includes(mode) ||
+      !validDate(round && round.processingRoundStartedAt) ||
+      !validDate(round && round.processingRoundEndedAt)) return null
+  return crypto.createHash('sha256').update(JSON.stringify([
+    submittedBy, displayName, mode, status, minutes, calendarVersion,
+    round.processingRoundStartedAt.toISOString(), round.processingRoundEndedAt.toISOString()
+  ])).digest('hex')
+}
+
+function processingRoundSnapshotState(round, startAt, endAt) {
+  const keys = [
+    'processingRoundTimingStatus', 'processingRoundWorkMinutes',
+    'processingRoundCalendarVersion', 'processingRoundStartedAt', 'processingRoundEndedAt'
+  ]
+  const descriptors = keys.map(key => Object.getOwnPropertyDescriptor(round || {}, key))
+  if (descriptors.every(descriptor => descriptor === undefined)) return 'legacy'
+  if (descriptors.some(descriptor => !descriptor ||
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value'))) return null
+  if (round.processingRoundTimingStatus !== 'pending_calendar' ||
+      round.processingRoundWorkMinutes !== null || round.processingRoundCalendarVersion !== null ||
+      !sameDate(round.processingRoundStartedAt, startAt) ||
+      !sameDate(round.processingRoundEndedAt, endAt) ||
+      processingAttributionHash(round) !== round.processingAttributionHash) return null
+  return 'pending'
+}
+
 function missingDocument(error) {
   return /document(?:\.get)?:fail.*(?:does not exist|not found)|document with _id .* does not exist/i
     .test(String(error && (error.errMsg || error.message || error)))
@@ -584,6 +621,9 @@ function createCloudCalendarRepository({
       if (candidate.kind === 'review_processing') {
         const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
         const round = await readDocument(transaction, 'node_review_rounds', candidate.id)
+        const roundSnapshotState = processingRoundSnapshotState(
+          round, candidate.startAt, candidate.endAt
+        )
         if (!node || !round || node.businessLineId !== line._id || round.businessLineId !== line._id ||
             round.nodeId !== node._id || line.currentNodeId !== node._id || node.status !== 'pending_review' ||
             node.activeReviewRoundId !== round._id || node.version !== candidate.nodeVersion ||
@@ -594,7 +634,8 @@ function createCloudCalendarRepository({
             !sameDate(round.reviewStartedAt, candidate.endAt) ||
             node.processingElapsedWorkMinutes !== candidate.baseElapsedWorkMinutes ||
             node.processingSlaWorkHours * 60 !== candidate.totalWorkMinutes ||
-            node.version === Number.MAX_SAFE_INTEGER || round.version === Number.MAX_SAFE_INTEGER) return false
+            node.version === Number.MAX_SAFE_INTEGER || round.version === Number.MAX_SAFE_INTEGER ||
+            roundSnapshotState === null) return false
         const elapsed = candidate.baseElapsedWorkMinutes + calculation.minutes
         if (!Number.isSafeInteger(elapsed)) return false
         const remaining = Math.max(0, candidate.totalWorkMinutes - elapsed)
@@ -609,12 +650,25 @@ function createCloudCalendarRepository({
           updatedAt: db.serverDate()
         }
         const lockedNodeVersion = node.version + 1
+        const resolvedAttributionHash = roundSnapshotState === 'pending'
+          ? processingAttributionHash(round, {
+              status: 'calculated', minutes: calculation.minutes,
+              calendarVersion: calculation.calendarVersion
+            })
+          : null
+        if (roundSnapshotState === 'pending' && !resolvedAttributionHash) return false
         await transaction.collection('business_nodes').doc(node._id).update({ data: {
           ...timing,
           version: lockedNodeVersion
         } })
         await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
           ...timing,
+          ...(roundSnapshotState === 'pending' ? {
+              processingRoundTimingStatus: 'calculated',
+              processingRoundWorkMinutes: calculation.minutes,
+              processingRoundCalendarVersion: calculation.calendarVersion,
+              processingAttributionHash: resolvedAttributionHash
+            } : {}),
           lockedNodeVersion,
           version: round.version + 1
         } })
@@ -628,6 +682,9 @@ function createCloudCalendarRepository({
           : await readDocument(transaction, 'node_review_rounds', candidate.activeReviewRoundId)
         const rejected = round && round.status === 'rejected'
         const approved = round && round.status === 'approved'
+        const roundSnapshotState = processingRoundSnapshotState(
+          round, candidate.startAt, candidate.endAt
+        )
         if (!node || !round || node.businessLineId !== line._id || round.businessLineId !== line._id ||
             round.nodeId !== node._id || node.version !== candidate.nodeVersion ||
             round.version !== candidate.version ||
@@ -644,7 +701,7 @@ function createCloudCalendarRepository({
             candidate.activeReviewRoundId !== (typeof node.activeReviewRoundId === 'string'
               ? node.activeReviewRoundId
               : null) ||
-            !approved && !rejected) return false
+            !approved && !rejected || roundSnapshotState === null) return false
         const recalculateCurrentDue = validDate(candidate.resumeAt)
         if (recalculateCurrentDue && (line.status !== 'active' || line.currentNodeId !== node._id ||
             !PROCESSING_STATUSES.has(node.status) ||
@@ -674,6 +731,13 @@ function createCloudCalendarRepository({
           node.reviewRoundNumber === round.reviewRoundNumber
         const timingResolved = recalculateCurrentDue || latestCompletedRound ||
           Boolean(activeRound && activeRound.processingTimingStatus === 'calculated')
+        const resolvedAttributionHash = roundSnapshotState === 'pending'
+          ? processingAttributionHash(round, {
+              status: 'calculated', minutes: calculation.minutes,
+              calendarVersion: calculation.calendarVersion
+            })
+          : null
+        if (roundSnapshotState === 'pending' && !resolvedAttributionHash) return false
         const nodeVersion = node.version + 1
         await transaction.collection('business_nodes').doc(node._id).update({ data: {
           processingTimingStatus: timingResolved ? 'calculated' : 'pending_calendar',
@@ -699,6 +763,12 @@ function createCloudCalendarRepository({
           processingRemainingWorkMinutes: Math.max(0, candidate.totalWorkMinutes - historicalElapsed),
           processingOverdueWorkMinutes: Math.max(0, historicalElapsed - candidate.totalWorkMinutes),
           processingCalendarVersion: calculation.calendarVersion,
+          ...(roundSnapshotState === 'pending' ? {
+              processingRoundTimingStatus: 'calculated',
+              processingRoundWorkMinutes: calculation.minutes,
+              processingRoundCalendarVersion: calculation.calendarVersion,
+              processingAttributionHash: resolvedAttributionHash
+            } : {}),
           processingCarryoverStatus: 'resolved',
           processingCarryoverResolvedAt: new Date(now),
           calendarRecalculatedAt: new Date(now),

@@ -23,8 +23,11 @@ function seed(overrides = {}) {
       _id: 'node-1', businessLineId: 'line-1', nodeCode: 'BL-20260811-0001-N001',
       name: '资料收集', sequence: 0, status: 'in_progress', version: 4,
       workflowMode: 'review', processorUserIds: ['processor-1'],
+      processorAssignmentMode: 'fixed_accounts',
       reviewerUserIds: ['reviewer-1', 'reviewer-2'], reviewMode: 'all',
       processingRoundNumber: 1, reviewRoundNumber: 0,
+      processingStartedAt: new Date('2026-08-11T01:00:00.000Z'),
+      processingElapsedWorkMinutes: 0,
       processingSlaWorkHours: 22, reviewSlaWorkHours: 8,
       latestFeedbackId: 'feedback-current', latestFeedbackRevision: 2
     }],
@@ -59,6 +62,10 @@ function request(overrides = {}) {
       processingTimingStatus: 'calculated', processingElapsedWorkMinutes: 120,
       processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0,
       processingCalendarVersion: 'calendar-a', reviewStartedAt: NOW,
+      processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 120,
+      processingRoundCalendarVersion: 'calendar-a',
+      processingRoundStartedAt: new Date('2026-08-11T01:00:00.000Z'),
+      processingRoundEndedAt: NOW,
       reviewRemainingWorkMinutes: 480, reviewElapsedWorkMinutes: 0,
       reviewOverdueWorkMinutes: 0, reviewDueStatus: 'calculated',
       reviewDueAt: new Date('2026-08-12T06:00:00.000Z'), reviewCalendarVersion: 'calendar-a'
@@ -197,6 +204,13 @@ test('提交审核在一个事务内创建轮次、锁定节点并写确定性�
   assert.equal(round.processingRemainingWorkMinutes, 1200)
   assert.equal(round.processingOverdueWorkMinutes, 0)
   assert.equal(round.processingCalendarVersion, 'calendar-a')
+  assert.equal(round.submittedByDisplayName, '处理人一')
+  assert.equal(round.processorAssignmentMode, 'fixed_accounts')
+  assert.equal(round.processingRoundTimingStatus, 'calculated')
+  assert.equal(round.processingRoundWorkMinutes, 120)
+  assert.equal(round.processingRoundCalendarVersion, 'calendar-a')
+  assert.deepEqual(round.processingRoundStartedAt, new Date('2026-08-11T01:00:00.000Z'))
+  assert.deepEqual(round.processingRoundEndedAt, NOW)
   assert.equal(JSON.stringify(round).includes('must-not-be-stored'), false)
   const [node] = fake.documents('business_nodes')
   assert.equal(node.status, 'pending_review')
@@ -206,6 +220,79 @@ test('提交审核在一个事务内创建轮次、锁定节点并写确定性�
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.equal(fake.transactionRuns.length, 1)
   assert.equal(fake.transactionRuns[0].operations <= 100, true)
+})
+
+test('多候选处理节点只把本轮处理时间归属给实际提交人', async () => {
+  const data = seed()
+  data.users.push({ _id: 'processor-2', status: 'active', displayName: '处理人二' })
+  data.business_lines[0].memberUserIds.push('processor-2')
+  data.business_nodes[0].processorUserIds = ['processor-1', 'processor-2']
+  data.node_feedback[0].submittedBy = 'processor-2'
+  const { fake, repository } = harness({ seed: data })
+  const value = request({ actor: { _id: 'processor-2', status: 'active' } })
+
+  await repository.createReviewRound(value)
+
+  const [round] = fake.documents('node_review_rounds')
+  assert.equal(round.submittedBy, 'processor-2')
+  assert.equal(round.submittedByDisplayName, '处理人二')
+  assert.deepEqual(round.processorDisplayNames, ['处理人一', '处理人二'])
+  assert.equal(round.processingRoundWorkMinutes, 120)
+})
+
+test('驳回后的第二轮归属第二次实际提交人且第一轮快照保持不变', async () => {
+  const data = seed()
+  data.users.push({ _id: 'processor-2', status: 'active', displayName: '处理人二' })
+  data.business_lines[0].memberUserIds.push('processor-2')
+  data.business_nodes[0] = {
+    ...data.business_nodes[0], version: 6, processorUserIds: ['processor-1', 'processor-2'],
+    processingRoundNumber: 2, reviewRoundNumber: 1,
+    processingStartedAt: new Date('2026-08-11T04:00:00.000Z'),
+    processingElapsedWorkMinutes: 120,
+    latestFeedbackId: 'feedback-second', latestFeedbackRevision: 1
+  }
+  data.node_feedback = [{
+    _id: 'feedback-second', businessLineId: 'line-1', nodeId: 'node-1',
+    publishState: 'published', revision: 1, processingRoundNumber: 2,
+    action: 'save_progress', submittedBy: 'processor-2', comment: '第二轮说明'
+  }]
+  data.node_review_rounds = [{
+    _id: 'review-first', businessLineId: 'line-1', nodeId: 'node-1', status: 'rejected',
+    submittedBy: 'processor-1', submittedByDisplayName: '处理人一',
+    processorAssignmentMode: 'fixed_accounts', processingRoundNumber: 1,
+    processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 120,
+    processingRoundCalendarVersion: 'calendar-a',
+    processingRoundStartedAt: new Date('2026-08-11T01:00:00.000Z'),
+    processingRoundEndedAt: new Date('2026-08-11T03:00:00.000Z')
+  }]
+  const firstRoundBefore = structuredClone(data.node_review_rounds[0])
+  const { fake, repository } = harness({ seed: data })
+  const value = request({
+    actor: { _id: 'processor-2', status: 'active' },
+    input: { businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 6 },
+    draft: {
+      feedbackId: 'feedback-second', feedbackRevision: 1, processingRoundNumber: 2,
+      processingComment: '第二轮说明', fieldSnapshots: [], evidenceIds: [], evidenceTotalBytes: 0
+    },
+    timing: {
+      ...request().timing,
+      processingElapsedWorkMinutes: 180, processingRemainingWorkMinutes: 1140,
+      processingRoundWorkMinutes: 60,
+      processingRoundStartedAt: new Date('2026-08-11T04:00:00.000Z'),
+      processingRoundEndedAt: new Date('2026-08-11T05:00:00.000Z'),
+      reviewStartedAt: new Date('2026-08-11T05:00:00.000Z')
+    }
+  })
+
+  await repository.createReviewRound(value)
+
+  const rounds = fake.documents('node_review_rounds')
+  assert.deepEqual(rounds.find(round => round._id === 'review-first'), firstRoundBefore)
+  const secondRound = rounds.find(round => round._id === 'review-feedback-second')
+  assert.equal(secondRound.submittedBy, 'processor-2')
+  assert.equal(secondRound.submittedByDisplayName, '处理人二')
+  assert.equal(secondRound.processingRoundNumber, 2)
+  assert.equal(secondRound.processingRoundWorkMinutes, 60)
 })
 
 test('待我审核列表只返回当前审核人真实待办并稳定投影已投会签状态', async () => {
@@ -922,6 +1009,29 @@ test('幂等重试必须用重新构建的完整草稿拒绝审核轮次摘要�
     round => { round.fieldValues = [{ fieldKey: 'summary', value: '篡改' }] },
     round => { round.evidenceIds = ['evidence-b', 'evidence-a'] },
     round => { round.evidenceTotalBytes = 2048 }
+  ]) {
+    const { fake, repository } = harness()
+    const value = request()
+    value.draftHash = retryValue(value).draftHash
+    await repository.createReviewRound(value)
+    const round = fake.documents('node_review_rounds')[0]
+    mutate(round)
+    fake.replace('node_review_rounds', round._id, round)
+    await assert.rejects(repository.findReviewRoundRetry(retryValue(value)), error =>
+      error.code === 'VERSION_CONFLICT')
+  }
+})
+
+test('幂等重试拒绝实际提交人处理工时快照缺失或被篡改', async () => {
+  for (const mutate of [
+    round => { delete round.submittedByDisplayName },
+    round => { round.submittedByDisplayName = '被篡改的提交人' },
+    round => { round.processorAssignmentMode = 'business_creator' },
+    round => { round.processingRoundTimingStatus = 'pending_calendar' },
+    round => { round.processingRoundWorkMinutes = 121 },
+    round => { round.processingRoundCalendarVersion = 'calendar-other' },
+    round => { round.processingRoundStartedAt = new Date('2026-08-11T01:01:00.000Z') },
+    round => { round.processingRoundEndedAt = new Date('2026-08-11T03:01:00.000Z') }
   ]) {
     const { fake, repository } = harness()
     const value = request()

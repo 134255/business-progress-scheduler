@@ -144,6 +144,11 @@ test('提交审核采用当前轮最新字段与全部有效凭证并计算双�
   const create = calls.find(call => call[0] === 'create')[1]
   assert.equal(create.timing.processingElapsedWorkMinutes, 120)
   assert.equal(create.timing.processingRemainingWorkMinutes, 1200)
+  assert.equal(create.timing.processingRoundTimingStatus, 'calculated')
+  assert.equal(create.timing.processingRoundWorkMinutes, 120)
+  assert.equal(create.timing.processingRoundCalendarVersion, 'calendar-a')
+  assert.deepEqual(create.timing.processingRoundStartedAt, new Date('2026-08-11T01:00:00.000Z'))
+  assert.deepEqual(create.timing.processingRoundEndedAt, new Date('2026-08-11T03:00:00.000Z'))
   assert.equal(create.timing.reviewRemainingWorkMinutes, 480)
   assert.equal(create.timing.reviewDueStatus, 'calculated')
   assert.equal(create.requestKeyHash.length, 64)
@@ -209,6 +214,11 @@ test('日历缺失不阻断审核轮次创建而是保存待补算截止时间',
   assert.equal(timing.reviewDueStatus, 'pending_calendar')
   assert.equal(timing.reviewDueAt, null)
   assert.equal(timing.processingTimingStatus, 'pending_calendar')
+  assert.equal(timing.processingRoundTimingStatus, 'pending_calendar')
+  assert.equal(timing.processingRoundWorkMinutes, null)
+  assert.equal(timing.processingRoundCalendarVersion, null)
+  assert.deepEqual(timing.processingRoundStartedAt, new Date('2026-08-11T01:00:00.000Z'))
+  assert.deepEqual(timing.processingRoundEndedAt, new Date('2026-08-11T03:00:00.000Z'))
 })
 
 test('提交审核输入和账号必须采用严格自有属性结构', async () => {

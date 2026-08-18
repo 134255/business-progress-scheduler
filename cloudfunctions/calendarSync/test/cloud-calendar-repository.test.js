@@ -2,8 +2,26 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const { createFakeCloudDatabase } = require('../../businessApi/test/helpers/fake-cloud-database')
 const { createCloudCalendarRepository } = require('../lib/cloud-calendar-repository')
+
+function processingAttributionSnapshot(startAt, endAt) {
+  const snapshot = {
+    submittedBy: 'processor-1', submittedByDisplayName: '处理人一',
+    processorAssignmentMode: 'fixed_accounts',
+    processingRoundTimingStatus: 'pending_calendar', processingRoundWorkMinutes: null,
+    processingRoundCalendarVersion: null,
+    processingRoundStartedAt: new Date(startAt), processingRoundEndedAt: new Date(endAt)
+  }
+  snapshot.processingAttributionHash = crypto.createHash('sha256').update(JSON.stringify([
+    snapshot.submittedBy, snapshot.submittedByDisplayName, snapshot.processorAssignmentMode,
+    snapshot.processingRoundTimingStatus, snapshot.processingRoundWorkMinutes,
+    snapshot.processingRoundCalendarVersion, snapshot.processingRoundStartedAt.toISOString(),
+    snapshot.processingRoundEndedAt.toISOString()
+  ])).digest('hex')
+  return snapshot
+}
 
 function pendingReviewTiming(startAt, endAt, { base = 0, total = 480 } = {}) {
   return {
@@ -422,7 +440,8 @@ test('待审核节点的处理时长待补算候选按活动轮次有界读取',
     node_review_rounds: [{
       _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending', version: 2,
       lockedNodeVersion: 7, reviewDueStatus: 'calculated', processingTimingStatus: 'pending_calendar',
-      reviewStartedAt: new Date('2026-08-11T03:00:00Z')
+      reviewStartedAt: new Date('2026-08-11T03:00:00Z'),
+      ...processingAttributionSnapshot('2026-08-11T01:00:00Z', '2026-08-11T03:00:00Z')
     }]
   })
   const repository = createCloudCalendarRepository({ db: fake.db })
@@ -450,7 +469,8 @@ test('待审核处理时长补算原子复核活动轮次并同步节点与轮�
       _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending', version: 2,
       lockedNodeVersion: 7, reviewStartedAt: new Date('2026-08-11T03:00:00Z'),
       processingTimingStatus: 'pending_calendar', processingElapsedWorkMinutes: 120,
-      processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0
+      processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0,
+      ...processingAttributionSnapshot('2026-08-11T01:00:00Z', '2026-08-11T03:00:00Z')
     }]
   })
   const repository = createCloudCalendarRepository({ db: fake.db })
@@ -478,6 +498,11 @@ test('待审核处理时长补算原子复核活动轮次并同步节点与轮�
   assert.equal(node.version, 8)
   assert.equal(round.version, 3)
   assert.equal(round.lockedNodeVersion, 8)
+  assert.equal(round.processingRoundTimingStatus, 'calculated')
+  assert.equal(round.processingRoundWorkMinutes, 180)
+  assert.equal(round.processingRoundCalendarVersion, 'v1')
+  assert.deepEqual(round.processingRoundStartedAt, new Date('2026-08-11T01:00:00Z'))
+  assert.deepEqual(round.processingRoundEndedAt, new Date('2026-08-11T03:00:00Z'))
   assert.equal(fake.transactionRuns.at(-1).operations <= 100, true)
 
   assert.equal(await repository.applyDueCalculation({
@@ -570,6 +595,7 @@ test('驳回返工的待补算处理段会原子修正历史分钟与新处理�
       lockedNodeVersion: 5, processingRoundNumber: 1, reviewRoundNumber: 1,
       processingTimingStatus: 'pending_calendar', processingElapsedWorkMinutes: 120,
       processingRemainingWorkMinutes: 1200, processingOverdueWorkMinutes: 0,
+      ...processingAttributionSnapshot('2026-08-11T01:00:00Z', '2026-08-11T03:00:00Z'),
       resultNodeStatus: 'in_progress', resultLineStatus: 'active', resultNextNodeId: null,
       processingCarryoverStatus: 'pending',
       processingCarryoverStartedAt: new Date('2026-08-11T01:00:00Z'),
@@ -600,6 +626,11 @@ test('驳回返工的待补算处理段会原子修正历史分钟与新处理�
   const round = fake.documents('node_review_rounds')[0]
   assert.equal(round.processingTimingStatus, 'calculated')
   assert.equal(round.processingElapsedWorkMinutes, 300)
+  assert.equal(round.processingRoundTimingStatus, 'calculated')
+  assert.equal(round.processingRoundWorkMinutes, 180)
+  assert.equal(round.processingRoundCalendarVersion, 'calendar-a')
+  assert.deepEqual(round.processingRoundStartedAt, new Date('2026-08-11T01:00:00Z'))
+  assert.deepEqual(round.processingRoundEndedAt, new Date('2026-08-11T03:00:00Z'))
   assert.equal(round.processingCarryoverStatus, 'resolved')
 })
 

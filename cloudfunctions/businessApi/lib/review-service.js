@@ -124,10 +124,14 @@ function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
 }
 
-function buildProcessingTiming(node, calculated) {
+function buildProcessingTiming(node, calculated, endedAt) {
   const total = node.processingSlaWorkHours * 60
   if (!Number.isSafeInteger(total) || total <= 0) throw createError('VERSION_CONFLICT')
   const previous = strictWorkMinutes(node.processingElapsedWorkMinutes || 0)
+  const startedAt = new Date(node.processingStartedAt)
+  if (!validDate(startedAt) || !validDate(endedAt) || startedAt.getTime() > endedAt.getTime()) {
+    throw createError('VERSION_CONFLICT')
+  }
   if (calculated && calculated.status === 'calculated' &&
       Number.isSafeInteger(calculated.minutes) && calculated.minutes >= 0) {
     const elapsed = strictWorkMinutes(previous + calculated.minutes)
@@ -136,7 +140,12 @@ function buildProcessingTiming(node, calculated) {
       processingElapsedWorkMinutes: elapsed,
       processingRemainingWorkMinutes: Math.max(0, total - elapsed),
       processingOverdueWorkMinutes: Math.max(0, elapsed - total),
-      processingCalendarVersion: calculated.calendarVersion || null
+      processingCalendarVersion: calculated.calendarVersion || null,
+      processingRoundTimingStatus: 'calculated',
+      processingRoundWorkMinutes: calculated.minutes,
+      processingRoundCalendarVersion: calculated.calendarVersion || null,
+      processingRoundStartedAt: startedAt,
+      processingRoundEndedAt: new Date(endedAt)
     }
   }
   if (calculated && calculated.status === 'pending_calendar' && calculated.minutes === null) {
@@ -145,7 +154,12 @@ function buildProcessingTiming(node, calculated) {
       processingElapsedWorkMinutes: previous,
       processingRemainingWorkMinutes: Math.max(0, total - previous),
       processingOverdueWorkMinutes: Math.max(0, previous - total),
-      processingCalendarVersion: null
+      processingCalendarVersion: null,
+      processingRoundTimingStatus: 'pending_calendar',
+      processingRoundWorkMinutes: null,
+      processingRoundCalendarVersion: null,
+      processingRoundStartedAt: startedAt,
+      processingRoundEndedAt: new Date(endedAt)
     }
   }
   throw createError('VERSION_CONFLICT')
@@ -296,7 +310,7 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
       input: safeInput,
       draft,
       timing: {
-        ...buildProcessingTiming(draft.node, processing),
+        ...buildProcessingTiming(draft.node, processing, at),
         ...buildReviewTiming(draft.node, at, reviewDue)
       },
       requestKeyHash,
