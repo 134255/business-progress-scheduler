@@ -182,4 +182,3 @@ node_review_rounds(reviewStartedAt DESC, _id ASC)
 10. 完整 `businessApi`、`calendarSync`、小程序、WXML、语法、差异和项目记忆门禁。
 
 真实 CloudBase 验收包括新增组合索引、云函数部署、模板开关、发起人冲突、多轮处理归属、多人会签响应时间、待补算恢复和运营页面展示。三个定时函数的正式触发器策略不因本设计自动改变。
-
