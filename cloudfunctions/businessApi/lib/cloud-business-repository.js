@@ -11,7 +11,7 @@ const {
   ownExactAccountIds
 } = require('./account-relationship-schema')
 const { normalizeFieldDefinition } = require('./field-domain')
-const { ALLOWED_EVIDENCE_TYPES } = require('./template-domain')
+const { ALLOWED_EVIDENCE_TYPES, PROCESSOR_ASSIGNMENT_MODE } = require('./template-domain')
 const {
   INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE,
   fitsBusinessMemberArray,
@@ -117,18 +117,39 @@ function snapshotParticipantUserIds(nodes) {
   }))].sort()
 }
 
-function snapshotReservationOperationCount(nodes) {
+function snapshotReservationOperationCount(nodes, creatorUserId = '') {
   if (!Array.isArray(nodes)) return Number.POSITIVE_INFINITY
-  return nodes.length + snapshotParticipantUserIds(nodes).length + 6
+  return nodes.length + snapshotParticipantUserIds(nodes).filter(id => id !== creatorUserId).length + 6
 }
 
-function canCreateBusinessSnapshot(nodes) {
+function canCreateBusinessSnapshot(nodes, creatorUserId = '') {
   const participants = snapshotParticipantUserIds(nodes)
   return Array.isArray(nodes) && nodes.length > 0 && nodes.length <= MAX_TEMPLATE_NODES &&
-    fitsBusinessMemberArray(participants) && nodes.every(node => node && node.workflowMode === 'review'
+    fitsBusinessMemberArray([...new Set([creatorUserId, ...participants].filter(Boolean))]) &&
+    nodes.every(node => node && node.workflowMode === 'review'
       ? fitsIndexedAccountArray(node.processorUserIds) && fitsIndexedAccountArray(node.reviewerUserIds)
       : fitsIndexedAccountArray(node && node.assigneeUserIds)) &&
-    snapshotReservationOperationCount(nodes) <= MAX_TRANSACTION_OPERATIONS
+    snapshotReservationOperationCount(nodes, creatorUserId) <= MAX_TRANSACTION_OPERATIONS
+}
+
+function resolveSnapshotNodes(nodes, creatorUserId) {
+  if (!Array.isArray(nodes) || typeof creatorUserId !== 'string' || !creatorUserId) {
+    throw createError('TEMPLATE_INVALID')
+  }
+  return nodes.map(node => {
+    if (!node || node.workflowMode !== 'review') return node
+    const mode = node.processorAssignmentMode === undefined
+      ? PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS
+      : node.processorAssignmentMode
+    if (![PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS, PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR].includes(mode)) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    if (mode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR) {
+      if (!Array.isArray(node.processorUserIds) || node.processorUserIds.length) throw createError('TEMPLATE_INVALID')
+      return { ...node, processorAssignmentMode: mode, processorUserIds: [creatorUserId] }
+    }
+    return { ...node, processorAssignmentMode: mode }
+  })
 }
 
 function createCloudBusinessRepository({
@@ -1360,6 +1381,7 @@ function createCloudBusinessRepository({
         ...(source.workflowMode === 'review'
           ? {
               workflowMode: 'review',
+              processorAssignmentMode: source.processorAssignmentMode,
               processorUserIds: clone(source.processorUserIds),
               reviewerUserIds: clone(source.reviewerUserIds),
               processorDisplayNames: source.processorUserIds.map(id => displayNames.get(id) || '历史账号'),
@@ -1478,14 +1500,16 @@ function createCloudBusinessRepository({
     return result
   }
 
-  function assertDefinitionBudget(definition) {
+  function assertDefinitionBudget(definition, creatorUserId = '') {
     const nodeCount = definition && Array.isArray(definition.nodes) ? definition.nodes.length : 0
     if (!nodeCount) throw createError('TEMPLATE_INVALID')
     if (nodeCount > MAX_TEMPLATE_NODES) {
       throw createError('TEMPLATE_LIMIT_EXCEEDED', TEMPLATE_LIMIT_MESSAGE)
     }
-    if (!canCreateBusinessSnapshot(definition.nodes)) {
-      const message = fitsBusinessMemberArray(snapshotParticipantUserIds(definition.nodes))
+    if (!canCreateBusinessSnapshot(definition.nodes, creatorUserId)) {
+      const message = fitsBusinessMemberArray([
+        ...new Set([creatorUserId, ...snapshotParticipantUserIds(definition.nodes)].filter(Boolean))
+      ])
         ? SNAPSHOT_LIMIT_MESSAGE
         : INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE
       throw createError('TEMPLATE_LIMIT_EXCEEDED', message)
@@ -1497,7 +1521,7 @@ function createCloudBusinessRepository({
     const existing = await findCreationResult({ actorId: actor._id, input })
     if (existing) return existing
 
-    const sourceNodes = clone(definition.nodes).sort(compareNodes)
+    const sourceNodes = resolveSnapshotNodes(clone(definition.nodes), actor._id).sort(compareNodes)
     const processorIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
       Array.isArray(node.processorUserIds) ? node.processorUserIds : []))].sort()
     const reviewerIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
@@ -1505,7 +1529,7 @@ function createCloudBusinessRepository({
     const legacyAssigneeIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode !== 'review' &&
       Array.isArray(node.assigneeUserIds) ? node.assigneeUserIds : []))].sort()
     const participantIds = snapshotParticipantUserIds(sourceNodes)
-    assertDefinitionBudget(definition)
+    assertDefinitionBudget({ ...definition, nodes: sourceNodes }, actor._id)
     const memberUserIds = [...new Set([actor._id, ...participantIds])].sort()
     const at = clock()
     if (!(at instanceof Date) || Number.isNaN(at.getTime())) throw new TypeError('clock must return a Date')
@@ -1571,6 +1595,11 @@ function createCloudBusinessRepository({
           }
           const creator = await readDocument(transaction, COLLECTIONS.users, actor._id)
           if (!creator || creator.status !== 'active') throw createError('FORBIDDEN')
+          if (sourceNodes.some(node => node.workflowMode === 'review' &&
+              node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR &&
+              node.reviewerUserIds.includes(creator._id))) {
+            throw createError('CREATOR_REVIEWER_CONFLICT')
+          }
           const displayNames = new Map([[actor._id, snapshotDisplayName(creator)]])
           for (const userId of processorIds) {
             if (userId === actor._id) continue

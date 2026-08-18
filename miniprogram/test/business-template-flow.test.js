@@ -135,6 +135,25 @@ test('business service creates only through the template route and builds dashbo
   })
 })
 
+test('business creation maps a creator-reviewer conflict to a stable Chinese message', async () => {
+  const cloud = {
+    async callBusinessApi() {
+      const error = new Error('CREATOR_REVIEWER_CONFLICT')
+      error.code = 'CREATOR_REVIEWER_CONFLICT'
+      throw error
+    }
+  }
+  const service = withFakeModule('utils/cloud.js', cloud, () => freshRequire('services/business.js'))
+
+  await assert.rejects(
+    service.createBusinessFromTemplate({
+      templateId: 'template-1', name: '冲突业务', description: '',
+      plannedStartDate: '', plannedEndDate: '', requestKey: 'attempt-conflict'
+    }),
+    error => error.code === 'CREATOR_REVIEWER_CONFLICT' && error.message === '业务发起人不能同时担任该节点审核人，请调整模板'
+  )
+})
+
 test('dashboard presents the protected pending assignment count', () => {
   const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/dashboard/index.wxml'), 'utf8')
   assert.doesNotMatch(wxml, /暂不可用/)

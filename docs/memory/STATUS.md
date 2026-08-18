@@ -2,6 +2,7 @@
 
 Status captured: 2026-08-18 (Asia/Shanghai)
 
+- 2026-08-18 “业务发起人节点负责人及个人工时明细”Task 2 已按 TDD 完成：业务创建时先将每个审核节点的负责人来源解析为不可变快照；`business_creator` 节点只把当前活动业务发起人写为唯一 `processorUserIds` 和显示名，其他排序节点仍按各自 `fixed_accounts` 配置保存。若发起人同时位于同一节点审核人数组，创建事务以 `CREATOR_REVIEWER_CONFLICT` 整笔拒绝并返回明确中文提示，不分配业务编号、不写业务、节点或半成品计数器。事务预算对已由固定读覆盖的发起人去重计数，原有恰好 100 次边界继续通过；旧模板缺少负责人来源时继续稳定兼容为固定账号。RED：业务仓储与小程序业务聚焦 95 项中 91 通过、4 项按预期失败；GREEN：同一聚焦 95/95，`businessApi` 全量 544/544，三份变更生产 JavaScript 语法通过。真实 CloudBase 快照创建、发起人/审核人冲突、多节点独立来源及索引写入仍为 `unverified`；操作员自己的 `project.config.json` 修改未读取、未修改、未暂存、未提交。
 - 2026-08-18 “业务发起人节点负责人及个人工时明细”Task 1 已按 TDD 完成：新版审核模板节点新增 `processorAssignmentMode: fixed_accounts | business_creator`；旧节点缺字段时稳定兼容为固定账号，发起人模式不允许保存占位处理人，未知值、访问器和继承值失败关闭。节点编辑页新增逐节点开关，开启时暂存并清空固定处理人、禁用手工选择，关闭时恢复本次编辑会话内的原选择；审核人、节点排序和其他节点不受影响；只读页展示相同来源且不能修改。RED：模板域、模板服务与小程序模板聚焦共 55 项中 49 通过、6 项按预期失败；GREEN：55/55，WXML 4/4，两个变更生产 JavaScript 语法通过。业务创建时解析实际发起人、处理/投票工时快照、日历补算、运营明细、CloudBase 索引和真实部署仍为 `unverified`；`project.config.json` 未触碰。
 - 2026-08-18 已确认“业务发起人节点负责人及个人工时明细”架构设计：每个新版模板节点独立选择固定候选处理人或业务发起人唯一处理；创建事务解析发起人并阻断同节点处理/审核角色冲突。新审核轮次将固化实际提交人、本轮处理工作分钟和负责人来源；新投票将固化实际投票人的个人响应工作分钟，未参与者不生成记录。日历缺失不阻断写入，处理轮与投票分别保存待补算边界并由 `calendarSync` 每批不超过 40 条有界恢复；旧记录显示“历史数据未记录”，不推断回填。运营看板将新增超级管理员专用的稳定分页轮次明细，保留现有指标和 CSV 语义。设计见 `docs/superpowers/specs/2026-08-18-initiator-processor-worktime-analytics-design.md`，持久决策见 `ADR-0009`，逐项 TDD 实施计划见 `docs/superpowers/plans/2026-08-18-initiator-processor-worktime-analytics.md`；实现、索引、CloudBase 部署和多账号验收当前均为 `unverified`。操作员自己的 `project.config.json` 修改继续保持未触碰。
 
