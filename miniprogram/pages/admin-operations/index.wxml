@@ -19,4 +19,35 @@
     <view class="card metric"><text class="value">{{stats.pendingCalendar || 0}}</text><text>日历待补算</text></view>
   </view>
   <button class="primary-button" bindtap="exportCsv" loading="{{exporting}}" disabled="{{exporting}}">导出 CSV</button>
+
+  <view class="section-title timing-title">节点处理时间明细</view>
+  <view wx:if="{{timingError}}" class="error">{{timingError}}</view>
+  <view wx:if="{{timingLoading && !timingItems.length}}" class="empty">正在加载个人工时明细…</view>
+  <view wx:elif="{{!timingItems.length && !timingError}}" class="empty">当前范围暂无个人工时记录</view>
+  <view wx:else>
+    <view class="card timing-card" wx:for="{{timingItems}}" wx:key="roundId">
+      <view class="row-between timing-heading">
+        <view>
+          <view class="timing-business">{{item.businessCode}} · {{item.businessName}}</view>
+          <view class="muted">{{item.nodeCode}} · {{item.nodeName}}</view>
+        </view>
+        <button class="link-button" size="mini" data-round-id="{{item.roundId}}" bindtap="toggleTimingDetail">{{item.expanded ? '收起' : '展开'}}</button>
+      </view>
+      <view class="timing-line">处理轮次 {{item.processingRoundNumber}} · 审核轮次 {{item.reviewRoundNumber}}</view>
+      <view class="timing-line">实际提交人：{{item.submittedByDisplayName}}</view>
+      <view class="timing-line">负责人来源：{{item.assignmentModeLabel}}</view>
+      <view class="timing-line">本轮处理：{{item.processingTimingLabel}}</view>
+      <view class="timing-line">本轮提交审核：{{item.reviewStartedAtLabel}}</view>
+      <view wx:if="{{item.expanded}}" class="timing-detail">
+        <view class="timing-line">提交时累计逾期：{{item.processingOverdueLabel}}</view>
+        <view wx:if="{{!item.votes.length}}" class="muted">本轮尚无实际投票记录</view>
+        <view class="vote-row" wx:for="{{item.votes}}" wx:for-item="vote" wx:key="voteKey">
+          <view>{{vote.reviewerDisplayName}} · {{vote.decisionLabel}}</view>
+          <view class="muted">响应工时：{{vote.responseTimingLabel}}</view>
+          <view class="muted">投票时间：{{vote.votedAtLabel}}</view>
+        </view>
+      </view>
+    </view>
+    <button wx:if="{{timingHasMore}}" class="secondary-button" bindtap="loadMoreTiming" loading="{{timingLoadingMore}}" disabled="{{timingLoadingMore}}">加载更多</button>
+  </view>
 </view>

@@ -32,6 +32,47 @@ function writeFile(filePath, data) {
   })
 }
 
+function displayDate(value) {
+  const date = new Date(value)
+  if (!value || Number.isNaN(date.getTime())) return '未记录'
+  const shifted = new Date(date.getTime() + 8 * 60 * 60 * 1000)
+  return `${shifted.toISOString().slice(0, 10)} ${shifted.toISOString().slice(11, 16)}`
+}
+
+function timingLabel(timing) {
+  if (!timing || timing.recorded !== true) return '历史未记录'
+  if (timing.status === 'pending_calendar') return '日历待补算'
+  if (timing.status === 'calculated' && Number.isSafeInteger(timing.workMinutes) && timing.workMinutes >= 0) {
+    return `${timing.workMinutes} 个工作分钟`
+  }
+  return '数据暂不可用'
+}
+
+function formatTimingItem(item) {
+  const roundId = typeof item.roundId === 'string' ? item.roundId : ''
+  return {
+    ...item,
+    roundId,
+    assignmentModeLabel: item.processorAssignmentMode === 'business_creator'
+      ? '业务发起人'
+      : item.processorAssignmentMode === 'fixed_accounts' ? '固定候选处理人' : '历史未记录',
+    processingTimingLabel: timingLabel(item.processingTiming),
+    processingOverdueLabel: item.processingTiming && item.processingTiming.recorded &&
+      Number.isSafeInteger(item.processingTiming.overdueWorkMinutes)
+      ? `${item.processingTiming.overdueWorkMinutes} 个工作分钟`
+      : '历史未记录',
+    reviewStartedAtLabel: displayDate(item.reviewStartedAt),
+    expanded: Boolean(item.expanded),
+    votes: (Array.isArray(item.votes) ? item.votes : []).map((vote, index) => ({
+      ...vote,
+      voteKey: `${roundId}-${index}`,
+      decisionLabel: vote.decision === 'approved' ? '通过' : vote.decision === 'rejected' ? '驳回' : '未知',
+      votedAtLabel: displayDate(vote.votedAt),
+      responseTimingLabel: timingLabel(vote.responseTiming)
+    }))
+  }
+}
+
 Page({
   data: {
     startDate: '', endDate: '', statusIndex: 0,
@@ -40,7 +81,9 @@ Page({
       { label: '已完成', value: 'completed' }, { label: '已取消', value: 'cancelled' },
       { label: '已关闭', value: 'closed' }, { label: '已删除', value: 'deleted' }
     ],
-    stats: {}, loading: false, exporting: false, errorMessage: ''
+    stats: {}, loading: false, exporting: false, errorMessage: '',
+    timingItems: [], timingCursor: '', timingHasMore: false,
+    timingLoading: false, timingLoadingMore: false, timingError: ''
   },
 
   onShow() {
@@ -54,6 +97,10 @@ Page({
       this.setData({ endDate: dateText(now), startDate: dateText(new Date(now.getTime() - 29 * 86400000)) })
     }
     return this.refresh(adminId)
+  },
+
+  onHide() {
+    this.requestSequence = (this.requestSequence || 0) + 1
   },
 
   onStartDateChange(event) { this.setData({ startDate: event.detail.value }) },
@@ -70,20 +117,68 @@ Page({
     if (!adminId) return
     const sequence = (this.requestSequence || 0) + 1
     this.requestSequence = sequence
-    this.setData({ loading: true, errorMessage: '' })
+    this.setData({ loading: true, timingLoading: true, errorMessage: '', timingError: '' })
+    const query = { startDate: this.data.startDate, endDate: this.data.endDate, status: this.currentStatus() }
+    const [dashboardResult, timingResult] = await Promise.allSettled([
+      businessService.getOperationsDashboard(query),
+      businessService.listOperationsTimingDetails({ ...query, cursor: '', pageSize: 20 })
+    ])
+    if (sequence !== this.requestSequence || currentAdminId() !== adminId) return
+    const update = { loading: false, timingLoading: false }
+    if (dashboardResult.status === 'fulfilled') update.stats = dashboardResult.value.stats || {}
+    else update.errorMessage = '运营看板加载失败，请稍后重试'
+    if (timingResult.status === 'fulfilled') {
+      update.timingItems = (timingResult.value.items || []).map(formatTimingItem)
+      update.timingCursor = timingResult.value.nextCursor || ''
+      update.timingHasMore = timingResult.value.hasMore === true
+      update.timingError = ''
+    } else {
+      update.timingError = '个人工时明细加载失败，请稍后重试'
+    }
+    this.setData(update)
+  },
+
+  async loadMoreTiming() {
+    if (this.timingPromise) return this.timingPromise
+    if (!this.data.timingHasMore || !this.data.timingCursor) return
+    const adminId = currentAdminId()
+    if (!adminId) return
+    const sequence = this.requestSequence || 0
+    this.setData({ timingLoadingMore: true, timingError: '' })
+    const request = businessService.listOperationsTimingDetails({
+      startDate: this.data.startDate, endDate: this.data.endDate, status: this.currentStatus(),
+      cursor: this.data.timingCursor, pageSize: 20
+    })
+    this.timingPromise = request
     try {
-      const result = await businessService.getOperationsDashboard({
-        startDate: this.data.startDate, endDate: this.data.endDate, status: this.currentStatus()
-      })
+      const result = await request
       if (sequence !== this.requestSequence || currentAdminId() !== adminId) return
-      this.setData({ stats: result.stats || {} })
+      const byId = new Map(this.data.timingItems.map(item => [item.roundId, item]))
+      for (const item of result.items || []) {
+        const formatted = formatTimingItem(item)
+        if (formatted.roundId && !byId.has(formatted.roundId)) byId.set(formatted.roundId, formatted)
+      }
+      this.setData({
+        timingItems: [...byId.values()], timingCursor: result.nextCursor || '',
+        timingHasMore: result.hasMore === true
+      })
     } catch (error) {
       if (sequence === this.requestSequence && currentAdminId() === adminId) {
-        this.setData({ errorMessage: error.message || '运营看板加载失败，请稍后重试' })
+        this.setData({ timingError: '个人工时明细加载失败，请稍后重试' })
       }
     } finally {
-      if (sequence === this.requestSequence && currentAdminId() === adminId) this.setData({ loading: false })
+      if (this.timingPromise === request) this.timingPromise = null
+      if (sequence === this.requestSequence && currentAdminId() === adminId) {
+        this.setData({ timingLoadingMore: false })
+      }
     }
+  },
+
+  toggleTimingDetail(event) {
+    const roundId = event && event.currentTarget && event.currentTarget.dataset.roundId
+    if (typeof roundId !== 'string') return
+    this.setData({ timingItems: this.data.timingItems.map(item =>
+      item.roundId === roundId ? { ...item, expanded: !item.expanded } : item) })
   },
 
   async exportCsv() {

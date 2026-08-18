@@ -87,6 +87,10 @@ function exportOperationsRows(query) {
   return callProtected('exportOperationsRows', query || {}, '运营数据导出失败，请稍后重试')
 }
 
+function listOperationsTimingDetails(query) {
+  return callProtected('listOperationsTimingDetails', query || {}, '个人工时明细加载失败，请稍后重试')
+}
+
 function createNodeShareSnapshot(input) {
   return callProtected('createNodeShareSnapshot', input, '生成分享快照失败，请稍后重试')
 }
@@ -194,6 +198,7 @@ module.exports = {
   listMyPendingProcessing,
   getOperationsDashboard,
   exportOperationsRows,
+  listOperationsTimingDetails,
   createNodeShareSnapshot,
   getPublicNodeShare,
   listBusinessLines,
