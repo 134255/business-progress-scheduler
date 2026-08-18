@@ -399,6 +399,51 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         !validDisplayName(vote.reviewerDisplayName, 100) || vote.comment !== value.input.comment) {
       throw createError(vote ? 'VOTE_CONFLICT' : 'VERSION_CONFLICT')
     }
+    const keys = [
+      'reviewResponseTimingStatus', 'reviewResponseWorkMinutes',
+      'reviewResponseCalendarVersion', 'reviewResponseStartedAt',
+      'reviewResponseEndedAt', 'reviewResponseHash'
+    ]
+    const fields = keys.map(key => ownDataValue(vote, key))
+    if (fields.every(field => !field.present)) return
+    if (fields.some(field => !field.valid)) throw createError('VOTE_CONFLICT')
+    const [status, minutes, calendarVersion, startedAt, endedAt, storedHash] =
+      fields.map(field => field.value)
+    const calculated = status === 'calculated'
+    const pending = status === 'pending_calendar'
+    if (!sameDateValue(startedAt, round.reviewStartedAt) || !validDate(endedAt) ||
+        startedAt.getTime() > endedAt.getTime() ||
+        calculated && (!safeInteger(minutes) ||
+          calendarVersion !== null && !validDisplayName(calendarVersion, 200)) ||
+        pending && (minutes !== null || calendarVersion !== null) || !calculated && !pending ||
+        storedHash !== hash(JSON.stringify([
+          vote.reviewerUserId, vote.reviewerDisplayName, status, minutes, calendarVersion,
+          startedAt.toISOString(), endedAt.toISOString()
+        ]))) {
+      throw createError('VOTE_CONFLICT')
+    }
+  }
+
+  function validateReviewResponseTiming(timing, context, round) {
+    if (!timing || !sameDateValue(timing.reviewResponseStartedAt, round.reviewStartedAt) ||
+        !sameDateValue(timing.reviewResponseStartedAt, context.reviewStartedAt) ||
+        !sameDateValue(timing.reviewResponseEndedAt, timing.transitionAt) ||
+        timing.reviewResponseStartedAt.getTime() > timing.reviewResponseEndedAt.getTime() ||
+        !['calculated', 'pending_calendar'].includes(timing.reviewResponseTimingStatus)) {
+      throw createError('VERSION_CONFLICT')
+    }
+    if (timing.reviewResponseTimingStatus === 'calculated') {
+      if (!safeInteger(timing.reviewResponseWorkMinutes) ||
+          timing.reviewResponseWorkMinutes !==
+            timing.reviewElapsedWorkMinutes - context.reviewBaseElapsedWorkMinutes ||
+          timing.reviewResponseCalendarVersion !== timing.reviewCalendarVersion) {
+        throw createError('VERSION_CONFLICT')
+      }
+    } else if (timing.reviewResponseWorkMinutes !== null ||
+        timing.reviewResponseCalendarVersion !== null ||
+        timing.reviewTimingStatus !== 'pending_calendar') {
+      throw createError('VERSION_CONFLICT')
+    }
   }
 
   function terminalCarryoverStateValid(round, kind, pending) {
@@ -1074,6 +1119,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         return voteResult(round, node.status, line.status)
       }
       validateCompletedReviewTiming(value.timing, context, round)
+      validateReviewResponseTiming(value.timing, context, round)
       const displayName = reviewerDisplayName(actor)
 
       if (!safeInteger(line.nodeCount, 1) || !safeInteger(node.sequence) ||
@@ -1126,7 +1172,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           : 'pending'
       const at = new Date(value.timing.transitionAt)
       const normalizedDecision = persistedDecision(value.input.decision)
-      await transaction.collection('node_review_votes').doc(voteId).set({ data: {
+      const vote = {
         reviewRoundId: round._id,
         businessLineId: line._id,
         nodeId: node._id,
@@ -1137,8 +1183,19 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         expectedRoundVersion: value.input.expectedRoundVersion,
         requestKeyHash: value.requestKeyHash,
         inputHash: value.inputHash,
+        reviewResponseTimingStatus: value.timing.reviewResponseTimingStatus,
+        reviewResponseWorkMinutes: value.timing.reviewResponseWorkMinutes,
+        reviewResponseCalendarVersion: value.timing.reviewResponseCalendarVersion,
+        reviewResponseStartedAt: new Date(value.timing.reviewResponseStartedAt),
+        reviewResponseEndedAt: new Date(value.timing.reviewResponseEndedAt),
         createdAt: db.serverDate()
-      } })
+      }
+      vote.reviewResponseHash = hash(JSON.stringify([
+        vote.reviewerUserId, vote.reviewerDisplayName, vote.reviewResponseTimingStatus,
+        vote.reviewResponseWorkMinutes, vote.reviewResponseCalendarVersion,
+        vote.reviewResponseStartedAt.toISOString(), vote.reviewResponseEndedAt.toISOString()
+      ]))
+      await transaction.collection('node_review_votes').doc(voteId).set({ data: vote })
 
       const auditId = `${voteId}-audit`
       await transaction.collection('audit_logs').doc(auditId).set({ data: {

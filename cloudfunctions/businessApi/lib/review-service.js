@@ -223,6 +223,33 @@ function buildCompletedReviewTiming(context, calculated) {
   throw createError('VERSION_CONFLICT')
 }
 
+function buildReviewResponseTiming(context, calculated, endedAt) {
+  const startedAt = new Date(context && context.reviewStartedAt)
+  if (!validDate(startedAt) || !validDate(endedAt) || startedAt.getTime() > endedAt.getTime()) {
+    throw createError('VERSION_CONFLICT')
+  }
+  if (calculated && calculated.status === 'calculated' &&
+      Number.isSafeInteger(calculated.minutes) && calculated.minutes >= 0) {
+    return {
+      reviewResponseTimingStatus: 'calculated',
+      reviewResponseWorkMinutes: calculated.minutes,
+      reviewResponseCalendarVersion: calculated.calendarVersion || null,
+      reviewResponseStartedAt: startedAt,
+      reviewResponseEndedAt: new Date(endedAt)
+    }
+  }
+  if (calculated && calculated.status === 'pending_calendar' && calculated.minutes === null) {
+    return {
+      reviewResponseTimingStatus: 'pending_calendar',
+      reviewResponseWorkMinutes: null,
+      reviewResponseCalendarVersion: null,
+      reviewResponseStartedAt: startedAt,
+      reviewResponseEndedAt: new Date(endedAt)
+    }
+  }
+  throw createError('VERSION_CONFLICT')
+}
+
 function createReviewService({ feedbackRepository, reviewRepository, workTimeService, clock = () => new Date() }) {
   if (!feedbackRepository || typeof feedbackRepository.getCurrentProcessingRoundDraft !== 'function') {
     throw new TypeError('feedbackRepository.getCurrentProcessingRoundDraft is required')
@@ -348,7 +375,9 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
       const elapsed = await workTimeService.workingMinutesBetween(
         new Date(context.reviewStartedAt), new Date(at)
       )
-      Object.assign(timing, buildCompletedReviewTiming(context, elapsed))
+      Object.assign(timing,
+        buildCompletedReviewTiming(context, elapsed),
+        buildReviewResponseTiming(context, elapsed, at))
     }
     if (context.transition === 'rework' && context.processingCarryoverPending === true) {
       Object.assign(timing, {

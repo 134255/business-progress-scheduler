@@ -171,7 +171,10 @@ function voteRequest(actorId, overrides = {}) {
     processingCalendarVersion: 'calendar-a',
     reviewTimingStatus: 'calculated', reviewElapsedWorkMinutes: 120,
     reviewRemainingWorkMinutes: 360, reviewOverdueWorkMinutes: 0,
-    reviewCalendarVersion: 'calendar-a'
+    reviewCalendarVersion: 'calendar-a',
+    reviewResponseTimingStatus: 'calculated', reviewResponseWorkMinutes: 120,
+    reviewResponseCalendarVersion: 'calendar-a',
+    reviewResponseStartedAt: NOW, reviewResponseEndedAt: NOW
   }
   return {
     actor: { _id: actorId, status: 'active' },
@@ -1181,6 +1184,11 @@ test('驳回投票持久化为 rejected 并保存事务内审核人显示名快�
   const [vote] = fake.documents('node_review_votes')
   assert.equal(vote.decision, 'rejected')
   assert.equal(vote.reviewerDisplayName, '审核人一')
+  assert.equal(vote.reviewResponseTimingStatus, 'calculated')
+  assert.equal(vote.reviewResponseWorkMinutes, 120)
+  assert.equal(vote.reviewResponseCalendarVersion, 'calendar-a')
+  assert.deepEqual(vote.reviewResponseStartedAt, NOW)
+  assert.deepEqual(vote.reviewResponseEndedAt, NOW)
   assert.equal(fake.documents('node_review_rounds')[0].finalDecision, 'rejected')
   assert.equal(fake.documents('audit_logs')[0].decision, 'rejected')
 })
@@ -1255,7 +1263,12 @@ test('会签逐票通过、同票同输入幂等且改票冲突', async () => {
     reviewRoundId: 'review-feedback-current', status: 'pending',
     nodeStatus: 'pending_review', lineStatus: 'active', nextNodeId: null
   })
+  const [firstStoredVote] = fake.documents('node_review_votes')
+  assert.equal(firstStoredVote.reviewerUserId, 'reviewer-1')
+  assert.equal(firstStoredVote.reviewResponseWorkMinutes, 120)
+  assert.equal(fake.documents('node_review_votes').some(vote => vote.reviewerUserId === 'reviewer-2'), false)
   assert.deepEqual(await repository.submitReviewVote(firstValue), first)
+  assert.deepEqual(fake.documents('node_review_votes')[0], firstStoredVote)
   await assert.rejects(
     repository.submitReviewVote(voteRequest('reviewer-1', {
       requestKey: 'vote-reviewer-1-change',
@@ -1267,6 +1280,10 @@ test('会签逐票通过、同票同输入幂等且改票冲突', async () => {
   const result = await repository.submitReviewVote(voteRequest('reviewer-2'))
   assert.equal(result.status, 'approved')
   assert.equal(fake.documents('node_review_votes').length, 2)
+  for (const vote of fake.documents('node_review_votes')) {
+    assert.equal(vote.reviewResponseTimingStatus, 'calculated')
+    assert.equal(vote.reviewResponseWorkMinutes, 120)
+  }
   assert.equal(fake.documents('node_review_rounds')[0].approvedVoteCount, 2)
   assert.equal(fake.documents('business_nodes').find(node => node._id === 'node-1').status, 'completed')
 })
@@ -1372,7 +1389,10 @@ test('终态重试版本链严格等于处理与审核两类已解决补算数',
       transitionAt: NOW, processingDueStatus: 'calculated',
       processingDueAt: new Date('2026-08-13T03:00:00Z'), processingCalendarVersion: 'calendar-a',
       reviewTimingStatus: 'pending_calendar', reviewElapsedWorkMinutes: 0,
-      reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0, reviewCalendarVersion: null
+      reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0, reviewCalendarVersion: null,
+      reviewResponseTimingStatus: 'pending_calendar', reviewResponseWorkMinutes: null,
+      reviewResponseCalendarVersion: null, reviewResponseStartedAt: NOW,
+      reviewResponseEndedAt: NOW
     }
   })
   const first = await repository.submitReviewVote(value)
@@ -1416,7 +1436,10 @@ test('终态重试拒绝待补算审核段不可变边界被篡改', async () =>
     timing: {
       reviewTimingStatus: 'pending_calendar', reviewElapsedWorkMinutes: 0,
       reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0,
-      reviewCalendarVersion: null
+      reviewCalendarVersion: null,
+      reviewResponseTimingStatus: 'pending_calendar', reviewResponseWorkMinutes: null,
+      reviewResponseCalendarVersion: null, reviewResponseStartedAt: NOW,
+      reviewResponseEndedAt: NOW
     }
   })
   await repository.submitReviewVote(value)
@@ -1484,7 +1507,10 @@ test('处理时长待补算时驳回会保留旧处理段边界供日历恢复�
       processingDueAt: null, processingCalendarVersion: null,
       reviewTimingStatus: 'pending_calendar', reviewElapsedWorkMinutes: 0,
       reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0,
-      reviewCalendarVersion: null
+      reviewCalendarVersion: null,
+      reviewResponseTimingStatus: 'pending_calendar', reviewResponseWorkMinutes: null,
+      reviewResponseCalendarVersion: null, reviewResponseStartedAt: NOW,
+      reviewResponseEndedAt: NOW
     }
   }))
 
@@ -1513,7 +1539,10 @@ test('终态审核段即时结算剩余与逾期工作分钟', async () => {
       processingCalendarVersion: 'calendar-a',
       reviewTimingStatus: 'calculated', reviewElapsedWorkMinutes: 600,
       reviewRemainingWorkMinutes: 0, reviewOverdueWorkMinutes: 120,
-      reviewCalendarVersion: 'calendar-review'
+      reviewCalendarVersion: 'calendar-review',
+      reviewResponseTimingStatus: 'calculated', reviewResponseWorkMinutes: 600,
+      reviewResponseCalendarVersion: 'calendar-review', reviewResponseStartedAt: NOW,
+      reviewResponseEndedAt: NOW
     }
   }))
   const round = fake.documents('node_review_rounds')[0]
@@ -1533,7 +1562,10 @@ test('末节点审核段缺少日历仍完成业务并写一条确定性脱敏�
     timing: {
       reviewTimingStatus: 'pending_calendar', reviewElapsedWorkMinutes: 0,
       reviewRemainingWorkMinutes: 480, reviewOverdueWorkMinutes: 0,
-      reviewCalendarVersion: null
+      reviewCalendarVersion: null,
+      reviewResponseTimingStatus: 'pending_calendar', reviewResponseWorkMinutes: null,
+      reviewResponseCalendarVersion: null, reviewResponseStartedAt: NOW,
+      reviewResponseEndedAt: NOW
     }
   })
 

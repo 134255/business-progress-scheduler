@@ -277,6 +277,13 @@ test('审核通过为下一节点计算处理截止且请求键只传递摘要',
   assert.equal(submitted.timing.reviewRemainingWorkMinutes, 300)
   assert.equal(submitted.timing.reviewOverdueWorkMinutes, 0)
   assert.equal(submitted.timing.reviewCalendarVersion, 'calendar-review')
+  assert.equal(submitted.timing.reviewResponseTimingStatus, 'calculated')
+  assert.equal(submitted.timing.reviewResponseWorkMinutes, 180)
+  assert.equal(submitted.timing.reviewResponseCalendarVersion, 'calendar-review')
+  assert.deepEqual(submitted.timing.reviewResponseStartedAt,
+    new Date('2026-08-11T01:00:00.000Z'))
+  assert.deepEqual(submitted.timing.reviewResponseEndedAt,
+    new Date('2026-08-11T03:00:00.000Z'))
   assert.equal(submitted.requestKeyHash.length, 64)
   assert.equal(submitted.inputHash.length, 64)
   assert.equal(JSON.stringify(submitted).includes('vote-request-1'), false)
@@ -342,6 +349,13 @@ test('驳回返工继承剩余处理分钟且日历缺失不阻断投票', async
   assert.equal(submitted.timing.reviewTimingStatus, 'pending_calendar')
   assert.equal(submitted.timing.reviewElapsedWorkMinutes, 0)
   assert.equal(submitted.timing.reviewRemainingWorkMinutes, 480)
+  assert.equal(submitted.timing.reviewResponseTimingStatus, 'pending_calendar')
+  assert.equal(submitted.timing.reviewResponseWorkMinutes, null)
+  assert.equal(submitted.timing.reviewResponseCalendarVersion, null)
+  assert.deepEqual(submitted.timing.reviewResponseStartedAt,
+    new Date('2026-08-11T01:00:00.000Z'))
+  assert.deepEqual(submitted.timing.reviewResponseEndedAt,
+    new Date('2026-08-11T03:00:00.000Z'))
 })
 
 test('终态投票同请求重试不再计算截止时间并只向仓储传递摘要', async () => {
