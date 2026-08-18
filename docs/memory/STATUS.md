@@ -2,6 +2,8 @@
 
 Status captured: 2026-08-18 (Asia/Shanghai)
 
+- 2026-08-18 已确认“业务发起人节点负责人及个人工时明细”架构设计：每个新版模板节点独立选择固定候选处理人或业务发起人唯一处理；创建事务解析发起人并阻断同节点处理/审核角色冲突。新审核轮次将固化实际提交人、本轮处理工作分钟和负责人来源；新投票将固化实际投票人的个人响应工作分钟，未参与者不生成记录。日历缺失不阻断写入，处理轮与投票分别保存待补算边界并由 `calendarSync` 每批不超过 40 条有界恢复；旧记录显示“历史数据未记录”，不推断回填。运营看板将新增超级管理员专用的稳定分页轮次明细，保留现有指标和 CSV 语义。设计见 `docs/superpowers/specs/2026-08-18-initiator-processor-worktime-analytics-design.md`，持久决策见 `ADR-0009`；实现、索引、CloudBase 部署和多账号验收当前均为 `unverified`。操作员自己的 `project.config.json` 修改继续保持未触碰。
+
 - 2026-08-18 微信开发者工具首次编译第二批次公开分享页时，精确复现 `pages/public-node-share/index.wxml` 第 22、28 行 `wx:else` 无法与同时带 `wx:if`/`wx:for` 的前置循环元素配对。TDD RED：增强 WXML 结构门禁后 4 项中 1 项失败，并准确报告上述两行；GREEN：字段和凭证列表改为外层条件 `block`、内层循环 `view`，WXML 门禁 4/4、公开分享页聚焦测试 1/1。下一步是在微信开发者工具重新编译，确认公开分享页不再出现 WXML 编译错误后继续第二批次 CloudBase 部署验收。
 
 - 2026-08-17 第二批次三项能力已在隔离分支 `codex/second-batch` 完成实现并通过本地全量门禁：真实“待我处理”与概览、活动超级管理员运营看板和安全 CSV、最长七日的小程序公开只读节点快照。公开令牌由 `PUBLIC_NODE_SHARE_HMAC_SECRET` 对活动账号、业务、节点和幂等请求键执行 HMAC-SHA256 派生；中断重试恢复原预约和原过期时间，凭证按 40 条分块且有效期内由 `publicShareHoldUntil` 阻止清理。快照公开读取无需登录，只返回固化正文和五分钟 HTTPS 凭证地址；发送者通过微信原生面板手动选择好友或群。待我处理的新版账号路径在固定文档事务中重验活动账号、业务、当前节点和账号关系；纯旧 OpenID 兼容路径还会重读 `wechat_bindings`，查询后并发撤绑不会返回旧待办。最新实测：`businessApi` 540/540、`calendarSync` 50/50、`workflowReminder` 30/30、`evidenceRetention` 42/42、小程序 150/150、WXML 4/4，均 0 失败；运营聚焦 49/49、分享聚焦 29/29。当前 `main` 上操作员自己的 `project.config.json` 修改保持未触碰。真实 CloudBase 新集合、组合索引、分享密钥配置、云函数部署、真机图片/视频/PDF 预览、好友/群分享、七日到期和清理仍为 `unverified`；`evidenceRetention` 周期触发器未启用，GitHub 未推送。
