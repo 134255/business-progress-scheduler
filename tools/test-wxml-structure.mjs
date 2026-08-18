@@ -42,7 +42,8 @@ function findInvalidConditionalSiblings(source) {
     const [, tag, attributes = ''] = tagMatch;
     const parent = stack.at(-1);
     const hasElse = /\bwx:(?:else|elif)\b/.test(attributes);
-    const previousHasCondition = /\bwx:(?:if|elif)\s*=/.test(parent.lastSiblingAttributes);
+    const previousHasCondition = /\bwx:(?:if|elif)\s*=/.test(parent.lastSiblingAttributes) &&
+      !/\bwx:for\s*=/.test(parent.lastSiblingAttributes);
 
     if (hasElse && !previousHasCondition) {
       const line = source.slice(0, match.index).split(/\r?\n/).length;
