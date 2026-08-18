@@ -36,9 +36,22 @@ function harness() {
     node_review_rounds: [
       {
         _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending',
-        reviewDueStatus: 'pending_calendar', reviewOverdueWorkMinutes: 3
+        reviewDueStatus: 'pending_calendar', reviewOverdueWorkMinutes: 3,
+        reviewStartedAt: new Date('2026-08-12T02:00:00Z'), processingRoundNumber: 2,
+        reviewRoundNumber: 1, submittedByDisplayName: '实际提交人', processorAssignmentMode: 'fixed_accounts',
+        processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 90,
+        processingRoundStartedAt: new Date('2026-08-11T01:00:00Z'),
+        processingRoundEndedAt: new Date('2026-08-12T02:00:00Z'), processingOverdueWorkMinutes: 5,
+        voteCount: 1, approvedVoteCount: 1
       }
-    ]
+    ],
+    node_review_votes: [{
+      _id: 'vote-1', reviewRoundId: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+      reviewerUserId: 'root', reviewerDisplayName: '实际审核人', decision: 'approved',
+      createdAt: new Date('2026-08-12T03:00:00Z'), reviewResponseTimingStatus: 'calculated',
+      reviewResponseWorkMinutes: 60, reviewResponseStartedAt: new Date('2026-08-12T02:00:00Z'),
+      reviewResponseEndedAt: new Date('2026-08-12T03:00:00Z')
+    }]
   })
   return { fake, repository: createCloudOperationsRepository({ db: fake.db }) }
 }
@@ -70,6 +83,46 @@ test('运营仓储统计权威状态并以稳定游标返回脱敏节点行', as
 
   const completedOnly = await repository.exportRows({ actor, range: { ...range, status: 'completed', pageSize: 50 } })
   assert.deepEqual(completedOnly.items.map(item => item.businessCode), ['BL-2'])
+})
+
+test('运营仓储按审核开始时间稳定分页返回实际提交人与实际投票人工时', async () => {
+  const { repository } = harness()
+  const actor = { _id: 'root', role: 'super_admin', status: 'active' }
+  const range = {
+    startDate: '2026-08-01', endDate: '2026-08-17', status: '',
+    startAt: new Date('2026-07-31T16:00:00Z'), endAt: new Date('2026-08-17T16:00:00Z'),
+    cursor: '', pageSize: 1
+  }
+  const page = await repository.listTimingDetails({ actor, range })
+  assert.equal(page.items.length, 1)
+  assert.equal(page.items[0].submittedByDisplayName, '实际提交人')
+  assert.equal(page.items[0].processingTiming.workMinutes, 90)
+  assert.deepEqual(page.items[0].votes.map(vote => [vote.reviewerDisplayName, vote.responseTiming.workMinutes]),
+    [['实际审核人', 60]])
+  assert.equal(JSON.stringify(page).includes('reviewerUserId'), false)
+  assert.equal(JSON.stringify(page).includes('businessLineId'), false)
+})
+
+test('运营工时明细原始窗口越过损坏关联并在返回前再次复核管理员与业务状态', async () => {
+  const { fake, repository } = harness()
+  for (let index = 0; index < 21; index += 1) {
+    fake.replace('node_review_rounds', `bad-${String(index).padStart(2, '0')}`, {
+      _id: `bad-${String(index).padStart(2, '0')}`, businessLineId: 'missing-line', nodeId: 'missing-node',
+      reviewStartedAt: new Date(`2026-08-13T${String(index).padStart(2, '0')}:00:00Z`)
+    })
+  }
+  const actor = { _id: 'root', role: 'super_admin', status: 'active' }
+  const range = {
+    startDate: '2026-08-01', endDate: '2026-08-17', status: '',
+    startAt: new Date('2026-07-31T16:00:00Z'), endAt: new Date('2026-08-17T16:00:00Z'),
+    cursor: '', pageSize: 20
+  }
+  const page = await repository.listTimingDetails({ actor, range })
+  assert.deepEqual(page.items.map(item => item.roundId), ['round-1'])
+  assert.notEqual(page.nextCursor, '')
+
+  fake.beforeNextTransaction(() => fake.replace('users', 'root', { role: 'user', status: 'active' }))
+  await assert.rejects(repository.listTimingDetails({ actor, range }), error => error.code === 'FORBIDDEN')
 })
 
 test('运营仓储在查询前后都复核超级管理员状态', async () => {

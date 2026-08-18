@@ -468,7 +468,8 @@ test('运营看板与导出路由只传递受信管理员及白名单日期分�
   const calls = []
   const operationsService = {
     async getDashboard(input) { calls.push(['getOperationsDashboard', input]); return { stats: {} } },
-    async exportRows(input) { calls.push(['exportOperationsRows', input]); return { items: [] } }
+    async exportRows(input) { calls.push(['exportOperationsRows', input]); return { items: [] } },
+    async listTimingDetails(input) { calls.push(['listOperationsTimingDetails', input]); return { items: [] } }
   }
   const harness = createRouteHarness({ operationsService })
   await harness.api.main({
@@ -479,10 +480,15 @@ test('运营看板与导出路由只传递受信管理员及白名单日期分�
     action: 'exportOperationsRows',
     payload: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 50, role: 'forged' }
   })
+  await harness.api.main({
+    action: 'listOperationsTimingDetails',
+    payload: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 20, actorId: 'forged' }
+  })
   const actor = { _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound' }
   assert.deepEqual(calls, [
     ['getOperationsDashboard', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17' } }],
-    ['exportOperationsRows', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 50 } }]
+    ['exportOperationsRows', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 50 } }],
+    ['listOperationsTimingDetails', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 20 } }]
   ])
 })
 

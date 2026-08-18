@@ -1,5 +1,5 @@
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
-const { normalizeOperationsQuery } = require('./operations-domain')
+const { normalizeOperationsQuery, normalizeTimingDetailsQuery } = require('./operations-domain')
 
 function createError(code) {
   const error = new Error(code)
@@ -21,7 +21,11 @@ function createOperationsService({ repository, clock = () => new Date() }) {
     requireAdmin(actor)
     return repository.exportRows({ actor, range: normalizeOperationsQuery(query, clock()) })
   }
-  return { getDashboard, exportRows }
+  async function listTimingDetails({ actor, query = {} }) {
+    requireAdmin(actor)
+    return repository.listTimingDetails({ actor, range: normalizeTimingDetailsQuery(query, clock()) })
+  }
+  return { getDashboard, exportRows, listTimingDetails }
 }
 
 module.exports = { createOperationsService }

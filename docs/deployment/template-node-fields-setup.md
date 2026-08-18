@@ -134,6 +134,7 @@
 | `node_review_rounds` | `processingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的处理时长补算扫描 |
 | `node_review_rounds` | `reviewTimingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的审核时长补算扫描 |
 | `node_review_rounds` | `status` 升序、`createdAt` 降序、`_id` 升序 | 否 | 运营看板待审核统计 |
+| `node_review_rounds` | `reviewStartedAt` 降序、`_id` 升序 | 否 | 运营看板个人工时明细稳定游标扫描 |
 | `node_review_votes` | `businessLineId` 升序、`nodeId` 升序、`createdAt` 升序 | 否 | 业务节点投票时间线 |
 | `node_review_votes` | `reviewRoundId` 升序、`reviewerUserId` 升序 | 是 | 每名审核人每轮唯一投票 |
 | `node_review_votes` | `reviewRoundId` 升序、`createdAt` 升序、`_id` 升序 | 否 | 审核详情投票时间线 |

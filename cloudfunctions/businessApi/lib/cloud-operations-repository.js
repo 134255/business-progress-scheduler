@@ -1,10 +1,13 @@
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
-const { safeOperationsRow } = require('./operations-domain')
+const { safeOperationsRow, safeTimingDetail } = require('./operations-domain')
 const { ownExactAccountIds } = require('./account-relationship-schema')
 
 const PAGE_SIZE = 100
 const MAX_ROWS = 5000
 const ACCOUNT_QUERY_CHUNK = 20
+const TIMING_SCAN_LIMIT = 100
+const TIMING_VOTE_LIMIT = 100
+const TIMING_CURSOR_VERSION = 1
 
 function createError(code) {
   const error = new Error(code)
@@ -202,7 +205,135 @@ function createCloudOperationsRepository({ db }) {
     }
   }
 
-  return { getDashboard, exportRows }
+  function sameDate(left, right) {
+    const leftDate = left instanceof Date ? left : new Date(left)
+    const rightDate = right instanceof Date ? right : new Date(right)
+    return !Number.isNaN(leftDate.getTime()) && !Number.isNaN(rightDate.getTime()) &&
+      leftDate.getTime() === rightDate.getTime()
+  }
+
+  function timingCursorFor(round, range) {
+    const startedAt = round.reviewStartedAt instanceof Date
+      ? round.reviewStartedAt.toISOString()
+      : new Date(round.reviewStartedAt).toISOString()
+    return Buffer.from(JSON.stringify({
+      v: TIMING_CURSOR_VERSION,
+      at: startedAt,
+      id: round._id,
+      startDate: range.startDate,
+      endDate: range.endDate,
+      status: range.status || ''
+    })).toString('base64url')
+  }
+
+  function decodeTimingCursor(value, range) {
+    if (!value) return null
+    try {
+      const text = Buffer.from(value, 'base64url').toString('utf8')
+      const parsed = JSON.parse(text)
+      const keys = Reflect.ownKeys(parsed)
+      const date = new Date(parsed.at)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+          keys.length !== 6 || keys.some(key => !['v', 'at', 'id', 'startDate', 'endDate', 'status'].includes(key)) ||
+          parsed.v !== TIMING_CURSOR_VERSION || typeof parsed.id !== 'string' || !parsed.id || parsed.id.length > 200 ||
+          typeof parsed.at !== 'string' || Number.isNaN(date.getTime()) || date.toISOString() !== parsed.at ||
+          parsed.startDate !== range.startDate || parsed.endDate !== range.endDate ||
+          parsed.status !== (range.status || '') ||
+          Buffer.from(JSON.stringify(parsed)).toString('base64url') !== value) {
+        throw new Error('bad cursor')
+      }
+      return { ...parsed, date }
+    } catch {
+      throw createError('VALIDATION_ERROR')
+    }
+  }
+
+  async function queryTimingRounds(range) {
+    const cursor = decodeTimingCursor(range.cursor, range)
+    const collection = db.collection('node_review_rounds')
+    if (!cursor) {
+      const result = await collection
+        .where({ reviewStartedAt: db.command.and(db.command.gte(range.startAt), db.command.lt(range.endAt)) })
+        .orderBy('reviewStartedAt', 'desc').orderBy('_id', 'asc').limit(TIMING_SCAN_LIMIT).get()
+      return result.data || []
+    }
+    const sameTimeResult = await collection
+      .where({ reviewStartedAt: cursor.date, _id: db.command.gt(cursor.id) })
+      .orderBy('reviewStartedAt', 'desc').orderBy('_id', 'asc').limit(TIMING_SCAN_LIMIT).get()
+    const rows = sameTimeResult.data || []
+    if (rows.length >= TIMING_SCAN_LIMIT) return rows
+    const earlierResult = await collection
+      .where({ reviewStartedAt: db.command.and(db.command.gte(range.startAt), db.command.lt(cursor.date)) })
+      .orderBy('reviewStartedAt', 'desc').orderBy('_id', 'asc').limit(TIMING_SCAN_LIMIT - rows.length).get()
+    return [...rows, ...(earlierResult.data || [])]
+  }
+
+  async function readVotes(round) {
+    const result = await db.collection('node_review_votes')
+      .where({ reviewRoundId: round._id })
+      .orderBy('createdAt', 'asc').orderBy('_id', 'asc').limit(TIMING_VOTE_LIMIT + 1).get()
+    const votes = result.data || []
+    if (votes.length > TIMING_VOTE_LIMIT) throw createError('VALIDATION_ERROR')
+    return votes
+  }
+
+  function validVoteAssociation(vote, round) {
+    return vote && vote.reviewRoundId === round._id && vote.businessLineId === round.businessLineId &&
+      vote.nodeId === round.nodeId && typeof vote.reviewerUserId === 'string' && vote.reviewerUserId
+  }
+
+  async function finalTimingEntry(actor, candidate, range) {
+    const votes = await readVotes(candidate)
+    return db.runTransaction(async transaction => {
+      const currentActor = await readDocument(transaction, 'users', actor._id)
+      if (!currentActor || currentActor.status !== 'active' || currentActor.role !== 'super_admin') {
+        throw createError('FORBIDDEN')
+      }
+      const line = await readDocument(transaction, 'business_lines', candidate.businessLineId)
+      const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
+      const round = await readDocument(transaction, 'node_review_rounds', candidate._id)
+      if (!line || !node || !round || node.businessLineId !== line._id ||
+          round.businessLineId !== line._id || round.nodeId !== node._id ||
+          node.workflowMode !== 'review' || !sameDate(round.reviewStartedAt, candidate.reviewStartedAt) ||
+          !['active', 'completed', 'cancelled', 'closed', 'deleted'].includes(line.status) ||
+          range.status && line.status !== range.status ||
+          !votes.every(vote => validVoteAssociation(vote, round)) ||
+          Number.isSafeInteger(round.voteCount) && round.voteCount !== votes.length ||
+          Number.isSafeInteger(round.approvedVoteCount) &&
+            round.approvedVoteCount !== votes.filter(vote => vote.decision === 'approved').length) {
+        return null
+      }
+      try {
+        return safeTimingDetail({ line, node, round, votes })
+      } catch (error) {
+        if (error && error.code === 'VALIDATION_ERROR') return null
+        throw error
+      }
+    })
+  }
+
+  async function listTimingDetails({ actor, range }) {
+    await requireCurrentAdmin(actor)
+    const raw = await queryTimingRounds(range)
+    const items = []
+    let lastScanned = null
+    let processed = 0
+    for (const candidate of raw) {
+      lastScanned = candidate
+      processed += 1
+      const entry = await finalTimingEntry(actor, candidate, range)
+      if (entry) items.push(entry)
+      if (items.length >= range.pageSize) break
+    }
+    await requireCurrentAdmin(actor)
+    return {
+      items,
+      nextCursor: lastScanned ? timingCursorFor(lastScanned, range) : '',
+      hasMore: processed < raw.length || raw.length === TIMING_SCAN_LIMIT
+    }
+  }
+
+  return { getDashboard, exportRows, listTimingDetails }
 }
 
 module.exports = { createCloudOperationsRepository }

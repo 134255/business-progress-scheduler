@@ -55,6 +55,16 @@ function normalizeOperationsQuery(query = {}, now = new Date()) {
   return { startDate, endDate, startAt, endAt: new Date(endStart.getTime() + DAY_MS), status, cursor, pageSize }
 }
 
+function normalizeTimingDetailsQuery(query = {}, now = new Date()) {
+  const source = query && typeof query === 'object' && !Array.isArray(query) ? query : query
+  const normalized = normalizeOperationsQuery({
+    ...source,
+    pageSize: source && source.pageSize === undefined ? 20 : source && source.pageSize
+  }, now)
+  if (normalized.pageSize > 20) throw createError('VALIDATION_ERROR')
+  return normalized
+}
+
 function iso(value) {
   const date = value instanceof Date ? value : new Date(value)
   return Number.isNaN(date.getTime()) ? '' : date.toISOString()
@@ -88,4 +98,94 @@ function safeOperationsRow({ line, node, processorDisplayNames = [], reviewerDis
   }
 }
 
-module.exports = { normalizeOperationsQuery, safeOperationsRow }
+function ownValue(source, key) {
+  const descriptor = source && Object.getOwnPropertyDescriptor(source, key)
+  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined
+}
+
+function safeText(source, key, { required = true, max = 200 } = {}) {
+  const value = ownValue(source, key)
+  if (value === undefined && !required) return ''
+  if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw createError('VALIDATION_ERROR')
+  }
+  return value.trim()
+}
+
+function safeIntegerValue(source, key, { nullable = false } = {}) {
+  const value = ownValue(source, key)
+  if (nullable && value === null) return null
+  if (!Number.isSafeInteger(value) || value < 0) throw createError('VALIDATION_ERROR')
+  return value
+}
+
+function safeDateValue(source, key) {
+  const value = ownValue(source, key)
+  const date = value instanceof Date ? value : new Date(value)
+  if (value === undefined || Number.isNaN(date.getTime())) throw createError('VALIDATION_ERROR')
+  return date.toISOString()
+}
+
+function timingSnapshot(source, prefix) {
+  const statusKey = `${prefix}TimingStatus`
+  if (ownValue(source, statusKey) === undefined) return { recorded: false }
+  const status = ownValue(source, statusKey)
+  if (!['calculated', 'pending_calendar'].includes(status)) throw createError('VALIDATION_ERROR')
+  const startedAt = safeDateValue(source, `${prefix}StartedAt`)
+  const endedAt = safeDateValue(source, `${prefix}EndedAt`)
+  if (startedAt > endedAt) throw createError('VALIDATION_ERROR')
+  const result = { recorded: true, status, startedAt, endedAt }
+  if (status === 'calculated') result.workMinutes = safeIntegerValue(source, `${prefix}WorkMinutes`)
+  else {
+    if (ownValue(source, `${prefix}WorkMinutes`) !== null) throw createError('VALIDATION_ERROR')
+    result.workMinutes = null
+  }
+  return result
+}
+
+function safeVote(vote) {
+  const decision = ownValue(vote, 'decision')
+  if (!['approved', 'rejected'].includes(decision)) throw createError('VALIDATION_ERROR')
+  return {
+    reviewerDisplayName: safeText(vote, 'reviewerDisplayName', { max: 100 }),
+    decision,
+    votedAt: safeDateValue(vote, 'createdAt'),
+    responseTiming: timingSnapshot(vote, 'reviewResponse')
+  }
+}
+
+function safeTimingDetail({ line, node, round, votes = [] }) {
+  const assignmentMode = ownValue(round, 'processorAssignmentMode')
+  if (assignmentMode !== undefined && !['fixed_accounts', 'business_creator'].includes(assignmentMode)) {
+    throw createError('VALIDATION_ERROR')
+  }
+  const submittedByDisplayName = ownValue(round, 'submittedByDisplayName') === undefined
+    ? '历史未记录'
+    : safeText(round, 'submittedByDisplayName', { max: 100 })
+  const processingTiming = timingSnapshot(round, 'processingRound')
+  if (processingTiming.recorded) {
+    processingTiming.overdueWorkMinutes = safeIntegerValue(round, 'processingOverdueWorkMinutes')
+  }
+  return {
+    roundId: safeText(round, '_id', { max: 200 }),
+    businessCode: safeText(line, 'code', { max: 100 }),
+    businessName: safeText(line, 'name', { max: 200 }),
+    businessStatus: safeText(line, 'status', { max: 40 }),
+    nodeCode: safeText(node, 'nodeCode', { max: 100 }),
+    nodeName: safeText(node, 'name', { max: 200 }),
+    processingRoundNumber: safeIntegerValue(round, 'processingRoundNumber'),
+    reviewRoundNumber: safeIntegerValue(round, 'reviewRoundNumber'),
+    reviewStartedAt: safeDateValue(round, 'reviewStartedAt'),
+    submittedByDisplayName,
+    processorAssignmentMode: assignmentMode || 'historical_unknown',
+    processingTiming,
+    votes: votes.map(safeVote)
+  }
+}
+
+module.exports = {
+  normalizeOperationsQuery,
+  normalizeTimingDetailsQuery,
+  safeOperationsRow,
+  safeTimingDetail
+}

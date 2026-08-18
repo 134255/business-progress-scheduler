@@ -1,7 +1,12 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-const { normalizeOperationsQuery, safeOperationsRow } = require('../lib/operations-domain')
+const {
+  normalizeOperationsQuery,
+  normalizeTimingDetailsQuery,
+  safeOperationsRow,
+  safeTimingDetail
+} = require('../lib/operations-domain')
 
 test('运营查询采用上海自然日、最多366天并严格限制输入', () => {
   const result = normalizeOperationsQuery({
@@ -38,4 +43,57 @@ test('运营导出行只保留安全业务与节点字段', () => {
   assert.equal(row.reviewerDisplayNames, '审核人乙')
   assert.equal(row.processingRoundNumber, 2)
   assert.equal(row.reviewMode, 'all')
+})
+
+test('个人工时明细查询最多20条且游标绑定上海日期与状态', () => {
+  const query = normalizeTimingDetailsQuery({
+    startDate: '2026-01-01', endDate: '2026-12-31', status: 'completed', pageSize: 20, cursor: ''
+  }, new Date('2026-08-17T02:00:00.000Z'))
+  assert.equal(query.pageSize, 20)
+  assert.equal(query.startAt.toISOString(), '2025-12-31T16:00:00.000Z')
+  assert.throws(() => normalizeTimingDetailsQuery({ pageSize: 21 }, new Date()),
+    error => error.code === 'VALIDATION_ERROR')
+})
+
+test('个人工时明细只投影不可变显示快照且历史缺失不伪造为零', () => {
+  const detail = safeTimingDetail({
+    line: { code: 'BL-1', name: '业务一', status: 'completed' },
+    node: { nodeCode: 'BL-1-N001', name: '资料处理' },
+    round: {
+      _id: 'round-1', businessLineId: 'line-secret', nodeId: 'node-secret',
+      processingRoundNumber: 2, reviewRoundNumber: 1,
+      submittedBy: 'user-secret', submittedByDisplayName: '实际提交人',
+      processorAssignmentMode: 'business_creator', reviewStartedAt: new Date('2026-08-17T01:00:00Z'),
+      processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 95,
+      processingRoundStartedAt: new Date('2026-08-16T01:00:00Z'),
+      processingRoundEndedAt: new Date('2026-08-17T01:00:00Z'),
+      processingOverdueWorkMinutes: 5, requestKeyHash: 'secret-hash'
+    },
+    votes: [{
+      reviewerUserId: 'reviewer-secret', reviewerDisplayName: '实际投票人', decision: 'approved',
+      createdAt: new Date('2026-08-17T02:00:00Z'), reviewResponseTimingStatus: 'calculated',
+      reviewResponseWorkMinutes: 60, reviewResponseStartedAt: new Date('2026-08-17T01:00:00Z'),
+      reviewResponseEndedAt: new Date('2026-08-17T02:00:00Z'), reviewResponseHash: 'secret-hash'
+    }]
+  })
+  assert.equal(detail.roundId, 'round-1')
+  assert.equal(detail.submittedByDisplayName, '实际提交人')
+  assert.equal(detail.processorAssignmentMode, 'business_creator')
+  assert.equal(detail.processingTiming.recorded, true)
+  assert.equal(detail.processingTiming.workMinutes, 95)
+  assert.deepEqual(detail.votes.map(vote => vote.reviewerDisplayName), ['实际投票人'])
+  assert.equal(detail.votes[0].responseTiming.workMinutes, 60)
+  assert.equal(JSON.stringify(detail).includes('user-secret'), false)
+  assert.equal(JSON.stringify(detail).includes('secret-hash'), false)
+  assert.equal(JSON.stringify(detail).includes('line-secret'), false)
+
+  const legacy = safeTimingDetail({
+    line: { code: 'BL-OLD', name: '旧业务', status: 'completed' },
+    node: { nodeCode: 'BL-OLD-N001', name: '旧节点' },
+    round: { _id: 'round-old', processingRoundNumber: 1, reviewRoundNumber: 1,
+      reviewStartedAt: new Date('2026-08-17T01:00:00Z') },
+    votes: [{ reviewerDisplayName: '旧审核人', decision: 'approved', createdAt: new Date('2026-08-17T02:00:00Z') }]
+  })
+  assert.deepEqual(legacy.processingTiming, { recorded: false })
+  assert.deepEqual(legacy.votes[0].responseTiming, { recorded: false })
 })

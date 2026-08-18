@@ -285,6 +285,10 @@ function createOperationsRoutes(operationsService) {
     exportOperationsRows: ({ actor, payload }) => operationsService.exportRows({
       actor,
       query: selectProtectedPayload(payload, keys)
+    }),
+    listOperationsTimingDetails: ({ actor, payload }) => operationsService.listTimingDetails({
+      actor,
+      query: selectProtectedPayload(payload, keys)
     })
   }
 }
