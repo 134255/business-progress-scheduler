@@ -2,6 +2,7 @@
 
 Status captured: 2026-08-18 (Asia/Shanghai)
 
+- 2026-08-18 “业务发起人节点负责人及个人工时明细”Task 1 已按 TDD 完成：新版审核模板节点新增 `processorAssignmentMode: fixed_accounts | business_creator`；旧节点缺字段时稳定兼容为固定账号，发起人模式不允许保存占位处理人，未知值、访问器和继承值失败关闭。节点编辑页新增逐节点开关，开启时暂存并清空固定处理人、禁用手工选择，关闭时恢复本次编辑会话内的原选择；审核人、节点排序和其他节点不受影响；只读页展示相同来源且不能修改。RED：模板域、模板服务与小程序模板聚焦共 55 项中 49 通过、6 项按预期失败；GREEN：55/55，WXML 4/4，两个变更生产 JavaScript 语法通过。业务创建时解析实际发起人、处理/投票工时快照、日历补算、运营明细、CloudBase 索引和真实部署仍为 `unverified`；`project.config.json` 未触碰。
 - 2026-08-18 已确认“业务发起人节点负责人及个人工时明细”架构设计：每个新版模板节点独立选择固定候选处理人或业务发起人唯一处理；创建事务解析发起人并阻断同节点处理/审核角色冲突。新审核轮次将固化实际提交人、本轮处理工作分钟和负责人来源；新投票将固化实际投票人的个人响应工作分钟，未参与者不生成记录。日历缺失不阻断写入，处理轮与投票分别保存待补算边界并由 `calendarSync` 每批不超过 40 条有界恢复；旧记录显示“历史数据未记录”，不推断回填。运营看板将新增超级管理员专用的稳定分页轮次明细，保留现有指标和 CSV 语义。设计见 `docs/superpowers/specs/2026-08-18-initiator-processor-worktime-analytics-design.md`，持久决策见 `ADR-0009`，逐项 TDD 实施计划见 `docs/superpowers/plans/2026-08-18-initiator-processor-worktime-analytics.md`；实现、索引、CloudBase 部署和多账号验收当前均为 `unverified`。操作员自己的 `project.config.json` 修改继续保持未触碰。
 
 - 2026-08-18 微信开发者工具首次编译第二批次公开分享页时，精确复现 `pages/public-node-share/index.wxml` 第 22、28 行 `wx:else` 无法与同时带 `wx:if`/`wx:for` 的前置循环元素配对。TDD RED：增强 WXML 结构门禁后 4 项中 1 项失败，并准确报告上述两行；GREEN：字段和凭证列表改为外层条件 `block`、内层循环 `view`，WXML 门禁 4/4、公开分享页聚焦测试 1/1。下一步是在微信开发者工具重新编译，确认公开分享页不再出现 WXML 编译错误后继续第二批次 CloudBase 部署验收。

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 
 const {
   normalizeTemplateNode,
+  collectTemplateParticipantUserIds,
   validateTemplateForEnable,
   assertTemplateEditable
 } = require('../lib/template-domain')
@@ -42,6 +43,7 @@ test('规范化新版节点的处理人、审核人、审核模式和双 SLA，�
     name: '启动',
     description: '',
     workflowMode: 'review',
+    processorAssignmentMode: 'fixed_accounts',
     processorUserIds: ['user-1'],
     reviewerUserIds: ['reviewer-1'],
     reviewMode: 'any',
@@ -54,6 +56,61 @@ test('规范化新版节点的处理人、审核人、审核模式和双 SLA，�
       { fieldKey: 'field-date', sequence: 1, name: '日期', description: '', type: 'date', required: false, constraints: {} }
     ]
   })
+})
+
+test('负责人来源按节点独立规范化，旧节点默认固定账号且发起人模式不保留占位处理人', () => {
+  const legacyShape = normalizeTemplateNode(createNode())
+  const creatorAssigned = normalizeTemplateNode(createNode({
+    processorAssignmentMode: 'business_creator',
+    processorUserIds: []
+  }))
+
+  assert.equal(legacyShape.processorAssignmentMode, 'fixed_accounts')
+  assert.deepEqual(legacyShape.processorUserIds, ['user-1'])
+  assert.equal(creatorAssigned.processorAssignmentMode, 'business_creator')
+  assert.deepEqual(creatorAssigned.processorUserIds, [])
+  assert.deepEqual(
+    collectTemplateParticipantUserIds([creatorAssigned]),
+    ['reviewer-1'],
+    '未来发起人不能使用伪账号占位，也不能进入模板固定参与人索引'
+  )
+  assert.equal(validateTemplateForEnable(
+    { status: 'draft' },
+    [creatorAssigned],
+    ['reviewer-1']
+  ), true)
+
+  assert.throws(
+    () => normalizeTemplateNode(createNode({
+      processorAssignmentMode: 'business_creator',
+      processorUserIds: ['user-1']
+    })),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+  assert.throws(
+    () => normalizeTemplateNode(createNode({ processorAssignmentMode: 'round_robin' })),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+})
+
+test('负责人来源只接受自有数据属性，访问器或继承值不得执行或降级兼容', () => {
+  let getterCalls = 0
+  const accessorNode = createNode()
+  Object.defineProperty(accessorNode, 'processorAssignmentMode', {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      return 'business_creator'
+    }
+  })
+  assert.throws(() => normalizeTemplateNode(accessorNode), error => error.code === 'TEMPLATE_INVALID')
+  assert.equal(getterCalls, 0)
+
+  const inheritedNode = Object.assign(
+    Object.create({ processorAssignmentMode: 'business_creator' }),
+    createNode({ processorUserIds: [] })
+  )
+  assert.throws(() => normalizeTemplateNode(inheritedNode), error => error.code === 'TEMPLATE_INVALID')
 })
 
 test('拒绝无效双 SLA、审核配置、凭证规则和重复稳定键', () => {

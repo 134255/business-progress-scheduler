@@ -28,6 +28,7 @@ function newField() {
 function newNode() {
   return {
     _uiKey: nextUiKey('node'), sequence: 0, name: '', description: '', workflowMode: 'review',
+    processorAssignmentMode: 'fixed_accounts',
     processorUserIds: [], reviewerUserIds: [], reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8,
     requiresEvidence: false, allowedEvidenceTypes: [], fields: []
   }
@@ -41,6 +42,7 @@ Page({
     name: '',
     description: '',
     accountOptions: [],
+    processorAssignmentMode: 'fixed_accounts',
     processorUserIds: [],
     reviewerUserIds: [],
     reviewMode: 'any',
@@ -72,6 +74,10 @@ Page({
     const isLegacyNode = !hasOwn(node, 'workflowMode')
     const processorUserIds = clone(isLegacyNode ? (node.assigneeUserIds || []) : (node.processorUserIds || []))
     const reviewerUserIds = clone(isLegacyNode ? [] : (node.reviewerUserIds || []))
+    const processorAssignmentMode = !isLegacyNode && node.processorAssignmentMode === 'business_creator'
+      ? 'business_creator'
+      : 'fixed_accounts'
+    this.fixedProcessorUserIds = processorAssignmentMode === 'fixed_accounts' ? processorUserIds.slice() : []
     this.nodeKey = node.nodeKey
     this.uiKey = node._uiKey || node.nodeKey || nextUiKey('node')
     this.setData({
@@ -87,6 +93,7 @@ Page({
         processorSelected: processorUserIds.includes(item._id),
         reviewerSelected: reviewerUserIds.includes(item._id)
       })),
+      processorAssignmentMode,
       processorUserIds,
       reviewerUserIds,
       reviewMode: !isLegacyNode && node.reviewMode === 'all' ? 'all' : 'any',
@@ -130,6 +137,7 @@ Page({
   },
   toggleAccountRole(role, event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
+    if (role === 'processor' && this.data.processorAssignmentMode === 'business_creator') return
     const id = event && event.currentTarget && event.currentTarget.dataset.id
     if (typeof id !== 'string' || !this.data.accountOptions.some(item => item._id === id)) return
     const dataKey = role === 'processor' ? 'processorUserIds' : 'reviewerUserIds'
@@ -147,6 +155,27 @@ Page({
   },
   onProcessorToggle(event) { this.toggleAccountRole('processor', event) },
   onReviewerToggle(event) { this.toggleAccountRole('reviewer', event) },
+  onProcessorAssignmentModeChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
+    const processorAssignmentMode = event && event.detail && event.detail.value
+      ? 'business_creator'
+      : 'fixed_accounts'
+    if (processorAssignmentMode === this.data.processorAssignmentMode) return
+    if (processorAssignmentMode === 'business_creator') {
+      this.fixedProcessorUserIds = this.data.processorUserIds.slice()
+    }
+    const processorUserIds = processorAssignmentMode === 'business_creator'
+      ? []
+      : (this.fixedProcessorUserIds || []).slice()
+    this.setData({
+      processorAssignmentMode,
+      processorUserIds,
+      accountOptions: this.data.accountOptions.map(item => ({
+        ...item,
+        processorSelected: processorUserIds.includes(item._id)
+      }))
+    })
+  },
   onReviewModeChange(event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     const reviewMode = event && event.detail && event.detail.value
@@ -266,6 +295,7 @@ Page({
       name: this.data.name.trim(),
       description: this.data.description.trim(),
       workflowMode: 'review',
+      processorAssignmentMode: this.data.processorAssignmentMode,
       processorUserIds: this.data.processorUserIds.slice(),
       reviewerUserIds: this.data.reviewerUserIds.slice(),
       reviewMode: this.data.reviewMode,
@@ -289,7 +319,7 @@ Page({
       this.setData({ errorMessage: '处理与审核 SLA 必须是可精确换算为整分钟的正数小时' })
       return
     }
-    if (!node.processorUserIds.length) {
+    if (node.processorAssignmentMode === 'fixed_accounts' && !node.processorUserIds.length) {
       this.setData({ errorMessage: '请至少选择一名处理人' })
       return
     }

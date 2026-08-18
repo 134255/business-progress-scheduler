@@ -22,10 +22,18 @@
       </view>
     </view>
     <view class="field">
+      <text class="field-label">处理人来源</text>
+      <label class="assignment-mode-row">
+        <switch checked="{{processorAssignmentMode === 'business_creator'}}" disabled="{{readOnly}}" bindchange="onProcessorAssignmentModeChange" />
+        业务发起人作为本节点唯一处理人
+      </label>
+      <text class="muted" wx:if="{{processorAssignmentMode === 'business_creator'}}">创建业务时将当前业务发起人固化为唯一处理人；其他节点不受影响。</text>
+    </view>
+    <view class="field">
       <text class="field-label">处理人</text>
       <view class="option-list">
         <label wx:for="{{accountOptions}}" wx:key="_id" data-id="{{item._id}}" bindtap="onProcessorToggle">
-          <checkbox checked="{{item.processorSelected}}" disabled="{{readOnly}}" />{{item.displayName || item.username}}（@{{item.username}}）
+          <checkbox checked="{{item.processorSelected}}" disabled="{{readOnly || processorAssignmentMode === 'business_creator'}}" />{{item.displayName || item.username}}（@{{item.username}}）
         </label>
       </view>
     </view>

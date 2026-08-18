@@ -8,6 +8,10 @@ const {
 
 const DEFAULT_PROCESSING_SLA_WORK_HOURS = 22
 const DEFAULT_REVIEW_SLA_WORK_HOURS = 8
+const PROCESSOR_ASSIGNMENT_MODE = Object.freeze({
+  FIXED_ACCOUNTS: 'fixed_accounts',
+  BUSINESS_CREATOR: 'business_creator'
+})
 const ALLOWED_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
 
 function createError(code, message = code) {
@@ -22,6 +26,28 @@ function isPlainObject(value) {
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key)
+}
+
+function hasDescriptorInPrototype(object, key) {
+  let current = Object.getPrototypeOf(object)
+  while (current) {
+    if (Object.getOwnPropertyDescriptor(current, key)) return true
+    current = Object.getPrototypeOf(current)
+  }
+  return false
+}
+
+function normalizeProcessorAssignmentMode(input) {
+  const descriptor = Object.getOwnPropertyDescriptor(input, 'processorAssignmentMode')
+  if (!descriptor) {
+    if (hasDescriptorInPrototype(input, 'processorAssignmentMode')) throw createError('TEMPLATE_INVALID')
+    return PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS
+  }
+  if (!hasOwn(descriptor, 'value')) throw createError('TEMPLATE_INVALID')
+  if (![PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS, PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR].includes(descriptor.value)) {
+    throw createError('TEMPLATE_INVALID')
+  }
+  return descriptor.value
 }
 
 function requireText(value) {
@@ -78,6 +104,7 @@ function normalizeFields(fields) {
 
 function normalizeTemplateNode(input) {
   if (!isPlainObject(input)) throw createError('TEMPLATE_INVALID')
+  const processorAssignmentMode = normalizeProcessorAssignmentMode(input)
   const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
   if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
   const processingSlaWorkHours = input.processingSlaWorkHours === undefined ? DEFAULT_PROCESSING_SLA_WORK_HOURS : input.processingSlaWorkHours
@@ -92,6 +119,10 @@ function normalizeTemplateNode(input) {
   }
   const allowedEvidenceTypes = normalizeEvidenceTypes(input.allowedEvidenceTypes === undefined ? [] : input.allowedEvidenceTypes)
   if (requiresEvidence && allowedEvidenceTypes.length === 0) throw createError('TEMPLATE_INVALID')
+  const processorUserIds = assertIndexedAccountArray(normalizeAccountIds(input.processorUserIds === undefined ? [] : input.processorUserIds))
+  if (processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR && processorUserIds.length) {
+    throw createError('TEMPLATE_INVALID')
+  }
 
   return {
     nodeKey: requireText(input.nodeKey),
@@ -99,7 +130,8 @@ function normalizeTemplateNode(input) {
     name: requireText(input.name),
     description: typeof input.description === 'string' ? input.description.trim() : '',
     workflowMode: WORKFLOW_MODE,
-    processorUserIds: assertIndexedAccountArray(normalizeAccountIds(input.processorUserIds === undefined ? [] : input.processorUserIds)),
+    processorAssignmentMode,
+    processorUserIds,
     reviewerUserIds: assertIndexedAccountArray(normalizeAccountIds(input.reviewerUserIds === undefined ? [] : input.reviewerUserIds)),
     reviewMode,
     processingSlaWorkHours,
@@ -183,8 +215,12 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
       if (node.assigneeUserIds.some(id => !active.has(id))) throw createError('ASSIGNEE_INACTIVE')
       continue
     }
-    if (!node.processorUserIds.length || !node.reviewerUserIds.length) throw createError('TEMPLATE_INVALID')
-    if (node.processorUserIds.some(id => !active.has(id))) throw createError('PROCESSOR_INACTIVE')
+    if (!node.reviewerUserIds.length) throw createError('TEMPLATE_INVALID')
+    if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS && !node.processorUserIds.length) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS &&
+        node.processorUserIds.some(id => !active.has(id))) throw createError('PROCESSOR_INACTIVE')
     if (node.reviewerUserIds.some(id => !active.has(id))) throw createError('REVIEWER_INACTIVE')
     if (node.processorUserIds.some(id => node.reviewerUserIds.includes(id))) throw createError('ROLE_OVERLAP')
   }
@@ -194,6 +230,7 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
 module.exports = {
   DEFAULT_PROCESSING_SLA_WORK_HOURS,
   DEFAULT_REVIEW_SLA_WORK_HOURS,
+  PROCESSOR_ASSIGNMENT_MODE,
   ALLOWED_EVIDENCE_TYPES,
   normalizeTemplateNode,
   collectTemplateParticipantUserIds,
