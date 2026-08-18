@@ -160,6 +160,35 @@ test('终态审核时长补算使用不可变轮次区间', async () => {
   assert.equal(applied[0].calculation.minutes, 600)
 })
 
+test('审核人个人响应待补算使用该票据自己的不可变响应区间', async () => {
+  const candidate = {
+    kind: 'review_response', id: 'vote-1', reviewRoundId: 'round-1',
+    businessLineId: 'line-1', nodeId: 'node-1', reviewerUserId: 'reviewer-1',
+    startAt: new Date('2026-08-11T01:00:00Z'), endAt: new Date('2026-08-11T03:30:00Z')
+  }
+  const applied = []
+  const service = createCalendarSyncService({
+    holidayClient: { async fetchYear(year) { return { year, sourceVersion: `v${year}`, days: [] } } },
+    calendarRepository: {
+      async replaceYear() {}, async listPendingDueCandidates() { return [candidate] },
+      async applyDueCalculation(value) { applied.push(value); return true },
+      async ensurePendingCalendarWarning() { throw new Error('unexpected') }
+    },
+    workTimeService: {
+      async workingMinutesBetween(startAt, endAt) {
+        assert.deepEqual([startAt, endAt], [candidate.startAt, candidate.endAt])
+        return { status: 'calculated', minutes: 150, calendarVersion: 'calendar-response' }
+      },
+      async tryAddWorkMinutes() { throw new Error('unexpected') }
+    }
+  })
+
+  const result = await service.run({ now: new Date('2026-08-11T04:00:00Z') })
+
+  assert.equal(result.recalculation.updated, 1)
+  assert.equal(applied[0].calculation.minutes, 150)
+})
+
 test('驳回后的待补算旧处理段先修正剩余分钟再计算返工截止时间', async () => {
   const candidate = {
     kind: 'review_processing_carryover', id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',

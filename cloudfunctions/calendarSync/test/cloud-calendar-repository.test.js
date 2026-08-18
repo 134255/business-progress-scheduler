@@ -42,6 +42,22 @@ function pendingReviewTiming(startAt, endAt, { base = 0, total = 480 } = {}) {
   }
 }
 
+function pendingReviewResponse(startAt, endAt, overrides = {}) {
+  const vote = {
+    _id: 'vote-1', reviewRoundId: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    reviewerUserId: 'reviewer-1', reviewerDisplayName: '审核人一', decision: 'approved',
+    reviewResponseTimingStatus: 'pending_calendar', reviewResponseWorkMinutes: null,
+    reviewResponseCalendarVersion: null, reviewResponseStartedAt: new Date(startAt),
+    reviewResponseEndedAt: new Date(endAt), createdAt: new Date(endAt), ...overrides
+  }
+  vote.reviewResponseHash = crypto.createHash('sha256').update(JSON.stringify([
+    vote.reviewerUserId, vote.reviewerDisplayName, vote.reviewResponseTimingStatus,
+    vote.reviewResponseWorkMinutes, vote.reviewResponseCalendarVersion,
+    vote.reviewResponseStartedAt.toISOString(), vote.reviewResponseEndedAt.toISOString()
+  ])).digest('hex')
+  return vote
+}
+
 function yearDays(year) {
   const rows = []
   for (let at = Date.UTC(year, 0, 1); new Date(at).getUTCFullYear() === year; at += 86400000) {
@@ -929,4 +945,134 @@ test('处理时长候选持续满批时仍为审核时长独立游标保留进�
   assert.equal(candidates.length, 40)
   assert.equal(candidates.filter(item => item.kind === 'review_processing_carryover').length, 39)
   assert.equal(candidates.filter(item => item.kind === 'review_timing_carryover').length, 1)
+})
+
+test('个人审核响应以独立游标签发并原子回写不可变投票快照', async () => {
+  const startAt = '2026-08-11T01:00:00Z'
+  const endAt = '2026-08-11T03:30:00Z'
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-1' }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', status: 'pending_review', version: 5,
+      activeReviewRoundId: 'round-1'
+    }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending',
+      version: 1, reviewStartedAt: new Date(startAt)
+    }],
+    node_review_votes: [pendingReviewResponse(startAt, endAt)]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+
+  const candidates = await repository.listPendingDueCandidates({ limit: 40 })
+  const candidate = candidates.find(item => item.kind === 'review_response')
+  assert.ok(candidate)
+  assert.equal(candidate.reviewerUserId, 'reviewer-1')
+  assert.deepEqual([candidate.startAt, candidate.endAt], [new Date(startAt), new Date(endAt)])
+
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 150, calendarVersion: 'calendar-response' },
+    now: new Date('2026-08-11T04:00:00Z')
+  }), true)
+  const [vote] = fake.documents('node_review_votes')
+  assert.equal(vote.reviewResponseTimingStatus, 'calculated')
+  assert.equal(vote.reviewResponseWorkMinutes, 150)
+  assert.equal(vote.reviewResponseCalendarVersion, 'calendar-response')
+  assert.deepEqual(vote.reviewResponseStartedAt, new Date(startAt))
+  assert.deepEqual(vote.reviewResponseEndedAt, new Date(endAt))
+  assert.equal(typeof vote.reviewResponseHash, 'string')
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+})
+
+test('个人审核响应游标越过40条损坏票据且损坏游标失败关闭', async () => {
+  const startAt = '2026-08-11T01:00:00Z'
+  const endAt = '2026-08-11T03:00:00Z'
+  const invalid = Array.from({ length: 40 }, (_, index) => ({
+    ...pendingReviewResponse(startAt, endAt), _id: `vote-${String(index).padStart(3, '0')}`,
+    reviewResponseHash: 'tampered'
+  }))
+  const valid = pendingReviewResponse(startAt, endAt, { _id: 'vote-040' })
+  const fake = createFakeCloudDatabase({
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', status: 'pending_review', version: 5 }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending',
+      version: 1, reviewStartedAt: new Date(startAt)
+    }],
+    node_review_votes: [...invalid, valid]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+
+  assert.deepEqual((await repository.listPendingDueCandidates({ limit: 40 }))
+    .filter(item => item.kind === 'review_response'), [])
+  assert.equal((await repository.listPendingDueCandidates({ limit: 40 }))
+    .find(item => item.kind === 'review_response').id, 'vote-040')
+  fake.replace('system_settings', 'calendar-review-vote-response-cursor', {
+    _id: 'calendar-review-vote-response-cursor', kind: 'review_response', cursorId: 42, version: 1
+  })
+  await assert.rejects(repository.listPendingDueCandidates({ limit: 40 }), /cursor is invalid/)
+})
+
+test('个人审核响应游标并发只签发一次且崩溃后有限回绕', async () => {
+  const startAt = '2026-08-11T01:00:00Z'
+  const endAt = '2026-08-11T03:00:00Z'
+  const vote = pendingReviewResponse(startAt, endAt)
+  const fake = createFakeCloudDatabase({
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', status: 'pending_review', version: 5 }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending',
+      version: 1, reviewStartedAt: new Date(startAt)
+    }],
+    node_review_votes: [vote]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+
+  const concurrent = await Promise.all([
+    repository.listPendingDueCandidates({ limit: 40 }),
+    repository.listPendingDueCandidates({ limit: 40 })
+  ])
+  assert.equal(concurrent.flat().filter(item => item.id === vote._id).length, 1)
+  assert.equal(fake.metrics.maxActiveCallbacks >= 2, true)
+  assert.equal(fake.metrics.conflicts >= 1, true)
+  assert.equal(fake.metrics.retries >= 1, true)
+  assert.deepEqual((await repository.listPendingDueCandidates({ limit: 40 }))
+    .filter(item => item.kind === 'review_response'), [])
+  assert.equal((await repository.listPendingDueCandidates({ limit: 40 }))
+    .find(item => item.kind === 'review_response').id, vote._id)
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+})
+
+test('个人审核响应补算在关联版本变化时不覆盖并可写脱敏日历告警', async () => {
+  const startAt = '2026-08-11T01:00:00Z'
+  const endAt = '2026-08-11T03:00:00Z'
+  const seed = {
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-1' }],
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', status: 'pending_review', version: 5 }],
+    node_review_rounds: [{
+      _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'pending',
+      version: 1, reviewStartedAt: new Date(startAt)
+    }],
+    node_review_votes: [pendingReviewResponse(startAt, endAt)]
+  }
+  const fake = createFakeCloudDatabase(seed)
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const candidate = (await repository.listPendingDueCandidates({ limit: 40 }))
+    .find(item => item.kind === 'review_response')
+
+  assert.equal(await repository.ensurePendingCalendarWarning({
+    candidate, now: new Date('2026-08-11T04:00:00Z')
+  }), true)
+  assert.deepEqual(fake.documents('notifications').map(item => ({
+    type: item.type, audienceRole: item.audienceRole, status: item.status
+  })), [{ type: 'work_calendar_missing', audienceRole: 'super_admin', status: 'pending' }])
+
+  fake.replace('node_review_rounds', 'round-1', {
+    ...fake.documents('node_review_rounds')[0], version: 2
+  })
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 120, calendarVersion: 'calendar-a' },
+    now: new Date('2026-08-11T04:00:00Z')
+  }), false)
+  assert.equal(fake.documents('node_review_votes')[0].reviewResponseTimingStatus, 'pending_calendar')
 })

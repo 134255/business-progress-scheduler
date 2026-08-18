@@ -10,6 +10,7 @@ const WRITE_BATCH_SIZE = 20
 const REVIEW_PROCESSING_CURSOR_ID = 'calendar-review-processing-cursor'
 const REVIEW_CARRYOVER_CURSOR_ID = 'calendar-review-carryover-cursor'
 const REVIEW_TIMING_CARRYOVER_CURSOR_ID = 'calendar-review-timing-carryover-cursor'
+const REVIEW_RESPONSE_CURSOR_ID = 'calendar-review-vote-response-cursor'
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 function validDate(value) {
@@ -51,6 +52,49 @@ function processingRoundSnapshotState(round, startAt, endAt) {
       !sameDate(round.processingRoundEndedAt, endAt) ||
       processingAttributionHash(round) !== round.processingAttributionHash) return null
   return 'pending'
+}
+
+function reviewResponseHash(vote, overrides = {}) {
+  const status = overrides.status === undefined
+    ? vote && vote.reviewResponseTimingStatus
+    : overrides.status
+  const minutes = overrides.minutes === undefined
+    ? vote && vote.reviewResponseWorkMinutes
+    : overrides.minutes
+  const calendarVersion = overrides.calendarVersion === undefined
+    ? vote && vote.reviewResponseCalendarVersion
+    : overrides.calendarVersion
+  if (!vote || typeof vote.reviewerUserId !== 'string' || !DOCUMENT_ID.test(vote.reviewerUserId) ||
+      typeof vote.reviewerDisplayName !== 'string' || !vote.reviewerDisplayName.trim() ||
+      vote.reviewerDisplayName.length > 100 || !validDate(vote.reviewResponseStartedAt) ||
+      !validDate(vote.reviewResponseEndedAt)) return null
+  return crypto.createHash('sha256').update(JSON.stringify([
+    vote.reviewerUserId, vote.reviewerDisplayName, status, minutes, calendarVersion,
+    vote.reviewResponseStartedAt.toISOString(), vote.reviewResponseEndedAt.toISOString()
+  ])).digest('hex')
+}
+
+function pendingReviewResponse(vote, round) {
+  const keys = [
+    '_id', 'reviewRoundId', 'businessLineId', 'nodeId', 'reviewerUserId',
+    'reviewerDisplayName', 'decision', 'createdAt',
+    'reviewResponseTimingStatus', 'reviewResponseWorkMinutes',
+    'reviewResponseCalendarVersion', 'reviewResponseStartedAt',
+    'reviewResponseEndedAt', 'reviewResponseHash'
+  ]
+  const descriptors = keys.map(key => Object.getOwnPropertyDescriptor(vote || {}, key))
+  if (descriptors.some(descriptor => !descriptor ||
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value'))) return false
+  return Boolean(round && ['pending', 'approved', 'rejected'].includes(round.status) &&
+    typeof vote._id === 'string' && DOCUMENT_ID.test(vote._id) && validDate(vote.createdAt) &&
+    vote.reviewRoundId === round._id && vote.businessLineId === round.businessLineId &&
+    vote.nodeId === round.nodeId && ['approved', 'rejected'].includes(vote.decision) &&
+    vote.reviewResponseTimingStatus === 'pending_calendar' &&
+    vote.reviewResponseWorkMinutes === null && vote.reviewResponseCalendarVersion === null &&
+    sameDate(vote.reviewResponseStartedAt, round.reviewStartedAt) &&
+    vote.reviewResponseStartedAt.getTime() <= vote.reviewResponseEndedAt.getTime() &&
+    vote.createdAt.getTime() >= vote.reviewResponseEndedAt.getTime() &&
+    reviewResponseHash(vote) === vote.reviewResponseHash)
 }
 
 function missingDocument(error) {
@@ -165,6 +209,16 @@ function validateReviewTimingCarryoverCursor(document) {
       document.cursorId !== null &&
       (typeof document.cursorId !== 'string' || !DOCUMENT_ID.test(document.cursorId))) {
     throw new TypeError('review timing carryover cursor is invalid')
+  }
+  return { exists: true, cursorId: document.cursorId, version: document.version }
+}
+
+function validateReviewResponseCursor(document) {
+  if (!document) return { exists: false, cursorId: null, version: 0 }
+  if (document._id !== REVIEW_RESPONSE_CURSOR_ID || document.kind !== 'review_response' ||
+      safeVersion(document.version) === null || document.cursorId !== null &&
+      (typeof document.cursorId !== 'string' || !DOCUMENT_ID.test(document.cursorId))) {
+    throw new TypeError('review response cursor is invalid')
   }
   return { exists: true, cursorId: document.cursorId, version: document.version }
 }
@@ -343,13 +397,60 @@ function createCloudCalendarRepository({
   async function listPendingDueCandidates({ limit } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 40) throw new TypeError('limit must be from 1 to 40')
     const result = []
+    const responseCursor = validateReviewResponseCursor(
+      await readDocument(db, 'system_settings', REVIEW_RESPONSE_CURSOR_ID)
+    )
+    const responseCriteria = { reviewResponseTimingStatus: 'pending_calendar' }
+    if (responseCursor.cursorId !== null) responseCriteria._id = db.command.gt(responseCursor.cursorId)
+    const responseQuery = await db.collection('node_review_votes')
+      .where(responseCriteria).orderBy('_id', 'asc').limit(limit).get()
+    const responseRows = Array.isArray(responseQuery && responseQuery.data) ? responseQuery.data : []
+    const responseNextCursorId = responseRows.length ? responseRows.at(-1)._id : null
+    const responseCursorClaimed = await db.runTransaction(async transaction => {
+      const current = validateReviewResponseCursor(
+        await readDocument(transaction, 'system_settings', REVIEW_RESPONSE_CURSOR_ID)
+      )
+      if (current.exists !== responseCursor.exists || current.cursorId !== responseCursor.cursorId ||
+          current.version !== responseCursor.version) return false
+      if (!responseRows.length && responseCursor.cursorId === null) return true
+      if (current.version === Number.MAX_SAFE_INTEGER) {
+        throw new TypeError('review response cursor is invalid')
+      }
+      const data = {
+        kind: 'review_response', cursorId: responseNextCursorId,
+        version: current.version + 1, updatedAt: db.serverDate()
+      }
+      if (current.exists) {
+        await transaction.collection('system_settings').doc(REVIEW_RESPONSE_CURSOR_ID).update({ data })
+      } else {
+        await transaction.collection('system_settings').doc(REVIEW_RESPONSE_CURSOR_ID).set({ data })
+      }
+      return true
+    })
+    if (!responseCursorClaimed) return result
+    for (const vote of responseRows) {
+      const round = await readDocument(db, 'node_review_rounds', vote.reviewRoundId)
+      const node = round ? await readDocument(db, 'business_nodes', round.nodeId) : null
+      if (!pendingReviewResponse(vote, round) || !node ||
+          node.businessLineId !== round.businessLineId || safeVersion(node.version) === null ||
+          safeVersion(round.version) === null) continue
+      result.push({
+        kind: 'review_response', id: vote._id, reviewRoundId: round._id,
+        businessLineId: round.businessLineId, nodeId: round.nodeId,
+        reviewerUserId: vote.reviewerUserId, responseHash: vote.reviewResponseHash,
+        roundVersion: round.version, nodeVersion: node.version,
+        startAt: vote.reviewResponseStartedAt, endAt: vote.reviewResponseEndedAt
+      })
+    }
+    if (result.length >= limit) return result
     const carryCursor = validateCarryoverCursor(
       await readDocument(db, 'system_settings', REVIEW_CARRYOVER_CURSOR_ID)
     )
     const carryCriteria = { processingCarryoverStatus: 'pending' }
     if (carryCursor.cursorId !== null) carryCriteria._id = db.command.gt(carryCursor.cursorId)
     // 为独立的审核时长游标至少保留一个名额，避免处理时长长期满批时饥饿。
-    const carryCapacity = limit > 1 ? limit - 1 : 1
+    const carryRemaining = limit - result.length
+    const carryCapacity = carryRemaining > 1 ? carryRemaining - 1 : 1
     const carryQuery = await db.collection('node_review_rounds')
       .where(carryCriteria).orderBy('_id', 'asc').limit(carryCapacity).get()
     const carryRows = Array.isArray(carryQuery && carryQuery.data) ? carryQuery.data : []
@@ -566,8 +667,10 @@ function createCloudCalendarRepository({
     const carryoverCalculation = candidate && candidate.kind === 'review_processing_carryover'
     const reviewTimingCarryoverCalculation = candidate &&
       candidate.kind === 'review_timing_carryover'
+    const reviewResponseCalculation = candidate && candidate.kind === 'review_response'
     if (!candidate || !calculation || calculation.status !== 'calculated' ||
-        (reviewProcessingCalculation || carryoverCalculation || reviewTimingCarryoverCalculation
+        (reviewProcessingCalculation || carryoverCalculation || reviewTimingCarryoverCalculation ||
+          reviewResponseCalculation
           ? safeNonNegativeInteger(calculation.minutes) === null
           : !validDate(calculation.dueAt)) ||
         carryoverCalculation && validDate(candidate.resumeAt) &&
@@ -577,10 +680,41 @@ function createCloudCalendarRepository({
           (typeof calculation.calendarVersion !== 'string' || !calculation.calendarVersion)) || !validDate(now)) {
       throw new TypeError('valid calculated due result is required')
     }
+    if (reviewResponseCalculation &&
+        (typeof calculation.calendarVersion !== 'string' || !calculation.calendarVersion)) {
+      throw new TypeError('valid calculated due result is required')
+    }
     return db.runTransaction(async transaction => {
       const line = await readDocument(transaction, 'business_lines', candidate.businessLineId)
       if (!line || !carryoverCalculation && !reviewTimingCarryoverCalculation &&
+          !reviewResponseCalculation &&
           line.status !== 'active') return false
+      if (candidate.kind === 'review_response') {
+        const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
+        const round = await readDocument(transaction, 'node_review_rounds', candidate.reviewRoundId)
+        const vote = await readDocument(transaction, 'node_review_votes', candidate.id)
+        if (!node || !round || !vote || node.businessLineId !== line._id ||
+            round.businessLineId !== line._id || round.nodeId !== node._id ||
+            node.version !== candidate.nodeVersion || round.version !== candidate.roundVersion ||
+            vote.reviewerUserId !== candidate.reviewerUserId ||
+            vote.reviewResponseHash !== candidate.responseHash ||
+            !sameDate(vote.reviewResponseStartedAt, candidate.startAt) ||
+            !sameDate(vote.reviewResponseEndedAt, candidate.endAt) ||
+            !pendingReviewResponse(vote, round)) return false
+        const resolvedHash = reviewResponseHash(vote, {
+          status: 'calculated', minutes: calculation.minutes,
+          calendarVersion: calculation.calendarVersion
+        })
+        if (!resolvedHash) return false
+        await transaction.collection('node_review_votes').doc(vote._id).update({ data: {
+          reviewResponseTimingStatus: 'calculated',
+          reviewResponseWorkMinutes: calculation.minutes,
+          reviewResponseCalendarVersion: calculation.calendarVersion,
+          reviewResponseHash: resolvedHash,
+          reviewResponseRecalculatedAt: new Date(now)
+        } })
+        return true
+      }
       if (candidate.kind === 'processing') {
         const node = await readDocument(transaction, 'business_nodes', candidate.id)
         if (!node || node.businessLineId !== line._id || line.currentNodeId !== node._id ||
@@ -859,15 +993,21 @@ function createCloudCalendarRepository({
 
   async function ensurePendingCalendarWarning({ candidate } = {}) {
     if (!candidate || !['processing', 'review_processing', 'review_processing_carryover',
-      'review_timing_carryover'].includes(candidate.kind) || typeof candidate.id !== 'string' ||
-        typeof candidate.businessLineId !== 'string' || typeof candidate.status !== 'string' ||
-        safeVersion(candidate.version) === null) return false
+      'review_timing_carryover', 'review_response'].includes(candidate.kind) ||
+        typeof candidate.id !== 'string' ||
+        typeof candidate.businessLineId !== 'string' ||
+        (candidate.kind === 'review_response'
+          ? typeof candidate.reviewRoundId !== 'string' ||
+            typeof candidate.responseHash !== 'string' ||
+            safeVersion(candidate.roundVersion) === null || safeVersion(candidate.nodeVersion) === null
+          : typeof candidate.status !== 'string' || safeVersion(candidate.version) === null)) return false
     return db.runTransaction(async transaction => {
       const line = await readDocument(transaction, 'business_lines', candidate.businessLineId)
       const nodeId = candidate.kind === 'processing' ? candidate.id : candidate.nodeId
       const node = await readDocument(transaction, 'business_nodes', nodeId)
       if (!line || !node || node.businessLineId !== line._id ||
-          !['review_processing_carryover', 'review_timing_carryover'].includes(candidate.kind) &&
+          !['review_processing_carryover', 'review_timing_carryover', 'review_response']
+            .includes(candidate.kind) &&
           (line.status !== 'active' || line.currentNodeId !== nodeId)) return false
       if (candidate.kind === 'processing') {
         if (node.status !== candidate.status || node.version !== candidate.version ||
@@ -887,12 +1027,20 @@ function createCloudCalendarRepository({
             round.processingTimingStatus !== 'pending_calendar' ||
             round.businessLineId !== line._id || round.nodeId !== node._id ||
             !['approved', 'rejected'].includes(round.status)) return false
-      } else {
+      } else if (candidate.kind === 'review_timing_carryover') {
         const round = await readDocument(transaction, 'node_review_rounds', candidate.id)
         if (!round || !pendingReviewTimingCarryover(round) ||
             node.version !== candidate.nodeVersion || round.version !== candidate.version ||
             round.businessLineId !== line._id || round.nodeId !== node._id ||
             !['approved', 'rejected'].includes(round.status)) return false
+      } else {
+        const round = await readDocument(transaction, 'node_review_rounds', candidate.reviewRoundId)
+        const vote = await readDocument(transaction, 'node_review_votes', candidate.id)
+        if (!round || !vote || round.businessLineId !== line._id || round.nodeId !== node._id ||
+            round.version !== candidate.roundVersion || node.version !== candidate.nodeVersion ||
+            vote.reviewerUserId !== candidate.reviewerUserId ||
+            vote.reviewResponseHash !== candidate.responseHash ||
+            !pendingReviewResponse(vote, round)) return false
       }
       const warningId = calendarWarningId(line._id)
       const existing = await readDocument(transaction, 'notifications', warningId)

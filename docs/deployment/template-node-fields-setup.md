@@ -137,6 +137,7 @@
 | `node_review_votes` | `businessLineId` 升序、`nodeId` 升序、`createdAt` 升序 | 否 | 业务节点投票时间线 |
 | `node_review_votes` | `reviewRoundId` 升序、`reviewerUserId` 升序 | 是 | 每名审核人每轮唯一投票 |
 | `node_review_votes` | `reviewRoundId` 升序、`createdAt` 升序、`_id` 升序 | 否 | 审核详情投票时间线 |
+| `node_review_votes` | `reviewResponseTimingStatus` 升序、`_id` 升序 | 否 | 实际投票人个人响应工作分钟待补算扫描 |
 | `node_feedback` | `nodeId` 升序、`revision` 降序 | 否 | 节点反馈历史 |
 | `node_feedback` | `publishState` 升序、`_id` 升序 | 否 | 恢复中反馈预约扫描 |
 | `node_feedback` | `publishState` 升序、`claimExpiresAt` 升序、`_id` 升序 | 否 | 过期或恢复中反馈预约的有界扫描 |
@@ -171,6 +172,8 @@
 `calendarSync` 还会自动创建或更新 `system_settings/calendar-review-carryover-cursor`，用于有界、可回绕地扫描审核轮次的处理时长补算。该文档仅保存 `kind`、`cursorId`、`version` 和更新时间，同样不得手工伪造、删除或覆盖。该扫描依赖上表的 `node_review_rounds(processingCarryoverStatus ASC, _id ASC)` 组合索引；索引未在目标环境创建且生效前，不得启用 `calendarSync` 定时触发器。
 
 审核终态还可能保存独立的审核时长待补算边界。`calendarSync` 会自动创建或更新 `system_settings/calendar-review-timing-carryover-cursor`，只保存 `kind`、`cursorId`、`version` 和更新时间；不得手工伪造、删除或覆盖。该扫描依赖 `node_review_rounds(reviewTimingCarryoverStatus ASC, _id ASC)` 组合索引。索引创建并确认生效前，不得启用 `calendarSync` 定时触发器。
+
+每张新审核票还可能保存独立的个人响应待补算边界。`calendarSync` 会自动创建或更新 `system_settings/calendar-review-vote-response-cursor`，只保存 `kind: review_response`、`cursorId`、`version` 和更新时间，不含账号、评论或业务正文；不得手工伪造、删除或覆盖。该游标每次最多扫描 40 条 `reviewResponseTimingStatus=pending_calendar` 原始票据，损坏页仍推进、尾页回绕，并在固定文档事务内重读业务、节点、审核轮次和票据后才把个人响应状态改为 `calculated`。该扫描依赖 `node_review_votes(reviewResponseTimingStatus ASC, _id ASC)` 非唯一组合索引；索引创建并确认生效前，不得部署包含本能力的 `calendarSync` 或启用其定时触发器。
 
 ### 5.2 旧业务兼容索引
 
