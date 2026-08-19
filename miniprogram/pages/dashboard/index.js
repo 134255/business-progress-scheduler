@@ -85,7 +85,7 @@ Page({
   },
 
   openAdminOperations() {
-    if (!this.data.profile || this.data.profile.role !== 'super_admin' || this.data.profile.status !== 'active') return
+    if (!this.data.profile || this.data.profile.status !== 'active') return
     wx.navigateTo({ url: '/pages/admin-operations/index' })
   },
 

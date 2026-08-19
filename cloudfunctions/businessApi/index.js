@@ -127,6 +127,7 @@ const LOGGABLE_ERROR_CODES = new Set([
   'NOT_FOUND',
   'OPENID_ALREADY_BOUND',
   'PASSWORD_CHANGE_REQUIRED',
+  'RANGE_TOO_LARGE',
   'REJECTION_NOT_ALLOWED',
   'REVIEW_COMMENT_REQUIRED',
   'SHARE_UNAVAILABLE',
@@ -277,6 +278,11 @@ function createCalendarAdminRoutes(calendarAdminService) {
 function createOperationsRoutes(operationsService) {
   if (!operationsService) return null
   const keys = new Set(['startDate', 'endDate', 'status', 'cursor', 'pageSize'])
+  const analyticsKeys = new Set([
+    'startDate', 'endDate', 'grain', 'templateId', 'templateVersion', 'status',
+    'businessLineId', 'stableNodeId', 'processorToken', 'reviewerToken',
+    'metric', 'cursor', 'pageSize'
+  ])
   return {
     getOperationsDashboard: ({ actor, payload }) => operationsService.getDashboard({
       actor,
@@ -289,6 +295,18 @@ function createOperationsRoutes(operationsService) {
     listOperationsTimingDetails: ({ actor, payload }) => operationsService.listTimingDetails({
       actor,
       query: selectProtectedPayload(payload, keys)
+    }),
+    getOperationsAnalyticsFilters: ({ actor, payload }) => operationsService.getAnalyticsFilters({
+      actor,
+      query: selectProtectedPayload(payload, analyticsKeys)
+    }),
+    getOperationsAnalyticsSummary: ({ actor, payload }) => operationsService.getAnalyticsSummary({
+      actor,
+      query: selectProtectedPayload(payload, analyticsKeys)
+    }),
+    listOperationsAnalyticsSamples: ({ actor, payload }) => operationsService.listAnalyticsSamples({
+      actor,
+      query: selectProtectedPayload(payload, analyticsKeys)
     })
   }
 }

@@ -1,53 +1,91 @@
 <view class="page">
-  <view class="section-title">运营看板</view>
-  <view class="card filters">
-    <view class="row-between"><text>开始日期</text><picker mode="date" value="{{startDate}}" bindchange="onStartDateChange"><text>{{startDate}}</text></picker></view>
-    <view class="row-between"><text>结束日期</text><picker mode="date" value="{{endDate}}" bindchange="onEndDateChange"><text>{{endDate}}</text></picker></view>
-    <view class="row-between"><text>业务状态</text><picker mode="selector" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatusChange"><text>{{statusOptions[statusIndex].label}}</text></picker></view>
-    <button class="secondary-button" bindtap="applyRange" disabled="{{loading}}" loading="{{loading}}">应用日期范围</button>
-  </view>
-  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
-  <view class="metrics">
-    <view class="card metric"><text class="value">{{stats.businesses || 0}}</text><text>业务总数</text></view>
-    <view class="card metric"><text class="value">{{stats.active || 0}}</text><text>进行中</text></view>
-    <view class="card metric"><text class="value">{{stats.completed || 0}}</text><text>已完成</text></view>
-    <view class="card metric"><text class="value">{{stats.frozen || 0}}</text><text>其他冻结终态</text></view>
-    <view class="card metric"><text class="value">{{stats.pendingProcessing || 0}}</text><text>待处理</text></view>
-    <view class="card metric"><text class="value">{{stats.pendingReview || 0}}</text><text>待审核</text></view>
-    <view class="card metric"><text class="value">{{stats.overdueProcessing || 0}}</text><text>处理逾期</text></view>
-    <view class="card metric"><text class="value">{{stats.overdueReview || 0}}</text><text>审核逾期</text></view>
-    <view class="card metric"><text class="value">{{stats.pendingCalendar || 0}}</text><text>日历待补算</text></view>
-  </view>
-  <button class="primary-button" bindtap="exportCsv" loading="{{exporting}}" disabled="{{exporting}}">导出 CSV</button>
+  <view class="section-title">运营统计看板</view>
 
-  <view class="section-title timing-title">节点处理时间明细</view>
-  <view wx:if="{{timingError}}" class="error">{{timingError}}</view>
-  <view wx:if="{{timingLoading && !timingItems.length}}" class="empty">正在加载个人工时明细…</view>
-  <view wx:elif="{{!timingItems.length && !timingError}}" class="empty">当前范围暂无个人工时记录</view>
-  <view wx:else>
-    <view class="card timing-card" wx:for="{{timingItems}}" wx:key="roundId">
-      <view class="row-between timing-heading">
-        <view>
-          <view class="timing-business">{{item.businessCode}} · {{item.businessName}}</view>
-          <view class="muted">{{item.nodeCode}} · {{item.nodeName}}</view>
+  <view wx:if="{{isAdmin && currentStats}}" class="card current-card">
+    <view class="card-title">当前运营状态</view>
+    <view class="current-grid">
+      <view><text>{{currentStats.businesses}}</text><text>业务总数</text></view>
+      <view><text>{{currentStats.active}}</text><text>进行中</text></view>
+      <view><text>{{currentStats.completed}}</text><text>已完成</text></view>
+      <view><text>{{currentStats.pendingProcessing}}</text><text>待处理</text></view>
+      <view><text>{{currentStats.pendingReview}}</text><text>待审核</text></view>
+      <view><text>{{currentStats.pendingCalendar}}</text><text>待补算</text></view>
+    </view>
+  </view>
+
+  <view class="card filters">
+    <view class="filter-row"><text>统计模板</text><picker mode="selector" range="{{templateOptions}}" range-key="label" value="{{templateIndex}}" bindchange="onTemplateChange"><text>{{templateOptions[templateIndex].label || '暂无模板'}}</text></picker></view>
+    <view class="filter-row"><text>日期范围</text><view><picker class="inline-picker" mode="date" value="{{startDate}}" bindchange="onStartDateChange"><text>{{startDate}}</text></picker><text> 至 </text><picker class="inline-picker" mode="date" value="{{endDate}}" bindchange="onEndDateChange"><text>{{endDate}}</text></picker></view></view>
+    <view class="filter-row"><text>时间粒度</text><picker mode="selector" range="{{grainOptions}}" range-key="label" value="{{grainIndex}}" bindchange="onGrainChange"><text>{{grainOptions[grainIndex].label}}</text></picker></view>
+    <view class="advanced-link" bindtap="toggleAdvanced">{{advancedOpen ? '收起高级筛选' : '展开高级筛选'}}{{advancedFilterLabel}}</view>
+    <view wx:if="{{advancedOpen}}" class="advanced-box">
+      <view class="filter-row"><text>模板版本</text><picker mode="selector" range="{{versionOptions}}" range-key="label" value="{{versionIndex}}" bindchange="onVersionChange"><text>{{versionOptions[versionIndex].label}}</text></picker></view>
+      <view class="filter-row"><text>业务状态</text><picker mode="selector" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatusChange"><text>{{statusOptions[statusIndex].label}}</text></picker></view>
+      <view class="filter-row"><text>稳定节点</text><picker mode="selector" range="{{nodeOptions}}" range-key="label" value="{{nodeIndex}}" bindchange="onNodeChange"><text>{{nodeOptions[nodeIndex].label}}</text></picker></view>
+      <view class="filter-row"><text>业务明细</text><picker mode="selector" range="{{businessOptions}}" range-key="label" value="{{businessIndex}}" bindchange="onBusinessChange"><text>{{businessOptions[businessIndex].label}}</text></picker></view>
+      <view class="filter-row"><text>实际处理人</text><picker mode="selector" range="{{processorOptions}}" range-key="label" value="{{processorIndex}}" bindchange="onProcessorChange"><text>{{processorOptions[processorIndex].label}}</text></picker></view>
+      <view class="filter-row"><text>实际审核人</text><picker mode="selector" range="{{reviewerOptions}}" range-key="label" value="{{reviewerIndex}}" bindchange="onReviewerChange"><text>{{reviewerOptions[reviewerIndex].label}}</text></picker></view>
+    </view>
+    <button class="primary-button" bindtap="applyFilters" loading="{{loading}}" disabled="{{loading || !templateOptions.length}}">生成统计图表</button>
+    <button wx:if="{{isAdmin}}" class="secondary-button" bindtap="exportCsv" loading="{{exporting}}" disabled="{{exporting}}">导出 CSV</button>
+  </view>
+
+  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view wx:if="{{summary}}">
+    <view class="notice">{{summary.scopeNotice}}</view>
+    <view class="metric-grid">
+      <view class="card metric-card"><text class="metric-value">{{summary.businessCompletionLabel}}</text><text>平均业务完成工时</text><text class="sample-note">{{summary.businessCompletionSampleLabel}}</text></view>
+      <view class="card metric-card"><text class="metric-value">{{summary.nodeProcessingLabel}}</text><text>每业务节点处理合计</text><text class="sample-note">{{summary.nodeProcessingSampleLabel}}</text></view>
+      <view class="card metric-card"><text class="metric-value">{{summary.reviewLabel}}</text><text>每业务审核合计</text><text class="sample-note">{{summary.reviewSampleLabel}}</text></view>
+    </view>
+
+    <view class="section-title">模板节点历史对比</view>
+    <view wx:if="{{!nodeSeries.length}}" class="empty">当前筛选范围暂无有效节点样本</view>
+    <scroll-view wx:else scroll-x="true" enhanced="true" class="node-chart-scroll">
+      <view class="node-chart-strip">
+        <view class="card chart-card node-chart-card" wx:for="{{nodeSeries}}" wx:key="stableNodeId">
+          <view class="node-title">{{index + 1}}. {{item.nodeName}}</view>
+          <view class="bar-row" data-node-id="{{item.stableNodeId}}" data-metric="node_processing" bindtap="openSamples">
+            <text class="bar-label">处理</text><view class="bar-track"><view class="bar processing-bar" style="width: {{item.processingWidth}}"></view></view><text class="bar-value">{{item.processingLabel}}</text>
+          </view>
+          <view class="bar-row" data-node-id="{{item.stableNodeId}}" data-metric="node_review" bindtap="openSamples">
+            <text class="bar-label">审核</text><view class="bar-track"><view class="bar review-bar" style="width: {{item.reviewWidth}}"></view></view><text class="bar-value">{{item.reviewLabel}}</text>
+          </view>
+          <view class="sample-note">处理样本 {{item.processing.sampleCount}} · 审核样本 {{item.review.sampleCount}}</view>
         </view>
-        <button class="link-button" size="mini" data-round-id="{{item.roundId}}" bindtap="toggleTimingDetail">{{item.expanded ? '收起' : '展开'}}</button>
       </view>
-      <view class="timing-line">处理轮次 {{item.processingRoundNumber}} · 审核轮次 {{item.reviewRoundNumber}}</view>
-      <view class="timing-line">实际提交人：{{item.submittedByDisplayName}}</view>
-      <view class="timing-line">负责人来源：{{item.assignmentModeLabel}}</view>
-      <view class="timing-line">本轮处理：{{item.processingTimingLabel}}</view>
-      <view class="timing-line">本轮提交审核：{{item.reviewStartedAtLabel}}</view>
-      <view wx:if="{{item.expanded}}" class="timing-detail">
-        <view class="timing-line">提交时累计逾期：{{item.processingOverdueLabel}}</view>
-        <view wx:if="{{!item.votes.length}}" class="muted">本轮尚无实际投票记录</view>
-        <view class="vote-row" wx:for="{{item.votes}}" wx:for-item="vote" wx:key="voteKey">
-          <view>{{vote.reviewerDisplayName}} · {{vote.decisionLabel}}</view>
-          <view class="muted">响应工时：{{vote.responseTimingLabel}}</view>
-          <view class="muted">投票时间：{{vote.votedAtLabel}}</view>
+    </scroll-view>
+
+    <view class="section-title">处理与审核历史趋势</view>
+    <view wx:if="{{!trendSeries.length}}" class="empty">当前筛选范围暂无有效趋势样本</view>
+    <view class="card trend-chart" wx:for="{{trendSeries}}" wx:key="bucket">
+      <view class="node-title">{{item.bucket}}</view>
+      <view class="bar-row"><text class="bar-label">处理</text><view class="bar-track"><view class="bar processing-bar" style="width: {{item.processingWidth}}"></view></view><text class="bar-value">{{item.processingLabel}}</text></view>
+      <view class="bar-row"><text class="bar-label">审核</text><view class="bar-track"><view class="bar review-bar" style="width: {{item.reviewWidth}}"></view></view><text class="bar-value">{{item.reviewLabel}}</text></view>
+    </view>
+  </view>
+
+  <view wx:if="{{sampleLoading}}" class="empty">正在加载权限范围内的业务明细…</view>
+  <view wx:if="{{samples}}" class="card sample-panel">
+    <view class="sample-heading"><text>{{sampleTitle}}</text><text class="advanced-link" bindtap="closeSamples">关闭</text></view>
+    <view class="statistics">有效样本 {{samples.globalSampleCount}} · 当前可见 {{samples.visibleSampleCount}}</view>
+    <view class="statistics">平均 {{samples.statistics.averageLabel}} · 中位数 {{samples.statistics.medianLabel}} · 最小 {{samples.statistics.minimumLabel}} · 最大 {{samples.statistics.maximumLabel}}</view>
+    <view class="statistics">待日历补算 {{samples.statistics.pendingCount}} · 历史未记录 {{samples.statistics.unrecordedCount}}</view>
+    <view wx:if="{{samples.visibilityNotice}}" class="notice">{{samples.visibilityNotice}}</view>
+    <view wx:if="{{!samples.items.length}}" class="empty">当前账号没有可下钻的业务明细</view>
+    <view class="sample-row" wx:for="{{samples.items}}" wx:key="businessCode">
+      <view data-index="{{index}}" bindtap="toggleSampleItem">
+        <view><text class="node-title">{{item.businessCode}}</text> · {{item.businessName}}</view>
+        <view>{{item.completedDay}} · {{item.workMinutesLabel}} · {{item.expanded ? '收起轮次' : '展开轮次'}}</view>
+      </view>
+      <view wx:if="{{item.expanded}}" class="round-list">
+        <view class="round-row" wx:for="{{item.rounds}}" wx:for-item="round" wx:for-index="roundIndex" wx:key="roundIndex">
+          <view>处理第 {{round.processingRoundNumber}} 轮 / 审核第 {{round.reviewRoundNumber}} 轮 · {{round.status}}</view>
+          <view>实际提交人：{{round.submittedByDisplayName}} · 处理 {{round.processingWorkMinutesLabel}} · 审核 {{round.reviewWorkMinutesLabel}}</view>
+          <view wx:for="{{round.votes}}" wx:for-item="vote" wx:for-index="voteIndex" wx:key="voteIndex">{{vote.reviewerDisplayName}} · {{vote.decision}} · 响应 {{vote.responseWorkMinutesLabel}}</view>
         </view>
       </view>
     </view>
-    <button wx:if="{{timingHasMore}}" class="secondary-button" bindtap="loadMoreTiming" loading="{{timingLoadingMore}}" disabled="{{timingLoadingMore}}">加载更多</button>
+    <button wx:if="{{samples.hasMore}}" class="secondary-button" bindtap="loadMoreSamples" loading="{{sampleLoading}}" disabled="{{sampleLoading}}">继续加载业务明细</button>
   </view>
 </view>

@@ -1,5 +1,5 @@
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
-const { normalizeOperationsQuery, normalizeTimingDetailsQuery } = require('./operations-domain')
+const { normalizeOperationsQuery, normalizeAnalyticsQuery, normalizeTimingDetailsQuery } = require('./operations-domain')
 
 function createError(code) {
   const error = new Error(code)
@@ -13,6 +13,9 @@ function createOperationsService({ repository, clock = () => new Date() }) {
   function requireAdmin(actor) {
     if (!actor || actor.status !== 'active' || actor.role !== 'super_admin') throw createError('FORBIDDEN')
   }
+  function requireActive(actor) {
+    if (!actor || actor.status !== 'active' || typeof actor._id !== 'string' || !actor._id) throw createError('FORBIDDEN')
+  }
   async function getDashboard({ actor, query = {} }) {
     requireAdmin(actor)
     return repository.getDashboard({ actor, range: normalizeOperationsQuery(query, clock()) })
@@ -25,7 +28,26 @@ function createOperationsService({ repository, clock = () => new Date() }) {
     requireAdmin(actor)
     return repository.listTimingDetails({ actor, range: normalizeTimingDetailsQuery(query, clock()) })
   }
-  return { getDashboard, exportRows, listTimingDetails }
+  async function getAnalyticsFilters({ actor, query = {} }) {
+    requireActive(actor)
+    return repository.getAnalyticsFilters({ actor, range: normalizeAnalyticsQuery(query, clock()) })
+  }
+  async function getAnalyticsSummary({ actor, query = {} }) {
+    requireActive(actor)
+    return repository.getAnalyticsSummary({ actor, range: normalizeAnalyticsQuery(query, clock()) })
+  }
+  async function listAnalyticsSamples({ actor, query = {} }) {
+    requireActive(actor)
+    return repository.listAnalyticsSamples({ actor, range: normalizeAnalyticsQuery(query, clock()) })
+  }
+  return {
+    getDashboard,
+    exportRows,
+    listTimingDetails,
+    getAnalyticsFilters,
+    getAnalyticsSummary,
+    listAnalyticsSamples
+  }
 }
 
 module.exports = { createOperationsService }

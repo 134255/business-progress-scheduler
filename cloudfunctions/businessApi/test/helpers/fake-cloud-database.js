@@ -197,7 +197,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       },
       async get() {
         rejectTransactionQuery('get')
-        queryCalls.push({ collection: name, criteria: clone(criteria), order: clone(order), limit: maximum })
+        queryCalls.push({ collection: name, criteria: clone(criteria), order: clone(order), offset, limit: maximum })
         let result = [...documents(name, targetState).values()].filter(document => matches(document, criteria))
         for (const [field, direction] of order.slice().reverse()) {
           result.sort((left, right) => {

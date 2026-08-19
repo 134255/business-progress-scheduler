@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 
 const {
   normalizeOperationsQuery,
+  normalizeAnalyticsQuery,
   normalizeTimingDetailsQuery,
   safeOperationsRow,
   safeTimingDetail
@@ -96,4 +97,24 @@ test('个人工时明细只投影不可变显示快照且历史缺失不伪造�
   })
   assert.deepEqual(legacy.processingTiming, { recorded: false })
   assert.deepEqual(legacy.votes[0].responseTiming, { recorded: false })
+})
+
+test('历史统计查询严格接纳模板、粒度和不透明人员令牌', () => {
+  const token = 'a'.repeat(64)
+  const query = normalizeAnalyticsQuery({
+    startDate: '2026-08-01', endDate: '2026-08-19', grain: 'week',
+    templateId: 'template-1', templateVersion: 2, status: 'completed',
+    stableNodeId: 'node-key-1', processorToken: token, pageSize: 20
+  }, new Date('2026-08-19T02:00:00.000Z'))
+  assert.equal(query.grain, 'week')
+  assert.equal(query.templateId, 'template-1')
+  assert.equal(query.templateVersion, 2)
+  assert.equal(query.processorToken, token)
+  assert.equal(query.startAt.toISOString(), '2026-07-31T16:00:00.000Z')
+  assert.throws(() => normalizeAnalyticsQuery({ templateId: 'template-1', actorId: 'secret' }, new Date()),
+    error => error.code === 'VALIDATION_ERROR')
+  assert.throws(() => normalizeAnalyticsQuery({ templateId: 'template-1', processorToken: 'user-id' }, new Date()),
+    error => error.code === 'VALIDATION_ERROR')
+  assert.throws(() => normalizeAnalyticsQuery({ templateId: 'template-1', grain: 'quarter' }, new Date()),
+    error => error.code === 'VALIDATION_ERROR')
 })

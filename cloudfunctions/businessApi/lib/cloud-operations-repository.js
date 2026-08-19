@@ -8,6 +8,8 @@ const ACCOUNT_QUERY_CHUNK = 20
 const TIMING_SCAN_LIMIT = 100
 const TIMING_VOTE_LIMIT = 100
 const TIMING_CURSOR_VERSION = 1
+const MAX_ANALYTICS_FACTS = 2000
+const MAX_ANALYTICS_ROLLUPS = 20000
 
 function createError(code) {
   const error = new Error(code)
@@ -42,6 +44,15 @@ function createCloudOperationsRepository({ db }) {
     })
   }
 
+  async function requireCurrentActor(actor) {
+    if (!actor || typeof actor._id !== 'string') throw createError('FORBIDDEN')
+    const current = await readDocument(db, 'users', actor._id)
+    if (!current || current.status !== 'active' || !['user', 'super_admin'].includes(current.role)) {
+      throw createError('FORBIDDEN')
+    }
+    return current
+  }
+
   async function readAll(buildQuery, limit = MAX_ROWS + 1) {
     const items = []
     for (let offset = 0; items.length < limit; offset += PAGE_SIZE) {
@@ -49,6 +60,49 @@ function createCloudOperationsRepository({ db }) {
       const page = result.data || []
       items.push(...page)
       if (page.length < PAGE_SIZE) break
+    }
+    return items
+  }
+
+  function assertAnalyticsKey(row) {
+    if (!row || typeof row._id !== 'string' || !row._id || row._id.length > 200 ||
+        typeof row.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(row.day)) {
+      throw createError('VALIDATION_ERROR')
+    }
+  }
+
+  async function readAnalyticsDayRange(collectionName, baseWhere, range, limit) {
+    const items = []
+    let cursor = null
+    while (items.length < limit) {
+      const pageLimit = Math.min(PAGE_SIZE, limit - items.length)
+      let page = []
+      if (!cursor) {
+        const result = await db.collection(collectionName).where({
+          ...baseWhere,
+          day: db.command.and(db.command.gte(range.startDate), db.command.lte(range.endDate))
+        }).orderBy('day', 'asc').orderBy('_id', 'asc').limit(pageLimit).get()
+        page = result.data || []
+      } else {
+        const sameDayResult = await db.collection(collectionName).where({
+          ...baseWhere,
+          day: cursor.day,
+          _id: db.command.gt(cursor.id)
+        }).orderBy('day', 'asc').orderBy('_id', 'asc').limit(pageLimit).get()
+        page = sameDayResult.data || []
+        if (page.length < pageLimit) {
+          const laterResult = await db.collection(collectionName).where({
+            ...baseWhere,
+            day: db.command.and(db.command.gt(cursor.day), db.command.lte(range.endDate))
+          }).orderBy('day', 'asc').orderBy('_id', 'asc').limit(pageLimit - page.length).get()
+          page.push(...(laterResult.data || []))
+        }
+      }
+      for (const row of page) assertAnalyticsKey(row)
+      items.push(...page)
+      if (page.length < pageLimit) break
+      const last = page.at(-1)
+      cursor = { day: last.day, id: last._id }
     }
     return items
   }
@@ -333,7 +387,401 @@ function createCloudOperationsRepository({ db }) {
     }
   }
 
-  return { getDashboard, exportRows, listTimingDetails }
+  function average(totalMinutes, sampleCount) {
+    return sampleCount ? Math.round(totalMinutes * 10 / sampleCount) / 10 : null
+  }
+
+  function analyticsMetric(rows) {
+    if (rows.some(row => Object.hasOwn(row, 'sampleCount'))) {
+      const result = { sampleCount: 0, totalMinutes: 0, pendingCount: 0, unrecordedCount: 0 }
+      for (const row of rows) {
+        for (const key of Object.keys(result)) {
+          if (!Number.isSafeInteger(row[key]) || row[key] < 0 || result[key] > Number.MAX_SAFE_INTEGER - row[key]) {
+            throw createError('VALIDATION_ERROR')
+          }
+          result[key] += row[key]
+        }
+      }
+      return { ...result, averageMinutes: average(result.totalMinutes, result.sampleCount) }
+    }
+    const calculated = rows.filter(row => row.timingStatus === 'calculated' &&
+      Number.isSafeInteger(row.workMinutes) && row.workMinutes >= 0)
+    let totalMinutes = 0
+    for (const row of calculated) {
+      if (totalMinutes > Number.MAX_SAFE_INTEGER - row.workMinutes) throw createError('VALIDATION_ERROR')
+      totalMinutes += row.workMinutes
+    }
+    return {
+      sampleCount: calculated.length,
+      totalMinutes,
+      averageMinutes: average(totalMinutes, calculated.length),
+      pendingCount: rows.filter(row => row.timingStatus === 'pending_calendar').length,
+      unrecordedCount: rows.filter(row => row.timingStatus === 'historical_unrecorded').length
+    }
+  }
+
+  function analyticsBucket(day, grain) {
+    if (grain === 'day') return day
+    if (grain === 'month') return day.slice(0, 7)
+    const date = new Date(`${day}T00:00:00.000Z`)
+    const weekday = date.getUTCDay()
+    date.setUTCDate(date.getUTCDate() - (weekday === 0 ? 6 : weekday - 1))
+    return date.toISOString().slice(0, 10)
+  }
+
+  function factMatchesDimension(fact, range) {
+    if (fact.metric === 'node_processing' && range.processorToken) {
+      return fact.dimensionRole === 'processor' && fact.dimensionFilterToken === range.processorToken
+    }
+    if (['node_review', 'review_response'].includes(fact.metric) && range.reviewerToken) {
+      return fact.dimensionRole === 'reviewer' && fact.dimensionFilterToken === range.reviewerToken
+    }
+    return fact.dimensionRole === 'global'
+  }
+
+  async function readAnalyticsFacts(range, { allDimensions = false } = {}) {
+    if (!range.templateId) return []
+    const facts = await readAnalyticsDayRange('operations_analytics_facts', {
+      templateId: range.templateId
+    }, range, MAX_ANALYTICS_FACTS + 1)
+    if (facts.length > MAX_ANALYTICS_FACTS) throw createError('RANGE_TOO_LARGE')
+    let allowedLineIds = null
+    if (range.status) {
+      const lineMap = await readAnalyticsLines(facts.map(fact => fact.businessLineId))
+      allowedLineIds = new Set([...lineMap.values()].filter(line => line.status === range.status).map(line => line._id))
+    }
+    return facts.filter(fact =>
+      fact.day >= range.startDate && fact.day <= range.endDate &&
+      fact.templateId === range.templateId &&
+      (range.templateVersion === null || fact.templateVersion === range.templateVersion) &&
+      (!range.businessLineId || fact.businessLineId === range.businessLineId) &&
+      (!range.stableNodeId || fact.stableNodeId === range.stableNodeId) &&
+      (!range.metric || fact.metric === range.metric) &&
+      (!allowedLineIds || allowedLineIds.has(fact.businessLineId)) &&
+      (allDimensions || factMatchesDimension(fact, range)))
+  }
+
+  async function readAnalyticsRollupRole(range, dimensionRole, dimensionFilterToken = '') {
+    const rows = await readAnalyticsDayRange('operations_analytics_daily', {
+      templateId: range.templateId,
+      dimensionRole,
+      ...(dimensionFilterToken ? { dimensionFilterToken } : {})
+    }, range, MAX_ANALYTICS_ROLLUPS + 1)
+    if (rows.length > MAX_ANALYTICS_ROLLUPS) throw createError('RANGE_TOO_LARGE')
+    return rows
+  }
+
+  async function readAnalyticsRollups(range) {
+    const rows = await readAnalyticsRollupRole(range, 'global')
+    if (range.processorToken) rows.push(...await readAnalyticsRollupRole(range, 'processor', range.processorToken))
+    if (range.reviewerToken) rows.push(...await readAnalyticsRollupRole(range, 'reviewer', range.reviewerToken))
+    return rows.filter(row =>
+      row.day >= range.startDate && row.day <= range.endDate && row.templateId === range.templateId &&
+      (range.templateVersion === null || row.templateVersion === range.templateVersion) &&
+      (!range.stableNodeId || row.stableNodeId === range.stableNodeId) &&
+      (!range.metric || row.metric === range.metric) && factMatchesDimension(row, range))
+  }
+
+  function safeTemplate(template) {
+    return template && typeof template._id === 'string' && typeof template.name === 'string' && template.name.trim()
+      ? { templateId: template._id, templateName: template.name.trim() }
+      : null
+  }
+
+  async function getAnalyticsFilters({ actor, range }) {
+    const currentActor = await requireCurrentActor(actor)
+    const templateResult = await db.collection('templates').orderBy('name', 'asc').orderBy('_id', 'asc').limit(101).get()
+    const templates = templateResult.data || []
+    if (templates.length > 100) throw createError('RANGE_TOO_LARGE')
+    const facts = range.templateId
+      ? await readAnalyticsFacts({ ...range, metric: '', stableNodeId: '', businessLineId: '' }, { allDimensions: true })
+      : []
+    const people = new Map()
+    const nodes = new Map()
+    const versions = new Set()
+    const businessIds = new Set()
+    for (const fact of facts) {
+      if (typeof fact.businessLineId === 'string' && fact.businessLineId) businessIds.add(fact.businessLineId)
+      if (Number.isSafeInteger(fact.templateVersion)) versions.add(fact.templateVersion)
+      if (fact.stableNodeId && typeof fact.nodeName === 'string' && Number.isSafeInteger(fact.nodeSequence)) {
+        nodes.set(fact.stableNodeId, {
+          stableNodeId: fact.stableNodeId,
+          nodeName: fact.nodeName,
+          sequence: fact.nodeSequence
+        })
+      }
+      if (['processor', 'reviewer'].includes(fact.dimensionRole) &&
+          /^[a-f0-9]{64}$/.test(fact.dimensionFilterToken || '') &&
+          typeof fact.dimensionDisplayName === 'string' && fact.dimensionDisplayName.trim()) {
+        people.set(`${fact.dimensionRole}:${fact.dimensionFilterToken}`, {
+          token: fact.dimensionFilterToken,
+          displayName: fact.dimensionDisplayName.trim(), role: fact.dimensionRole,
+          userId: fact.dimensionUserId
+        })
+      }
+    }
+    const userMap = await readAnalyticsUsers([...people.values()].map(person => person.userId))
+    for (const [key, person] of people) {
+      const user = typeof person.userId === 'string' ? userMap.get(person.userId) : null
+      if (!user || user.status !== 'active') people.delete(key)
+    }
+    const businesses = []
+    const businessMap = await readAnalyticsLines([...businessIds])
+    for (const id of businessIds) {
+      const line = businessMap.get(id)
+      if (!line || !canReadAnalyticsLine(currentActor, line)) continue
+      const currentLine = await finalAuthorizedAnalyticsLine(actor, id)
+      if (!currentLine || typeof currentLine.code !== 'string' || typeof currentLine.name !== 'string') continue
+      businesses.push({ businessLineId: currentLine._id, businessCode: currentLine.code, businessName: currentLine.name })
+    }
+    await requireCurrentActor(actor)
+    const allPeople = [...people.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh-CN'))
+    return {
+      templates: templates.map(safeTemplate).filter(Boolean),
+      templateVersions: [...versions].sort((a, b) => b - a),
+      stableNodes: [...nodes.values()].sort((a, b) => a.sequence - b.sequence || a.stableNodeId.localeCompare(b.stableNodeId)),
+      businesses: businesses.sort((a, b) => a.businessCode.localeCompare(b.businessCode)),
+      processors: allPeople.filter(item => item.role === 'processor').map(({ role, userId, ...item }) => item),
+      reviewers: allPeople.filter(item => item.role === 'reviewer').map(({ role, userId, ...item }) => item)
+    }
+  }
+
+  async function getAnalyticsSummary({ actor, range }) {
+    const currentActor = await requireCurrentActor(actor)
+    await requireAnalyticsBusinessAccess(currentActor, range.businessLineId)
+    const facts = !range.status && !range.businessLineId
+      ? await readAnalyticsRollups(range)
+      : await readAnalyticsFacts(range)
+    const nodeMap = new Map()
+    for (const fact of facts.filter(item => ['node_processing', 'node_review'].includes(item.metric))) {
+      const key = fact.stableNodeId
+      const current = nodeMap.get(key) || {
+        stableNodeId: key,
+        nodeName: typeof fact.nodeName === 'string' ? fact.nodeName : '历史节点',
+        sequence: Number.isSafeInteger(fact.nodeSequence) ? fact.nodeSequence : Number.MAX_SAFE_INTEGER,
+        processingRows: [], reviewRows: []
+      }
+      current[fact.metric === 'node_processing' ? 'processingRows' : 'reviewRows'].push(fact)
+      nodeMap.set(key, current)
+    }
+    const nodeSeries = [...nodeMap.values()].sort((a, b) => a.sequence - b.sequence || a.stableNodeId.localeCompare(b.stableNodeId))
+      .map(({ processingRows, reviewRows, ...node }) => ({
+        ...node,
+        processing: analyticsMetric(processingRows),
+        review: analyticsMetric(reviewRows)
+      }))
+    const businessCompletionRows = facts.filter(item => item.metric === 'business_completion')
+    const hasBusinessTotals = facts.some(item => item.metric === 'business_node_processing_total')
+    const processingTrendMetric = range.stableNodeId || !hasBusinessTotals ? 'node_processing' : 'business_node_processing_total'
+    const reviewTrendMetric = range.stableNodeId || !hasBusinessTotals ? 'node_review' : 'business_review_total'
+    const buckets = new Map()
+    for (const fact of facts.filter(item => [processingTrendMetric, reviewTrendMetric].includes(item.metric))) {
+      const bucket = analyticsBucket(fact.day, range.grain)
+      if (!buckets.has(bucket)) buckets.set(bucket, { processingRows: [], reviewRows: [] })
+      buckets.get(bucket)[fact.metric === processingTrendMetric ? 'processingRows' : 'reviewRows'].push(fact)
+    }
+    await requireCurrentActor(actor)
+    return {
+      scopeNotice: '全局汇总可见；业务明细仍按当前账号权限过滤',
+      templateMetrics: {
+        businessCompletion: analyticsMetric(businessCompletionRows),
+        nodeProcessingPerBusiness: analyticsMetric(facts.filter(item => item.metric === 'business_node_processing_total')),
+        reviewPerBusiness: analyticsMetric(facts.filter(item => item.metric === 'business_review_total'))
+      },
+      nodeSeries,
+      trendSeries: [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([bucket, rows]) => ({
+        bucket,
+        processing: analyticsMetric(rows.processingRows),
+        review: analyticsMetric(rows.reviewRows)
+      }))
+    }
+  }
+
+  function canReadAnalyticsLine(actor, line) {
+    if (actor.role === 'super_admin') return true
+    const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
+    const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
+    return Boolean(managers && members && (managers.includes(actor._id) || members.includes(actor._id)))
+  }
+
+  async function requireAnalyticsBusinessAccess(actor, businessLineId) {
+    if (!businessLineId) return null
+    const line = await finalAuthorizedAnalyticsLine(actor, businessLineId)
+    if (!line) throw createError('FORBIDDEN')
+    return line
+  }
+
+  async function finalAuthorizedAnalyticsLine(actor, businessLineId) {
+    return db.runTransaction(async transaction => {
+      const current = await readDocument(transaction, 'users', actor._id)
+      const line = await readDocument(transaction, 'business_lines', businessLineId)
+      if (!current || current.status !== 'active' || !['user', 'super_admin'].includes(current.role) ||
+          !line || !canReadAnalyticsLine(current, line)) return null
+      return line
+    })
+  }
+
+  async function readAnalyticsLines(ids) {
+    const unique = [...new Set(ids.filter(id => typeof id === 'string' && id))]
+    if (unique.length > MAX_ANALYTICS_FACTS) throw createError('RANGE_TOO_LARGE')
+    const lines = new Map()
+    for (let offset = 0; offset < unique.length; offset += ACCOUNT_QUERY_CHUNK) {
+      const chunk = unique.slice(offset, offset + ACCOUNT_QUERY_CHUNK)
+      const result = await db.collection('business_lines').where({ _id: db.command.in(chunk) })
+        .limit(ACCOUNT_QUERY_CHUNK).get()
+      for (const line of result.data || []) lines.set(line._id, line)
+    }
+    return lines
+  }
+
+  async function readAnalyticsUsers(ids) {
+    const unique = [...new Set(ids.filter(id => typeof id === 'string' && id))]
+    if (unique.length > MAX_ANALYTICS_FACTS) throw createError('RANGE_TOO_LARGE')
+    const users = new Map()
+    for (let offset = 0; offset < unique.length; offset += ACCOUNT_QUERY_CHUNK) {
+      const chunk = unique.slice(offset, offset + ACCOUNT_QUERY_CHUNK)
+      const result = await db.collection('users').where({ _id: db.command.in(chunk) })
+        .limit(ACCOUNT_QUERY_CHUNK).get()
+      for (const user of result.data || []) users.set(user._id, user)
+    }
+    return users
+  }
+
+  function sampleQueryIdentity(range) {
+    return [
+      range.startDate, range.endDate, range.templateId, range.templateVersion, range.status,
+      range.businessLineId, range.stableNodeId, range.processorToken, range.reviewerToken, range.metric
+    ]
+  }
+
+  function sampleCursor(fact, range) {
+    return Buffer.from(JSON.stringify({ v: 1, day: fact.day, id: fact._id, query: sampleQueryIdentity(range) }))
+      .toString('base64url')
+  }
+
+  function decodeSampleCursor(value, range) {
+    if (!value) return null
+    try {
+      const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.v !== 1 ||
+          typeof parsed.day !== 'string' || typeof parsed.id !== 'string' ||
+          JSON.stringify(parsed.query) !== JSON.stringify(sampleQueryIdentity(range)) ||
+          Buffer.from(JSON.stringify(parsed)).toString('base64url') !== value) throw new Error('bad cursor')
+      return parsed
+    } catch {
+      throw createError('VALIDATION_ERROR')
+    }
+  }
+
+  function sampleMinutes(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null
+  }
+
+  function sampleText(value) {
+    return typeof value === 'string' && value.trim() && value.length <= 100 ? value.trim() : '历史账号'
+  }
+
+  async function readSampleRounds(fact) {
+    if (typeof fact.nodeId !== 'string' || !fact.nodeId) return []
+    const roundResult = await db.collection('node_review_rounds').where({
+      businessLineId: fact.businessLineId, nodeId: fact.nodeId
+    }).orderBy('_id', 'asc').limit(101).get()
+    const voteResult = await db.collection('node_review_votes').where({
+      businessLineId: fact.businessLineId, nodeId: fact.nodeId
+    }).orderBy('_id', 'asc').limit(101).get()
+    const rounds = roundResult.data || []
+    const votes = voteResult.data || []
+    if (rounds.length > 100 || votes.length > 100) throw createError('RANGE_TOO_LARGE')
+    const voteMap = new Map()
+    for (const vote of votes) {
+      if (!vote || typeof vote.reviewRoundId !== 'string' ||
+          !['approved', 'rejected'].includes(vote.decision)) throw createError('VALIDATION_ERROR')
+      if (!voteMap.has(vote.reviewRoundId)) voteMap.set(vote.reviewRoundId, [])
+      voteMap.get(vote.reviewRoundId).push({
+        reviewerDisplayName: sampleText(vote.reviewerDisplayName),
+        decision: vote.decision,
+        responseWorkMinutes: sampleMinutes(vote.reviewResponseWorkMinutes)
+      })
+    }
+    return rounds.map(round => {
+      if (!round || round.businessLineId !== fact.businessLineId || round.nodeId !== fact.nodeId ||
+          !['pending', 'approved', 'rejected'].includes(round.status)) throw createError('VALIDATION_ERROR')
+      return {
+        processingRoundNumber: Number.isSafeInteger(round.processingRoundNumber) ? round.processingRoundNumber : null,
+        reviewRoundNumber: Number.isSafeInteger(round.reviewRoundNumber) ? round.reviewRoundNumber : null,
+        status: round.status,
+        submittedByDisplayName: sampleText(round.submittedByDisplayName),
+        processingWorkMinutes: sampleMinutes(round.processingRoundWorkMinutes),
+        reviewWorkMinutes: sampleMinutes(round.reviewElapsedWorkMinutes),
+        votes: voteMap.get(round._id) || []
+      }
+    })
+  }
+
+  async function listAnalyticsSamples({ actor, range }) {
+    const currentActor = await requireCurrentActor(actor)
+    await requireAnalyticsBusinessAccess(currentActor, range.businessLineId)
+    const allFacts = (await readAnalyticsFacts(range)).filter(fact => !range.metric || fact.metric === range.metric)
+    const metricStatistics = analyticsMetric(allFacts)
+    const facts = allFacts.filter(fact => fact.timingStatus === 'calculated')
+      .sort((left, right) => right.day.localeCompare(left.day) || left._id.localeCompare(right._id))
+    const values = facts.map(fact => fact.workMinutes).sort((a, b) => a - b)
+    const middle = Math.floor(values.length / 2)
+    const medianMinutes = values.length === 0 ? null : values.length % 2
+      ? values[middle]
+      : Math.round((values[middle - 1] + values[middle]) * 5) / 10
+    const lineMap = await readAnalyticsLines(facts.map(fact => fact.businessLineId))
+    const visible = []
+    for (const fact of facts) {
+      const line = lineMap.get(fact.businessLineId)
+      if (!line || !canReadAnalyticsLine(currentActor, line)) continue
+      visible.push({ fact, line })
+    }
+    const cursor = decodeSampleCursor(range.cursor, range)
+    const start = cursor ? visible.findIndex(entry => entry.fact.day === cursor.day && entry.fact._id === cursor.id) + 1 : 0
+    if (cursor && start === 0) throw createError('VALIDATION_ERROR')
+    const page = []
+    let scannedIndex = start
+    for (; scannedIndex < visible.length && page.length < range.pageSize; scannedIndex += 1) {
+      const entry = visible[scannedIndex]
+      const rounds = await readSampleRounds(entry.fact)
+      const currentLine = await finalAuthorizedAnalyticsLine(actor, entry.line._id)
+      if (currentLine) page.push({ ...entry, line: currentLine, rounds })
+    }
+    return {
+      globalSampleCount: facts.length,
+      visibleSampleCount: visible.length,
+      visibilityNotice: facts.length > visible.length ? '全局样本多于当前账号可下钻的业务明细' : '',
+      statistics: {
+        averageMinutes: analyticsMetric(facts).averageMinutes,
+        medianMinutes,
+        minimumMinutes: values.length ? values[0] : null,
+        maximumMinutes: values.length ? values.at(-1) : null,
+        pendingCount: metricStatistics.pendingCount,
+        unrecordedCount: metricStatistics.unrecordedCount
+      },
+      items: page.map(({ fact, line, rounds }) => ({
+        businessCode: String(line.code || ''),
+        businessName: String(line.name || ''),
+        businessStatus: String(line.status || ''),
+        nodeName: String(fact.nodeName || ''),
+        completedDay: fact.day,
+        workMinutes: fact.workMinutes,
+        rounds
+      })),
+      nextCursor: page.length ? sampleCursor(page.at(-1).fact, range) : '',
+      hasMore: scannedIndex < visible.length
+    }
+  }
+
+  return {
+    getDashboard,
+    exportRows,
+    listTimingDetails,
+    getAnalyticsFilters,
+    getAnalyticsSummary,
+    listAnalyticsSamples
+  }
 }
 
 module.exports = { createCloudOperationsRepository }

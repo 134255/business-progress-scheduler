@@ -469,7 +469,10 @@ test('运营看板与导出路由只传递受信管理员及白名单日期分�
   const operationsService = {
     async getDashboard(input) { calls.push(['getOperationsDashboard', input]); return { stats: {} } },
     async exportRows(input) { calls.push(['exportOperationsRows', input]); return { items: [] } },
-    async listTimingDetails(input) { calls.push(['listOperationsTimingDetails', input]); return { items: [] } }
+    async listTimingDetails(input) { calls.push(['listOperationsTimingDetails', input]); return { items: [] } },
+    async getAnalyticsFilters(input) { calls.push(['getOperationsAnalyticsFilters', input]); return { templates: [] } },
+    async getAnalyticsSummary(input) { calls.push(['getOperationsAnalyticsSummary', input]); return { nodeSeries: [] } },
+    async listAnalyticsSamples(input) { calls.push(['listOperationsAnalyticsSamples', input]); return { items: [] } }
   }
   const harness = createRouteHarness({ operationsService })
   await harness.api.main({
@@ -484,11 +487,16 @@ test('运营看板与导出路由只传递受信管理员及白名单日期分�
     action: 'listOperationsTimingDetails',
     payload: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 20, actorId: 'forged' }
   })
+  await harness.api.main({
+    action: 'getOperationsAnalyticsSummary',
+    payload: { templateId: 'template-1', grain: 'week', processorToken: 'a'.repeat(64), actorId: 'forged' }
+  })
   const actor = { _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound' }
   assert.deepEqual(calls, [
     ['getOperationsDashboard', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17' } }],
     ['exportOperationsRows', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 50 } }],
-    ['listOperationsTimingDetails', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 20 } }]
+    ['listOperationsTimingDetails', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 20 } }],
+    ['getOperationsAnalyticsSummary', { actor, query: { templateId: 'template-1', grain: 'week', processorToken: 'a'.repeat(64) } }]
   ])
 })
 

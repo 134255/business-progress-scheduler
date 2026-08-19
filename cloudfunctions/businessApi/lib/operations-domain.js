@@ -3,6 +3,18 @@ const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
 const ALLOWED_KEYS = new Set(['startDate', 'endDate', 'status', 'cursor', 'pageSize'])
 const ALLOWED_STATUSES = new Set(['', 'active', 'completed', 'cancelled', 'closed', 'deleted'])
+const ANALYTICS_KEYS = new Set([
+  'startDate', 'endDate', 'grain', 'templateId', 'templateVersion', 'status',
+  'businessLineId', 'stableNodeId', 'processorToken', 'reviewerToken',
+  'metric', 'cursor', 'pageSize'
+])
+const ANALYTICS_GRAINS = new Set(['day', 'week', 'month'])
+const ANALYTICS_METRICS = new Set([
+  '', 'business_completion', 'business_node_processing_total', 'business_review_total',
+  'node_processing', 'node_review', 'review_response'
+])
+const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,160}$/
+const FILTER_TOKEN = /^[a-f0-9]{64}$/
 const DAY_MS = 24 * 60 * 60 * 1000
 
 function createError(code) {
@@ -63,6 +75,49 @@ function normalizeTimingDetailsQuery(query = {}, now = new Date()) {
   }, now)
   if (normalized.pageSize > 20) throw createError('VALIDATION_ERROR')
   return normalized
+}
+
+function normalizeAnalyticsQuery(query = {}, now = new Date()) {
+  if (!query || typeof query !== 'object' || Array.isArray(query) ||
+      Reflect.ownKeys(query).some(key => typeof key !== 'string' || !ANALYTICS_KEYS.has(key))) {
+    throw createError('VALIDATION_ERROR')
+  }
+  const base = normalizeOperationsQuery({
+    startDate: query.startDate,
+    endDate: query.endDate,
+    status: query.status,
+    cursor: query.cursor,
+    pageSize: query.pageSize === undefined ? 20 : query.pageSize
+  }, now)
+  const grain = query.grain === undefined ? 'week' : query.grain
+  const templateId = query.templateId === undefined ? '' : query.templateId
+  const templateVersion = query.templateVersion === undefined ? null : query.templateVersion
+  const businessLineId = query.businessLineId === undefined ? '' : query.businessLineId
+  const stableNodeId = query.stableNodeId === undefined ? '' : query.stableNodeId
+  const processorToken = query.processorToken === undefined ? '' : query.processorToken
+  const reviewerToken = query.reviewerToken === undefined ? '' : query.reviewerToken
+  const metric = query.metric === undefined ? '' : query.metric
+  if (!ANALYTICS_GRAINS.has(grain) ||
+      templateId !== '' && !DOCUMENT_ID.test(templateId) ||
+      templateVersion !== null && (!Number.isSafeInteger(templateVersion) || templateVersion < 1) ||
+      businessLineId !== '' && !DOCUMENT_ID.test(businessLineId) ||
+      stableNodeId !== '' && !DOCUMENT_ID.test(stableNodeId) ||
+      processorToken !== '' && !FILTER_TOKEN.test(processorToken) ||
+      reviewerToken !== '' && !FILTER_TOKEN.test(reviewerToken) ||
+      !ANALYTICS_METRICS.has(metric) || base.pageSize > 20) {
+    throw createError('VALIDATION_ERROR')
+  }
+  return {
+    ...base,
+    grain,
+    templateId,
+    templateVersion,
+    businessLineId,
+    stableNodeId,
+    processorToken,
+    reviewerToken,
+    metric
+  }
 }
 
 function iso(value) {
@@ -185,6 +240,7 @@ function safeTimingDetail({ line, node, round, votes = [] }) {
 
 module.exports = {
   normalizeOperationsQuery,
+  normalizeAnalyticsQuery,
   normalizeTimingDetailsQuery,
   safeOperationsRow,
   safeTimingDetail

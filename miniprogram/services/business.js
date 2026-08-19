@@ -91,6 +91,18 @@ function listOperationsTimingDetails(query) {
   return callProtected('listOperationsTimingDetails', query || {}, '个人工时明细加载失败，请稍后重试')
 }
 
+function getOperationsAnalyticsFilters(query) {
+  return callProtected('getOperationsAnalyticsFilters', query || {}, '统计筛选项加载失败，请稍后重试')
+}
+
+function getOperationsAnalyticsSummary(query) {
+  return callProtected('getOperationsAnalyticsSummary', query || {}, '历史统计加载失败，请稍后重试')
+}
+
+function listOperationsAnalyticsSamples(query) {
+  return callProtected('listOperationsAnalyticsSamples', query || {}, '统计明细加载失败，请稍后重试')
+}
+
 function createNodeShareSnapshot(input) {
   return callProtected('createNodeShareSnapshot', input, '生成分享快照失败，请稍后重试')
 }
@@ -199,6 +211,9 @@ module.exports = {
   getOperationsDashboard,
   exportOperationsRows,
   listOperationsTimingDetails,
+  getOperationsAnalyticsFilters,
+  getOperationsAnalyticsSummary,
+  listOperationsAnalyticsSamples,
   createNodeShareSnapshot,
   getPublicNodeShare,
   listBusinessLines,
