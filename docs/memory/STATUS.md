@@ -2,7 +2,7 @@
 
 Status captured: 2026-08-19 (Asia/Shanghai)
 
-- 2026-08-19 “运营统计看板与历史工时分析”设计已确认：主图以模板和稳定节点为统计主体，单条业务只作为权限受控的下钻样本；处理指标累计节点全部处理轮，审核主指标累计全部终态审核轮的审核流程工作分钟，实际投票人响应分钟保留为明细。日期按节点或业务最终完成日归属，支持日/周/月手动切换、模板版本默认合并，以及版本、业务、节点、实际处理人和实际审核人筛选。所有活动账号可看全局汇总；普通账号下钻继续受现有业务权限限制，超级管理员可下钻全部业务并保留 CSV。已接受派生事实、每日汇总和独立可信 Timer `operationsAnalytics` 工作器架构；详见 `docs/superpowers/specs/2026-08-19-operations-analytics-dashboard-design.md` 与 `docs/memory/decisions/ADR-0010-operations-analytics-materialized-facts.md`。当前仅完成设计，应用代码、集合、索引、云函数、自动化测试和真实 CloudBase 验收均为未实现或未验证；下一步生成实施计划并按 TDD 开发。操作员自己的 `project.config.json` 修改未读取、未修改、未暂存、未提交。
+- 2026-08-19 “运营统计看板与历史工时分析”设计与实施计划已确认：主图以模板和稳定节点为统计主体，单条业务只作为权限受控的下钻样本；处理指标累计节点全部处理轮，审核主指标累计全部终态审核轮的审核流程工作分钟，实际投票人响应分钟保留为明细。日期按节点或业务最终完成日归属，支持日/周/月手动切换、模板版本默认合并，以及版本、业务、节点、实际处理人和实际审核人筛选。所有活动账号可看全局汇总；普通账号下钻继续受现有业务权限限制，超级管理员可下钻全部业务并保留 CSV。已接受派生事实、每日汇总和独立可信 Timer `operationsAnalytics` 工作器架构；详见 `docs/superpowers/specs/2026-08-19-operations-analytics-dashboard-design.md`、`docs/memory/decisions/ADR-0010-operations-analytics-materialized-facts.md` 与 `docs/superpowers/plans/2026-08-19-operations-analytics-dashboard.md`。计划已明确复用业务节点快照的 `sourceTemplateNodeKey` 作为稳定节点身份，并由新工作器使用权威工作日历计算业务创建至完成的完整工作分钟；应用代码、集合、索引、云函数、自动化测试和真实 CloudBase 验收当前仍为未实现或未验证。下一步在隔离分支按 RED→GREEN 逐项实现。操作员自己的 `project.config.json` 修改未读取、未修改、未暂存、未提交。
 
 - 2026-08-19 真实模板验收发现：节点编辑页正确保存 `processorAssignmentMode`，但模板总页最终清洗请求时漏掉该字段，使“业务发起人作为本节点唯一处理人”被服务端按固定负责人解析，并因空 `processorUserIds` 返回 `TEMPLATE_INVALID`。TDD RED：模板聚焦 27 项中 26 通过、1 项按预期失败，最终请求中的发起人/固定负责人两种模式均为 `undefined`；最小修复后模式随每个节点独立透传，旧节点仍稳定归一为 `fixed_accounts`。GREEN：模板聚焦 27/27、小程序全量 157/157、`businessApi` 551/551、WXML 4/4，生产 JavaScript 语法通过。微信开发者工具重新编译和真实模板保存复验仍为 `unverified`；操作员自己的 `project.config.json` 修改未读取、未修改、未暂存、未提交。
 
