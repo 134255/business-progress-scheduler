@@ -2,7 +2,7 @@
 
 Status captured: 2026-08-19 (Asia/Shanghai)
 
-- 2026-08-19 本地 `main` 的运营统计功能合并后门禁保持全绿，但向既有 `origin/main` 推送时连续两次在 GitHub HTTPS 连接阶段失败：一次连接被重置，一次无法连接 443 端口；未出现认证失败、远端非快进或提交冲突，本地提交与用户未提交的 `project.config.json` 均保持原状，因此远端同步仍为 `blocked`。CloudBase 部署包和手册已核对：下一步先备份或记录两个尚不存在的统计集合，再创建 `operations_analytics_facts`、`operations_analytics_daily` 及手册列明的来源扫描/事实/每日汇总索引，随后部署 `businessApi`、`operationsAnalytics` 和小程序；`operationsAnalytics` 首次部署必须保持 `triggers: []`，一次性 Timer、多账号下钻及正式 15 分钟周期仍为 `unverified`。
+- 2026-08-19 本地 `main` 的运营统计功能合并后门禁保持全绿，并已通过 Git HTTP/1.1 成功推送到既有 `origin/main`；未提交的 `project.config.json` 未进入任何提交或推送。CloudBase 部署包和手册已核对：下一步先备份或记录两个尚不存在的统计集合，再创建 `operations_analytics_facts`、`operations_analytics_daily` 及手册列明的来源扫描/事实/每日汇总索引，随后部署 `businessApi`、`operationsAnalytics` 和小程序；`operationsAnalytics` 首次部署必须保持 `triggers: []`，一次性 Timer、多账号下钻及正式 15 分钟周期仍为 `unverified`。
 
 - 2026-08-19 “运营统计看板与历史工时分析”已从 `codex/operations-analytics-dashboard` 快进合并到本地 `main`。所有活动账号可读取不含业务身份的全局汇总，普通账号的业务筛选项和样本下钻在返回前逐项重验当前活动账号及业务关系，超级管理员可查看全部样本并保留原当前指标与 CSV。看板按模板和 `sourceTemplateNodeKey` 稳定节点展示处理/审核并列柱状图、日/周/月双趋势、模板级业务完成/每业务节点处理/审核指标，并支持模板版本、业务状态、可访问业务、稳定节点、实际处理人及实际审核人筛选；明细提供有效样本、精确中位数、平均/最短/最长、待日历补算、历史未记录、分页业务、全部处理/终态审核轮次和实际投票响应，合法零分钟与缺失历史字段使用不同中文标签。独立可信 Timer `operationsAnalytics` 使用每批 40 条的持久游标，将业务/节点不可变来源物化为确定性事实及每日汇总；日历缺失事实由第三个独立游标单向补算，不阻断业务流转。TDD 先后精确复现客户端图表缺失、事实刷新缺失、部署索引遗漏、分钟累计溢出、筛选项撤权竞态和空工时展示，均已转为 GREEN。合并后最终新跑：`businessApi` 558/558、`operationsAnalytics` 26/26、`calendarSync` 55/55、`workflowReminder` 30/30、`evidenceRetention` 42/42、小程序 162/162、WXML 4/4，全部 0 失败；30 个变更 JavaScript 文件语法、`git diff --check` 与项目记忆校验均通过。真实 CloudBase 新集合、复合索引、统计工作器部署/事务竞争、一次性 Timer、历史首次物化、微信开发者工具视觉及多账号真机仍为 `unverified`，正式 Timer 不得自动启用。操作员自己的 `project.config.json` 修改未读取、未修改、未暂存、未提交。
 
