@@ -52,6 +52,9 @@ function cleanNode(node, sequence) {
     name: node.name,
     description: node.description || '',
     workflowMode: 'review',
+    processorAssignmentMode: !isLegacyNode && node.processorAssignmentMode === 'business_creator'
+      ? 'business_creator'
+      : 'fixed_accounts',
     processorUserIds: (isLegacyNode ? node.assigneeUserIds : node.processorUserIds || []).slice(),
     reviewerUserIds: (isLegacyNode ? [] : node.reviewerUserIds || []).slice(),
     reviewMode: !isLegacyNode && node.reviewMode === 'all' ? 'all' : 'any',

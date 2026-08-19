@@ -252,6 +252,46 @@ test('node editor independently switches one node to the business creator and pr
   delete global.wx
 })
 
+test('template editor preserves each node processor assignment mode in the final save request', async () => {
+  const definitions = []
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { showToast: () => {}, navigateBack: () => {}, reLaunch: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': { createTemplate: async definition => { definitions.push(definition) } },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  page.setData({
+    name: '负责人来源验收模板',
+    nodes: [
+      {
+        sequence: 0, name: '发起人处理节点', description: '', workflowMode: 'review',
+        processorAssignmentMode: 'business_creator', processorUserIds: [], reviewerUserIds: ['reviewer-1'],
+        reviewMode: 'any', processingSlaWorkHours: 2, reviewSlaWorkHours: 1,
+        requiresEvidence: false, allowedEvidenceTypes: [], fields: []
+      },
+      {
+        sequence: 1, name: '固定负责人节点', description: '', workflowMode: 'review',
+        processorAssignmentMode: 'fixed_accounts', processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
+        reviewMode: 'any', processingSlaWorkHours: 2, reviewSlaWorkHours: 1,
+        requiresEvidence: false, allowedEvidenceTypes: [], fields: []
+      }
+    ]
+  })
+
+  await page.submit()
+
+  assert.equal(definitions.length, 1)
+  assert.deepEqual(definitions[0].nodes.map(node => ({
+    processorAssignmentMode: node.processorAssignmentMode,
+    processorUserIds: node.processorUserIds
+  })), [
+    { processorAssignmentMode: 'business_creator', processorUserIds: [] },
+    { processorAssignmentMode: 'fixed_accounts', processorUserIds: ['processor-1'] }
+  ])
+  delete global.getApp
+  delete global.wx
+})
+
 test('node editor read-only page exposes the per-node assignment source without enabling edits', () => {
   const reviewer = { _id: 'reviewer-1', displayName: '审核人', username: 'reviewer' }
   const page = createNodeEditor({
