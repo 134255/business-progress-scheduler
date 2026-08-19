@@ -1646,6 +1646,13 @@ test('末节点通过完成业务并只在业务线上建立统一60天凭证保
   assert.deepEqual(line.retentionStartedAt, NOW)
   assert.deepEqual(line.purgeDueAt, new Date(NOW.getTime() + 60 * 24 * 60 * 60 * 1000))
   assert.equal(line.progress, 100)
+  assert.equal(line.analyticsSnapshotStatus, 'pending')
+  assert.equal(line.analyticsSourceVersion, 1)
+  assert.deepEqual(line.analyticsCompletedAt, NOW)
+  const node = fake.documents('business_nodes').find(item => item._id === 'node-1')
+  assert.equal(node.analyticsSnapshotStatus, 'pending')
+  assert.equal(node.analyticsSourceVersion, 1)
+  assert.deepEqual(node.analyticsCompletedAt, NOW)
   assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
   const context = await repository.prepareReviewVote({
     actor: value.actor, input: value.input,

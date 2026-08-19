@@ -56,6 +56,13 @@ test('last-node completion freezes the line and records one authoritative 60-day
   assert.deepEqual(line.completedAt, NOW)
   assert.deepEqual(line.frozenAt, NOW)
   assert.deepEqual(line.retentionStartedAt, NOW)
+  assert.equal(line.analyticsSnapshotStatus, 'pending')
+  assert.equal(line.analyticsSourceVersion, 1)
+  assert.deepEqual(line.analyticsCompletedAt, NOW)
+  const [node] = fake.documents('business_nodes')
+  assert.equal(node.analyticsSnapshotStatus, 'pending')
+  assert.equal(node.analyticsSourceVersion, 1)
+  assert.deepEqual(node.analyticsCompletedAt, NOW)
   const due = new Date(NOW.getTime() + 60 * 24 * 60 * 60 * 1000)
   assert.deepEqual(line.purgeDueAt, due)
   for (const evidence of fake.documents('evidences')) {

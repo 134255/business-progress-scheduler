@@ -111,6 +111,17 @@ function increment(value) {
   return value + 1
 }
 
+function nextAnalyticsSourceVersion(value) {
+  if (!value || typeof value !== 'object') throw createError('VERSION_CONFLICT')
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'analyticsSourceVersion')
+  if (!descriptor) return 1
+  if (!Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+      !safeInteger(descriptor.value) || descriptor.value === Number.MAX_SAFE_INTEGER) {
+    throw createError('VERSION_CONFLICT')
+  }
+  return descriptor.value + 1
+}
+
 function publicResult(feedback) {
   const result = {
     feedbackId: feedback._id,
@@ -639,7 +650,12 @@ function createCloudFeedbackRepository({
         }
         nodeChanges.blockedReason = value.input.action === 'mark_blocked' ? value.input.comment : ''
       }
-      if (value.input.status === 'completed') nodeChanges.completedAt = reservation.transitionAt
+      if (value.input.status === 'completed') {
+        nodeChanges.completedAt = reservation.transitionAt
+        nodeChanges.analyticsSnapshotStatus = 'pending'
+        nodeChanges.analyticsSourceVersion = nextAnalyticsSourceVersion(current.node)
+        nodeChanges.analyticsCompletedAt = reservation.transitionAt
+      }
       await transaction.collection(COLLECTIONS.nodes).doc(current.node._id).update({ data: nodeChanges })
 
       let lineStatus = 'active'
@@ -649,7 +665,11 @@ function createCloudFeedbackRepository({
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
           status: 'completed', progress: 100, version: increment(current.line.version),
           completedAt: reservation.transitionAt, frozenAt: reservation.transitionAt,
-          retentionStartedAt: reservation.transitionAt, purgeDueAt, updatedAt: db.serverDate()
+          retentionStartedAt: reservation.transitionAt, purgeDueAt,
+          analyticsSnapshotStatus: 'pending',
+          analyticsSourceVersion: nextAnalyticsSourceVersion(current.line),
+          analyticsCompletedAt: reservation.transitionAt,
+          updatedAt: db.serverDate()
         } })
       } else if (value.input.status === 'completed') {
         const nextId = nextNodeId(current.line._id, current.node.sequence)

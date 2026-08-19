@@ -73,6 +73,17 @@ function increment(value) {
   return value + 1
 }
 
+function nextAnalyticsSourceVersion(value) {
+  if (!value || typeof value !== 'object') throw createError('VERSION_CONFLICT')
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'analyticsSourceVersion')
+  if (!descriptor) return 1
+  if (!Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+      !safeInteger(descriptor.value) || descriptor.value === Number.MAX_SAFE_INTEGER) {
+    throw createError('VERSION_CONFLICT')
+  }
+  return descriptor.value + 1
+}
+
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
 }
@@ -1294,6 +1305,9 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         await transaction.collection('business_nodes').doc(node._id).update({ data: {
           status: nodeStatus,
           completedAt: at,
+          analyticsSnapshotStatus: 'pending',
+          analyticsSourceVersion: nextAnalyticsSourceVersion(node),
+          analyticsCompletedAt: at,
           activeReviewRoundId: db.command.remove(),
           lastReviewRoundId: round._id,
           lastReviewTimingStatus: reviewTiming.reviewTimingStatus,
@@ -1314,6 +1328,9 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
             frozenAt: at,
             retentionStartedAt: at,
             purgeDueAt,
+            analyticsSnapshotStatus: 'pending',
+            analyticsSourceVersion: nextAnalyticsSourceVersion(line),
+            analyticsCompletedAt: at,
             version: increment(line.version),
             updatedAt: db.serverDate()
           } })
