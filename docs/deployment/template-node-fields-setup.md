@@ -7,8 +7,8 @@
 ## 一、部署原则
 
 - 必须按“备份、集合、唯一性检查、索引、业务云函数、定时云函数、触发器、验收”的顺序执行。
-- `businessApi`、`calendarSync`、`workflowReminder` 和 `evidenceRetention` 均选择“上传并部署：云端安装依赖”。不要上传本地 `node_modules`。
-- 首次验收时 `calendarSync`、`workflowReminder` 与 `evidenceRetention` 均保持 `triggers: []`；仅在隔离验收通过后分阶段启用日历每日同步和小时级提醒。
+- `businessApi`、`calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 均选择“上传并部署：云端安装依赖”。不要上传本地 `node_modules`。
+- 首次验收时 `calendarSync`、`workflowReminder`、`evidenceRetention` 与 `operationsAnalytics` 均保持 `triggers: []`；仅在隔离验收通过后分阶段启用日历每日同步和小时级提醒，运营统计的 15 分钟周期任务必须另行批准。
 - 不删除旧集合，不批量伪造旧业务编号，不用回滚为由删除凭证元数据或审计记录。
 - 所有客户端读写继续经过云函数；模板、业务、节点、反馈、凭证和审计集合禁止小程序端直接写入。
 - 每完成一阶段都记录时间、操作员、结果和可回退点，但只记录脱敏结论。
@@ -43,6 +43,8 @@
 - `calendar_sync_requests`
 - `public_node_shares`
 - `public_node_share_chunks`
+- `operations_analytics_facts`
+- `operations_analytics_daily`
 
 对每份导出执行以下检查：
 
@@ -51,7 +53,7 @@
 3. 对比控制台记录数与导出记录数；若导出工具采用分片，核对所有分片总数。
 4. 把备份保存到受控位置，不提交 Git，不通过普通聊天发送。
 
-`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years`、`calendar_sync_requests`、`public_node_shares` 与 `public_node_share_chunks` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
+`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years`、`calendar_sync_requests`、`public_node_shares`、`public_node_share_chunks`、`operations_analytics_facts` 与 `operations_analytics_daily` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
 
 ## 三、集合准备
 
@@ -76,6 +78,8 @@
 | `audit_logs` | 模板、业务、反馈、修订和清理审计 |
 | `public_node_shares` | 七日公开节点固定快照头与发布状态 |
 | `public_node_share_chunks` | 每块最多 40 条的公开凭证快照 |
+| `operations_analytics_facts` | 完成业务与节点的确定性统计事实、权限受控下钻样本 |
+| `operations_analytics_daily` | 按上海自然日、模板、稳定节点和匿名参与人维度维护的每日汇总 |
 
 集合权限使用“仅云函数/服务端可读写”或等效的最严格配置。不要为了调试开放全体用户读写。
 
@@ -110,6 +114,7 @@
 
 | 集合 | 字段顺序 | 唯一 | 用途 |
 |---|---|---:|---|
+| `templates` | `name` 升序、`_id` 升序 | 否 | 运营统计模板筛选目录 |
 | `business_lines` | `code` 升序 | 是 | 业务编号最终防重 |
 | `business_lines` | `status` 升序、`updatedAt` 降序 | 否 | 状态筛选与后台检索 |
 | `business_lines` | `memberUserIds` 升序、`updatedAt` 降序 | 否 | 新账号成员业务列表 |
@@ -133,12 +138,14 @@
 | `node_review_rounds` | `reviewDueStatus` 升序、`_id` 升序 | 否 | 日历恢复后的审核截止时间补算扫描 |
 | `node_review_rounds` | `processingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的处理时长补算扫描 |
 | `node_review_rounds` | `reviewTimingCarryoverStatus` 升序、`_id` 升序 | 否 | 审核结束后的审核时长补算扫描 |
+| `node_review_rounds` | `businessLineId` 升序、`nodeId` 升序、`_id` 升序 | 否 | 运营统计节点事实重建 |
 | `node_review_rounds` | `status` 升序、`createdAt` 降序、`_id` 升序 | 否 | 运营看板待审核统计 |
 | `node_review_rounds` | `reviewStartedAt` 降序、`_id` 升序 | 否 | 运营看板个人工时明细稳定游标扫描 |
 | `node_review_votes` | `businessLineId` 升序、`nodeId` 升序、`createdAt` 升序 | 否 | 业务节点投票时间线 |
 | `node_review_votes` | `reviewRoundId` 升序、`reviewerUserId` 升序 | 是 | 每名审核人每轮唯一投票 |
 | `node_review_votes` | `reviewRoundId` 升序、`createdAt` 升序、`_id` 升序 | 否 | 审核详情投票时间线 |
 | `node_review_votes` | `reviewResponseTimingStatus` 升序、`_id` 升序 | 否 | 实际投票人个人响应工作分钟待补算扫描 |
+| `node_review_votes` | `businessLineId` 升序、`nodeId` 升序、`_id` 升序 | 否 | 运营统计节点投票事实重建 |
 | `node_feedback` | `nodeId` 升序、`revision` 降序 | 否 | 节点反馈历史 |
 | `node_feedback` | `publishState` 升序、`_id` 升序 | 否 | 恢复中反馈预约扫描 |
 | `node_feedback` | `publishState` 升序、`claimExpiresAt` 升序、`_id` 升序 | 否 | 过期或恢复中反馈预约的有界扫描 |
@@ -161,6 +168,13 @@
 | `work_calendar_entries` | `sourceYear` 升序、`generationId` 升序、`date` 升序 | 否 | 同版本全年完整性的有界分页校验 |
 | `public_node_shares` | `expiresAt` 升序、`_id` 升序 | 否 | 到期公开分享有界清理 |
 | `public_node_share_chunks` | `shareId` 升序、`_id` 升序 | 否 | 单个分享的凭证块有界清理 |
+| `business_nodes` | `analyticsSnapshotStatus` 升序、`_id` 升序 | 否 | 运营统计工作器的待生成节点候选游标 |
+| `business_lines` | `analyticsSnapshotStatus` 升序、`_id` 升序 | 否 | 运营统计工作器的待生成业务候选游标 |
+| `operations_analytics_facts` | `businessLineId` 升序、`sourceType` 升序、`dimensionRole` 升序、`_id` 升序 | 否 | 业务事实汇总和来源重建 |
+| `operations_analytics_facts` | `templateId` 升序、`day` 升序、`_id` 升序 | 否 | 模板日期范围事实、筛选目录与权限下钻 |
+| `operations_analytics_facts` | `timingStatus` 升序、`_id` 升序 | 否 | 待日历补算事实的单向转换游标 |
+| `operations_analytics_daily` | `templateId` 升序、`dimensionRole` 升序、`day` 升序、`_id` 升序 | 否 | 模板全局及角色每日汇总图表 |
+| `operations_analytics_daily` | `templateId` 升序、`dimensionRole` 升序、`dimensionFilterToken` 升序、`day` 升序、`_id` 升序 | 否 | 实际处理人或审核人匿名筛选后的每日汇总图表 |
 
 `work_calendar_entries` 索引未在真实 CloudBase 验证前，不得将日历同步标记为可部署通过；索引错误应保留旧活动代际并返回安全失败。
 
@@ -230,15 +244,25 @@
 }
 ```
 
-## 十、配置触发器
+## 十、上传 `operationsAnalytics`
 
-首次隔离验收前，依次打开 `calendarSync`、`workflowReminder` 和 `evidenceRetention` 的“触发管理/触发器”，核对并保存为 `{"triggers": []}`。若发现遗留非空配置，仅恢复空数组并记录脱敏变更。`evidenceRetention` 在破坏性候选、再次备份和云对象归属全部核对完成并取得单独批准前，不得创建、预创建或保存任何非空触发器配置。
+1. 在微信开发者工具中右键 `cloudfunctions/operationsAnalytics`，选择“上传并部署：云端安装依赖（不上传 `node_modules`）”。
+2. 在 CloudBase 控制台确认函数名为 `operationsAnalytics`、入口为 `index.main`、运行时为 Node.js 16，并先使用 256 MB、60 秒配置。
+3. 首次部署及回滚时都必须保持 `operationsAnalytics` 的 `triggers: []`；控制台直接测试、事件正文伪造 Timer、客户端调用和缺少平台可信来源都会被拒绝。
+4. 不要人工创建或修改 `system_settings/operations-analytics-node-cursor`、`system_settings/operations-analytics-business-cursor` 与 `system_settings/operations-analytics-refresh-cursor`。工作器会用固定批次 40、持久游标和确定性事实编号自动维护；第三个游标只扫描 `timingStatus=pending_calendar` 的事实，并在权威日历恢复后把事实和每日汇总原子、单向转换为有效样本。损坏游标会失败关闭。
+5. 仅在两个统计集合、全部组合索引和权限生效后，使用无敏感隔离业务批准一次 `operationsAnalytics` 一次性 Timer。核对返回的节点/业务/待补算扫描与事实安全计数、事实与每日汇总幂等，再立即恢复空触发器。
+6. 所有活动用户应能看到同一全局汇总；普通用户的业务明细仍按当前业务权限过滤，超级管理员可查看全部明细并保留安全 CSV 导出。客户端不得收到内部账号编号、成员数组或永久文件路径。
+7. 每 15 分钟周期触发器不属于首次部署：必须在一次性 Timer、多账号权限和幂等复跑验收通过后单独批准、单独配置并记录回退点。
+
+## 十一、配置触发器
+
+首次隔离验收前，依次打开 `calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 的“触发管理/触发器”，核对并保存为 `{"triggers": []}`。若发现遗留非空配置，仅恢复空数组并记录脱敏变更。`evidenceRetention` 在破坏性候选、再次备份和云对象归属全部核对完成并取得单独批准前，不得创建、预创建或保存任何非空触发器配置。
 
 隔离验收全部通过并取得单独批准后，才可按顺序单独处理 `calendarSync` 的每日同步触发器和 `workflowReminder` 的小时级提醒触发器：每次只启用一个函数，使用已批准的目标时刻，在控制台核对时区、下一次触发时间和脱敏日志后，再决定下一项。`evidenceRetention` 只允许为破坏性隔离验收临时保存一次性 Timer，每次执行并取得日志后立即恢复 `triggers: []`；正式周期调度属于后续独立变更，不包含在本手册的部署范围。
 
 触发器会异步调用函数，平台可能重试，因此工作器以确定性提醒编号、短期清理租约和幂等状态转换防止重复处理。
 
-## 十一、分阶段脱敏验收矩阵
+## 十二、分阶段脱敏验收矩阵
 
 所有项目初始状态均为“未验证”。操作员完成后只记录“通过/失败、时间、测试记录编号和脱敏现象”，不记录账号密码、OpenID、真实文件名、业务正文或云文件地址。
 
