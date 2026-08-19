@@ -15,7 +15,8 @@ test('运营统计入口只信任平台 Timer 来源并忽略事件中的时间�
   assert.equal(calls.length, 0)
   const handler = createOperationsAnalyticsHandler({ service, getContext: () => ({}), getTriggerSource: () => 'timer', clock: () => now })
   assert.deepEqual(await handler({ now: '2039-01-01', batchSize: 999 }), {
-    nodeExamined: 2, businessExamined: 1, nodeGenerated: 0, businessGenerated: 0, failed: 0
+    nodeExamined: 2, businessExamined: 1, refreshExamined: 0,
+    nodeGenerated: 0, businessGenerated: 0, refreshed: 0, failed: 0
   })
   assert.deepEqual(calls, [{ now, batchSize: 40 }])
 })

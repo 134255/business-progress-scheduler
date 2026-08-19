@@ -107,6 +107,11 @@ test('节点来源生成处理、审核、参与人和投票响应事实并按�
     ['review_response', 'review_response', 'reviewer', 12]
   ])
   assert.equal(facts.every(item => item.stableNodeId === 'stable-node-1' && item.day === '2026-08-19'), true)
+  assert.equal(facts.every(item => item.nodeName === '资料审核' && item.nodeSequence === 0), true)
+  const processor = facts.find(item => item.dimensionRole === 'processor')
+  assert.match(processor.dimensionFilterToken, /^[a-f0-9]{64}$/)
+  assert.notEqual(processor.dimensionFilterToken, 'processor-a')
+  assert.equal(facts.find(item => item.dimensionRole === 'global').dimensionFilterToken, '')
 })
 
 test('业务来源生成业务完成和每业务节点累计指标，日历缺失不伪装为零', async () => {
@@ -117,11 +122,16 @@ test('业务来源生成业务完成和每业务节点累计指标，日历缺�
       analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1
     },
     nodes: [
-      { _id: 'node-1', analyticsSnapshotStatus: 'generated', analyticsSourceVersion: 1, analyticsGeneratedVersion: 1 }
+      { _id: 'node-1', businessLineId: 'line-1', sourceTemplateNodeKey: 'stable-node-1',
+        analyticsSnapshotStatus: 'generated', analyticsSourceVersion: 1, analyticsGeneratedVersion: 1 }
     ],
     nodeFacts: [
-      { metric: 'node_processing', dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 90 },
-      { metric: 'node_review', dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 30 }
+      { sourceType: 'node', sourceId: 'node-1', sourceVersion: 1, businessLineId: 'line-1', nodeId: 'node-1',
+        templateId: 'template-1', templateVersion: 2, stableNodeId: 'stable-node-1',
+        metric: 'node_processing', dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 90 },
+      { sourceType: 'node', sourceId: 'node-1', sourceVersion: 1, businessLineId: 'line-1', nodeId: 'node-1',
+        templateId: 'template-1', templateVersion: 2, stableNodeId: 'stable-node-1',
+        metric: 'node_review', dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 30 }
     ]
   }
   const facts = await materializeBusinessSource(source, {
@@ -171,4 +181,33 @@ test('事实与每日汇总编号确定且区分维度', () => {
     stableNodeId: 'node-key-1', metric: 'node_processing', dimensionRole: 'global', dimensionUserId: '' }
   assert.equal(dailyRollupId(base), dailyRollupId(base))
   assert.notEqual(dailyRollupId(base), dailyRollupId({ ...base, dimensionRole: 'processor', dimensionUserId: 'user-1' }))
+})
+
+test('业务汇总必须完整绑定每个节点的处理与审核全局事实', async () => {
+  const line = {
+    _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 1,
+    createdAt: new Date('2026-08-18T01:00:00Z'), analyticsCompletedAt: new Date('2026-08-19T08:00:00Z'),
+    analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1
+  }
+  const node = {
+    _id: 'node-1', businessLineId: 'line-1', sourceTemplateNodeKey: 'stable-1', name: '节点一', sequence: 0,
+    analyticsSnapshotStatus: 'generated', analyticsSourceVersion: 2, analyticsGeneratedVersion: 2
+  }
+  const validFacts = ['node_processing', 'node_review'].map(metric => ({
+    _id: `fact-${metric}`, sourceType: 'node', sourceId: 'node-1', sourceVersion: 2,
+    businessLineId: 'line-1', nodeId: 'node-1', templateId: 'template-1', templateVersion: 1,
+    stableNodeId: 'stable-1', nodeName: '节点一', nodeSequence: 0, metric,
+    dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 1
+  }))
+  const service = { async workingMinutesBetween() { return { status: 'calculated', minutes: 1 } } }
+  for (const nodeFacts of [
+    validFacts.slice(0, 1),
+    [...validFacts, validFacts[0]],
+    validFacts.map(fact => fact.metric === 'node_review' ? { ...fact, sourceVersion: 1 } : fact),
+    validFacts.map(fact => fact.metric === 'node_review' ? { ...fact, businessLineId: 'line-other' } : fact)
+  ]) {
+    await assert.rejects(materializeBusinessSource({ line, nodes: [node], nodeFacts }, service), /VALIDATION_ERROR/)
+  }
+  const facts = await materializeBusinessSource({ line, nodes: [node], nodeFacts: validFacts }, service)
+  assert.equal(facts.length, 3)
 })

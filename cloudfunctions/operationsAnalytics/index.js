@@ -36,8 +36,10 @@ function createOperationsAnalyticsHandler({
       return {
         nodeExamined: safeCount(result && result.nodeExamined),
         businessExamined: safeCount(result && result.businessExamined),
+        refreshExamined: safeCount(result && result.refreshExamined),
         nodeGenerated: safeCount(result && result.nodeGenerated),
         businessGenerated: safeCount(result && result.businessGenerated),
+        refreshed: safeCount(result && result.refreshed),
         failed: safeCount(result && result.failed)
       }
     } catch (_) {

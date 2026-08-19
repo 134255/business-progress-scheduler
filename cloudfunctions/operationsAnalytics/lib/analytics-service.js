@@ -17,6 +17,7 @@ function createAnalyticsService({
   if (!analyticsRepository ||
       typeof analyticsRepository.claimNodeCandidates !== 'function' ||
       typeof analyticsRepository.claimBusinessCandidates !== 'function' ||
+      typeof analyticsRepository.claimPendingFactCandidates !== 'function' ||
       typeof analyticsRepository.readNodeSource !== 'function' ||
       typeof analyticsRepository.readBusinessSource !== 'function') {
     throw new TypeError('analyticsRepository is required')
@@ -44,6 +45,29 @@ function createAnalyticsService({
     })
   }
 
+  async function refreshPendingSource(candidate, now) {
+    if (!candidate || !['node', 'business'].includes(candidate.sourceType)) {
+      throw new TypeError('refresh candidate is invalid')
+    }
+    const source = candidate.sourceType === 'node'
+      ? await analyticsRepository.readNodeSource(candidate)
+      : await analyticsRepository.readBusinessSource(candidate)
+    const facts = candidate.sourceType === 'node'
+      ? typeof nodeMaterializer === 'function'
+        ? await nodeMaterializer({ source, now })
+        : materializeNodeSource(source)
+      : typeof businessMaterializer === 'function'
+        ? await businessMaterializer({ source, now })
+        : await materializeBusinessSource(source, workTimeService)
+    if (!Array.isArray(facts)) throw new TypeError('refresh facts are invalid')
+    let refreshed = false
+    for (const fact of facts) {
+      const result = await analyticsRepository.applyFact(fact)
+      if (result && result.applied === true) refreshed = true
+    }
+    return refreshed
+  }
+
   async function runCycle({ now, batchSize } = {}) {
     if (!validDate(now)) throw new TypeError('now must be a valid Date')
     if (!Number.isSafeInteger(batchSize) || batchSize !== MAX_BATCH_SIZE) {
@@ -51,14 +75,17 @@ function createAnalyticsService({
     }
     const nodeCandidates = await analyticsRepository.claimNodeCandidates({ limit: batchSize })
     const businessCandidates = await analyticsRepository.claimBusinessCandidates({ limit: batchSize })
-    if (!Array.isArray(nodeCandidates) || !Array.isArray(businessCandidates)) {
+    const refreshCandidates = await analyticsRepository.claimPendingFactCandidates({ limit: batchSize })
+    if (!Array.isArray(nodeCandidates) || !Array.isArray(businessCandidates) || !Array.isArray(refreshCandidates)) {
       throw new TypeError('candidate page is invalid')
     }
     const result = {
       nodeExamined: nodeCandidates.length,
       businessExamined: businessCandidates.length,
+      refreshExamined: refreshCandidates.length,
       nodeGenerated: 0,
       businessGenerated: 0,
+      refreshed: 0,
       failed: 0
     }
     for (const candidate of nodeCandidates) {
@@ -75,6 +102,13 @@ function createAnalyticsService({
         const source = await analyticsRepository.readBusinessSource(candidate)
         const applied = await generateBusiness(source, now)
         if (applied && applied.generated === true) result.businessGenerated += 1
+      } catch (_) {
+        result.failed += 1
+      }
+    }
+    for (const candidate of refreshCandidates) {
+      try {
+        if (await refreshPendingSource(candidate, now)) result.refreshed += 1
       } catch (_) {
         result.failed += 1
       }

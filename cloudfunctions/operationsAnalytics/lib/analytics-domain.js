@@ -36,6 +36,11 @@ function digest(parts) {
   return crypto.createHash('sha256').update(parts.join('\0')).digest('hex')
 }
 
+function personFilterToken(role, userId) {
+  if (!['processor', 'reviewer'].includes(role)) throw validationError()
+  return digest(['operations-filter-v1', role, safeId(userId)])
+}
+
 function factId(type, sourceIds) {
   if (!FACT_TYPES.has(type) || !Array.isArray(sourceIds) || sourceIds.length === 0) throw validationError()
   return `analytics-fact-${digest([type, ...sourceIds.map(safeId)])}`
@@ -203,7 +208,9 @@ function factBase({ line, node, sourceType, sourceId, sourceVersion, day }) {
     day,
     templateId: safeId(line.sourceTemplateId),
     templateVersion: safeInteger(line.sourceTemplateVersion),
-    stableNodeId: node ? safeId(node.sourceTemplateNodeKey) : ''
+    stableNodeId: node ? safeId(node.sourceTemplateNodeKey) : '',
+    nodeName: node ? safeText(node.name, 200) : '',
+    nodeSequence: node ? safeInteger(node.sequence) : null
   }
 }
 
@@ -219,6 +226,7 @@ function timingFact(base, { factType, metric, dimensionRole = 'global', dimensio
     metric,
     dimensionRole,
     dimensionUserId,
+    dimensionFilterToken: dimensionRole === 'global' ? '' : personFilterToken(dimensionRole, dimensionUserId),
     dimensionDisplayName,
     timingStatus: timing.timingStatus,
     workMinutes: timing.workMinutes
@@ -283,6 +291,27 @@ async function materializeBusinessSource(source, workTimeService) {
         node.analyticsGeneratedVersion !== node.analyticsSourceVersion) throw validationError()
   }
   const line = source.line
+  const nodeById = new Map()
+  for (const node of source.nodes) {
+    const nodeId = safeId(node._id)
+    if (nodeById.has(nodeId) || node.businessLineId !== line._id) throw validationError()
+    nodeById.set(nodeId, node)
+  }
+  const factKeys = new Set()
+  for (const fact of source.nodeFacts) {
+    const node = nodeById.get(ownValue(fact, 'nodeId'))
+    const metric = ownValue(fact, 'metric')
+    const key = `${ownValue(fact, 'nodeId')}\0${metric}`
+    if (!node || !['node_processing', 'node_review'].includes(metric) || factKeys.has(key) ||
+        ownValue(fact, 'sourceType') !== 'node' || ownValue(fact, 'sourceId') !== node._id ||
+        ownValue(fact, 'sourceVersion') !== node.analyticsSourceVersion ||
+        ownValue(fact, 'businessLineId') !== line._id || ownValue(fact, 'dimensionRole') !== 'global' ||
+        ownValue(fact, 'templateId') !== line.sourceTemplateId ||
+        ownValue(fact, 'templateVersion') !== line.sourceTemplateVersion ||
+        ownValue(fact, 'stableNodeId') !== node.sourceTemplateNodeKey) throw validationError()
+    factKeys.add(key)
+  }
+  if (factKeys.size !== source.nodes.length * 2) throw validationError()
   const day = shanghaiDay(line.analyticsCompletedAt)
   const base = factBase({
     line, node: null, sourceType: 'business', sourceId: line._id,
@@ -306,6 +335,7 @@ module.exports = {
   bucketDay,
   aggregateRollups,
   safeAverage,
+  personFilterToken,
   materializeNodeSource,
   materializeBusinessSource
 }

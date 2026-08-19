@@ -6,8 +6,18 @@ const { dailyRollupId } = require('./analytics-domain')
 const MAX_BATCH_SIZE = 40
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const CURSORS = Object.freeze({
-  node: { id: 'operations-analytics-node-cursor', kind: 'operations_analytics_node', collection: 'business_nodes' },
-  business: { id: 'operations-analytics-business-cursor', kind: 'operations_analytics_business', collection: 'business_lines' }
+  node: {
+    id: 'operations-analytics-node-cursor', kind: 'operations_analytics_node',
+    collection: 'business_nodes', criteria: { analyticsSnapshotStatus: 'pending' }
+  },
+  business: {
+    id: 'operations-analytics-business-cursor', kind: 'operations_analytics_business',
+    collection: 'business_lines', criteria: { analyticsSnapshotStatus: 'pending' }
+  },
+  refresh: {
+    id: 'operations-analytics-refresh-cursor', kind: 'operations_analytics_refresh',
+    collection: 'operations_analytics_facts', criteria: { timingStatus: 'pending_calendar' }
+  }
 })
 
 function validateLimit(limit) {
@@ -42,7 +52,7 @@ function validateCursor(document, spec) {
 
 async function queryCandidates(db, spec, cursorId, limit) {
   const where = {
-    analyticsSnapshotStatus: 'pending',
+    ...spec.criteria,
     ...(cursorId ? { _id: db.command.gt(cursorId) } : {})
   }
   const result = await db.collection(spec.collection).where(where).orderBy('_id', 'asc').limit(limit).get()
@@ -71,8 +81,10 @@ async function readAllById(db, collection, baseWhere, pageSize = 100) {
 const FACT_HASH_FIELDS = [
   '_id', 'sourceType', 'sourceId', 'sourceVersion', 'businessLineId', 'nodeId', 'factType',
   'metric', 'day', 'templateId', 'templateVersion', 'stableNodeId', 'dimensionRole',
-  'dimensionUserId', 'dimensionDisplayName', 'timingStatus', 'workMinutes'
+  'dimensionUserId', 'dimensionFilterToken', 'dimensionDisplayName', 'nodeName', 'nodeSequence',
+  'timingStatus', 'workMinutes'
 ]
+const FACT_IMMUTABLE_FIELDS = FACT_HASH_FIELDS.filter(key => !['timingStatus', 'workMinutes'].includes(key))
 
 function factHash(fact) {
   return crypto.createHash('sha256').update(JSON.stringify(FACT_HASH_FIELDS.map(key => fact[key]))).digest('hex')
@@ -107,7 +119,20 @@ function createCloudAnalyticsRepository({ db } = {}) {
       } })
       return true
     })
-    return claimed ? rows.map(row => ({ sourceId: row._id })) : []
+    if (!claimed) return []
+    if (kind !== 'refresh') return rows.map(row => ({ sourceId: row._id }))
+    const sources = new Map()
+    for (const row of rows) {
+      if (!row || !['node', 'business'].includes(row.sourceType) ||
+          typeof row.sourceId !== 'string' || !DOCUMENT_ID.test(row.sourceId)) {
+        throw new TypeError('pending analytics fact is invalid')
+      }
+      sources.set(`${row.sourceType}\0${row.sourceId}`, {
+        sourceType: row.sourceType,
+        sourceId: row.sourceId
+      })
+    }
+    return [...sources.values()]
   }
 
   async function readNodeSource({ sourceId } = {}) {
@@ -185,8 +210,12 @@ function createCloudAnalyticsRepository({ db } = {}) {
     const expectedFactHash = factHash(fact)
     return db.runTransaction(async transaction => {
       const source = await readDocument(transaction, spec.collection, spec.id)
-      if (!source || source.analyticsSnapshotStatus !== 'pending' ||
-          source.analyticsSourceVersion !== fact.sourceVersion) throw new TypeError('analytics source changed')
+      const sourcePending = source && source.analyticsSnapshotStatus === 'pending' &&
+        source.analyticsSourceVersion === fact.sourceVersion
+      const sourceGenerated = source && source.analyticsSnapshotStatus === 'generated' &&
+        source.analyticsSourceVersion === fact.sourceVersion &&
+        source.analyticsGeneratedVersion === fact.sourceVersion
+      if (!sourcePending && !sourceGenerated) throw new TypeError('analytics source changed')
       const existingFact = await readDocument(transaction, 'operations_analytics_facts', fact._id)
       if (existingFact) {
         if (existingFact.sourceVersion === fact.sourceVersion &&
@@ -194,30 +223,64 @@ function createCloudAnalyticsRepository({ db } = {}) {
             existingFact.factHash === expectedFactHash) {
           return { applied: false }
         }
+        const canResolvePending = existingFact.timingStatus === 'pending_calendar' &&
+          existingFact.workMinutes === null && fact.timingStatus === 'calculated' &&
+          Number.isSafeInteger(fact.workMinutes) && fact.workMinutes >= 0 &&
+          existingFact.rollupId === rollupId && existingFact.rollupAppliedVersion === fact.sourceVersion &&
+          FACT_IMMUTABLE_FIELDS.every(key => existingFact[key] === fact[key])
+        if (!canResolvePending) throw new TypeError('analytics fact conflict')
+      } else if (sourceGenerated) {
         throw new TypeError('analytics fact conflict')
       }
       const existingRollup = await readDocument(transaction, 'operations_analytics_daily', rollupId)
       const counters = existingRollup || { sampleCount: 0, totalMinutes: 0, pendingCount: 0, unrecordedCount: 0, version: 0 }
+      const transition = Boolean(existingFact)
+      const counterDelta = transition
+        ? { sampleCount: 1, totalMinutes: fact.workMinutes, pendingCount: -1, unrecordedCount: 0 }
+        : delta
       const next = {}
       for (const key of ['sampleCount', 'totalMinutes', 'pendingCount', 'unrecordedCount']) {
         const current = safeCounter(counters[key])
-        if (current === null || current > Number.MAX_SAFE_INTEGER - delta[key]) throw new TypeError('analytics rollup is invalid')
-        next[key] = current + delta[key]
+        const change = counterDelta[key]
+        if (current === null || !Number.isSafeInteger(change) || current + change < 0 ||
+            change > 0 && current > Number.MAX_SAFE_INTEGER - change) {
+          throw new TypeError('analytics rollup is invalid')
+        }
+        next[key] = current + change
       }
       const version = safeCounter(counters.version)
       if (version === null || version === Number.MAX_SAFE_INTEGER) throw new TypeError('analytics rollup is invalid')
+      const previousMinimum = existingRollup && existingRollup.minimumMinutes
+      const previousMaximum = existingRollup && existingRollup.maximumMinutes
+      const hasPreviousSamples = safeCounter(counters.sampleCount) > 0
+      if (hasPreviousSamples && (!Number.isSafeInteger(previousMinimum) || previousMinimum < 0 ||
+          !Number.isSafeInteger(previousMaximum) || previousMaximum < previousMinimum)) {
+        throw new TypeError('analytics rollup is invalid')
+      }
+      const minimumMinutes = counterDelta.sampleCount
+        ? hasPreviousSamples ? Math.min(previousMinimum, fact.workMinutes) : fact.workMinutes
+        : hasPreviousSamples ? previousMinimum : null
+      const maximumMinutes = counterDelta.sampleCount
+        ? hasPreviousSamples ? Math.max(previousMaximum, fact.workMinutes) : fact.workMinutes
+        : hasPreviousSamples ? previousMaximum : null
       await transaction.collection('operations_analytics_facts').doc(fact._id).set({ data: {
         ...fact,
         factHash: expectedFactHash,
         rollupId,
         rollupAppliedVersion: fact.sourceVersion,
-        createdAt: db.serverDate(),
+        createdAt: existingFact && existingFact.createdAt ? existingFact.createdAt : db.serverDate(),
         updatedAt: db.serverDate()
       } })
       await transaction.collection('operations_analytics_daily').doc(rollupId).set({ data: {
         _id: rollupId,
         ...identity,
+        dimensionFilterToken: fact.dimensionFilterToken,
+        dimensionDisplayName: fact.dimensionDisplayName,
+        nodeName: fact.nodeName,
+        nodeSequence: fact.nodeSequence,
         ...next,
+        minimumMinutes,
+        maximumMinutes,
         version: version + 1,
         updatedAt: db.serverDate()
       } })
@@ -245,6 +308,7 @@ function createCloudAnalyticsRepository({ db } = {}) {
   return {
     claimNodeCandidates: ({ limit } = {}) => claim('node', limit),
     claimBusinessCandidates: ({ limit } = {}) => claim('business', limit),
+    claimPendingFactCandidates: ({ limit } = {}) => claim('refresh', limit),
     readNodeSource,
     readBusinessSource,
     applyFact,
