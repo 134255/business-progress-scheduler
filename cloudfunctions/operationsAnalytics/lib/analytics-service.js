@@ -1,5 +1,7 @@
 'use strict'
 
+const { materializeNodeSource, materializeBusinessSource } = require('./analytics-domain')
+
 const MAX_BATCH_SIZE = 40
 
 function validDate(value) {
@@ -8,8 +10,9 @@ function validDate(value) {
 
 function createAnalyticsService({
   analyticsRepository,
-  materializeNodeSource = async () => ({ generated: false }),
-  materializeBusinessSource = async () => ({ generated: false })
+  workTimeService,
+  nodeMaterializer,
+  businessMaterializer
 } = {}) {
   if (!analyticsRepository ||
       typeof analyticsRepository.claimNodeCandidates !== 'function' ||
@@ -17,6 +20,28 @@ function createAnalyticsService({
       typeof analyticsRepository.readNodeSource !== 'function' ||
       typeof analyticsRepository.readBusinessSource !== 'function') {
     throw new TypeError('analyticsRepository is required')
+  }
+
+  async function generateNode(source, now) {
+    if (typeof nodeMaterializer === 'function') return nodeMaterializer({ source, now })
+    if (typeof analyticsRepository.applyFact !== 'function' ||
+        typeof analyticsRepository.markSourceGenerated !== 'function') return { generated: false }
+    const facts = materializeNodeSource(source)
+    for (const fact of facts) await analyticsRepository.applyFact(fact)
+    return analyticsRepository.markSourceGenerated({
+      sourceType: 'node', sourceId: source.node._id, sourceVersion: source.node.analyticsSourceVersion
+    })
+  }
+
+  async function generateBusiness(source, now) {
+    if (typeof businessMaterializer === 'function') return businessMaterializer({ source, now })
+    if (typeof analyticsRepository.applyFact !== 'function' ||
+        typeof analyticsRepository.markSourceGenerated !== 'function') return { generated: false }
+    const facts = await materializeBusinessSource(source, workTimeService)
+    for (const fact of facts) await analyticsRepository.applyFact(fact)
+    return analyticsRepository.markSourceGenerated({
+      sourceType: 'business', sourceId: source.line._id, sourceVersion: source.line.analyticsSourceVersion
+    })
   }
 
   async function runCycle({ now, batchSize } = {}) {
@@ -39,7 +64,7 @@ function createAnalyticsService({
     for (const candidate of nodeCandidates) {
       try {
         const source = await analyticsRepository.readNodeSource(candidate)
-        const applied = await materializeNodeSource({ source, now })
+        const applied = await generateNode(source, now)
         if (applied && applied.generated === true) result.nodeGenerated += 1
       } catch (_) {
         result.failed += 1
@@ -48,7 +73,7 @@ function createAnalyticsService({
     for (const candidate of businessCandidates) {
       try {
         const source = await analyticsRepository.readBusinessSource(candidate)
-        const applied = await materializeBusinessSource({ source, now })
+        const applied = await generateBusiness(source, now)
         if (applied && applied.generated === true) result.businessGenerated += 1
       } catch (_) {
         result.failed += 1

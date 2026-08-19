@@ -8,15 +8,17 @@ const {
   summarizeNodeFacts,
   bucketDay,
   aggregateRollups,
-  safeAverage
+  safeAverage,
+  materializeNodeSource,
+  materializeBusinessSource
 } = require('../lib/analytics-domain')
 
 test('节点样本累计全部处理轮与全部终态审核轮并按实际参与人归属', () => {
   const result = summarizeNodeFacts({
     rounds: [
-      { _id: 'round-1', status: 'rejected', submittedByUserId: 'processor-a',
+      { _id: 'round-1', status: 'rejected', submittedBy: 'processor-a',
         processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 20 },
-      { _id: 'round-2', status: 'approved', submittedByUserId: 'processor-b',
+      { _id: 'round-2', status: 'approved', submittedBy: 'processor-b',
         processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 10 }
     ],
     votes: [
@@ -48,7 +50,7 @@ test('节点样本累计全部处理轮与全部终态审核轮并按实际参�
 
 test('待补算不会伪装为零且历史缺失不会被推测', () => {
   const pending = summarizeNodeFacts({
-    rounds: [{ _id: 'round-1', status: 'approved', submittedByUserId: 'processor-a',
+    rounds: [{ _id: 'round-1', status: 'approved', submittedBy: 'processor-a',
       processingRoundTimingStatus: 'pending_calendar', processingRoundWorkMinutes: null }],
     votes: [],
     reviewMinuteByRoundId: new Map([['round-1', { timingStatus: 'pending_calendar', workMinutes: null }]])
@@ -57,7 +59,7 @@ test('待补算不会伪装为零且历史缺失不会被推测', () => {
   assert.equal(pending.reviewProcess.timingStatus, 'pending_calendar')
 
   const historical = summarizeNodeFacts({
-    rounds: [{ _id: 'round-old', status: 'approved', submittedByUserId: 'processor-a' }],
+    rounds: [{ _id: 'round-old', status: 'approved', submittedBy: 'processor-a' }],
     votes: [],
     reviewMinuteByRoundId: new Map()
   })
@@ -67,7 +69,7 @@ test('待补算不会伪装为零且历史缺失不会被推测', () => {
 
 test('零分钟合法且平均值只保留一位小数', () => {
   const result = summarizeNodeFacts({
-    rounds: [{ _id: 'round-1', status: 'approved', submittedByUserId: 'processor-a',
+    rounds: [{ _id: 'round-1', status: 'approved', submittedBy: 'processor-a',
       processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 0 }],
     votes: [],
     reviewMinuteByRoundId: new Map([['round-1', { timingStatus: 'calculated', workMinutes: 0 }]])
@@ -76,6 +78,72 @@ test('零分钟合法且平均值只保留一位小数', () => {
   assert.equal(safeAverage(10, 3), 3.3)
   assert.equal(safeAverage(0, 2), 0)
   assert.equal(safeAverage(0, 0), null)
+})
+
+test('节点来源生成处理、审核、参与人和投票响应事实并按稳定节点键归组', () => {
+  const source = {
+    line: { _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 2 },
+    node: {
+      _id: 'node-1', businessLineId: 'line-1', sourceTemplateNodeKey: 'stable-node-1',
+      name: '资料审核', sequence: 0, analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1,
+      analyticsCompletedAt: new Date('2026-08-19T08:00:00.000Z')
+    },
+    rounds: [{
+      _id: 'round-1', status: 'approved', submittedBy: 'processor-a', submittedByDisplayName: '处理人甲',
+      processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 90,
+      reviewTimingStatus: 'calculated', reviewElapsedWorkMinutes: 30
+    }],
+    votes: [{
+      _id: 'vote-1', reviewRoundId: 'round-1', reviewerUserId: 'reviewer-a', reviewerDisplayName: '审核人甲',
+      decision: 'approved', reviewResponseTimingStatus: 'calculated', reviewResponseWorkMinutes: 12
+    }]
+  }
+  const facts = materializeNodeSource(source)
+  assert.deepEqual(facts.map(item => [item.factType, item.metric, item.dimensionRole, item.workMinutes]), [
+    ['node_completed', 'node_processing', 'global', 90],
+    ['processor_contribution', 'node_processing', 'processor', 90],
+    ['review_process', 'node_review', 'global', 30],
+    ['reviewer_process_contribution', 'node_review', 'reviewer', 30],
+    ['review_response', 'review_response', 'reviewer', 12]
+  ])
+  assert.equal(facts.every(item => item.stableNodeId === 'stable-node-1' && item.day === '2026-08-19'), true)
+})
+
+test('业务来源生成业务完成和每业务节点累计指标，日历缺失不伪装为零', async () => {
+  const source = {
+    line: {
+      _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 2,
+      createdAt: new Date('2026-08-18T01:00:00Z'), analyticsCompletedAt: new Date('2026-08-19T08:00:00Z'),
+      analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1
+    },
+    nodes: [
+      { _id: 'node-1', analyticsSnapshotStatus: 'generated', analyticsSourceVersion: 1, analyticsGeneratedVersion: 1 }
+    ],
+    nodeFacts: [
+      { metric: 'node_processing', dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 90 },
+      { metric: 'node_review', dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 30 }
+    ]
+  }
+  const facts = await materializeBusinessSource(source, {
+    async workingMinutesBetween() { return { status: 'pending_calendar', minutes: null } }
+  })
+  assert.deepEqual(facts.map(item => [item.metric, item.timingStatus, item.workMinutes]), [
+    ['business_completion', 'pending_calendar', null],
+    ['business_node_processing_total', 'calculated', 90],
+    ['business_review_total', 'calculated', 30]
+  ])
+})
+
+test('业务汇总在任一节点统计尚未生成时失败关闭', async () => {
+  await assert.rejects(materializeBusinessSource({
+    line: {
+      _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 1,
+      createdAt: new Date('2026-08-18T01:00:00Z'), analyticsCompletedAt: new Date('2026-08-19T08:00:00Z'),
+      analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1
+    },
+    nodes: [{ _id: 'node-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],
+    nodeFacts: []
+  }, { async workingMinutesBetween() { return { status: 'calculated', minutes: 1 } } }), /VALIDATION_ERROR/)
 })
 
 test('上海自然日按日、周一和月稳定分桶', () => {

@@ -50,3 +50,43 @@ test('节点和业务来源仅按固定文档与受限查询读取', async () =>
   const line = await repository.readBusinessSource({ sourceId: 'line-1' })
   assert.deepEqual(line.nodes.map(item => item._id), ['node-1'])
 })
+
+test('确定性事实重复应用不重复累计且生成后原子关闭来源', async () => {
+  const { fake, repository } = harness({
+    business_lines: [{ _id: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],
+    operations_analytics_facts: [], operations_analytics_daily: []
+  })
+  const fact = {
+    _id: 'analytics-fact-1', sourceType: 'node', sourceId: 'node-1', sourceVersion: 1,
+    businessLineId: 'line-1', nodeId: 'node-1', factType: 'node_completed', metric: 'node_processing',
+    day: '2026-08-19', templateId: 'template-1', templateVersion: 2, stableNodeId: 'stable-1',
+    dimensionRole: 'global', dimensionUserId: '', timingStatus: 'calculated', workMinutes: 90
+  }
+  assert.deepEqual(await repository.applyFact(fact), { applied: true })
+  assert.deepEqual(await repository.applyFact(fact), { applied: false })
+  await assert.rejects(repository.applyFact({ ...fact, workMinutes: 91 }), /fact conflict/)
+  assert.equal(fake.documents('operations_analytics_daily')[0].sampleCount, 1)
+  assert.equal(fake.documents('operations_analytics_daily')[0].totalMinutes, 90)
+  assert.deepEqual(await repository.markSourceGenerated({ sourceType: 'node', sourceId: 'node-1', sourceVersion: 1 }), { generated: true })
+  assert.equal(fake.documents('business_nodes')[0].analyticsSnapshotStatus, 'generated')
+  assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
+})
+
+test('待补算和历史未记录只增加各自缺失计数', async () => {
+  const { fake, repository } = harness({
+    business_lines: [{ _id: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],
+    operations_analytics_facts: [], operations_analytics_daily: []
+  })
+  const base = {
+    sourceType: 'node', sourceId: 'node-1', sourceVersion: 1, businessLineId: 'line-1', nodeId: 'node-1',
+    factType: 'node_completed', metric: 'node_processing', day: '2026-08-19', templateId: 'template-1',
+    templateVersion: 2, stableNodeId: 'stable-1', dimensionRole: 'global', dimensionUserId: '', workMinutes: null
+  }
+  await repository.applyFact({ ...base, _id: 'analytics-fact-pending', timingStatus: 'pending_calendar' })
+  await repository.applyFact({ ...base, _id: 'analytics-fact-old', factType: 'review_process', metric: 'node_review', timingStatus: 'historical_unrecorded' })
+  const rows = fake.documents('operations_analytics_daily')
+  assert.equal(rows.find(item => item.metric === 'node_processing').pendingCount, 1)
+  assert.equal(rows.find(item => item.metric === 'node_review').unrecordedCount, 1)
+})

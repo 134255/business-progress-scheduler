@@ -127,7 +127,7 @@ function summarizeNodeFacts({ rounds, votes, reviewMinuteByRoundId }) {
     const id = safeId(ownValue(round, '_id'))
     if (roundIds.has(id) || !['approved', 'rejected'].includes(ownValue(round, 'status'))) throw validationError()
     roundIds.add(id)
-    const processorId = safeId(ownValue(round, 'submittedByUserId'))
+    const processorId = safeId(ownValue(round, 'submittedBy'))
     const processing = timingValue(round, 'processingRoundTimingStatus', 'processingRoundWorkMinutes')
     processingValues.push(processing)
     if (!processorValues.has(processorId)) processorValues.set(processorId, [])
@@ -183,11 +183,129 @@ function aggregateRollups(rows, grain) {
   }))
 }
 
+function shanghaiDay(value) {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) throw validationError()
+  return new Date(value.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
+function safeText(value, maximum = 100) {
+  if (typeof value !== 'string' || !value.trim() || value.length > maximum) throw validationError()
+  return value.trim()
+}
+
+function factBase({ line, node, sourceType, sourceId, sourceVersion, day }) {
+  return {
+    sourceType,
+    sourceId,
+    sourceVersion: safeInteger(sourceVersion),
+    businessLineId: safeId(line._id),
+    nodeId: node ? safeId(node._id) : '',
+    day,
+    templateId: safeId(line.sourceTemplateId),
+    templateVersion: safeInteger(line.sourceTemplateVersion),
+    stableNodeId: node ? safeId(node.sourceTemplateNodeKey) : ''
+  }
+}
+
+function timingFact(base, { factType, metric, dimensionRole = 'global', dimensionUserId = '', dimensionDisplayName = '', timing, identityIds = [] }) {
+  if (!TIMING_STATUSES.has(timing.timingStatus) ||
+      timing.timingStatus === 'calculated' && !Number.isSafeInteger(timing.workMinutes) ||
+      timing.timingStatus !== 'calculated' && timing.workMinutes !== null) throw validationError()
+  const ids = [base.sourceId, metric, dimensionRole, dimensionUserId || 'global', ...identityIds]
+  return {
+    _id: factId(factType, ids),
+    ...base,
+    factType,
+    metric,
+    dimensionRole,
+    dimensionUserId,
+    dimensionDisplayName,
+    timingStatus: timing.timingStatus,
+    workMinutes: timing.workMinutes
+  }
+}
+
+function materializeNodeSource(source) {
+  if (!source || typeof source !== 'object' || !source.line || !source.node ||
+      source.node.analyticsSnapshotStatus !== 'pending' ||
+      source.node.businessLineId !== source.line._id) throw validationError()
+  const day = shanghaiDay(source.node.analyticsCompletedAt)
+  const base = factBase({
+    line: source.line, node: source.node, sourceType: 'node', sourceId: source.node._id,
+    sourceVersion: source.node.analyticsSourceVersion, day
+  })
+  const reviewMinuteByRoundId = new Map()
+  const processorNames = new Map()
+  for (const round of source.rounds) {
+    reviewMinuteByRoundId.set(round._id, {
+      timingStatus: ownValue(round, 'reviewTimingStatus'),
+      workMinutes: ownValue(round, 'reviewElapsedWorkMinutes')
+    })
+    processorNames.set(round.submittedBy, safeText(round.submittedByDisplayName))
+  }
+  const reviewerNames = new Map()
+  for (const vote of source.votes) reviewerNames.set(vote.reviewerUserId, safeText(vote.reviewerDisplayName))
+  const summary = summarizeNodeFacts({ rounds: source.rounds, votes: source.votes, reviewMinuteByRoundId })
+  const facts = [
+    timingFact(base, { factType: 'node_completed', metric: 'node_processing', timing: summary.processing }),
+    ...summary.processorContributions.map(item => timingFact(base, {
+      factType: 'processor_contribution', metric: 'node_processing', dimensionRole: 'processor',
+      dimensionUserId: item.userId, dimensionDisplayName: processorNames.get(item.userId), timing: item
+    })),
+    timingFact(base, { factType: 'review_process', metric: 'node_review', timing: summary.reviewProcess }),
+    ...summary.reviewerContributions.map(item => timingFact(base, {
+      factType: 'reviewer_process_contribution', metric: 'node_review', dimensionRole: 'reviewer',
+      dimensionUserId: item.userId, dimensionDisplayName: reviewerNames.get(item.userId), timing: item
+    })),
+    ...summary.reviewResponses.map(item => timingFact(base, {
+      factType: 'review_response', metric: 'review_response', dimensionRole: 'reviewer',
+      dimensionUserId: item.userId, dimensionDisplayName: reviewerNames.get(item.userId), timing: item,
+      identityIds: [item.voteId]
+    }))
+  ]
+  return facts
+}
+
+function combineFactMetric(facts, metric) {
+  const values = facts.filter(item => item.metric === metric && item.dimensionRole === 'global')
+    .map(item => ({ timingStatus: item.timingStatus, workMinutes: item.workMinutes }))
+  return combineTimings(values)
+}
+
+async function materializeBusinessSource(source, workTimeService) {
+  if (!source || typeof source !== 'object' || !source.line || !Array.isArray(source.nodes) ||
+      source.nodes.length === 0 || !Array.isArray(source.nodeFacts) ||
+      source.line.analyticsSnapshotStatus !== 'pending' || !workTimeService ||
+      typeof workTimeService.workingMinutesBetween !== 'function') throw validationError()
+  for (const node of source.nodes) {
+    if (!node || node.analyticsSnapshotStatus !== 'generated' ||
+        !Number.isSafeInteger(node.analyticsSourceVersion) ||
+        node.analyticsGeneratedVersion !== node.analyticsSourceVersion) throw validationError()
+  }
+  const line = source.line
+  const day = shanghaiDay(line.analyticsCompletedAt)
+  const base = factBase({
+    line, node: null, sourceType: 'business', sourceId: line._id,
+    sourceVersion: line.analyticsSourceVersion, day
+  })
+  const completion = await workTimeService.workingMinutesBetween(line.createdAt, line.analyticsCompletedAt)
+  const completionTiming = completion && completion.status === 'calculated'
+    ? { timingStatus: 'calculated', workMinutes: Math.floor(completion.minutes) }
+    : { timingStatus: 'pending_calendar', workMinutes: null }
+  return [
+    timingFact(base, { factType: 'business_completed', metric: 'business_completion', timing: completionTiming }),
+    timingFact(base, { factType: 'business_completed', metric: 'business_node_processing_total', timing: combineFactMetric(source.nodeFacts, 'node_processing') }),
+    timingFact(base, { factType: 'business_completed', metric: 'business_review_total', timing: combineFactMetric(source.nodeFacts, 'node_review') })
+  ]
+}
+
 module.exports = {
   factId,
   dailyRollupId,
   summarizeNodeFacts,
   bucketDay,
   aggregateRollups,
-  safeAverage
+  safeAverage,
+  materializeNodeSource,
+  materializeBusinessSource
 }

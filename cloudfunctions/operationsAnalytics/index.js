@@ -2,6 +2,8 @@
 
 const { createAnalyticsService } = require('./lib/analytics-service')
 const { createCloudAnalyticsRepository } = require('./lib/cloud-analytics-repository')
+const { createWorkTimeService } = require('./lib/work-time-service')
+const { createCloudWorkCalendarRepository } = require('./lib/cloud-work-calendar-repository')
 
 function safeError(code, message) {
   const error = new Error(message)
@@ -48,9 +50,15 @@ function createOperationsAnalyticsHandler({
 function createDefaultHandler() {
   const cloud = require('wx-server-sdk')
   cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV })
-  const repository = createCloudAnalyticsRepository({ db: cloud.database() })
+  const db = cloud.database()
+  const repository = createCloudAnalyticsRepository({ db })
   return createOperationsAnalyticsHandler({
-    service: createAnalyticsService({ analyticsRepository: repository }),
+    service: createAnalyticsService({
+      analyticsRepository: repository,
+      workTimeService: createWorkTimeService({
+        calendarRepository: createCloudWorkCalendarRepository({ db })
+      })
+    }),
     getContext: () => cloud.getWXContext(),
     getTriggerSource: () => process.env.TRIGGER_SRC
   })
