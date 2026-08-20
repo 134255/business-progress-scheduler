@@ -9,7 +9,7 @@ function harness(overrides = {}) {
   const fake = createFakeCloudDatabase({
     business_nodes: [], business_lines: [], node_review_rounds: [], node_review_votes: [],
     system_settings: [], ...overrides
-  })
+  }, { rejectExplicitIdOnSet: true })
   return { fake, repository: createCloudAnalyticsRepository({ db: fake.db }) }
 }
 

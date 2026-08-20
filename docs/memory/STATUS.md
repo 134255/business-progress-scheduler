@@ -1,6 +1,8 @@
 # Current Status
 
-Status captured: 2026-08-19 (Asia/Shanghai)
+Status captured: 2026-08-20 (Asia/Shanghai)
+
+- 2026-08-20 真实 CloudBase 首次运行 `operationsAnalytics` 时在领取首批候选前安全失败：来源业务和两个节点均保持 `analyticsSnapshotStatus: pending`，统计游标、事实和每日汇总均未生成。根因是运营统计仓储在通过 `doc(id).set()` 写游标、事实和每日汇总时，又把只读系统字段 `_id` 放入 `data`；CloudBase 拒绝更新 `_id`，而原内存数据库未模拟该限制。TDD 已为测试数据库增加可选的真实约束，RED 为运营统计仓储 6 项中 2 项通过、4 项因 `_id` 写入失败；最小修复只从三类 `set` 数据中移除显式 `_id`，文档编号继续由 `doc(id)` 确定，GREEN 为 6/6。最终新跑：`operationsAnalytics` 26/26、`businessApi` 558/558、`calendarSync` 55/55、`workflowReminder` 30/30、`evidenceRetention` 42/42、小程序 162/162、WXML 4/4，全部 0 失败。真实目标环境重新部署、一次性 Timer 恢复 pending 来源、生成事实/每日汇总并恢复空触发器仍为 `unverified`；操作员自己的 `project.config.json` 修改未读取、未修改、未暂存、未提交。
 
 - 2026-08-19 本地 `main` 的运营统计功能合并后门禁保持全绿，并已通过 Git HTTP/1.1 成功推送到既有 `origin/main`；未提交的 `project.config.json` 未进入任何提交或推送。CloudBase 部署包和手册已核对：下一步先备份或记录两个尚不存在的统计集合，再创建 `operations_analytics_facts`、`operations_analytics_daily` 及手册列明的来源扫描/事实/每日汇总索引，随后部署 `businessApi`、`operationsAnalytics` 和小程序；`operationsAnalytics` 首次部署必须保持 `triggers: []`，一次性 Timer、多账号下钻及正式 15 分钟周期仍为 `unverified`。
 

@@ -111,7 +111,6 @@ function createCloudAnalyticsRepository({ db } = {}) {
       if (current.cursorId !== observed.cursorId || current.version !== observed.version) return false
       if (current.version === Number.MAX_SAFE_INTEGER) throw new TypeError('analytics cursor is invalid')
       await transaction.collection('system_settings').doc(spec.id).set({ data: {
-        _id: spec.id,
         kind: spec.kind,
         cursorId: nextCursorId,
         version: current.version + 1,
@@ -208,6 +207,7 @@ function createCloudAnalyticsRepository({ db } = {}) {
     }
     const rollupId = dailyRollupId(identity)
     const expectedFactHash = factHash(fact)
+    const { _id: factDocumentId, ...factData } = fact
     return db.runTransaction(async transaction => {
       const source = await readDocument(transaction, spec.collection, spec.id)
       const sourcePending = source && source.analyticsSnapshotStatus === 'pending' &&
@@ -216,7 +216,7 @@ function createCloudAnalyticsRepository({ db } = {}) {
         source.analyticsSourceVersion === fact.sourceVersion &&
         source.analyticsGeneratedVersion === fact.sourceVersion
       if (!sourcePending && !sourceGenerated) throw new TypeError('analytics source changed')
-      const existingFact = await readDocument(transaction, 'operations_analytics_facts', fact._id)
+      const existingFact = await readDocument(transaction, 'operations_analytics_facts', factDocumentId)
       if (existingFact) {
         if (existingFact.sourceVersion === fact.sourceVersion &&
             existingFact.rollupAppliedVersion === fact.sourceVersion && existingFact.rollupId === rollupId &&
@@ -263,8 +263,8 @@ function createCloudAnalyticsRepository({ db } = {}) {
       const maximumMinutes = counterDelta.sampleCount
         ? hasPreviousSamples ? Math.max(previousMaximum, fact.workMinutes) : fact.workMinutes
         : hasPreviousSamples ? previousMaximum : null
-      await transaction.collection('operations_analytics_facts').doc(fact._id).set({ data: {
-        ...fact,
+      await transaction.collection('operations_analytics_facts').doc(factDocumentId).set({ data: {
+        ...factData,
         factHash: expectedFactHash,
         rollupId,
         rollupAppliedVersion: fact.sourceVersion,
@@ -272,7 +272,6 @@ function createCloudAnalyticsRepository({ db } = {}) {
         updatedAt: db.serverDate()
       } })
       await transaction.collection('operations_analytics_daily').doc(rollupId).set({ data: {
-        _id: rollupId,
         ...identity,
         dimensionFilterToken: fact.dimensionFilterToken,
         dimensionDisplayName: fact.dimensionDisplayName,

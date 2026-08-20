@@ -102,6 +102,9 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       },
       async set({ data }) {
         countOperation()
+        if (options.rejectExplicitIdOnSet && data && Object.hasOwn(data, '_id')) {
+          throw new Error('document.set:fail cannot update _id field')
+        }
         if (transactionRecord) {
           transactionRecord.writes += 1
           transactionRecord.writeDetails.push({ collection: name, id, operation: 'set', data: clone(data) })
