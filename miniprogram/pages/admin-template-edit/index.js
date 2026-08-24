@@ -56,6 +56,9 @@ function cleanNode(node, sequence) {
       ? 'business_creator'
       : 'fixed_accounts',
     processorUserIds: (isLegacyNode ? node.assigneeUserIds : node.processorUserIds || []).slice(),
+    reviewerAssignmentMode: !isLegacyNode && node.reviewerAssignmentMode === 'business_creator'
+      ? 'business_creator'
+      : 'fixed_accounts',
     reviewerUserIds: (isLegacyNode ? [] : node.reviewerUserIds || []).slice(),
     reviewMode: !isLegacyNode && node.reviewMode === 'all' ? 'all' : 'any',
     processingSlaWorkHours: !isLegacyNode && node.processingSlaWorkHours !== undefined ? node.processingSlaWorkHours : 22,

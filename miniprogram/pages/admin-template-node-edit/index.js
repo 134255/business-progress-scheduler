@@ -29,7 +29,7 @@ function newNode() {
   return {
     _uiKey: nextUiKey('node'), sequence: 0, name: '', description: '', workflowMode: 'review',
     processorAssignmentMode: 'fixed_accounts',
-    processorUserIds: [], reviewerUserIds: [], reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8,
+    processorUserIds: [], reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: [], reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8,
     requiresEvidence: false, allowedEvidenceTypes: [], fields: []
   }
 }
@@ -44,6 +44,7 @@ Page({
     accountOptions: [],
     processorAssignmentMode: 'fixed_accounts',
     processorUserIds: [],
+    reviewerAssignmentMode: 'fixed_accounts',
     reviewerUserIds: [],
     reviewMode: 'any',
     processingSlaWorkHours: 22,
@@ -77,6 +78,9 @@ Page({
     const processorAssignmentMode = !isLegacyNode && node.processorAssignmentMode === 'business_creator'
       ? 'business_creator'
       : 'fixed_accounts'
+    const reviewerAssignmentMode = !isLegacyNode && node.reviewerAssignmentMode === 'business_creator'
+      ? 'business_creator'
+      : 'fixed_accounts'
     this.fixedProcessorUserIds = processorAssignmentMode === 'fixed_accounts' ? processorUserIds.slice() : []
     this.nodeKey = node.nodeKey
     this.uiKey = node._uiKey || node.nodeKey || nextUiKey('node')
@@ -95,6 +99,7 @@ Page({
       })),
       processorAssignmentMode,
       processorUserIds,
+      reviewerAssignmentMode,
       reviewerUserIds,
       reviewMode: !isLegacyNode && node.reviewMode === 'all' ? 'all' : 'any',
       processingSlaWorkHours: !isLegacyNode && node.processingSlaWorkHours !== undefined ? node.processingSlaWorkHours : 22,
@@ -138,6 +143,7 @@ Page({
   toggleAccountRole(role, event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     if (role === 'processor' && this.data.processorAssignmentMode === 'business_creator') return
+    if (role === 'reviewer' && this.data.reviewerAssignmentMode === 'business_creator') return
     const id = event && event.currentTarget && event.currentTarget.dataset.id
     if (typeof id !== 'string' || !this.data.accountOptions.some(item => item._id === id)) return
     const dataKey = role === 'processor' ? 'processorUserIds' : 'reviewerUserIds'
@@ -161,6 +167,10 @@ Page({
       ? 'business_creator'
       : 'fixed_accounts'
     if (processorAssignmentMode === this.data.processorAssignmentMode) return
+    if (processorAssignmentMode === 'business_creator' && this.data.reviewerAssignmentMode === 'business_creator') {
+      this.setData({ errorMessage: '业务发起人不能同时作为本节点处理人和审核人' })
+      return
+    }
     if (processorAssignmentMode === 'business_creator') {
       this.fixedProcessorUserIds = this.data.processorUserIds.slice()
     }
@@ -170,9 +180,30 @@ Page({
     this.setData({
       processorAssignmentMode,
       processorUserIds,
+      errorMessage: '',
       accountOptions: this.data.accountOptions.map(item => ({
         ...item,
         processorSelected: processorUserIds.includes(item._id)
+      }))
+    })
+  },
+  onReviewerAssignmentModeChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
+    const reviewerAssignmentMode = event && event.detail && event.detail.value
+      ? 'business_creator'
+      : 'fixed_accounts'
+    if (reviewerAssignmentMode === this.data.reviewerAssignmentMode) return
+    if (reviewerAssignmentMode === 'business_creator' && this.data.processorAssignmentMode === 'business_creator') {
+      this.setData({ errorMessage: '业务发起人不能同时作为本节点处理人和审核人' })
+      return
+    }
+    this.setData({
+      reviewerAssignmentMode,
+      reviewerUserIds: [],
+      errorMessage: '',
+      accountOptions: this.data.accountOptions.map(item => ({
+        ...item,
+        reviewerSelected: false
       }))
     })
   },
@@ -297,6 +328,7 @@ Page({
       workflowMode: 'review',
       processorAssignmentMode: this.data.processorAssignmentMode,
       processorUserIds: this.data.processorUserIds.slice(),
+      reviewerAssignmentMode: this.data.reviewerAssignmentMode,
       reviewerUserIds: this.data.reviewerUserIds.slice(),
       reviewMode: this.data.reviewMode,
       processingSlaWorkHours: Number(this.data.processingSlaWorkHours),
@@ -323,8 +355,12 @@ Page({
       this.setData({ errorMessage: '请至少选择一名处理人' })
       return
     }
-    if (!node.reviewerUserIds.length) {
+    if (node.reviewerAssignmentMode === 'fixed_accounts' && !node.reviewerUserIds.length) {
       this.setData({ errorMessage: '请至少选择一名审核人' })
+      return
+    }
+    if (node.processorAssignmentMode === 'business_creator' && node.reviewerAssignmentMode === 'business_creator') {
+      this.setData({ errorMessage: '业务发起人不能同时作为本节点处理人和审核人' })
       return
     }
     if (node.processorUserIds.some(id => node.reviewerUserIds.includes(id))) {

@@ -206,12 +206,71 @@ test('node editor saves separate processor reviewer mode and dual SLA fields', (
   assert.equal(node.workflowMode, 'review')
   assert.equal(node.processorAssignmentMode, 'fixed_accounts')
   assert.deepEqual(node.processorUserIds, [processor._id])
+  assert.equal(node.reviewerAssignmentMode, 'fixed_accounts')
   assert.deepEqual(node.reviewerUserIds, [reviewer._id])
   assert.equal(node.reviewMode, 'all')
   assert.equal(node.processingSlaWorkHours, 22)
   assert.equal(node.reviewSlaWorkHours, 8)
   assert.equal(Object.hasOwn(node, 'assigneeUserIds'), false)
   assert.equal(Object.hasOwn(node, 'slaWorkHours'), false)
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor switches one node to the business creator as unique reviewer and clears fixed reviewers', async () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  const reviewer = { _id: 'reviewer-1', displayName: '审核人', username: 'reviewer' }
+  let accepted
+  const page = createNodeEditor({
+    users: [processor, reviewer],
+    node: storedNode({
+      workflowMode: 'review',
+      processorUserIds: [processor._id],
+      reviewerUserIds: [reviewer._id]
+    }),
+    acceptNodeFromEditor: (_index, node) => { accepted = node }
+  })
+
+  assert.equal(page.data.reviewerAssignmentMode, 'fixed_accounts', '旧节点必须稳定默认固定审核账号')
+  page.onReviewerAssignmentModeChange({ detail: { value: true } })
+  assert.equal(page.data.reviewerAssignmentMode, 'business_creator')
+  assert.deepEqual(page.data.reviewerUserIds, [])
+  assert.equal(page.data.accountOptions.find(item => item._id === reviewer._id).reviewerSelected, false)
+
+  page.onReviewerToggle({ currentTarget: { dataset: { id: reviewer._id } } })
+  assert.deepEqual(page.data.reviewerUserIds, [], '发起人模式不得重新写入固定审核人')
+
+  page.onReviewerAssignmentModeChange({ detail: { value: false } })
+  assert.equal(page.data.reviewerAssignmentMode, 'fixed_accounts')
+  assert.deepEqual(page.data.reviewerUserIds, [], '切回固定模式必须重新选择，不恢复已清除账号')
+  page.onReviewerToggle({ currentTarget: { dataset: { id: reviewer._id } } })
+  assert.deepEqual(page.data.reviewerUserIds, [reviewer._id])
+
+  page.onReviewerAssignmentModeChange({ detail: { value: true } })
+  page.setData({ name: '发起人审核节点' })
+  await page.submit()
+  assert.equal(accepted.reviewerAssignmentMode, 'business_creator')
+  assert.deepEqual(accepted.reviewerUserIds, [])
+
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor rejects using the business creator as both processor and reviewer on one node', () => {
+  const page = createNodeEditor({ users: [], node: storedNode({
+    workflowMode: 'review',
+    processorAssignmentMode: 'business_creator',
+    processorUserIds: [],
+    reviewerUserIds: ['reviewer-1']
+  }) })
+
+  page.onReviewerAssignmentModeChange({ detail: { value: true } })
+
+  assert.equal(page.data.reviewerAssignmentMode, 'fixed_accounts')
+  assert.match(page.data.errorMessage, /不能同时/)
+
   delete global.getApp
   delete global.getCurrentPages
   delete global.wx
@@ -265,13 +324,13 @@ test('template editor preserves each node processor assignment mode in the final
     nodes: [
       {
         sequence: 0, name: '发起人处理节点', description: '', workflowMode: 'review',
-        processorAssignmentMode: 'business_creator', processorUserIds: [], reviewerUserIds: ['reviewer-1'],
+        processorAssignmentMode: 'business_creator', processorUserIds: [], reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: ['reviewer-1'],
         reviewMode: 'any', processingSlaWorkHours: 2, reviewSlaWorkHours: 1,
         requiresEvidence: false, allowedEvidenceTypes: [], fields: []
       },
       {
         sequence: 1, name: '固定负责人节点', description: '', workflowMode: 'review',
-        processorAssignmentMode: 'fixed_accounts', processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
+        processorAssignmentMode: 'fixed_accounts', processorUserIds: ['processor-1'], reviewerAssignmentMode: 'business_creator', reviewerUserIds: [],
         reviewMode: 'any', processingSlaWorkHours: 2, reviewSlaWorkHours: 1,
         requiresEvidence: false, allowedEvidenceTypes: [], fields: []
       }
@@ -283,10 +342,12 @@ test('template editor preserves each node processor assignment mode in the final
   assert.equal(definitions.length, 1)
   assert.deepEqual(definitions[0].nodes.map(node => ({
     processorAssignmentMode: node.processorAssignmentMode,
-    processorUserIds: node.processorUserIds
+    processorUserIds: node.processorUserIds,
+    reviewerAssignmentMode: node.reviewerAssignmentMode,
+    reviewerUserIds: node.reviewerUserIds
   })), [
-    { processorAssignmentMode: 'business_creator', processorUserIds: [] },
-    { processorAssignmentMode: 'fixed_accounts', processorUserIds: ['processor-1'] }
+    { processorAssignmentMode: 'business_creator', processorUserIds: [], reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: ['reviewer-1'] },
+    { processorAssignmentMode: 'fixed_accounts', processorUserIds: ['processor-1'], reviewerAssignmentMode: 'business_creator', reviewerUserIds: [] }
   ])
   delete global.getApp
   delete global.wx
@@ -301,6 +362,7 @@ test('node editor read-only page exposes the per-node assignment source without 
       workflowMode: 'review',
       processorAssignmentMode: 'business_creator',
       processorUserIds: [],
+      reviewerAssignmentMode: 'fixed_accounts',
       reviewerUserIds: [reviewer._id]
     })
   })
@@ -313,6 +375,17 @@ test('node editor read-only page exposes the per-node assignment source without 
   assert.match(wxml, /业务发起人作为本节点唯一处理人/)
   assert.match(wxml, /processorAssignmentMode\s*===\s*'business_creator'/)
   assert.match(wxml, /disabled="{{readOnly\s*\|\|\s*processorAssignmentMode\s*===\s*'business_creator'}}"/)
+
+  page.setData({
+    processorAssignmentMode: 'fixed_accounts',
+    reviewerAssignmentMode: 'business_creator',
+    reviewerUserIds: []
+  })
+  page.onReviewerAssignmentModeChange({ detail: { value: false } })
+  assert.equal(page.data.reviewerAssignmentMode, 'business_creator')
+  assert.match(wxml, /业务发起人作为本节点唯一审核人/)
+  assert.match(wxml, /reviewerAssignmentMode\s*===\s*'business_creator'/)
+  assert.match(wxml, /disabled="{{readOnly\s*\|\|\s*reviewerAssignmentMode\s*===\s*'business_creator'}}"/)
 
   delete global.getApp
   delete global.getCurrentPages
