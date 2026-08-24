@@ -119,6 +119,7 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(nodes[0].workflowMode, 'review')
   assert.equal(nodes[0].processorAssignmentMode, 'fixed_accounts')
   assert.deepEqual(nodes[0].processorUserIds, ['user-2'])
+  assert.equal(nodes[0].reviewerAssignmentMode, 'fixed_accounts')
   assert.deepEqual(nodes[0].reviewerUserIds, ['user-3'])
   assert.deepEqual(nodes[0].processorDisplayNames, ['用户二'])
   assert.deepEqual(nodes[0].reviewerDisplayNames, ['用户三'])
@@ -187,6 +188,57 @@ test('发起人模式只替换当前节点处理人并固化唯一账号快照',
   assert.deepEqual(line.memberUserIds, ['user-1', 'user-2', 'user-3', 'user-4'])
 })
 
+test('发起人审核模式只替换当前节点审核人并固化唯一账号与显示名快照', async () => {
+  const nodes = [
+    sourceNode({
+      reviewerAssignmentMode: 'business_creator',
+      reviewerUserIds: []
+    }),
+    sourceNode({
+      _id: 'template-node-2', nodeKey: 'node-b', sequence: 1, name: '后续固定节点',
+      processorUserIds: ['user-3'], reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: ['user-4']
+    })
+  ]
+  const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes }))
+
+  await repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  })
+
+  const [line] = fake.documents('business_lines')
+  const stored = fake.documents('business_nodes').sort((left, right) => left.sequence - right.sequence)
+  assert.equal(stored[0].reviewerAssignmentMode, 'business_creator')
+  assert.deepEqual(stored[0].reviewerUserIds, ['user-1'])
+  assert.deepEqual(stored[0].reviewerDisplayNames, ['用户一'])
+  assert.equal(stored[1].reviewerAssignmentMode, 'fixed_accounts')
+  assert.deepEqual(stored[1].reviewerUserIds, ['user-4'])
+  assert.deepEqual(stored[1].reviewerDisplayNames, ['用户四'])
+  assert.deepEqual(line.memberUserIds, ['user-1', 'user-2', 'user-3', 'user-4'])
+})
+
+test('发起人可在不同节点分别担任处理人与审核人', async () => {
+  const nodes = [
+    sourceNode({
+      processorAssignmentMode: 'business_creator', processorUserIds: [],
+      reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: ['user-3']
+    }),
+    sourceNode({
+      _id: 'template-node-2', nodeKey: 'node-b', sequence: 1,
+      processorAssignmentMode: 'fixed_accounts', processorUserIds: ['user-2'],
+      reviewerAssignmentMode: 'business_creator', reviewerUserIds: []
+    })
+  ]
+  const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes }))
+
+  await assert.doesNotReject(repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  }))
+
+  const stored = fake.documents('business_nodes').sort((left, right) => left.sequence - right.sequence)
+  assert.deepEqual(stored[0].processorUserIds, ['user-1'])
+  assert.deepEqual(stored[1].reviewerUserIds, ['user-1'])
+})
+
 test('发起人模式在同节点审核角色冲突时整笔拒绝且不写半成品', async () => {
   const nodes = [sourceNode({
     processorAssignmentMode: 'business_creator',
@@ -202,6 +254,41 @@ test('发起人模式在同节点审核角色冲突时整笔拒绝且不写半�
   assert.equal(fake.documents('business_lines').length, 0)
   assert.equal(fake.documents('business_nodes').length, 0)
   assert.equal(fake.documents('sequence_counters').length, 0)
+  assert.equal(fake.documents('audit_logs').length, 0)
+})
+
+test('固定处理人包含发起人且发起人又是本节点审核人时整笔拒绝', async () => {
+  const nodes = [sourceNode({
+    processorAssignmentMode: 'fixed_accounts',
+    processorUserIds: ['user-1'],
+    reviewerAssignmentMode: 'business_creator',
+    reviewerUserIds: []
+  })]
+  const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes }))
+
+  await assert.rejects(repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  }), error => error.code === 'CREATOR_REVIEWER_CONFLICT')
+
+  for (const collection of ['business_lines', 'business_nodes', 'sequence_counters', 'audit_logs']) {
+    assert.equal(fake.documents(collection).length, 0)
+  }
+})
+
+test('被篡改为同节点双发起人模式的定义在事务内失败关闭', async () => {
+  const nodes = [sourceNode({
+    processorAssignmentMode: 'business_creator', processorUserIds: [],
+    reviewerAssignmentMode: 'business_creator', reviewerUserIds: []
+  })]
+  const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes }))
+
+  await assert.rejects(repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  }), error => error.code === 'CREATOR_REVIEWER_CONFLICT')
+
+  for (const collection of ['business_lines', 'business_nodes', 'sequence_counters', 'audit_logs']) {
+    assert.equal(fake.documents(collection).length, 0)
+  }
 })
 
 test('待我处理查询只返回当前业务节点，并按处理截止时间稳定排序', async () => {

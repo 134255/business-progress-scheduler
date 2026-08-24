@@ -150,7 +150,7 @@ test('business creation maps a creator-reviewer conflict to a stable Chinese mes
       templateId: 'template-1', name: '冲突业务', description: '',
       plannedStartDate: '', plannedEndDate: '', requestKey: 'attempt-conflict'
     }),
-    error => error.code === 'CREATOR_REVIEWER_CONFLICT' && error.message === '业务发起人不能同时担任该节点审核人，请调整模板'
+    error => error.code === 'CREATOR_REVIEWER_CONFLICT' && error.message === '业务发起人不能同时担任同一节点的处理人和审核人，请调整模板或由其他账号发起'
   )
 })
 

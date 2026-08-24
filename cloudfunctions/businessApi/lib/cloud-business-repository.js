@@ -11,7 +11,11 @@ const {
   ownExactAccountIds
 } = require('./account-relationship-schema')
 const { normalizeFieldDefinition } = require('./field-domain')
-const { ALLOWED_EVIDENCE_TYPES, PROCESSOR_ASSIGNMENT_MODE } = require('./template-domain')
+const {
+  ALLOWED_EVIDENCE_TYPES,
+  PROCESSOR_ASSIGNMENT_MODE,
+  REVIEWER_ASSIGNMENT_MODE
+} = require('./template-domain')
 const {
   INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE,
   fitsBusinessMemberArray,
@@ -138,17 +142,36 @@ function resolveSnapshotNodes(nodes, creatorUserId) {
   }
   return nodes.map(node => {
     if (!node || node.workflowMode !== 'review') return node
-    const mode = node.processorAssignmentMode === undefined
+    const processorMode = node.processorAssignmentMode === undefined
       ? PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS
       : node.processorAssignmentMode
-    if (![PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS, PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR].includes(mode)) {
+    const reviewerMode = node.reviewerAssignmentMode === undefined
+      ? REVIEWER_ASSIGNMENT_MODE.FIXED_ACCOUNTS
+      : node.reviewerAssignmentMode
+    if (![PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS, PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR].includes(processorMode) ||
+        ![REVIEWER_ASSIGNMENT_MODE.FIXED_ACCOUNTS, REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR].includes(reviewerMode)) {
       throw createError('TEMPLATE_INVALID')
     }
-    if (mode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR) {
-      if (!Array.isArray(node.processorUserIds) || node.processorUserIds.length) throw createError('TEMPLATE_INVALID')
-      return { ...node, processorAssignmentMode: mode, processorUserIds: [creatorUserId] }
+    if (!Array.isArray(node.processorUserIds) || !Array.isArray(node.reviewerUserIds)) {
+      throw createError('TEMPLATE_INVALID')
     }
-    return { ...node, processorAssignmentMode: mode }
+    if (processorMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR && node.processorUserIds.length) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    if (reviewerMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR && node.reviewerUserIds.length) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    return {
+      ...node,
+      processorAssignmentMode: processorMode,
+      reviewerAssignmentMode: reviewerMode,
+      processorUserIds: processorMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR
+        ? [creatorUserId]
+        : node.processorUserIds,
+      reviewerUserIds: reviewerMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR
+        ? [creatorUserId]
+        : node.reviewerUserIds
+    }
   })
 }
 
@@ -1383,6 +1406,7 @@ function createCloudBusinessRepository({
               workflowMode: 'review',
               processorAssignmentMode: source.processorAssignmentMode,
               processorUserIds: clone(source.processorUserIds),
+              reviewerAssignmentMode: source.reviewerAssignmentMode,
               reviewerUserIds: clone(source.reviewerUserIds),
               processorDisplayNames: source.processorUserIds.map(id => displayNames.get(id) || '历史账号'),
               reviewerDisplayNames: source.reviewerUserIds.map(id => displayNames.get(id) || '历史账号'),
@@ -1596,8 +1620,7 @@ function createCloudBusinessRepository({
           const creator = await readDocument(transaction, COLLECTIONS.users, actor._id)
           if (!creator || creator.status !== 'active') throw createError('FORBIDDEN')
           if (sourceNodes.some(node => node.workflowMode === 'review' &&
-              node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR &&
-              node.reviewerUserIds.includes(creator._id))) {
+              node.processorUserIds.some(userId => node.reviewerUserIds.includes(userId)))) {
             throw createError('CREATOR_REVIEWER_CONFLICT')
           }
           const displayNames = new Map([[actor._id, snapshotDisplayName(creator)]])

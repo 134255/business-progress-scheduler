@@ -47,6 +47,19 @@ test('creation accepts only validated template-backed metadata and returns gener
   }])
 })
 
+test('creation forwards a business creator reviewer policy unchanged for repository snapshot resolution', async () => {
+  const definition = businessTemplate()
+  definition.nodes[1].reviewerAssignmentMode = 'business_creator'
+  definition.nodes[1].reviewerUserIds = []
+  const harness = createBusinessHarness({ definition })
+
+  await harness.service.createFromTemplate({ actor: harness.actor, input: validInput() })
+
+  const snapshotCall = harness.calls.find(call => call[0] === 'createBusinessSnapshot')
+  assert.equal(snapshotCall[1].definition.nodes[1].reviewerAssignmentMode, 'business_creator')
+  assert.deepEqual(snapshotCall[1].definition.nodes[1].reviewerUserIds, [])
+})
+
 test('an idempotent retry returns its reservation without requiring the template to remain enabled', async () => {
   const harness = createBusinessHarness({
     definition: null,
