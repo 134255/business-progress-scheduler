@@ -12,6 +12,10 @@ const PROCESSOR_ASSIGNMENT_MODE = Object.freeze({
   FIXED_ACCOUNTS: 'fixed_accounts',
   BUSINESS_CREATOR: 'business_creator'
 })
+const REVIEWER_ASSIGNMENT_MODE = Object.freeze({
+  FIXED_ACCOUNTS: 'fixed_accounts',
+  BUSINESS_CREATOR: 'business_creator'
+})
 const ALLOWED_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
 
 function createError(code, message = code) {
@@ -50,6 +54,19 @@ function normalizeProcessorAssignmentMode(input) {
   return descriptor.value
 }
 
+function normalizeReviewerAssignmentMode(input) {
+  const descriptor = Object.getOwnPropertyDescriptor(input, 'reviewerAssignmentMode')
+  if (!descriptor) {
+    if (hasDescriptorInPrototype(input, 'reviewerAssignmentMode')) throw createError('TEMPLATE_INVALID')
+    return REVIEWER_ASSIGNMENT_MODE.FIXED_ACCOUNTS
+  }
+  if (!hasOwn(descriptor, 'value')) throw createError('TEMPLATE_INVALID')
+  if (![REVIEWER_ASSIGNMENT_MODE.FIXED_ACCOUNTS, REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR].includes(descriptor.value)) {
+    throw createError('TEMPLATE_INVALID')
+  }
+  return descriptor.value
+}
+
 function requireText(value) {
   if (typeof value !== 'string' || !value.trim()) throw createError('TEMPLATE_INVALID')
   return value.trim()
@@ -66,6 +83,9 @@ function validSlaHours(value) {
 
 function normalizeAccountIds(value) {
   if (!Array.isArray(value)) throw createError('TEMPLATE_INVALID')
+  for (let index = 0; index < value.length; index += 1) {
+    if (!hasOwn(value, index)) throw createError('TEMPLATE_INVALID')
+  }
   const ids = value.map(requireText)
   if (new Set(ids).size !== ids.length) throw createError('TEMPLATE_INVALID')
   return ids
@@ -105,6 +125,7 @@ function normalizeFields(fields) {
 function normalizeTemplateNode(input) {
   if (!isPlainObject(input)) throw createError('TEMPLATE_INVALID')
   const processorAssignmentMode = normalizeProcessorAssignmentMode(input)
+  const reviewerAssignmentMode = normalizeReviewerAssignmentMode(input)
   const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
   if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
   const processingSlaWorkHours = input.processingSlaWorkHours === undefined ? DEFAULT_PROCESSING_SLA_WORK_HOURS : input.processingSlaWorkHours
@@ -123,6 +144,10 @@ function normalizeTemplateNode(input) {
   if (processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR && processorUserIds.length) {
     throw createError('TEMPLATE_INVALID')
   }
+  const reviewerUserIds = assertIndexedAccountArray(normalizeAccountIds(input.reviewerUserIds === undefined ? [] : input.reviewerUserIds))
+  if (reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR && reviewerUserIds.length) {
+    throw createError('TEMPLATE_INVALID')
+  }
 
   return {
     nodeKey: requireText(input.nodeKey),
@@ -132,7 +157,8 @@ function normalizeTemplateNode(input) {
     workflowMode: WORKFLOW_MODE,
     processorAssignmentMode,
     processorUserIds,
-    reviewerUserIds: assertIndexedAccountArray(normalizeAccountIds(input.reviewerUserIds === undefined ? [] : input.reviewerUserIds)),
+    reviewerAssignmentMode,
+    reviewerUserIds,
     reviewMode,
     processingSlaWorkHours,
     reviewSlaWorkHours,
@@ -215,13 +241,20 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
       if (node.assigneeUserIds.some(id => !active.has(id))) throw createError('ASSIGNEE_INACTIVE')
       continue
     }
-    if (!node.reviewerUserIds.length) throw createError('TEMPLATE_INVALID')
+    if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR &&
+        node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR) {
+      throw createError('ROLE_OVERLAP')
+    }
+    if (node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.FIXED_ACCOUNTS && !node.reviewerUserIds.length) {
+      throw createError('TEMPLATE_INVALID')
+    }
     if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS && !node.processorUserIds.length) {
       throw createError('TEMPLATE_INVALID')
     }
     if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS &&
         node.processorUserIds.some(id => !active.has(id))) throw createError('PROCESSOR_INACTIVE')
-    if (node.reviewerUserIds.some(id => !active.has(id))) throw createError('REVIEWER_INACTIVE')
+    if (node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.FIXED_ACCOUNTS &&
+        node.reviewerUserIds.some(id => !active.has(id))) throw createError('REVIEWER_INACTIVE')
     if (node.processorUserIds.some(id => node.reviewerUserIds.includes(id))) throw createError('ROLE_OVERLAP')
   }
   return true
@@ -231,6 +264,7 @@ module.exports = {
   DEFAULT_PROCESSING_SLA_WORK_HOURS,
   DEFAULT_REVIEW_SLA_WORK_HOURS,
   PROCESSOR_ASSIGNMENT_MODE,
+  REVIEWER_ASSIGNMENT_MODE,
   ALLOWED_EVIDENCE_TYPES,
   normalizeTemplateNode,
   collectTemplateParticipantUserIds,

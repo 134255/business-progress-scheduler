@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 
 const {
+  REVIEWER_ASSIGNMENT_MODE,
   normalizeTemplateNode,
   collectTemplateParticipantUserIds,
   validateTemplateForEnable,
@@ -45,6 +46,7 @@ test('规范化新版节点的处理人、审核人、审核模式和双 SLA，�
     workflowMode: 'review',
     processorAssignmentMode: 'fixed_accounts',
     processorUserIds: ['user-1'],
+    reviewerAssignmentMode: 'fixed_accounts',
     reviewerUserIds: ['reviewer-1'],
     reviewMode: 'any',
     processingSlaWorkHours: 22,
@@ -56,6 +58,70 @@ test('规范化新版节点的处理人、审核人、审核模式和双 SLA，�
       { fieldKey: 'field-date', sequence: 1, name: '日期', description: '', type: 'date', required: false, constraints: {} }
     ]
   })
+})
+
+test('审核人来源按节点独立规范化，旧节点默认固定账号且发起人模式不保留固定审核人', () => {
+  const legacyShape = normalizeTemplateNode(createNode())
+  const creatorAssigned = normalizeTemplateNode(createNode({
+    reviewerAssignmentMode: 'business_creator',
+    reviewerUserIds: []
+  }))
+
+  assert.equal(REVIEWER_ASSIGNMENT_MODE.FIXED_ACCOUNTS, 'fixed_accounts')
+  assert.equal(REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR, 'business_creator')
+  assert.equal(legacyShape.reviewerAssignmentMode, 'fixed_accounts')
+  assert.deepEqual(legacyShape.reviewerUserIds, ['reviewer-1'])
+  assert.equal(creatorAssigned.reviewerAssignmentMode, 'business_creator')
+  assert.deepEqual(creatorAssigned.reviewerUserIds, [])
+  assert.deepEqual(
+    collectTemplateParticipantUserIds([creatorAssigned]),
+    ['user-1'],
+    '未来业务发起人不能使用模板伪账号占位'
+  )
+  assert.equal(validateTemplateForEnable(
+    { status: 'draft' },
+    [creatorAssigned],
+    ['user-1']
+  ), true)
+
+  assert.throws(
+    () => normalizeTemplateNode(createNode({
+      reviewerAssignmentMode: 'business_creator',
+      reviewerUserIds: ['reviewer-1']
+    })),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+  assert.throws(
+    () => normalizeTemplateNode(createNode({ reviewerAssignmentMode: 'round_robin' })),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+})
+
+test('审核人来源只接受自有数据属性，访问器、继承值和稀疏审核人数组失败关闭', () => {
+  let getterCalls = 0
+  const accessorNode = createNode()
+  Object.defineProperty(accessorNode, 'reviewerAssignmentMode', {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      return 'business_creator'
+    }
+  })
+  assert.throws(() => normalizeTemplateNode(accessorNode), error => error.code === 'TEMPLATE_INVALID')
+  assert.equal(getterCalls, 0)
+
+  const inheritedNode = Object.assign(
+    Object.create({ reviewerAssignmentMode: 'business_creator' }),
+    createNode({ reviewerUserIds: [] })
+  )
+  assert.throws(() => normalizeTemplateNode(inheritedNode), error => error.code === 'TEMPLATE_INVALID')
+
+  const sparseReviewers = []
+  sparseReviewers.length = 1
+  assert.throws(
+    () => normalizeTemplateNode(createNode({ reviewerUserIds: sparseReviewers })),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
 })
 
 test('负责人来源按节点独立规范化，旧节点默认固定账号且发起人模式不保留占位处理人', () => {
@@ -145,6 +211,13 @@ test('启用前要求连续唯一节点键、启用处理人和审核人、且�
   assert.throws(() => validateTemplateForEnable(template, [first], ['account-1']), error => error.code === 'REVIEWER_INACTIVE')
   assert.throws(() => validateTemplateForEnable(template, [{ ...first, reviewerUserIds: ['account-1'] }], ['account-1']), error => error.code === 'ROLE_OVERLAP')
   assert.throws(() => validateTemplateForEnable(template, [{ ...first, reviewerUserIds: [] }], ['account-1']), error => error.code === 'TEMPLATE_INVALID')
+  assert.throws(() => validateTemplateForEnable(template, [{
+    ...first,
+    processorAssignmentMode: 'business_creator',
+    processorUserIds: [],
+    reviewerAssignmentMode: 'business_creator',
+    reviewerUserIds: []
+  }], []), error => error.code === 'ROLE_OVERLAP')
 })
 
 test('模板拒绝会进入必需索引的超预算账号数组并接受保守边界', () => {

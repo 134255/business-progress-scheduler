@@ -86,8 +86,24 @@ test('template creation assigns stable keys and creates a draft', async () => {
   assert.equal(created.nodes[0].nodeKey, 'node-1')
   assert.equal(created.nodes[0].fields[0].fieldKey, 'field-2')
   assert.equal(created.nodes[0].processorUserIds[0], 'account-1')
+  assert.equal(created.nodes[0].reviewerAssignmentMode, 'fixed_accounts')
   assert.equal(created.nodes[0].reviewerUserIds[0], 'account-2')
   assert.equal(harness.audits[0].action, 'CREATE_TEMPLATE')
+})
+
+test('template creation preserves business creator reviewer mode without fixed reviewer participants', async () => {
+  const harness = createTemplateHarness({ users: [
+    { _id: 'account-1', status: 'active' }
+  ] })
+  const definition = validDefinition()
+  definition.nodes[0].reviewerAssignmentMode = 'business_creator'
+  definition.nodes[0].reviewerUserIds = []
+
+  const created = await harness.service.createTemplate({ actor: harness.admin, input: definition })
+
+  assert.equal(created.nodes[0].reviewerAssignmentMode, 'business_creator')
+  assert.deepEqual(created.nodes[0].reviewerUserIds, [])
+  assert.deepEqual(harness.audits[0].participantUserIds, ['account-1'])
 })
 
 test('template persistence passes sorted processor and reviewer participants to the repository', async () => {
