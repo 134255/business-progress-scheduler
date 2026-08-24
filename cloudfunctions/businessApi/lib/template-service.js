@@ -1,5 +1,6 @@
 const {
   normalizeTemplateNode,
+  templateDefinitionDigest,
   collectTemplateParticipantUserIds,
   validateTemplateForEnable,
   assertTemplateEditable
@@ -50,6 +51,36 @@ function requireText(value) {
   return value.trim()
 }
 
+function safeOwnDataRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw createError('TEMPLATE_INVALID')
+  }
+  const result = {}
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') throw createError('TEMPLATE_INVALID')
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    result[key] = descriptor.value
+  }
+  return result
+}
+
+function safeArrayValues(value) {
+  if (!Array.isArray(value)) throw createError('TEMPLATE_INVALID')
+  const result = []
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    result.push(descriptor.value)
+  }
+  return result
+}
+
 function requireVersion(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw createError('VERSION_CONFLICT')
   return value
@@ -85,7 +116,7 @@ function requireSnapshotBudget(nodes, participantUserIds) {
 }
 
 function normalizeNodeInput(node, sequence, nodeKey) {
-  return callTemplateDomain(() => normalizeTemplateNode({ ...node, nodeKey, sequence }))
+  return callTemplateDomain(() => normalizeTemplateNode({ ...safeOwnDataRecord(node), nodeKey, sequence }))
 }
 
 function uniqueKey(keyFactory, prefix, occupied) {
@@ -103,11 +134,15 @@ function assignCreateKeys(inputNodes, keyFactory) {
   if (!Array.isArray(inputNodes)) throw createError('TEMPLATE_INVALID')
   const nodeKeys = new Set()
   const fieldKeys = new Set()
-  return inputNodes.map((node, sequence) => {
+  return safeArrayValues(inputNodes).map((node, sequence) => {
+    const safeNode = safeOwnDataRecord(node)
     const nodeKey = uniqueKey(keyFactory, 'node', nodeKeys)
-    const fields = Array.isArray(node && node.fields) ? node.fields : []
-    const keyedFields = fields.map(field => ({ ...field, fieldKey: uniqueKey(keyFactory, 'field', fieldKeys) }))
-    return normalizeNodeInput({ ...node, fields: keyedFields }, sequence, nodeKey)
+    const fields = safeNode.fields === undefined ? [] : safeArrayValues(safeNode.fields)
+    const keyedFields = fields.map(field => ({
+      ...safeOwnDataRecord(field),
+      fieldKey: uniqueKey(keyFactory, 'field', fieldKeys)
+    }))
+    return normalizeNodeInput({ ...safeNode, fields: keyedFields }, sequence, nodeKey)
   })
 }
 
@@ -119,14 +154,14 @@ function assignUpdateKeys(current, inputNodes, keyFactory) {
   const selectedNodeKeys = new Set()
   const selectedFieldKeys = new Set()
 
-  return inputNodes.map((node, sequence) => {
-    if (!node || typeof node !== 'object' || Array.isArray(node)) throw createError('TEMPLATE_INVALID')
+  return safeArrayValues(inputNodes).map((node, sequence) => {
+    const safeNode = safeOwnDataRecord(node)
     let existingNode = null
     let nodeKey
-    if (node.nodeKey === undefined || node.nodeKey === '') {
+    if (safeNode.nodeKey === undefined || safeNode.nodeKey === '') {
       nodeKey = uniqueKey(keyFactory, 'node', occupiedNodeKeys)
     } else {
-      nodeKey = requireText(node.nodeKey)
+      nodeKey = requireText(safeNode.nodeKey)
       existingNode = currentNodes.get(nodeKey)
       if (!existingNode || selectedNodeKeys.has(nodeKey)) throw createError('TEMPLATE_INVALID')
     }
@@ -134,21 +169,21 @@ function assignUpdateKeys(current, inputNodes, keyFactory) {
     selectedNodeKeys.add(nodeKey)
 
     const existingFields = new Map((existingNode && existingNode.fields || []).map(field => [field.fieldKey, field]))
-    if (!Array.isArray(node.fields)) throw createError('TEMPLATE_INVALID')
-    const fields = node.fields.map(field => {
+    const fields = safeArrayValues(safeNode.fields).map(field => {
+      const safeField = safeOwnDataRecord(field)
       let fieldKey
-      if (field.fieldKey === undefined || field.fieldKey === '') {
+      if (safeField.fieldKey === undefined || safeField.fieldKey === '') {
         fieldKey = uniqueKey(keyFactory, 'field', occupiedFieldKeys)
       } else {
-        fieldKey = requireText(field.fieldKey)
+        fieldKey = requireText(safeField.fieldKey)
         if (!existingFields.has(fieldKey) || selectedFieldKeys.has(fieldKey)) throw createError('TEMPLATE_INVALID')
       }
       if (selectedFieldKeys.has(fieldKey)) throw createError('TEMPLATE_INVALID')
       selectedFieldKeys.add(fieldKey)
-      return { ...field, fieldKey }
+      return { ...safeField, fieldKey }
     })
     return {
-      ...normalizeNodeInput({ ...node, fields }, sequence, nodeKey),
+      ...normalizeNodeInput({ ...safeNode, fields }, sequence, nodeKey),
       ...(existingNode && existingNode._id ? { _id: existingNode._id } : {})
     }
   })
@@ -234,6 +269,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
           ...metadata,
           status: 'draft',
           nodeCount: nodes.length,
+          definitionDigest: templateDefinitionDigest(nodes),
           createdBy: actor._id,
           createdAt: at,
           updatedBy: actor._id,
@@ -264,7 +300,13 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       expectedStatus: current.template.status,
       participantUserIds,
       definition: {
-        template: { ...metadata, nodeCount: nodes.length, updatedBy: actor._id, updatedAt: clock() },
+        template: {
+          ...metadata,
+          nodeCount: nodes.length,
+          definitionDigest: templateDefinitionDigest(nodes),
+          updatedBy: actor._id,
+          updatedAt: clock()
+        },
         nodes
       },
       audit: { action: 'UPDATE_TEMPLATE', resultCode: 'TEMPLATE_UPDATED' }
@@ -292,7 +334,13 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
         expectedStatus: currentStatus,
         participantUserIds,
         definition: {
-          template: { status, enabledAt: clock(), updatedBy: actor._id, updatedAt: clock() }
+          template: {
+            status,
+            definitionDigest: templateDefinitionDigest(current.nodes),
+            enabledAt: clock(),
+            updatedBy: actor._id,
+            updatedAt: clock()
+          }
         },
         audit: { action: 'ENABLE_TEMPLATE', resultCode: 'TEMPLATE_ENABLED' }
       })

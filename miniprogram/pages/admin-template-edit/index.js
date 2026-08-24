@@ -74,6 +74,7 @@ function messageFor(error) {
   if (error && error.code === 'TEMPLATE_NOT_EDITABLE') return '启用中的模板为只读，请先停用模板'
   if (error && error.code === 'PROCESSOR_INACTIVE') return '节点处理人已停用，请重新选择启用账号'
   if (error && error.code === 'REVIEWER_INACTIVE') return '节点审核人已停用，请重新选择启用账号'
+  if (error && error.code === 'ROLE_OVERLAP') return '同一节点的处理人与审核人不能使用同一账号'
   if (error && error.code === 'TEMPLATE_INVALID') return '模板定义不完整，请检查节点、字段和负责人'
   return error && error.message ? error.message : '网络异常，请稍后重试'
 }

@@ -25,6 +25,7 @@ function seed(overrides = {}) {
       workflowMode: 'review', processorUserIds: ['processor-1'],
       processorAssignmentMode: 'fixed_accounts',
       reviewerUserIds: ['reviewer-1', 'reviewer-2'], reviewMode: 'all',
+      processorDisplayNames: ['处理人一'], reviewerDisplayNames: ['审核人一', '审核人二'],
       processingRoundNumber: 1, reviewRoundNumber: 0,
       processingStartedAt: new Date('2026-08-11T01:00:00.000Z'),
       processingElapsedWorkMinutes: 0,
@@ -230,6 +231,7 @@ test('多候选处理节点只把本轮处理时间归属给实际提交人', as
   data.users.push({ _id: 'processor-2', status: 'active', displayName: '处理人二' })
   data.business_lines[0].memberUserIds.push('processor-2')
   data.business_nodes[0].processorUserIds = ['processor-1', 'processor-2']
+  data.business_nodes[0].processorDisplayNames = ['处理人一', '处理人二']
   data.node_feedback[0].submittedBy = 'processor-2'
   const { fake, repository } = harness({ seed: data })
   const value = request({ actor: { _id: 'processor-2', status: 'active' } })
@@ -249,6 +251,7 @@ test('驳回后的第二轮归属第二次实际提交人且第一轮快照保�
   data.business_lines[0].memberUserIds.push('processor-2')
   data.business_nodes[0] = {
     ...data.business_nodes[0], version: 6, processorUserIds: ['processor-1', 'processor-2'],
+    processorDisplayNames: ['处理人一', '处理人二'],
     processingRoundNumber: 2, reviewRoundNumber: 1,
     processingStartedAt: new Date('2026-08-11T04:00:00.000Z'),
     processingElapsedWorkMinutes: 120,
@@ -539,13 +542,17 @@ test('旧审核轮次缺少显示名快照时使用固定安全占位且不泄�
   assert.doesNotMatch(JSON.stringify(detail), /processor-1|reviewer-1|reviewer-2/)
 })
 
-test('新审核轮次创建时固化处理人和审核人显示名', async () => {
-  const { fake, repository } = harness()
+test('新审核轮次沿用业务创建时显示名快照而不受账号改名影响', async () => {
+  const data = seed()
+  data.business_nodes[0].processorDisplayNames = ['创建时处理人']
+  data.business_nodes[0].reviewerDisplayNames = ['创建时审核人一', '创建时审核人二']
+  data.users = data.users.map(user => ({ ...user, displayName: `当前-${user.displayName}` }))
+  const { fake, repository } = harness({ seed: data })
   await repository.createReviewRound(request())
   const round = fake.documents('node_review_rounds')[0]
 
-  assert.deepEqual(round.processorDisplayNames, ['处理人一'])
-  assert.deepEqual(round.reviewerDisplayNames, ['审核人一', '审核人二'])
+  assert.deepEqual(round.processorDisplayNames, ['创建时处理人'])
+  assert.deepEqual(round.reviewerDisplayNames, ['创建时审核人一', '创建时审核人二'])
 })
 
 test('审核查询投影不泄漏凭据、OpenID、云文件编号、哈希、租约或请求摘要', async () => {

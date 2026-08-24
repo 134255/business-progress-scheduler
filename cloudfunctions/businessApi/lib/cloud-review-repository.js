@@ -207,16 +207,13 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     return safeAccount(await readDocument(database, 'users', actor._id), actor._id)
   }
 
-  async function participantNameSnapshots(database, ids, knownAccount = null) {
-    const names = []
+  async function assertActiveParticipantAccounts(database, ids, knownAccount = null) {
     for (const id of ids) {
       const account = knownAccount && knownAccount._id === id
         ? knownAccount
         : await readDocument(database, 'users', id)
       safeAccount(account, id)
-      names.push(reviewerDisplayName(account))
     }
-    return names
   }
 
   function persistedNameSnapshots(round, key, count, placeholder) {
@@ -225,7 +222,14 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     if (!field.valid || !Array.isArray(field.value) || field.value.length !== count) {
       throw createError('FORBIDDEN')
     }
-    const names = field.value.map(value => validDisplayName(value, 100))
+    const names = []
+    for (let index = 0; index < field.value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(field.value, String(index))
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+        throw createError('FORBIDDEN')
+      }
+      names.push(validDisplayName(descriptor.value, 100))
+    }
     if (names.some(value => !value)) throw createError('FORBIDDEN')
     return names
   }
@@ -913,8 +917,14 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       validateTiming(value.timing, node)
       const feedback = await readDocument(transaction, 'node_feedback', value.draft.feedbackId)
       validateDraft(value, node, feedback)
-      const processorDisplayNames = await participantNameSnapshots(transaction, processors, actor)
-      const reviewerDisplayNames = await participantNameSnapshots(transaction, reviewers)
+      await assertActiveParticipantAccounts(transaction, processors, actor)
+      await assertActiveParticipantAccounts(transaction, reviewers)
+      const processorDisplayNames = persistedNameSnapshots(
+        node, 'processorDisplayNames', processors.length, '历史处理人'
+      )
+      const reviewerDisplayNames = persistedNameSnapshots(
+        node, 'reviewerDisplayNames', reviewers.length, '历史审核人'
+      )
       const lockedNodeVersion = increment(node.version)
       const reviewRoundNumber = increment(node.reviewRoundNumber === undefined ? 0 : node.reviewRoundNumber)
       const round = {

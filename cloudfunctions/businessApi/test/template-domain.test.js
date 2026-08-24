@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const {
   REVIEWER_ASSIGNMENT_MODE,
   normalizeTemplateNode,
+  templateDefinitionDigest,
   collectTemplateParticipantUserIds,
   validateTemplateForEnable,
   assertTemplateEditable
@@ -121,6 +122,52 @@ test('审核人来源只接受自有数据属性，访问器、继承值和稀�
   assert.throws(
     () => normalizeTemplateNode(createNode({ reviewerUserIds: sparseReviewers })),
     error => error.code === 'TEMPLATE_INVALID'
+  )
+
+  const accessorReviewers = createNode()
+  Object.defineProperty(accessorReviewers, 'reviewerUserIds', {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      return ['reviewer-1']
+    }
+  })
+  assert.throws(() => normalizeTemplateNode(accessorReviewers), error => error.code === 'TEMPLATE_INVALID')
+  assert.equal(getterCalls, 0)
+
+  const inheritedReviewers = createNode()
+  delete inheritedReviewers.reviewerUserIds
+  Object.setPrototypeOf(inheritedReviewers, { reviewerUserIds: ['reviewer-1'] })
+  assert.throws(() => normalizeTemplateNode(inheritedReviewers), error => error.code === 'TEMPLATE_INVALID')
+
+  const accessorArray = []
+  Object.defineProperty(accessorArray, '0', {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      return 'reviewer-1'
+    }
+  })
+  accessorArray.length = 1
+  assert.throws(
+    () => normalizeTemplateNode(createNode({ reviewerUserIds: accessorArray })),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+  assert.equal(getterCalls, 0)
+
+  assert.throws(
+    () => normalizeTemplateNode(createNode({ assigneeUserIds: ['legacy-account'] })),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+})
+
+test('模板定义摘要绑定规范化节点内容并忽略存储元数据', () => {
+  const original = createNode({ reviewerAssignmentMode: 'business_creator', reviewerUserIds: [] })
+  const stored = { ...original, _id: 'stored-node', templateId: 'template-1', version: 7 }
+  assert.equal(templateDefinitionDigest([original]), templateDefinitionDigest([stored]))
+  assert.notEqual(
+    templateDefinitionDigest([original]),
+    templateDefinitionDigest([{ ...original, reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: ['reviewer-1'] }])
   )
 })
 

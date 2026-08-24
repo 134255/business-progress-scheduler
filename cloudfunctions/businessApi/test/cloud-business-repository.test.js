@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 
 const { createCloudBusinessRepository } = require('../lib/cloud-business-repository')
+const { templateDefinitionDigest } = require('../lib/template-domain')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 const { createOptimisticBusinessDatabase } = require('./helpers/business-harness')
 
@@ -49,7 +50,7 @@ function seedDefinition(overrides = {}) {
     ],
     templates: [{
       _id: 'template-1', name: '交付模板', status: 'enabled', version: 4,
-      nodeCount: nodes.length
+      nodeCount: nodes.length, definitionDigest: templateDefinitionDigest(nodes)
     }],
     template_nodes: nodes,
     ...(overrides.extra || {})
@@ -431,12 +432,73 @@ test('snapshot creation and publication roll back safely and resume through the 
   assert.equal(fake.documents('sequence_counters')[0].sequence, 1)
 })
 
+test('creation reservation retries reauthorize the current creator and exact business relationships', async t => {
+  await t.test('disabled creator cannot publish a previously reserved business', async () => {
+    const { fake, repository } = createRepositoryHarness()
+    fake.failNextWrite({ collection: 'audit_logs', operation: 'set', error: new Error('audit unavailable') })
+    await assert.rejects(repository.createBusinessSnapshot({
+      actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+    }), /audit unavailable/)
+    fake.replace('users', 'user-1', { status: 'disabled', displayName: '用户一' })
+
+    await assert.rejects(
+      repository.findCreationResult({ actorId: 'user-1', input: input() }),
+      error => error.code === 'FORBIDDEN'
+    )
+    assert.equal(fake.documents('business_lines')[0].status, 'creating')
+    assert.equal(fake.documents('audit_logs').length, 0)
+  })
+
+  await t.test('published retry still rejects a disabled creator', async () => {
+    const { fake, repository } = createRepositoryHarness()
+    await repository.createBusinessSnapshot({
+      actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+    })
+    fake.replace('users', 'user-1', { status: 'disabled', displayName: '用户一' })
+
+    await assert.rejects(
+      repository.findCreationResult({ actorId: 'user-1', input: input() }),
+      error => error.code === 'FORBIDDEN'
+    )
+  })
+
+  await t.test('published retry fails closed when the stored creator relationship is malformed', async () => {
+    const { fake, repository } = createRepositoryHarness()
+    const created = await repository.createBusinessSnapshot({
+      actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+    })
+    fake.replace('business_lines', created.id, {
+      managerUserIds: [],
+      memberUserIds: ['user-2']
+    })
+
+    await assert.rejects(
+      repository.findCreationResult({ actorId: 'user-1', input: input() }),
+      error => error.code === 'FORBIDDEN'
+    )
+  })
+})
+
 test('snapshot transaction revalidates enabled template and active processor/reviewer accounts and leaves no partial data', async t => {
   await t.test('template disabled after the service read', async () => {
     const { fake, repository } = createRepositoryHarness()
     const source = await definition(repository)
     fake.beforeNextTransaction(() => fake.replace('templates', 'template-1', {
       name: '交付模板', status: 'disabled', version: 5, nodeCount: 2
+    }))
+    await assert.rejects(repository.createBusinessSnapshot({
+      actor: { _id: 'user-1' }, input: input(), definition: source
+    }), error => error.code === 'TEMPLATE_NOT_ENABLED')
+    assert.equal(fake.documents('business_lines').length, 0)
+    assert.equal(fake.documents('business_nodes').length, 0)
+  })
+
+  await t.test('template definition digest changed after the service read', async () => {
+    const { fake, repository } = createRepositoryHarness()
+    const source = await definition(repository)
+    fake.beforeNextTransaction(() => fake.replace('templates', 'template-1', {
+      ...source.template,
+      definitionDigest: 'f'.repeat(64)
     }))
     await assert.rejects(repository.createBusinessSnapshot({
       actor: { _id: 'user-1' }, input: input(), definition: source
@@ -773,6 +835,7 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
         _id: 'node-review', businessLineId: 'line-review', nodeCode: 'BL-20260811-0001-N001',
         sequence: 0, name: '资料收集', status: 'pending_review', workflowMode: 'review', version: 5,
         processorUserIds: ['user-2'], reviewerUserIds: ['user-3'], reviewMode: 'any',
+        processorDisplayNames: ['创建时处理人'], reviewerDisplayNames: ['创建时审核人'],
         processingRoundNumber: 2, reviewRoundNumber: 1,
         processingDueStatus: 'calculated', processingDueAt: new Date('2026-08-11T08:00:00.000Z'),
         processingOverdueWorkMinutes: 30, reviewDueStatus: 'calculated',
@@ -817,7 +880,7 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
   assert.deepEqual(result.nodes[0], {
     _id: 'node-review', nodeCode: 'BL-20260811-0001-N001', sequence: 0,
     name: '资料收集', description: '', status: 'pending_review', version: 5,
-    workflowMode: 'review', processorDisplayNames: ['处理人'], reviewerDisplayNames: ['reviewer03'],
+    workflowMode: 'review', processorDisplayNames: ['创建时处理人'], reviewerDisplayNames: ['创建时审核人'],
     reviewMode: 'any', processingRoundNumber: 2, reviewRoundNumber: 1,
     processingDueStatus: 'calculated', processingDueAt: new Date('2026-08-11T08:00:00.000Z'),
     processingOverdueWorkMinutes: 30, reviewDueStatus: 'calculated',
@@ -862,7 +925,7 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
   }), error => error.code === 'FORBIDDEN')
 })
 
-test('停用节点参与人不阻断已完成业务详情并显示停用标记', async () => {
+test('停用或改名的节点参与人不改变已完成业务的显示名快照', async () => {
   const seed = seedDefinition({
     users: [
       { _id: 'manager-1', status: 'active', displayName: '业务管理员' },
@@ -882,6 +945,7 @@ test('停用节点参与人不阻断已完成业务详情并显示停用标记',
         nodeCode: 'BL-HISTORY-001-N001', sequence: 0, name: '历史节点',
         status: 'completed', version: 3, workflowMode: 'review',
         processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
+        processorDisplayNames: ['创建时处理人'], reviewerDisplayNames: ['创建时审核人'],
         reviewMode: 'any', processingRoundNumber: 1, reviewRoundNumber: 1,
         processingDueStatus: 'calculated', reviewDueStatus: 'calculated',
         requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
@@ -894,107 +958,39 @@ test('停用节点参与人不阻断已完成业务详情并显示停用标记',
     actor: { _id: 'manager-1' }, lineId: 'line-completed'
   })
 
-  assert.deepEqual(result.nodes[0].processorDisplayNames, ['历史处理人（已停用）'])
-  assert.deepEqual(result.nodes[0].reviewerDisplayNames, ['历史审核人'])
+  assert.deepEqual(result.nodes[0].processorDisplayNames, ['创建时处理人'])
+  assert.deepEqual(result.nodes[0].reviewerDisplayNames, ['创建时审核人'])
 })
 
-test('业务详情对损坏或缺失的节点参与账号继续失败关闭', async t => {
-  function historySeed(processor) {
-    return seedDefinition({
-      users: [
-        { _id: 'manager-1', status: 'active', displayName: '业务管理员' },
-        ...(processor ? [processor] : []),
-        { _id: 'reviewer-1', status: 'active', displayName: '历史审核人' }
-      ],
-      extra: {
-        business_lines: [{
-          _id: 'line-history-invalid', code: 'BL-HISTORY-INVALID', name: '历史异常业务',
-          status: 'completed', version: 4, progress: 100,
-          managerUserIds: ['manager-1'],
-          memberUserIds: ['manager-1', 'processor-1', 'reviewer-1'],
-          currentNodeId: 'node-history-invalid', currentNodeIndex: 0, nodeCount: 1
-        }],
-        business_nodes: [{
-          _id: 'node-history-invalid', businessLineId: 'line-history-invalid',
-          nodeCode: 'BL-HISTORY-INVALID-N001', sequence: 0, name: '历史异常节点',
-          status: 'completed', version: 3, workflowMode: 'review',
-          processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
-          reviewMode: 'any', processingRoundNumber: 1, reviewRoundNumber: 1,
-          processingDueStatus: 'calculated', reviewDueStatus: 'calculated',
-          requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
-        }]
-      }
-    })
-  }
+test('旧审核节点缺少显示名快照时使用固定历史占位而不依赖当前参与账号', async () => {
+  const { repository } = createRepositoryHarness(seedDefinition({
+    users: [{ _id: 'manager-1', status: 'active', displayName: '业务管理员' }],
+    extra: {
+      business_lines: [{
+        _id: 'line-history-placeholder', code: 'BL-HISTORY-PLACEHOLDER', name: '历史业务',
+        status: 'completed', version: 4, progress: 100,
+        managerUserIds: ['manager-1'],
+        memberUserIds: ['manager-1', 'processor-1', 'reviewer-1'],
+        currentNodeId: 'node-history-placeholder', currentNodeIndex: 0, nodeCount: 1
+      }],
+      business_nodes: [{
+        _id: 'node-history-placeholder', businessLineId: 'line-history-placeholder',
+        nodeCode: 'BL-HISTORY-PLACEHOLDER-N001', sequence: 0, name: '历史节点',
+        status: 'completed', version: 3, workflowMode: 'review',
+        processorUserIds: ['processor-1'], reviewerUserIds: ['reviewer-1'],
+        reviewMode: 'any', processingRoundNumber: 1, reviewRoundNumber: 1,
+        processingDueStatus: 'calculated', reviewDueStatus: 'calculated',
+        requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+      }]
+    }
+  }))
 
-  for (const item of [
-    { name: '状态缺失', processor: { _id: 'processor-1', displayName: '历史处理人' } },
-    { name: '未知状态', processor: { _id: 'processor-1', status: 'locked', displayName: '历史处理人' } },
-    { name: '账号缺失', processor: null }
-  ]) {
-    await t.test(item.name, async () => {
-      const { repository } = createRepositoryHarness(historySeed(item.processor))
-      await assert.rejects(repository.getBusinessLine({
-        actor: { _id: 'manager-1' }, lineId: 'line-history-invalid'
-      }), error => error.code === 'FORBIDDEN')
-    })
-  }
-
-  await t.test('名称访问器不执行', async () => {
-    const getterReads = { count: 0 }
-    const { repository } = createRepositoryHarness(historySeed({
-      _id: 'processor-1', status: 'disabled', displayName: '占位名称'
-    }), {
-      fakeOptions: {
-        transformRead({ collection, data }) {
-          if (collection === 'users' && data._id === 'processor-1') {
-            delete data.username
-            Object.defineProperty(data, 'displayName', {
-              enumerable: true,
-              get() {
-                getterReads.count += 1
-                return '不应读取'
-              }
-            })
-          }
-          return data
-        }
-      }
-    })
-
-    await assert.rejects(repository.getBusinessLine({
-      actor: { _id: 'manager-1' }, lineId: 'line-history-invalid'
-    }), error => error.code === 'FORBIDDEN')
-    assert.equal(getterReads.count, 0)
+  const result = await repository.getBusinessLine({
+    actor: { _id: 'manager-1' }, lineId: 'line-history-placeholder'
   })
 
-  await t.test('状态访问器不执行', async () => {
-    const getterReads = { count: 0 }
-    const { repository } = createRepositoryHarness(historySeed({
-      _id: 'processor-1', status: 'disabled', displayName: '历史处理人'
-    }), {
-      fakeOptions: {
-        transformRead({ collection, data }) {
-          if (collection === 'users' && data._id === 'processor-1') {
-            delete data.status
-            Object.defineProperty(data, 'status', {
-              enumerable: true,
-              get() {
-                getterReads.count += 1
-                return 'disabled'
-              }
-            })
-          }
-          return data
-        }
-      }
-    })
-
-    await assert.rejects(repository.getBusinessLine({
-      actor: { _id: 'manager-1' }, lineId: 'line-history-invalid'
-    }), error => error.code === 'FORBIDDEN')
-    assert.equal(getterReads.count, 0)
-  })
+  assert.deepEqual(result.nodes[0].processorDisplayNames, ['历史处理人'])
+  assert.deepEqual(result.nodes[0].reviewerDisplayNames, ['历史审核人'])
 })
 
 test('已创建的初始审核节点缺少截止状态时只把尚未开始阶段安全映射为 not_started', async () => {
@@ -1199,7 +1195,7 @@ test('新版审核节点凭证策略拒绝旧字段回退、混合字段、访�
   }
 })
 
-test('业务详情按请求缓存负责人显示名且重复账号只解析一次', async () => {
+test('业务详情直接复用负责人显示名快照且不读取当前参与账号', async () => {
   const participants = Array.from({ length: 46 }, (_, index) => ({
     _id: `staff-${String(index + 1).padStart(2, '0')}`,
     status: 'active', displayName: `成员${String(index + 1).padStart(2, '0')}`
@@ -1212,7 +1208,8 @@ test('业务详情按请求缓存负责人显示名且重复账号只解析一�
       nodeCode: `BL-20260811-0099-N${String(index + 1).padStart(3, '0')}`,
       sequence: index, name: `节点${index + 1}`, status: index === 0 ? 'ready' : 'waiting',
       version: 1, workflowMode: 'review', processorUserIds: [processor],
-      reviewerUserIds: [reviewer], reviewMode: 'any', processingRoundNumber: 1,
+      processorDisplayNames: [`快照-${processor}`], reviewerUserIds: [reviewer],
+      reviewerDisplayNames: [`快照-${reviewer}`], reviewMode: 'any', processingRoundNumber: 1,
       reviewRoundNumber: 0, processingDueStatus: 'calculated', reviewDueStatus: 'not_started',
       requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
     }
@@ -1245,8 +1242,7 @@ test('业务详情按请求缓存负责人显示名且重复账号只解析一�
   })
 
   assert.equal(result.nodes.length, 48)
-  assert.equal([...reads.values()].reduce((sum, count) => sum + count, 0), 46)
-  assert.equal([...reads.values()].every(count => count === 1), true)
+  assert.equal([...reads.values()].reduce((sum, count) => sum + count, 0), 0)
   assert.equal(result.nodes[0].reviewerDisplayNames[0], result.nodes[46].reviewerDisplayNames[0])
 })
 

@@ -1,4 +1,5 @@
 const crypto = require('node:crypto')
+const { templateDefinitionDigest } = require('./template-domain')
 
 const COLLECTIONS = Object.freeze({
   templates: 'templates',
@@ -82,7 +83,23 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
   async function getTemplateDefinition(templateId) {
     const template = await readDocument(db, COLLECTIONS.templates, templateId)
     if (!template || template.status === 'deleted') return null
-    return { template, nodes: await readNodes(templateId) }
+    const nodes = await readNodes(templateId)
+    assertStoredDefinitionDigest(template, nodes)
+    return { template, nodes }
+  }
+
+  function assertStoredDefinitionDigest(template, nodes) {
+    if (!Object.prototype.hasOwnProperty.call(template, 'definitionDigest')) return
+    let actualDigest = null
+    try {
+      actualDigest = templateDefinitionDigest(nodes)
+    } catch (error) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    if (typeof template.definitionDigest !== 'string' || !/^[a-f0-9]{64}$/.test(template.definitionDigest) ||
+        actualDigest !== template.definitionDigest) {
+      throw createError('TEMPLATE_INVALID')
+    }
   }
 
   async function listTemplateDefinitions({ status } = {}) {
@@ -90,7 +107,11 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
       .filter(template => template.status !== 'deleted')
       .filter(template => !status || template.status === status)
       .sort(compareIds)
-    return Promise.all(templates.map(async template => ({ template, nodes: await readNodes(template._id) })))
+    return Promise.all(templates.map(async template => {
+      const nodes = await readNodes(template._id)
+      assertStoredDefinitionDigest(template, nodes)
+      return { template, nodes }
+    }))
   }
 
   async function listActiveUserIds(userIds) {

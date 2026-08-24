@@ -45,17 +45,21 @@
       </label>
       <text class="muted" wx:if="{{reviewerAssignmentMode === 'business_creator'}}">创建业务时将当前业务发起人固化为唯一审核人；本节点不再选择固定审核账号。</text>
     </view>
-    <view class="field">
+    <view class="field" wx:if="{{reviewerAssignmentMode === 'fixed_accounts'}}">
       <text class="field-label">审核人</text>
       <view class="option-list">
         <label wx:for="{{accountOptions}}" wx:key="_id" data-id="{{item._id}}" bindtap="onReviewerToggle">
-          <checkbox checked="{{item.reviewerSelected}}" disabled="{{readOnly || reviewerAssignmentMode === 'business_creator'}}" />{{item.displayName || item.username}}（@{{item.username}}）
+          <checkbox checked="{{item.reviewerSelected}}" disabled="{{readOnly}}" />{{item.displayName || item.username}}（@{{item.username}}）
         </label>
       </view>
       <radio-group class="review-mode" bindchange="onReviewModeChange">
         <label><radio value="any" checked="{{reviewMode === 'any'}}" disabled="{{readOnly}}" />或签（任一审核人通过）</label>
         <label><radio value="all" checked="{{reviewMode === 'all'}}" disabled="{{readOnly}}" />会签（全部审核人通过）</label>
       </radio-group>
+    </view>
+    <view class="field" wx:else>
+      <text class="field-label">审核人</text>
+      <text>业务创建时自动使用该业务发起人</text>
     </view>
     <view class="field">
       <text class="field-label">凭证要求</text>

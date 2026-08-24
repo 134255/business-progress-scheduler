@@ -329,4 +329,3 @@ git commit -m "docs: 记录发起人审核交付证据"
 ```
 
 If `PROJECT.md` or the deployment manual has no actual stable change, do not modify or stage it merely to satisfy the file list.
-

@@ -1,3 +1,5 @@
+const crypto = require('node:crypto')
+
 const { normalizeFieldDefinition } = require('./field-domain')
 const { WORKFLOW_MODE, normalizeReviewMode } = require('./review-domain')
 const {
@@ -25,7 +27,9 @@ function createError(code, message = code) {
 }
 
 function isPlainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
 function hasOwn(object, key) {
@@ -39,6 +43,29 @@ function hasDescriptorInPrototype(object, key) {
     current = Object.getPrototypeOf(current)
   }
   return false
+}
+
+function ownDataObject(value) {
+  if (!isPlainObject(value)) throw createError('TEMPLATE_INVALID')
+  const result = {}
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') throw createError('TEMPLATE_INVALID')
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor || !hasOwn(descriptor, 'value')) throw createError('TEMPLATE_INVALID')
+    result[key] = descriptor.value
+  }
+  return result
+}
+
+function ownArrayValues(value) {
+  if (!Array.isArray(value)) throw createError('TEMPLATE_INVALID')
+  const values = []
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor || !hasOwn(descriptor, 'value')) throw createError('TEMPLATE_INVALID')
+    values.push(descriptor.value)
+  }
+  return values
 }
 
 function normalizeProcessorAssignmentMode(input) {
@@ -82,11 +109,7 @@ function validSlaHours(value) {
 }
 
 function normalizeAccountIds(value) {
-  if (!Array.isArray(value)) throw createError('TEMPLATE_INVALID')
-  for (let index = 0; index < value.length; index += 1) {
-    if (!hasOwn(value, index)) throw createError('TEMPLATE_INVALID')
-  }
-  const ids = value.map(requireText)
+  const ids = ownArrayValues(value).map(requireText)
   if (new Set(ids).size !== ids.length) throw createError('TEMPLATE_INVALID')
   return ids
 }
@@ -99,8 +122,7 @@ function assertIndexedAccountArray(values) {
 }
 
 function normalizeEvidenceTypes(value) {
-  if (!Array.isArray(value)) throw createError('TEMPLATE_INVALID')
-  const types = value.map(type => {
+  const types = ownArrayValues(value).map(type => {
     if (typeof type !== 'string') throw createError('TEMPLATE_INVALID')
     const normalized = type.trim().toLowerCase()
     if (!ALLOWED_EVIDENCE_TYPES.includes(normalized)) throw createError('TEMPLATE_INVALID')
@@ -111,10 +133,10 @@ function normalizeEvidenceTypes(value) {
 }
 
 function normalizeFields(fields) {
-  if (!Array.isArray(fields)) throw createError('TEMPLATE_INVALID')
+  const values = ownArrayValues(fields)
   let normalized
   try {
-    normalized = fields.map(normalizeFieldDefinition)
+    normalized = values.map(field => normalizeFieldDefinition(ownDataObject(field)))
   } catch (error) {
     throw createError('TEMPLATE_INVALID')
   }
@@ -123,7 +145,8 @@ function normalizeFields(fields) {
 }
 
 function normalizeTemplateNode(input) {
-  if (!isPlainObject(input)) throw createError('TEMPLATE_INVALID')
+  input = ownDataObject(input)
+  if (hasOwn(input, 'assigneeUserIds') || hasOwn(input, 'slaWorkHours')) throw createError('TEMPLATE_INVALID')
   const processorAssignmentMode = normalizeProcessorAssignmentMode(input)
   const reviewerAssignmentMode = normalizeReviewerAssignmentMode(input)
   const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
@@ -169,7 +192,10 @@ function normalizeTemplateNode(input) {
 }
 
 function normalizeLegacyTemplateNode(input) {
-  if (!isPlainObject(input)) throw createError('TEMPLATE_INVALID')
+  input = ownDataObject(input)
+  if (['workflowMode', 'processorAssignmentMode', 'processorUserIds', 'reviewerAssignmentMode',
+    'reviewerUserIds', 'reviewMode', 'processingSlaWorkHours', 'reviewSlaWorkHours']
+    .some(key => hasOwn(input, key))) throw createError('TEMPLATE_INVALID')
   const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
   if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
   const slaWorkHours = input.slaWorkHours === undefined ? DEFAULT_PROCESSING_SLA_WORK_HOURS : input.slaWorkHours
@@ -189,10 +215,12 @@ function normalizeLegacyTemplateNode(input) {
 }
 
 function normalizeDefinitionNodes(nodes) {
-  if (!Array.isArray(nodes) || nodes.length === 0) throw createError('TEMPLATE_INVALID')
-  const workflowModes = nodes.map(node => {
+  const nodeValues = ownArrayValues(nodes)
+  if (nodeValues.length === 0) throw createError('TEMPLATE_INVALID')
+  const workflowModes = nodeValues.map(node => {
     if (!isPlainObject(node)) throw createError('TEMPLATE_INVALID')
-    if (node.workflowMode === WORKFLOW_MODE ||
+    const safeNode = ownDataObject(node)
+    if (safeNode.workflowMode === WORKFLOW_MODE ||
         (!hasOwn(node, 'workflowMode') && (hasOwn(node, 'processorUserIds') || hasOwn(node, 'reviewerUserIds')))) {
       return WORKFLOW_MODE
     }
@@ -202,14 +230,27 @@ function normalizeDefinitionNodes(nodes) {
   if (new Set(workflowModes).size !== 1) throw createError('TEMPLATE_INVALID')
   const workflowMode = workflowModes[0]
   const normalizedNodes = workflowMode === WORKFLOW_MODE
-    ? nodes.map(normalizeTemplateNode)
-    : nodes.map(normalizeLegacyTemplateNode)
+    ? nodeValues.map(normalizeTemplateNode)
+    : nodeValues.map(normalizeLegacyTemplateNode)
   if (new Set(normalizedNodes.map(node => node.nodeKey)).size !== normalizedNodes.length) {
     throw createError('TEMPLATE_INVALID')
   }
   const orderedNodes = normalizedNodes.slice().sort((left, right) => left.sequence - right.sequence)
   if (orderedNodes.some((node, index) => node.sequence !== index)) throw createError('TEMPLATE_INVALID')
   return { workflowMode, nodes: orderedNodes }
+}
+
+function templateDefinitionDigest(nodes) {
+  const values = ownArrayValues(nodes)
+  if (values.length === 0) {
+    return crypto.createHash('sha256')
+      .update(JSON.stringify({ workflowMode: null, nodes: [] }))
+      .digest('hex')
+  }
+  const definition = normalizeDefinitionNodes(values)
+  return crypto.createHash('sha256')
+    .update(JSON.stringify({ workflowMode: definition.workflowMode, nodes: definition.nodes }))
+    .digest('hex')
 }
 
 function collectTemplateParticipantUserIds(nodes) {
@@ -267,6 +308,7 @@ module.exports = {
   REVIEWER_ASSIGNMENT_MODE,
   ALLOWED_EVIDENCE_TYPES,
   normalizeTemplateNode,
+  templateDefinitionDigest,
   collectTemplateParticipantUserIds,
   validateTemplateForEnable,
   assertTemplateEditable

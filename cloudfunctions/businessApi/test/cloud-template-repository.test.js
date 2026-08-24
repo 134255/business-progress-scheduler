@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 
 const { createCloudTemplateRepository } = require('../lib/cloud-template-repository')
+const { templateDefinitionDigest } = require('../lib/template-domain')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 
 function createRepositoryHarness(seed = {}) {
@@ -83,6 +84,22 @@ test('filtered definition lists and node records use deterministic ordering', as
   const result = await repository.listTemplateDefinitions({ status: 'enabled' })
   assert.deepEqual(result.map(item => item.template._id), ['t1', 't2'])
   assert.deepEqual(result[0].nodes.map(item => item._id), ['n1-a', 'n1-z', 'n2'])
+})
+
+test('definition reads fail closed when stored nodes no longer match the template digest', async () => {
+  const storedNode = { _id: 'n1', templateId: 't1', ...node(), version: 1 }
+  const { repository } = createRepositoryHarness({
+    templates: [{
+      _id: 't1', name: '模板', status: 'enabled', version: 1, nodeCount: 1,
+      definitionDigest: templateDefinitionDigest([storedNode])
+    }],
+    template_nodes: [{ ...storedNode, name: '被绕过仓储修改的节点' }]
+  })
+
+  await assert.rejects(
+    repository.getTemplateDefinition('t1'),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
 })
 
 test('definition reads paginate beyond the CloudBase one-hundred-document query window', async () => {

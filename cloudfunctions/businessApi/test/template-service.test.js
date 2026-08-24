@@ -83,6 +83,7 @@ test('template creation assigns stable keys and creates a draft', async () => {
   assert.equal(created.template.status, 'draft')
   assert.equal(created.template.version, 1)
   assert.equal(created.template.nodeCount, 1)
+  assert.match(created.template.definitionDigest, /^[a-f0-9]{64}$/)
   assert.equal(created.nodes[0].nodeKey, 'node-1')
   assert.equal(created.nodes[0].fields[0].fieldKey, 'field-2')
   assert.equal(created.nodes[0].processorUserIds[0], 'account-1')
@@ -102,8 +103,30 @@ test('template creation preserves business creator reviewer mode without fixed r
   const created = await harness.service.createTemplate({ actor: harness.admin, input: definition })
 
   assert.equal(created.nodes[0].reviewerAssignmentMode, 'business_creator')
+  assert.match(created.template.definitionDigest, /^[a-f0-9]{64}$/)
   assert.deepEqual(created.nodes[0].reviewerUserIds, [])
   assert.deepEqual(harness.audits[0].participantUserIds, ['account-1'])
+})
+
+test('template service never executes reviewer relationship accessors before domain validation', async () => {
+  let getterCalls = 0
+  const harness = createTemplateHarness({ users: [
+    { _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }
+  ] })
+  const input = validDefinition()
+  Object.defineProperty(input.nodes[0], 'reviewerUserIds', {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      return ['account-2']
+    }
+  })
+
+  await assert.rejects(
+    harness.service.createTemplate({ actor: harness.admin, input }),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+  assert.equal(getterCalls, 0)
 })
 
 test('template persistence passes sorted processor and reviewer participants to the repository', async () => {

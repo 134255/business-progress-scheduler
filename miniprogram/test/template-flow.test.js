@@ -385,7 +385,7 @@ test('node editor read-only page exposes the per-node assignment source without 
   assert.equal(page.data.reviewerAssignmentMode, 'business_creator')
   assert.match(wxml, /业务发起人作为本节点唯一审核人/)
   assert.match(wxml, /reviewerAssignmentMode\s*===\s*'business_creator'/)
-  assert.match(wxml, /disabled="{{readOnly\s*\|\|\s*reviewerAssignmentMode\s*===\s*'business_creator'}}"/)
+  assert.match(wxml, /wx:if="{{reviewerAssignmentMode\s*===\s*'fixed_accounts'}}"/)
 
   delete global.getApp
   delete global.getCurrentPages
@@ -647,6 +647,30 @@ test('template editor rejects an empty definition and refreshes stale versions w
 
   await page.enableTemplate()
   assert.equal(page.data.errorMessage, limit.message)
+  delete global.getApp
+  delete global.wx
+})
+
+test('template editor maps a server role overlap to a stable Chinese message', async () => {
+  const overlap = new Error('ROLE_OVERLAP')
+  overlap.code = 'ROLE_OVERLAP'
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { setNavigationBarTitle: () => {}, navigateBack: () => {}, showToast: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {
+      getTemplate: async () => ({
+        template: { _id: 't1', name: '角色冲突模板', description: '', status: 'disabled', version: 1 },
+        nodes: [storedNode()]
+      }),
+      updateTemplate: async () => { throw overlap }
+    },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  await page.onLoad({ id: 't1' })
+
+  await page.submit()
+
+  assert.equal(page.data.errorMessage, '同一节点的处理人与审核人不能使用同一账号')
   delete global.getApp
   delete global.wx
 })

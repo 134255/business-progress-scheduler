@@ -14,7 +14,8 @@ const { normalizeFieldDefinition } = require('./field-domain')
 const {
   ALLOWED_EVIDENCE_TYPES,
   PROCESSOR_ASSIGNMENT_MODE,
-  REVIEWER_ASSIGNMENT_MODE
+  REVIEWER_ASSIGNMENT_MODE,
+  templateDefinitionDigest
 } = require('./template-domain')
 const {
   INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE,
@@ -101,6 +102,18 @@ function assertMatchingReservation(line, actorId, identity) {
   if (line.createdBy !== actorId || line.creationRequestHash !== identity.requestHash ||
       line.creationInputHash !== identity.inputHash) {
     throw createError('VERSION_CONFLICT')
+  }
+}
+
+function assertCurrentCreationAuthorization(actor, line, actorId) {
+  const actorStatus = ownDataValue(actor, 'status')
+  const createdBy = ownDataValue(line, 'createdBy')
+  const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
+  const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
+  if (!actor || actor._id !== actorId || !actorStatus.valid || actorStatus.value !== 'active' ||
+      !createdBy.valid || createdBy.value !== actorId || !managers || !members ||
+      !managers.includes(actorId) || !members.includes(actorId)) {
+    throw createError('FORBIDDEN')
   }
 }
 
@@ -217,7 +230,24 @@ function createCloudBusinessRepository({
   async function getTemplateDefinition(templateId) {
     const template = await readDocument(db, COLLECTIONS.templates, templateId)
     if (!template || template.status === 'deleted') return null
-    return { template, nodes: await readTemplateNodes(templateId) }
+    const nodes = await readTemplateNodes(templateId)
+    const hasDigest = Object.prototype.hasOwnProperty.call(template, 'definitionDigest')
+    const requiresDigest = nodes.some(node => node &&
+      node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR)
+    let actualDigest = null
+    if (hasDigest) {
+      try {
+        actualDigest = templateDefinitionDigest(nodes)
+      } catch (error) {
+        throw createError('TEMPLATE_INVALID')
+      }
+    }
+    if ((hasDigest && (typeof template.definitionDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(template.definitionDigest) ||
+        actualDigest !== template.definitionDigest)) || (requiresDigest && !hasDigest)) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    return { template, nodes }
   }
 
   async function readAll(buildQuery, maximum = Number.MAX_SAFE_INTEGER) {
@@ -319,14 +349,7 @@ function createCloudBusinessRepository({
   function exactDisplayAccountIds(nodes, accountSchema) {
     const ids = new Set()
     for (const node of nodes) {
-      if (node.workflowMode === 'review') {
-        const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
-        const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
-        if (!processors || !reviewers || processors.some(id => reviewers.includes(id))) {
-          throw createError('FORBIDDEN')
-        }
-        for (const id of [...processors, ...reviewers]) ids.add(id)
-      } else if (accountSchema) {
+      if (node.workflowMode !== 'review' && accountSchema) {
         const assignees = ownExactAccountIds(node, 'assigneeUserIds')
         if (!assignees) throw createError('FORBIDDEN')
         for (const id of assignees) ids.add(id)
@@ -353,6 +376,26 @@ function createCloudBusinessRepository({
       if (!displayNames.has(id)) throw createError('FORBIDDEN')
       return displayNames.get(id)
     })
+  }
+
+  function persistedDisplayNames(node, key, count, placeholder) {
+    const field = ownDataValue(node, key)
+    if (!field.present) return Array.from({ length: count }, () => placeholder)
+    if (!field.valid || !Array.isArray(field.value) || field.value.length !== count) {
+      throw createError('FORBIDDEN')
+    }
+    const names = []
+    for (let index = 0; index < field.value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(field.value, String(index))
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+          typeof descriptor.value !== 'string') throw createError('FORBIDDEN')
+      const name = descriptor.value.trim()
+      if (!name || name.length > 100 || /[\u0000-\u001f\u007f]/.test(name)) {
+        throw createError('FORBIDDEN')
+      }
+      names.push(name)
+    }
+    return names
   }
 
   function safeFieldDefinitions(value) {
@@ -470,8 +513,8 @@ function createCloudBusinessRepository({
       return {
         ...base,
         workflowMode: 'review',
-        processorDisplayNames: accountDisplayNames(processors, displayNames),
-        reviewerDisplayNames: accountDisplayNames(reviewers, displayNames),
+        processorDisplayNames: persistedDisplayNames(node, 'processorDisplayNames', processors.length, '历史处理人'),
+        reviewerDisplayNames: persistedDisplayNames(node, 'reviewerDisplayNames', reviewers.length, '历史审核人'),
         reviewMode: node.reviewMode,
         processingRoundNumber: node.processingRoundNumber,
         reviewRoundNumber: node.reviewRoundNumber,
@@ -1477,8 +1520,10 @@ function createCloudBusinessRepository({
   async function publishCreation(actorId, input, lineId, expectedNodes) {
     const identity = creationIdentity(actorId, input)
     return db.runTransaction(async transaction => {
+      const actor = await readDocument(transaction, COLLECTIONS.users, actorId)
       const line = await readDocument(transaction, COLLECTIONS.lines, lineId)
       if (!line) throw createError('NOT_FOUND')
+      assertCurrentCreationAuthorization(actor, line, actorId)
       assertMatchingReservation(line, actorId, identity)
       if (line.status !== 'creating') return { id: line._id, code: line.code }
 
@@ -1508,13 +1553,12 @@ function createCloudBusinessRepository({
 
   async function findCreationResult({ actorId, input }) {
     const identity = creationIdentity(actorId, input)
+    const actor = await readDocument(db, COLLECTIONS.users, actorId)
+    if (!actor || ownDataValue(actor, 'status').value !== 'active') throw createError('FORBIDDEN')
     const line = await readDocument(db, COLLECTIONS.lines, identity.lineId)
     if (!line) return null
+    assertCurrentCreationAuthorization(actor, line, actorId)
     assertMatchingReservation(line, actorId, identity)
-    if (line.status !== 'creating') {
-      await ensurePendingCalendarWarning(line._id)
-      return { id: line._id, code: line.code }
-    }
     const nodes = Array.from({ length: line.nodeCount }, (_, index) => ({
       id: nodeId(line._id, index),
       data: { nodeCode: formatNodeCode(line.code, index + 1), sequence: index }
@@ -1607,18 +1651,21 @@ function createCloudBusinessRepository({
       let attemptedSequence
       try {
         reserved = await db.runTransaction(async transaction => {
+          const creator = await readDocument(transaction, COLLECTIONS.users, actor._id)
+          if (!creator || creator.status !== 'active') throw createError('FORBIDDEN')
           const concurrent = await readDocument(transaction, COLLECTIONS.lines, identity.lineId)
           if (concurrent) {
+            assertCurrentCreationAuthorization(creator, concurrent, actor._id)
             assertMatchingReservation(concurrent, actor._id, identity)
             return { line: concurrent, existing: true }
           }
           const template = await readDocument(transaction, COLLECTIONS.templates, definition.template._id)
           if (!template || template.status !== 'enabled' || template.version !== definition.template.version ||
-              template.nodeCount !== sourceNodes.length) {
+              template.nodeCount !== sourceNodes.length ||
+              (definition.template.definitionDigest !== undefined &&
+                template.definitionDigest !== definition.template.definitionDigest)) {
             throw createError('TEMPLATE_NOT_ENABLED')
           }
-          const creator = await readDocument(transaction, COLLECTIONS.users, actor._id)
-          if (!creator || creator.status !== 'active') throw createError('FORBIDDEN')
           if (sourceNodes.some(node => node.workflowMode === 'review' &&
               node.processorUserIds.some(userId => node.reviewerUserIds.includes(userId)))) {
             throw createError('CREATOR_REVIEWER_CONFLICT')
@@ -1664,6 +1711,7 @@ function createCloudBusinessRepository({
             plannedEndDate: input.plannedEndDate,
             sourceTemplateId: template._id,
             sourceTemplateVersion: template.version,
+            ...(template.definitionDigest ? { sourceTemplateDefinitionDigest: template.definitionDigest } : {}),
             status: 'creating',
             managerUserIds: [actor._id],
             memberUserIds,
@@ -1695,7 +1743,6 @@ function createCloudBusinessRepository({
 
     if (!reserved) throw createError('DUPLICATE_CODE')
     if (reserved.existing) {
-      if (reserved.line.status !== 'creating') return { id: reserved.line._id, code: reserved.line.code }
       prepared = Array.from({ length: reserved.line.nodeCount }, (_, index) => ({
         id: nodeId(reserved.line._id, index),
         data: { nodeCode: formatNodeCode(reserved.line.code, index + 1), sequence: index }
