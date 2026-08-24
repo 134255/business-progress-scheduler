@@ -1,8 +1,6 @@
 # Current Status
 
-- 2026-08-24 已基于确认设计生成实施计划 `docs/superpowers/plans/2026-08-24-initiator-reviewer-assignment.md`，拆分为模板域、管理端交互、业务快照、下游回归和完整交付五个 TDD 任务。隔离工作区基线实测 `businessApi` 558/558、相关小程序 60/60、WXML 4/4，均 0 失败；公开分享现有回归包含在基线中。生产实现尚未开始，CloudBase 与体验版仍为 `unverified`。
-
-- 2026-08-24 已确认“业务发起人作为节点唯一审核人”完整设计：每个模板节点新增固定审核人与业务发起人两种来源；模板保存/启用和业务创建执行双层处理/审核角色冲突校验；创建事务把当前活动发起人固化为唯一审核人快照；旧模板默认固定审核人、旧业务不迁移。现有七日公开只读节点快照同时纳入小程序 `1.0.1` 上线范围，安全边界保持 ADR-0008 不变。设计见 `docs/superpowers/specs/2026-08-24-initiator-reviewer-assignment-design.md` 与 ADR-0011；当前仅完成文档设计，生产实现、自动化门禁、CloudBase 部署和体验版验收均为 `unverified`。操作员自己的 `project.config.json` 修改继续保持未触碰。
+- 2026-08-24 “业务发起人作为节点唯一审核人”已完成本地实现与完整门禁。每个模板节点新增严格的 `reviewerAssignmentMode: fixed_accounts | business_creator`；管理端可切换来源并在发起人模式清空固定审核人，模板保存/启用拒绝同节点处理人和审核人同时来自发起人。业务创建事务重新读取活动创建人和模板，把发起人及安全显示名固化为唯一审核人快照；固定处理人恰为实际发起人时以 `CREATOR_REVIEWER_CONFLICT` 整笔拒绝，不产生业务、节点、计数器或审计半成品。旧模板缺字段默认固定审核人，旧业务不迁移；审核待办、投票、提醒、个人响应工时、运营统计和七日公开只读分享继续消费统一快照。阶段提交为 `6369ede`、`9369d7e`、`805019d`、`fb4c0f8`。最终新跑：`businessApi` 567/567、`calendarSync` 55/55、`workflowReminder` 31/31、`evidenceRetention` 42/42、`operationsAnalytics` 27/27、小程序 164/164、WXML 4/4，全部 0 失败；5 个生产 JavaScript 语法、`git diff --check` 与项目记忆校验通过。真实 CloudBase 重新部署、开发者工具编译、第二节点自动固化、同节点角色冲突中文提示、真实好友/群转发和未登录接收者查看图片/视频/PDF 仍为 `unverified`。本功能不新增集合、索引、环境变量或 Timer；只需部署 `businessApi` 并上传小程序 `1.0.1`。操作员自己的 `project.config.json` 修改继续保持未读取、未修改、未暂存、未提交。
 
 Status captured: 2026-08-24 (Asia/Shanghai)
 
