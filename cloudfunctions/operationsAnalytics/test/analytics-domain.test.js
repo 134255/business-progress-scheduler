@@ -48,6 +48,31 @@ test('节点样本累计全部处理轮与全部终态审核轮并按实际参�
   ])
 })
 
+test('发起人审核快照只有实际投票后才生成个人响应工时', () => {
+  const round = {
+    _id: 'round-creator', status: 'approved', reviewerAssignmentMode: 'business_creator',
+    reviewerUserIds: ['creator-1'], submittedBy: 'processor-a',
+    processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 10
+  }
+  const withoutVote = summarizeNodeFacts({
+    rounds: [round], votes: [],
+    reviewMinuteByRoundId: new Map([['round-creator', { timingStatus: 'calculated', workMinutes: 5 }]])
+  })
+  assert.deepEqual(withoutVote.reviewResponses, [])
+
+  const withVote = summarizeNodeFacts({
+    rounds: [round],
+    votes: [{
+      _id: 'vote-creator', reviewRoundId: 'round-creator', reviewerUserId: 'creator-1',
+      decision: 'approved', reviewResponseTimingStatus: 'calculated', reviewResponseWorkMinutes: 3
+    }],
+    reviewMinuteByRoundId: new Map([['round-creator', { timingStatus: 'calculated', workMinutes: 5 }]])
+  })
+  assert.deepEqual(withVote.reviewResponses, [{
+    voteId: 'vote-creator', userId: 'creator-1', timingStatus: 'calculated', workMinutes: 3
+  }])
+})
+
 test('待补算不会伪装为零且历史缺失不会被推测', () => {
   const pending = summarizeNodeFacts({
     rounds: [{ _id: 'round-1', status: 'approved', submittedBy: 'processor-a',

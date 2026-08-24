@@ -333,6 +333,34 @@ test('待我审核列表只返回当前审核人真实待办并稳定投影已�
   })
 })
 
+test('业务发起人审核快照可直接进入待办并作为唯一审核人完成投票', async () => {
+  const data = votingSeed({ mode: 'any' })
+  data.users.push({ _id: 'creator-1', status: 'active', displayName: '业务发起人' })
+  data.business_lines[0].memberUserIds.push('creator-1')
+  data.business_nodes[0].reviewerAssignmentMode = 'business_creator'
+  data.business_nodes[0].reviewerUserIds = ['creator-1']
+  data.business_nodes[0].reviewerDisplayNames = ['业务发起人']
+  data.node_review_rounds[0].reviewerUserIds = ['creator-1']
+  data.node_review_rounds[0].reviewerDisplayNames = ['业务发起人']
+  const { fake, repository } = harness({ seed: data })
+
+  const pending = await repository.listPendingReviews({
+    actor: { _id: 'creator-1', status: 'active' }, query: { page: 1, pageSize: 20 }
+  })
+  assert.deepEqual(pending.items.map(item => item.reviewRoundId), ['review-feedback-current'])
+
+  const detail = await repository.getReviewDetail({
+    actor: { _id: 'creator-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
+  })
+  assert.deepEqual(detail.reviewerDisplayNames, ['业务发起人'])
+  assert.equal(JSON.stringify(detail).includes('creator-1'), false)
+
+  const result = await repository.submitReviewVote(voteRequest('creator-1'))
+  assert.equal(result.status, 'approved')
+  assert.equal(fake.documents('node_review_votes').length, 1)
+  assert.equal(fake.documents('node_review_votes')[0].reviewerDisplayName, '业务发起人')
+})
+
 test('待办候选初验后撤销成员或审核人关系时最终结果不再返回', async () => {
   for (const field of ['memberUserIds', 'reviewerUserIds']) {
     const data = votingSeed({ mode: 'all' })

@@ -138,6 +138,33 @@ test('会签只提醒未投票审核人并按轮次、审核人和小时去重',
   assert.match(note._id, /^review-reminder-/)
 })
 
+test('发起人唯一审核人快照只在未投票时接收审核提醒', async () => {
+  const data = reviewSeed({ mode: 'any', vote: false })
+  data.business_nodes[0].reviewerAssignmentMode = 'business_creator'
+  data.business_nodes[0].reviewerUserIds = ['reviewer-a']
+  data.node_review_rounds[0].reviewerUserIds = ['reviewer-a']
+  const { fake, repository } = harness(data)
+  const value = {
+    reviewRoundId: 'round-1', nodeId: 'node-1', reviewerUserId: 'reviewer-a',
+    accumulatedWorkHour: 1, expectedVoteCount: 0, expectedApprovedVoteCount: 0,
+    advanceHour: false
+  }
+
+  assert.deepEqual(await repository.createReviewReminder(value), { created: true, fulfilled: true })
+  assert.deepEqual(fake.documents('notifications')[0].recipientUserIds, ['reviewer-a'])
+
+  fake.replace('node_review_votes', `review-vote-${crypto.createHash('sha256')
+    .update('round-1\0reviewer-a').digest('hex')}`, {
+    _id: `review-vote-${crypto.createHash('sha256').update('round-1\0reviewer-a').digest('hex')}`,
+    reviewRoundId: 'round-1', businessLineId: 'line-1', nodeId: 'node-1',
+    reviewerUserId: 'reviewer-a', decision: 'approved'
+  })
+  data.node_review_rounds[0].voteCount = 1
+  data.node_review_rounds[0].approvedVoteCount = 1
+  fake.replace('node_review_rounds', 'round-1', data.node_review_rounds[0])
+  assert.deepEqual(await repository.createReviewReminder({ ...value, accumulatedWorkHour: 2 }), { created: false })
+})
+
 test('或签结束、任一驳回后及换轮次均不再创建审核提醒', async () => {
   for (const data of [reviewSeed({ mode: 'any', status: 'approved' }), reviewSeed({ status: 'rejected' })]) {
     const { fake, repository } = harness(data)

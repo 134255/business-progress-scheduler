@@ -24,6 +24,7 @@ function harness() {
         _id: 'node-1', businessLineId: 'line-1', nodeCode: 'BL-1-N001', sequence: 0,
         name: '处理', status: 'in_progress', workflowMode: 'review', processingDueStatus: 'calculated',
         processorUserIds: ['user'], reviewerUserIds: ['root'], reviewMode: 'any',
+        reviewerAssignmentMode: 'business_creator',
         processorDisplayNames: ['创建时处理人'], reviewerDisplayNames: ['创建时审核人'],
         processingRoundNumber: 2, reviewRoundNumber: 1, processingElapsedWorkMinutes: 90,
         processingDueAt: new Date('2026-08-12T00:00:00Z'), processingOverdueWorkMinutes: 5,
@@ -42,6 +43,7 @@ function harness() {
         reviewDueStatus: 'pending_calendar', reviewOverdueWorkMinutes: 3,
         reviewStartedAt: new Date('2026-08-12T02:00:00Z'), processingRoundNumber: 2,
         reviewRoundNumber: 1, submittedByDisplayName: '实际提交人', processorAssignmentMode: 'fixed_accounts',
+        reviewerAssignmentMode: 'business_creator', reviewerUserIds: ['root'],
         processingRoundTimingStatus: 'calculated', processingRoundWorkMinutes: 90,
         processingRoundStartedAt: new Date('2026-08-11T01:00:00Z'),
         processingRoundEndedAt: new Date('2026-08-12T02:00:00Z'), processingOverdueWorkMinutes: 5,
@@ -136,6 +138,7 @@ test('运营仓储按审核开始时间稳定分页返回实际提交人与实�
     [['实际审核人', 60]])
   assert.equal(JSON.stringify(page).includes('reviewerUserId'), false)
   assert.equal(JSON.stringify(page).includes('businessLineId'), false)
+  assert.equal(JSON.stringify(page).includes('reviewerAssignmentMode'), false)
 })
 
 test('运营工时明细原始窗口越过损坏关联并在返回前再次复核管理员与业务状态', async () => {
