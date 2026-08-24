@@ -1,6 +1,8 @@
 # Current Status
 
-Status captured: 2026-08-20 (Asia/Shanghai)
+Status captured: 2026-08-24 (Asia/Shanghai)
+
+- 2026-08-24 运营统计真实 CloudBase 修复验收已完成：修复版 `operationsAnalytics` 部署后，以一次性可信 Timer 领取 2 个节点和 1 条业务来源，三者全部生成且 `failed: 0`；对应来源均从 `pending` 转为 `generated`，来源版本与生成版本一致并保存生成时间。隔离业务产生 13 条不可变事实，事实摘要、汇总编号和应用版本抽查符合；每日汇总由 0 变为非 0，计数、分钟、版本和更新时间结构符合。小程序按隔离模板生成两个节点的处理/审核并列柱状图与历史趋势，有效样本非 0。参与业务的活动普通账号可查看全局汇总并下钻有权业务，无关活动普通账号仍可查看匿名全局图表但看不到该业务明细，两者均无 CSV 导出入口。一次性 Timer 执行后已恢复 `operationsAnalytics` 的 `triggers: []`。正式周期 Timer、长期运行监控和生产发布仍为 `unverified`；操作员自己的 `project.config.json` 修改未读取、未修改、未暂存、未提交。
 
 - 2026-08-20 真实 CloudBase 首次运行 `operationsAnalytics` 时在领取首批候选前安全失败：来源业务和两个节点均保持 `analyticsSnapshotStatus: pending`，统计游标、事实和每日汇总均未生成。根因是运营统计仓储在通过 `doc(id).set()` 写游标、事实和每日汇总时，又把只读系统字段 `_id` 放入 `data`；CloudBase 拒绝更新 `_id`，而原内存数据库未模拟该限制。TDD 已为测试数据库增加可选的真实约束，RED 为运营统计仓储 6 项中 2 项通过、4 项因 `_id` 写入失败；最小修复只从三类 `set` 数据中移除显式 `_id`，文档编号继续由 `doc(id)` 确定，GREEN 为 6/6。最终新跑：`operationsAnalytics` 26/26、`businessApi` 558/558、`calendarSync` 55/55、`workflowReminder` 30/30、`evidenceRetention` 42/42、小程序 162/162、WXML 4/4，全部 0 失败。真实目标环境重新部署、一次性 Timer 恢复 pending 来源、生成事实/每日汇总并恢复空触发器仍为 `unverified`；操作员自己的 `project.config.json` 修改未读取、未修改、未暂存、未提交。
 
