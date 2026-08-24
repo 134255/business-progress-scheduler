@@ -1,5 +1,7 @@
 # Current Status
 
+- 2026-08-24 已基于确认设计生成实施计划 `docs/superpowers/plans/2026-08-24-initiator-reviewer-assignment.md`，拆分为模板域、管理端交互、业务快照、下游回归和完整交付五个 TDD 任务。隔离工作区基线实测 `businessApi` 558/558、相关小程序 60/60、WXML 4/4，均 0 失败；公开分享现有回归包含在基线中。生产实现尚未开始，CloudBase 与体验版仍为 `unverified`。
+
 - 2026-08-24 已确认“业务发起人作为节点唯一审核人”完整设计：每个模板节点新增固定审核人与业务发起人两种来源；模板保存/启用和业务创建执行双层处理/审核角色冲突校验；创建事务把当前活动发起人固化为唯一审核人快照；旧模板默认固定审核人、旧业务不迁移。现有七日公开只读节点快照同时纳入小程序 `1.0.1` 上线范围，安全边界保持 ADR-0008 不变。设计见 `docs/superpowers/specs/2026-08-24-initiator-reviewer-assignment-design.md` 与 ADR-0011；当前仅完成文档设计，生产实现、自动化门禁、CloudBase 部署和体验版验收均为 `unverified`。操作员自己的 `project.config.json` 修改继续保持未触碰。
 
 Status captured: 2026-08-24 (Asia/Shanghai)
