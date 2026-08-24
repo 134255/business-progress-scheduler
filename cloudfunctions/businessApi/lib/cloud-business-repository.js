@@ -136,7 +136,10 @@ function snapshotParticipantUserIds(nodes) {
 
 function snapshotReservationOperationCount(nodes, creatorUserId = '') {
   if (!Array.isArray(nodes)) return Number.POSITIVE_INFINITY
-  return nodes.length + snapshotParticipantUserIds(nodes).filter(id => id !== creatorUserId).length + 6
+  // Each source template node is reread inside the reservation transaction so
+  // the published business cannot bind a definition that changed after the
+  // service pre-read. The second nodes.length accounts for those reads.
+  return (nodes.length * 2) + snapshotParticipantUserIds(nodes).filter(id => id !== creatorUserId).length + 6
 }
 
 function canCreateBusinessSnapshot(nodes, creatorUserId = '') {
@@ -1590,6 +1593,12 @@ function createCloudBusinessRepository({
     if (existing) return existing
 
     const sourceNodes = resolveSnapshotNodes(clone(definition.nodes), actor._id).sort(compareNodes)
+    let expectedTemplateDigest
+    try {
+      expectedTemplateDigest = templateDefinitionDigest(definition.nodes)
+    } catch (error) {
+      throw createError('TEMPLATE_INVALID')
+    }
     const processorIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
       Array.isArray(node.processorUserIds) ? node.processorUserIds : []))].sort()
     const reviewerIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
@@ -1664,6 +1673,27 @@ function createCloudBusinessRepository({
               template.nodeCount !== sourceNodes.length ||
               (definition.template.definitionDigest !== undefined &&
                 template.definitionDigest !== definition.template.definitionDigest)) {
+            throw createError('TEMPLATE_NOT_ENABLED')
+          }
+          const sourceNodeIds = definition.nodes.map(node => node && node._id)
+          if (sourceNodeIds.some(id => typeof id !== 'string' || !id) ||
+              new Set(sourceNodeIds).size !== sourceNodeIds.length) {
+            throw createError('TEMPLATE_NOT_ENABLED')
+          }
+          const currentTemplateNodes = []
+          for (const sourceNodeId of sourceNodeIds) {
+            const currentNode = await readDocument(transaction, COLLECTIONS.templateNodes, sourceNodeId)
+            if (!currentNode || currentNode.templateId !== template._id) throw createError('TEMPLATE_NOT_ENABLED')
+            currentTemplateNodes.push(currentNode)
+          }
+          let currentTemplateDigest
+          try {
+            currentTemplateDigest = templateDefinitionDigest(currentTemplateNodes.sort(compareNodes))
+          } catch (error) {
+            throw createError('TEMPLATE_NOT_ENABLED')
+          }
+          if (currentTemplateDigest !== expectedTemplateDigest ||
+              (template.definitionDigest !== undefined && template.definitionDigest !== currentTemplateDigest)) {
             throw createError('TEMPLATE_NOT_ENABLED')
           }
           if (sourceNodes.some(node => node.workflowMode === 'review' &&

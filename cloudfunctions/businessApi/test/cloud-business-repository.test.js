@@ -507,6 +507,21 @@ test('snapshot transaction revalidates enabled template and active processor/rev
     assert.equal(fake.documents('business_nodes').length, 0)
   })
 
+  await t.test('template node changed without updating the template header after the service read', async () => {
+    const { fake, repository } = createRepositoryHarness()
+    const source = await definition(repository)
+    fake.beforeNextTransaction(() => fake.replace('template_nodes', 'template-node-1', {
+      ...source.nodes[0],
+      reviewerUserIds: ['user-4'],
+      version: source.nodes[0].version === undefined ? 5 : source.nodes[0].version + 1
+    }))
+    await assert.rejects(repository.createBusinessSnapshot({
+      actor: { _id: 'user-1' }, input: input(), definition: source
+    }), error => error.code === 'TEMPLATE_NOT_ENABLED')
+    assert.equal(fake.documents('business_lines').length, 0)
+    assert.equal(fake.documents('business_nodes').length, 0)
+  })
+
   await t.test('processor disabled after the service read', async () => {
     const { fake, repository } = createRepositoryHarness()
     const source = await definition(repository)
@@ -626,7 +641,7 @@ test('snapshot creation rejects creator-aware operation budget overflow before s
 })
 
 test('snapshot transaction budget permits exactly one hundred operations with deduplicated review participants', async () => {
-  const nodes = Array.from({ length: 48 }, (_, index) => sourceNode({
+  const nodes = Array.from({ length: 24 }, (_, index) => sourceNode({
     _id: `template-node-${index}`,
     nodeKey: `node-${index}`,
     sequence: index,
