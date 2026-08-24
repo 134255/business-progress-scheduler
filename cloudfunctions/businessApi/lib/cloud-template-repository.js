@@ -1,5 +1,5 @@
 const crypto = require('node:crypto')
-const { templateDefinitionDigest } = require('./template-domain')
+const { REVIEWER_ASSIGNMENT_MODE, templateDefinitionDigest } = require('./template-domain')
 
 const COLLECTIONS = Object.freeze({
   templates: 'templates',
@@ -50,6 +50,19 @@ function compareNodes(left, right) {
   return Number(left.sequence) - Number(right.sequence) || compareIds(left, right)
 }
 
+function publishedNodeIds(nodes) {
+  const ids = nodes.slice().sort(compareNodes).map(node => {
+    const descriptor = node && Object.getOwnPropertyDescriptor(node, '_id')
+    return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      ? descriptor.value
+      : null
+  })
+  if (ids.some(id => typeof id !== 'string' || !id) || new Set(ids).size !== ids.length) {
+    throw createError('TEMPLATE_INVALID')
+  }
+  return ids
+}
+
 function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
   if (!db) throw new TypeError('db is required')
 
@@ -89,6 +102,29 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
   }
 
   function assertStoredDefinitionDigest(template, nodes) {
+    const requiresNodeIds = nodes.some(node => {
+      const descriptor = node && Object.getOwnPropertyDescriptor(node, 'reviewerAssignmentMode')
+      return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+        descriptor.value === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR
+    })
+    if (requiresNodeIds && !Object.prototype.hasOwnProperty.call(template, 'definitionNodeIds')) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    if (Object.prototype.hasOwnProperty.call(template, 'definitionNodeIds')) {
+      const descriptor = Object.getOwnPropertyDescriptor(template, 'definitionNodeIds')
+      const storedIds = descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+        ? descriptor.value
+        : null
+      const actualIds = publishedNodeIds(nodes)
+      if (!Array.isArray(storedIds) || storedIds.length !== actualIds.length ||
+          actualIds.some((id, index) => {
+            const item = Object.getOwnPropertyDescriptor(storedIds, String(index))
+            return !item || !Object.prototype.hasOwnProperty.call(item, 'value') ||
+              typeof item.value !== 'string' || !item.value || item.value !== id
+          })) {
+        throw createError('TEMPLATE_INVALID')
+      }
+    }
     if (!Object.prototype.hasOwnProperty.call(template, 'definitionDigest')) return
     let actualDigest = null
     try {
@@ -189,6 +225,11 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
       await assertActiveParticipantDocuments(transaction, participantIds)
       const template = {
         ...timestampedTemplate(definition.template, { create: true }),
+        definitionNodeIds: preparedNodes
+          .slice()
+          .sort((left, right) => Number(left.node.sequence) - Number(right.node.sequence) ||
+            String(left.id).localeCompare(String(right.id)))
+          .map(prepared => prepared.id),
         version: 1
       }
       await transaction.collection(COLLECTIONS.templates).doc(templateId).set({ data: template })
@@ -240,7 +281,18 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
       }
       await assertActiveParticipantDocuments(transaction, participantIds)
       const version = current.version + 1
-      const changes = { ...timestampedTemplate(definition.template), version }
+      const authoritativeNodes = preparedNodes === undefined
+        ? initial.nodes.map(node => ({ id: node._id, node }))
+        : preparedNodes
+      const changes = {
+        ...timestampedTemplate(definition.template),
+        definitionNodeIds: authoritativeNodes
+          .slice()
+          .sort((left, right) => Number(left.node.sequence) - Number(right.node.sequence) ||
+            String(left.id).localeCompare(String(right.id)))
+          .map(prepared => prepared.id),
+        version
+      }
       const updated = await transaction.collection(COLLECTIONS.templates).doc(templateId).update({ data: changes })
       if (!updated.stats || updated.stats.updated !== 1) throw createError('NOT_FOUND')
 

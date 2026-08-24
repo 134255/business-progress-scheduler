@@ -121,6 +121,32 @@ function compareNodes(left, right) {
   return Number(left.sequence) - Number(right.sequence) || String(left._id).localeCompare(String(right._id))
 }
 
+function exactDefinitionNodeIds(value) {
+  if (!Array.isArray(value) || value.length > MAX_TEMPLATE_NODES) return null
+  const ids = []
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+        typeof descriptor.value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(descriptor.value)) {
+      return null
+    }
+    ids.push(descriptor.value)
+  }
+  return new Set(ids).size === ids.length ? ids : null
+}
+
+function templateNodeDocumentIds(nodes) {
+  if (!Array.isArray(nodes)) return null
+  const ids = []
+  for (const node of nodes) {
+    const field = ownDataValue(node, '_id')
+    if (!field.valid || typeof field.value !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(field.value)) return null
+    ids.push(field.value)
+  }
+  return new Set(ids).size === ids.length ? ids : null
+}
+
 function snapshotParticipantUserIds(nodes) {
   if (!Array.isArray(nodes)) return []
   return [...new Set(nodes.flatMap(node => {
@@ -237,6 +263,16 @@ function createCloudBusinessRepository({
     const hasDigest = Object.prototype.hasOwnProperty.call(template, 'definitionDigest')
     const requiresDigest = nodes.some(node => node &&
       node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR)
+    const nodeIdsResult = ownDataValue(template, 'definitionNodeIds')
+    const requiresNodeIds = requiresDigest
+    const storedNodeIds = nodeIdsResult.valid ? exactDefinitionNodeIds(nodeIdsResult.value) : null
+    const currentNodeIds = templateNodeDocumentIds(nodes)
+    if ((nodeIdsResult.present && (!storedNodeIds || !currentNodeIds ||
+        storedNodeIds.length !== currentNodeIds.length ||
+        storedNodeIds.some((id, index) => id !== currentNodeIds[index]))) ||
+        (requiresNodeIds && !nodeIdsResult.present)) {
+      throw createError('TEMPLATE_INVALID')
+    }
     let actualDigest = null
     if (hasDigest) {
       try {
@@ -251,6 +287,31 @@ function createCloudBusinessRepository({
       throw createError('TEMPLATE_INVALID')
     }
     return { template, nodes }
+  }
+
+  function assertCurrentTemplateHeader(template, definition, expectedNodes) {
+    const expectedNodeIds = templateNodeDocumentIds(expectedNodes)
+    const definitionNodeIds = ownDataValue(definition.template, 'definitionNodeIds')
+    const currentNodeIds = ownDataValue(template, 'definitionNodeIds')
+    const expectedHeaderIds = definitionNodeIds.valid
+      ? exactDefinitionNodeIds(definitionNodeIds.value)
+      : null
+    const currentHeaderIds = currentNodeIds.valid ? exactDefinitionNodeIds(currentNodeIds.value) : null
+    const requiresNodeIds = expectedNodes.some(node => node &&
+      node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR)
+    const hasMatchingNodeIds = definitionNodeIds.present || currentNodeIds.present
+      ? expectedNodeIds && expectedHeaderIds && currentHeaderIds &&
+        expectedHeaderIds.length === expectedNodeIds.length &&
+        currentHeaderIds.length === expectedNodeIds.length &&
+        expectedNodeIds.every((id, index) =>
+          expectedHeaderIds[index] === id && currentHeaderIds[index] === id)
+      : !requiresNodeIds
+    if (!template || template.status !== 'enabled' || template.version !== definition.template.version ||
+        template.nodeCount !== expectedNodes.length || !hasMatchingNodeIds ||
+        (definition.template.definitionDigest !== undefined &&
+          template.definitionDigest !== definition.template.definitionDigest)) {
+      throw createError('TEMPLATE_NOT_ENABLED')
+    }
   }
 
   async function readAll(buildQuery, maximum = Number.MAX_SAFE_INTEGER) {
@@ -1669,12 +1730,7 @@ function createCloudBusinessRepository({
             return { line: concurrent, existing: true }
           }
           const template = await readDocument(transaction, COLLECTIONS.templates, definition.template._id)
-          if (!template || template.status !== 'enabled' || template.version !== definition.template.version ||
-              template.nodeCount !== sourceNodes.length ||
-              (definition.template.definitionDigest !== undefined &&
-                template.definitionDigest !== definition.template.definitionDigest)) {
-            throw createError('TEMPLATE_NOT_ENABLED')
-          }
+          assertCurrentTemplateHeader(template, definition, sourceNodes)
           const sourceNodeIds = definition.nodes.map(node => node && node._id)
           if (sourceNodeIds.some(id => typeof id !== 'string' || !id) ||
               new Set(sourceNodeIds).size !== sourceNodeIds.length) {

@@ -50,7 +50,9 @@ function seedDefinition(overrides = {}) {
     ],
     templates: [{
       _id: 'template-1', name: '交付模板', status: 'enabled', version: 4,
-      nodeCount: nodes.length, definitionDigest: templateDefinitionDigest(nodes)
+      nodeCount: nodes.length,
+      definitionNodeIds: nodes.slice().sort((left, right) => left.sequence - right.sequence).map(node => node._id),
+      definitionDigest: templateDefinitionDigest(nodes)
     }],
     template_nodes: nodes,
     ...(overrides.extra || {})
@@ -522,6 +524,34 @@ test('snapshot transaction revalidates enabled template and active processor/rev
     assert.equal(fake.documents('business_nodes').length, 0)
   })
 
+  await t.test('unpublished orphan node inserted immediately before the reservation transaction is excluded', async () => {
+    const { fake, repository } = createRepositoryHarness()
+    const source = await definition(repository)
+    fake.beforeNextTransaction(() => fake.replace('template_nodes', 'template-node-extra', {
+      ...source.nodes[1],
+      nodeKey: 'unexpected-extra-node',
+      sequence: source.nodes.length,
+      name: '未发布的额外节点'
+    }))
+    await repository.createBusinessSnapshot({
+      actor: { _id: 'user-1' }, input: input(), definition: source
+    })
+    const businessNodes = fake.documents('business_nodes').sort((left, right) => left.sequence - right.sequence)
+    assert.equal(businessNodes.length, 2)
+    assert.deepEqual(businessNodes.map(node => node.sourceTemplateNodeKey), ['node-a', 'node-b'])
+    assert.equal(fake.documents('template_nodes').length, 3)
+    await assert.rejects(repository.getTemplateDefinition('template-1'), error =>
+      error.code === 'TEMPLATE_INVALID')
+  })
+
+  await t.test('published definition node id list mismatch fails closed', async () => {
+    const seed = seedDefinition()
+    seed.templates[0].definitionNodeIds = ['template-node-1', 'template-node-extra']
+    const { repository } = createRepositoryHarness(seed)
+    await assert.rejects(repository.getTemplateDefinition('template-1'), error =>
+      error.code === 'TEMPLATE_INVALID')
+  })
+
   await t.test('processor disabled after the service read', async () => {
     const { fake, repository } = createRepositoryHarness()
     const source = await definition(repository)
@@ -657,7 +687,7 @@ test('snapshot transaction budget permits exactly one hundred operations with de
     actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
   })
 
-  assert.equal(fake.transactionRuns[0].operations, 100)
+  assert.equal(Math.max(...fake.transactionRuns.map(run => run.operations)), 100)
   assert.equal(fake.documents('business_lines').length, 1)
 })
 

@@ -52,6 +52,7 @@ test('creation atomically writes metadata, nodes, server dates, and one audit re
   assert.equal(result.template.version, 1)
   assert.equal(result.nodes[0].sequence, 0)
   assert.equal(result.nodes[1].sequence, 1)
+  assert.deepEqual(result.template.definitionNodeIds, result.nodes.map(item => item._id))
   assert.deepEqual(result.template.createdAt, { __serverDate: 1 })
   assert.deepEqual(result.template.updatedAt, { __serverDate: 2 })
   assert.ok(result.nodes.every(item => item.createdAt.__serverDate && item.updatedAt.__serverDate))
@@ -100,6 +101,20 @@ test('definition reads fail closed when stored nodes no longer match the templat
     repository.getTemplateDefinition('t1'),
     error => error.code === 'TEMPLATE_INVALID'
   )
+})
+
+test('definition reads fail closed when the published node id list differs from stored nodes', async () => {
+  const storedNode = { _id: 'n1', templateId: 't1', ...node(), version: 1 }
+  const { repository } = createRepositoryHarness({
+    templates: [{
+      _id: 't1', name: '模板', status: 'enabled', version: 1, nodeCount: 1,
+      definitionNodeIds: ['unpublished-node'],
+      definitionDigest: templateDefinitionDigest([storedNode])
+    }],
+    template_nodes: [storedNode]
+  })
+
+  await assert.rejects(repository.getTemplateDefinition('t1'), error => error.code === 'TEMPLATE_INVALID')
 })
 
 test('definition reads paginate beyond the CloudBase one-hundred-document query window', async () => {
@@ -287,6 +302,7 @@ test('transaction-budget validation permits exactly one hundred operations with 
   })
 
   assert.equal(result.template.version, 2)
+  assert.deepEqual(result.template.definitionNodeIds, existingNodes.map(item => item._id))
   assert.equal(fake.transactionRuns[0].operations, 100)
 })
 
