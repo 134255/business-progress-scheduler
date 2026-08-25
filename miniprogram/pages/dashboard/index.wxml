@@ -4,7 +4,7 @@
       <text class="muted">你好{{profile && profile.displayName ? '，' + profile.displayName : ''}}</text>
       <text class="profile-link" bindtap="openProfile">个人资料</text>
     </view>
-    <view class="title">让每条售后都有清晰的下一步</view>
+    <view class="title">让每条售后都有清晰的记录</view>
     <view class="hero-actions">
       <button class="primary-button action" bindtap="createBusiness">新建售后线</button>
       <button class="secondary-button action" bindtap="openList">查看全部</button>

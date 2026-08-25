@@ -160,6 +160,12 @@ test('dashboard presents the protected pending assignment count', () => {
   assert.match(wxml, /stats\.pendingMine/)
 })
 
+test('dashboard uses the approved after-sales record slogan', () => {
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/dashboard/index.wxml'), 'utf8')
+  assert.match(wxml, /让每条售后都有清晰的记录/)
+  assert.doesNotMatch(wxml, /让每条售后都有清晰的下一步/)
+})
+
 test('ordinary template list loads server availability and navigates with only an available template id', async () => {
   const navigations = []
   const toasts = []
