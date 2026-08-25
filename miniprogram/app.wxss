@@ -85,10 +85,18 @@ page {
   border: 1rpx solid #d1d5db;
   border-radius: 12rpx;
   padding: 20rpx;
+  color: #1f2937;
+  font-size: 30rpx;
+}
+
+.input {
+  height: 88rpx;
+  line-height: 46rpx;
 }
 
 .textarea {
   min-height: 180rpx;
+  line-height: 1.6;
 }
 
 .empty {
@@ -96,4 +104,3 @@ page {
   text-align: center;
   color: #9ca3af;
 }
-
