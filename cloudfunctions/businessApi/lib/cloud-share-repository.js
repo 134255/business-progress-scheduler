@@ -50,10 +50,12 @@ function assertCreateAccess({ actor, line, node, round, businessLineId, nodeId }
   const managers = exactIds(line, 'managerUserIds')
   const members = exactIds(line, 'memberUserIds')
   const processors = exactIds(node, 'processorUserIds')
-  exactIds(node, 'reviewerUserIds')
+  const reviewers = exactIds(node, 'reviewerUserIds')
   exactIds(round, 'processorUserIds')
-  exactIds(round, 'reviewerUserIds')
-  if (!members.includes(actor._id) || !managers.includes(actor._id) && !processors.includes(actor._id)) {
+  const roundReviewers = exactIds(round, 'reviewerUserIds')
+  const canShare = managers.includes(actor._id) || processors.includes(actor._id) ||
+    reviewers.includes(actor._id) && roundReviewers.includes(actor._id)
+  if (!members.includes(actor._id) || !canShare) {
     throw createError('FORBIDDEN')
   }
   const evidenceIds = exactIds(round, 'evidenceIds', { nonEmpty: false })

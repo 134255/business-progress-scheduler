@@ -591,7 +591,8 @@ function createCloudBusinessRepository({
         reviewStartedAt: clone(node.reviewStartedAt || null),
         activeReviewRoundId: node.activeReviewRoundId || '',
         canFeedback: processors.includes(actor._id),
-        canShareResult: node.status === 'completed' && (canManage || processors.includes(actor._id)),
+        canShareResult: node.status === 'completed' &&
+          (canManage || processors.includes(actor._id) || reviewers.includes(actor._id)),
         ...evidencePolicy,
         fieldDefinitions
       }

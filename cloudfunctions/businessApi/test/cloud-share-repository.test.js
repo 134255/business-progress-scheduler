@@ -98,6 +98,36 @@ test('进行中业务的已完成审核节点可立即生成分享快照', async
   assert.equal(fake.documents('public_node_shares')[0].publishState, 'published')
 })
 
+test('节点与最终通过轮次中的审核人可生成分享快照', async () => {
+  const data = seed(0)
+  data.users.push({ _id: 'reviewer', status: 'active', role: 'user' })
+  const { fake, repository } = harness(0, data)
+
+  await repository.createSnapshot({
+    actor: { _id: 'reviewer', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 10).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: '7'.repeat(64), inputHash: '8'.repeat(64)
+  })
+
+  assert.equal(fake.documents('public_node_shares').length, 1)
+  assert.equal(fake.documents('public_node_shares')[0].createdByUserId, 'reviewer')
+})
+
+test('无关业务成员不能生成节点分享快照', async () => {
+  const data = seed(0)
+  data.users.push({ _id: 'observer', status: 'active', role: 'user' })
+  data.business_lines[0].memberUserIds.push('observer')
+  const { repository } = harness(0, data)
+
+  await assert.rejects(repository.createSnapshot({
+    actor: { _id: 'observer', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 11).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: '9'.repeat(64), inputHash: '0'.repeat(64)
+  }), error => error.code === 'FORBIDDEN')
+})
+
 test('分块中断后的同请求重试沿用原到期时间并完成发布', async () => {
   const { fake, repository } = harness(41)
   const token = Buffer.alloc(32, 4).toString('base64url')

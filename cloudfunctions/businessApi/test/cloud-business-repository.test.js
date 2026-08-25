@@ -970,6 +970,38 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
   }), error => error.code === 'FORBIDDEN')
 })
 
+test('已完成审核节点向当前节点审核人显示分享入口', async () => {
+  const seed = seedDefinition({
+    users: [
+      { _id: 'manager', status: 'active', displayName: '管理员' },
+      { _id: 'processor', status: 'active', displayName: '处理人' },
+      { _id: 'reviewer', status: 'active', displayName: '审核人' }
+    ],
+    extra: {
+      business_lines: [{
+        _id: 'line-share', code: 'BL-SHARE', name: '分享业务', status: 'in_progress', version: 2,
+        managerUserIds: ['manager'], memberUserIds: ['manager', 'processor', 'reviewer'],
+        currentNodeId: 'node-next', currentNodeIndex: 1
+      }],
+      business_nodes: [{
+        _id: 'node-completed', businessLineId: 'line-share', nodeCode: 'BL-SHARE-N001', sequence: 0,
+        name: '已完成节点', status: 'completed', version: 3, workflowMode: 'review',
+        processorUserIds: ['processor'], reviewerUserIds: ['reviewer'],
+        processorDisplayNames: ['处理人'], reviewerDisplayNames: ['审核人'], reviewMode: 'any',
+        processingRoundNumber: 1, reviewRoundNumber: 1, lastReviewRoundId: 'round-share',
+        requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+      }]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+
+  const result = await repository.getBusinessLine({
+    actor: { _id: 'reviewer', status: 'active' }, lineId: 'line-share'
+  })
+
+  assert.equal(result.nodes[0].canShareResult, true)
+})
+
 test('停用或改名的节点参与人不改变已完成业务的显示名快照', async () => {
   const seed = seedDefinition({
     users: [
