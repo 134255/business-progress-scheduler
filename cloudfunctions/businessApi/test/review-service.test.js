@@ -129,12 +129,54 @@ function harness(overrides = {}) {
     calls,
     service: createReviewService({
       feedbackRepository,
-      reviewRepository,
+      reviewRepository: { ...reviewRepository, ...overrides.reviewRepository },
       workTimeService: overrides.workTimeService || workTimeService,
+      businessSearchClient: overrides.businessSearchClient,
       clock: overrides.clock || (() => new Date('2026-08-11T03:00:00.000Z'))
     })
   }
 }
+
+test('提交审核同步检索索引并剥离内部信封', async () => {
+  const publicResult = {
+    reviewRoundId: 'review-feedback-current', status: 'pending',
+    nodeStatus: 'pending_review', evidenceIds: ['evidence-a', 'evidence-b']
+  }
+  const envelope = { actorId: 'processor-1', businessLineId: 'line-1', sourceVersion: 2 }
+  const indexed = []
+  const value = harness({
+    reviewRepository: {
+      async createReviewRound() { return { publicResult, searchEnvelope: envelope } }
+    },
+    businessSearchClient: { async ensureIndexed(item) { indexed.push(item) } }
+  })
+  assert.equal(await value.service.submitNodeForReview({ actor: ACTOR, input: input() }), publicResult)
+  assert.deepEqual(indexed, [envelope])
+})
+
+test('审核投票同步检索索引且失败返回稳定错误', async () => {
+  const publicResult = {
+    reviewRoundId: 'review-feedback-current', status: 'approved',
+    nodeStatus: 'completed', lineStatus: 'active', nextNodeId: 'line-1-node-002'
+  }
+  const value = harness({
+    reviewRepository: {
+      async submitReviewVote() {
+        return { publicResult, searchEnvelope: {
+          actorId: 'reviewer-1', businessLineId: 'line-1', sourceVersion: 3
+        } }
+      }
+    },
+    businessSearchClient: { async ensureIndexed() { throw new Error('timeout') } }
+  })
+  await assert.rejects(value.service.submitReviewVote({
+    actor: { _id: 'reviewer-1', status: 'active' },
+    input: {
+      reviewRoundId: 'review-feedback-current', expectedRoundVersion: 1,
+      decision: 'approve', comment: '', requestKey: 'vote-index-1'
+    }
+  }), error => error.code === 'BUSINESS_SEARCH_PENDING')
+})
 
 test('提交审核采用当前轮最新字段与全部有效凭证并计算双时限快照', async () => {
   const { calls, service } = harness()

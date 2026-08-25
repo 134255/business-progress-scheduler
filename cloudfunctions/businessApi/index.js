@@ -799,11 +799,15 @@ function createDefaultBusinessApi() {
     businessSearchClient
   })
   const evidenceService = createEvidenceService({ repository: evidenceRepository })
-  const feedbackService = createFeedbackService({ repository: feedbackRepository })
+  const feedbackService = createFeedbackService({
+    repository: feedbackRepository,
+    businessSearchClient
+  })
   const reviewService = createReviewService({
     feedbackRepository,
     reviewRepository,
     workTimeService,
+    businessSearchClient,
     clock: () => new Date()
   })
   const calendarAdminService = createCalendarAdminService({

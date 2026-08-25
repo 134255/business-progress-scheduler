@@ -195,6 +195,9 @@ test('提交审核在一个事务内创建轮次、锁定节点并写确定性�
     reviewRoundId: 'review-feedback-current', status: 'pending', nodeStatus: 'pending_review',
     evidenceIds: ['evidence-a', 'evidence-b']
   })
+  assert.deepEqual(result.searchEnvelope, {
+    actorId: 'processor-1', businessLineId: 'line-1', sourceVersion: 1
+  })
   const [round] = fake.documents('node_review_rounds')
   assert.equal(round._id, 'review-feedback-current')
   assert.equal(round.processingRoundNumber, 1)
@@ -220,6 +223,13 @@ test('提交审核在一个事务内创建轮次、锁定节点并写确定性�
   assert.equal(node.status, 'pending_review')
   assert.equal(node.activeReviewRoundId, round._id)
   assert.equal(node.version, 5)
+  assert.equal(node.searchSourceVersion, 1)
+  assert.equal(node.searchGeneratedVersion, 0)
+  assert.equal(node.searchIndexStatus, 'pending')
+  const [line] = fake.documents('business_lines')
+  assert.equal(line.searchSourceVersion, 1)
+  assert.equal(line.searchGeneratedVersion, 0)
+  assert.equal(line.searchIndexStatus, 'pending')
   assert.equal(fake.documents('notifications').length, 1)
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.equal(fake.transactionRuns.length, 1)
@@ -1298,11 +1308,17 @@ test('会签逐票通过、同票同输入幂等且改票冲突', async () => {
     reviewRoundId: 'review-feedback-current', status: 'pending',
     nodeStatus: 'pending_review', lineStatus: 'active', nextNodeId: null
   })
+  assert.deepEqual(first.searchEnvelope, {
+    actorId: 'reviewer-1', businessLineId: 'line-1', sourceVersion: 1
+  })
+  assert.equal(fake.documents('business_lines')[0].searchSourceVersion, 1)
+  assert.equal(fake.documents('business_nodes').find(node => node._id === 'node-1').searchSourceVersion, 1)
   const [firstStoredVote] = fake.documents('node_review_votes')
   assert.equal(firstStoredVote.reviewerUserId, 'reviewer-1')
   assert.equal(firstStoredVote.reviewResponseWorkMinutes, 120)
   assert.equal(fake.documents('node_review_votes').some(vote => vote.reviewerUserId === 'reviewer-2'), false)
   assert.deepEqual(await repository.submitReviewVote(firstValue), first)
+  assert.equal(fake.documents('business_lines')[0].searchSourceVersion, 1)
   assert.deepEqual(fake.documents('node_review_votes')[0], firstStoredVote)
   await assert.rejects(
     repository.submitReviewVote(voteRequest('reviewer-1', {
@@ -1314,6 +1330,11 @@ test('会签逐票通过、同票同输入幂等且改票冲突', async () => {
 
   const result = await repository.submitReviewVote(voteRequest('reviewer-2'))
   assert.equal(result.status, 'approved')
+  assert.deepEqual(result.searchEnvelope, {
+    actorId: 'reviewer-2', businessLineId: 'line-1', sourceVersion: 2
+  })
+  assert.equal(fake.documents('business_lines')[0].searchSourceVersion, 2)
+  assert.equal(fake.documents('business_nodes').find(node => node._id === 'node-1').searchSourceVersion, 2)
   assert.equal(fake.documents('node_review_votes').length, 2)
   for (const vote of fake.documents('node_review_votes')) {
     assert.equal(vote.reviewResponseTimingStatus, 'calculated')

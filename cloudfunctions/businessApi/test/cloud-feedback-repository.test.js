@@ -25,6 +25,9 @@ test('completion claims more than one transaction of tiny evidence without a cou
     lineStatus: 'active',
     nodeVersion: 5
   })
+  assert.deepEqual(result.searchEnvelope, {
+    actorId: 'account-a', businessLineId: 'line-1', sourceVersion: 1
+  })
   assert.equal(fake.documents('node_feedback')[0].nodeVersion, 5)
   const [feedback] = fake.documents('node_feedback')
   assert.equal(feedback.publishState, 'published')
@@ -39,6 +42,18 @@ test('completion claims more than one transaction of tiny evidence without a cou
   assert.equal(fake.documents('evidences').every(item => item.orphanExpiresAt === null), true)
   assert.deepEqual(fake.documents('business_nodes').sort((a, b) => a.sequence - b.sequence).map(item => item.status), ['completed', 'ready'])
   assert.equal(fake.documents('business_lines')[0].currentNodeId, 'line-1-node-002')
+  assert.deepEqual(
+    (({ searchSourceVersion, searchGeneratedVersion, searchIndexStatus }) => ({
+      searchSourceVersion, searchGeneratedVersion, searchIndexStatus
+    }))(fake.documents('business_lines')[0]),
+    { searchSourceVersion: 1, searchGeneratedVersion: 0, searchIndexStatus: 'pending' }
+  )
+  assert.deepEqual(
+    (({ searchSourceVersion, searchGeneratedVersion, searchIndexStatus }) => ({
+      searchSourceVersion, searchGeneratedVersion, searchIndexStatus
+    }))(fake.documents('business_nodes').find(item => item._id === 'node-1')),
+    { searchSourceVersion: 1, searchGeneratedVersion: 0, searchIndexStatus: 'pending' }
+  )
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.equal(fake.transactionQueries.length, 0)
   assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
@@ -391,6 +406,9 @@ test('same request is idempotent, changed payload conflicts, and another OR sign
   const first = await repository.commitFeedback(original)
   const retry = await repository.commitFeedback(original)
   assert.deepEqual(retry, first)
+  assert.deepEqual(retry.searchEnvelope, first.searchEnvelope)
+  assert.equal(fake.documents('business_lines')[0].searchSourceVersion, 1)
+  assert.equal(fake.documents('business_nodes').find(item => item._id === 'node-1').searchSourceVersion, 1)
   assert.equal(retry.nodeVersion, first.nodeVersion)
   assert.equal(Number.isSafeInteger(retry.nodeVersion), true)
   await assert.rejects(

@@ -3,6 +3,7 @@ const crypto = require('node:crypto')
 const { validateFieldValues } = require('./field-domain')
 const { validateFeedbackTotalSize } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
+const { stripSearchEnvelope } = require('./search-version')
 
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const REQUEST_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
@@ -136,7 +137,20 @@ function orderedEvidences(evidences, evidenceIds) {
   })
 }
 
-function createFeedbackService({ repository }) {
+async function synchronizeSearch(stored, businessSearchClient) {
+  const envelope = stored && Object.getOwnPropertyDescriptor(stored, 'searchEnvelope')
+  if (!envelope) return stored
+  try {
+    if (!Object.prototype.hasOwnProperty.call(envelope, 'value') || !businessSearchClient ||
+        typeof businessSearchClient.ensureIndexed !== 'function') throw new Error('search unavailable')
+    await businessSearchClient.ensureIndexed(envelope.value)
+    return stripSearchEnvelope(stored)
+  } catch (_) {
+    throw createError('BUSINESS_SEARCH_PENDING')
+  }
+}
+
+function createFeedbackService({ repository, businessSearchClient = null }) {
   if (!repository) throw new TypeError('repository is required')
 
   async function submitFeedback({ actor, input }) {
@@ -150,7 +164,7 @@ function createFeedbackService({ repository }) {
       requestFingerprint,
       legacyOnly: true
     })
-    if (published) return published
+    if (published) return synchronizeSearch(published, businessSearchClient)
     const submission = await repository.getSubmissionContext({
       actor,
       businessLineId: normalized.businessLineId,
@@ -172,13 +186,13 @@ function createFeedbackService({ repository }) {
     if (normalized.status === 'completed' && submission.node.requiresEvidence && !normalized.evidenceIds.length) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
-    return repository.commitFeedback({
+    return synchronizeSearch(await repository.commitFeedback({
       actor,
       input: commitInput,
       requestFingerprint,
       fieldSnapshots,
       evidenceTotalBytes
-    })
+    }), businessSearchClient)
   }
 
   async function saveNodeProgress({ actor, input }) {
@@ -187,7 +201,7 @@ function createFeedbackService({ repository }) {
     const requestFingerprint = createRequestFingerprint(actor, normalized)
     const { fieldValues, ...commitInput } = normalized
     const published = await repository.findPublishedFeedback({ actor, input: commitInput, requestFingerprint })
-    if (published) return published
+    if (published) return synchronizeSearch(published, businessSearchClient)
     const submission = await repository.getSubmissionContext({
       actor,
       businessLineId: normalized.businessLineId,
@@ -204,13 +218,13 @@ function createFeedbackService({ repository }) {
     } catch (error) {
       markApplicationError(error)
     }
-    return repository.commitFeedback({
+    return synchronizeSearch(await repository.commitFeedback({
       actor,
       input: commitInput,
       requestFingerprint,
       fieldSnapshots,
       evidenceTotalBytes
-    })
+    }), businessSearchClient)
   }
 
   async function getNodeHistory({ actor, businessLineId, nodeId }) {

@@ -8,6 +8,7 @@ const {
   hasAccountRelationshipMarker,
   ownDataValue
 } = require('./account-relationship-schema')
+const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
 
 const COLLECTIONS = Object.freeze({
   users: 'users', lines: 'business_lines', nodes: 'business_nodes',
@@ -130,6 +131,21 @@ function publicResult(feedback) {
     lineStatus: feedback.lineStatus
   }
   if (safeInteger(feedback.nodeVersion, { minimum: 1 })) result.nodeVersion = feedback.nodeVersion
+  return result
+}
+
+function withSearchEnvelope(result, actorId, businessLineId, lineOrVersion) {
+  const state = typeof lineOrVersion === 'number'
+    ? { searchSourceVersion: lineOrVersion }
+    : currentSearchVersion(lineOrVersion)
+  Object.defineProperties(result, {
+    publicResult: { value: result },
+    searchEnvelope: { value: {
+      actorId,
+      businessLineId,
+      sourceVersion: state.searchSourceVersion
+    } }
+  })
   return result
 }
 
@@ -369,7 +385,7 @@ function createCloudFeedbackRepository({
           existing.submittedBy !== actor._id) {
         throw createError('VERSION_CONFLICT')
       }
-      return publicResult(existing)
+      return withSearchEnvelope(publicResult(existing), actor._id, current.line._id, current.line)
     })
   }
 
@@ -393,7 +409,10 @@ function createCloudFeedbackRepository({
             existing.requestFingerprint !== id.requestFingerprint ||
             existing.submittedBy !== value.actor._id) throw createError('VERSION_CONFLICT')
         if (existing.publishState === 'published') {
-          return { ...id, published: publicResult(existing) }
+          return {
+            ...id,
+            published: withSearchEnvelope(publicResult(existing), value.actor._id, current.line._id, current.line)
+          }
         }
       }
       if (existing && existing.publishState === 'reserved' && current.node &&
@@ -609,7 +628,9 @@ function createCloudFeedbackRepository({
       const reservation = await readDocument(transaction, COLLECTIONS.feedback, id.feedbackId)
       if (reservation && reservation.publishState === 'published') {
         assertExactPublishedRetry(current, reservation, id, value)
-        return publicResult(reservation)
+        return withSearchEnvelope(
+          publicResult(reservation), value.actor._id, current.line._id, current.line
+        )
       }
       assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
       const cursorValid = reservation && reservation.publishState === 'reserved' &&
@@ -631,6 +652,8 @@ function createCloudFeedbackRepository({
       const latestRevision = current.node.latestFeedbackRevision === undefined ? 0 : current.node.latestFeedbackRevision
       if (!safeInteger(revision, { minimum: 1 }) || revision !== increment(latestRevision)) throw createError('VERSION_CONFLICT')
       const nodeVersion = increment(current.node.version)
+      const nextLineSearch = advanceSearchVersion(current.line)
+      const nextNodeSearch = advanceSearchVersion(current.node)
       const nodeChanges = {
         status: value.input.status,
         version: nodeVersion,
@@ -640,7 +663,8 @@ function createCloudFeedbackRepository({
         feedbackClaimId: db.command.remove(),
         feedbackClaimHash: db.command.remove(),
         feedbackClaimExpiresAt: db.command.remove(),
-        updatedAt: db.serverDate()
+        updatedAt: db.serverDate(),
+        ...nextNodeSearch
       }
       if (current.node.workflowMode === 'review') {
         if (!['save_progress', 'mark_blocked'].includes(value.input.action) ||
@@ -669,6 +693,7 @@ function createCloudFeedbackRepository({
           analyticsSnapshotStatus: 'pending',
           analyticsSourceVersion: nextAnalyticsSourceVersion(current.line),
           analyticsCompletedAt: reservation.transitionAt,
+          ...nextLineSearch,
           updatedAt: db.serverDate()
         } })
       } else if (value.input.status === 'completed') {
@@ -686,11 +711,11 @@ function createCloudFeedbackRepository({
         const progress = Math.floor(((Number(current.node.sequence) + 1) / Number(current.line.nodeCount)) * 100)
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
           currentNodeId: nextId, currentNodeIndex: next.sequence, currentNodeName: next.name,
-          progress, version: increment(current.line.version), updatedAt: db.serverDate()
+          progress, version: increment(current.line.version), ...nextLineSearch, updatedAt: db.serverDate()
         } })
       } else {
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
-          version: increment(current.line.version), updatedAt: db.serverDate()
+          version: increment(current.line.version), ...nextLineSearch, updatedAt: db.serverDate()
         } })
       }
       await transaction.collection(COLLECTIONS.feedback).doc(id.feedbackId).update({ data: {
@@ -704,7 +729,12 @@ function createCloudFeedbackRepository({
         resultStatus: value.input.status, evidenceCount: reservation.evidenceCount,
         createdAt: db.serverDate()
       } })
-      return { feedbackId: id.feedbackId, revision, nodeStatus: value.input.status, lineStatus, nodeVersion }
+      return withSearchEnvelope(
+        { feedbackId: id.feedbackId, revision, nodeStatus: value.input.status, lineStatus, nodeVersion },
+        current.actor._id,
+        current.line._id,
+        nextLineSearch.searchSourceVersion
+      )
     })
   }
 

@@ -184,6 +184,26 @@ test('权威快照按节点状态只选择当前处理、活动审核、最终�
   assert.equal(JSON.stringify(snapshot).includes('cloud://'), false)
 })
 
+test('售后版本作为并发屏障允许未变节点版本落后并在发布时统一追平', async () => {
+  const data = authoritativeSeed()
+  data.business_nodes[1].searchSourceVersion = 2
+  data.business_nodes[2].searchSourceVersion = 1
+  data.business_nodes[3].searchSourceVersion = 0
+  data.node_feedback[1].action = 'mark_blocked'
+  const { repository, fake } = harness(data)
+
+  const snapshot = await repository.loadAuthoritativeSnapshot({ businessLineId: 'line-1', sourceVersion: 3 })
+  assert.equal(snapshot.nodes[0].processingComment, '当前处理说明')
+  await repository.publishGeneration({
+    businessLineId: 'line-1', sourceVersion: 3, generationId: 'generation-compatible',
+    entries: indexedEntries(snapshot)
+  })
+
+  assert.equal(fake.documents('business_nodes').every(node =>
+    node.searchSourceVersion === 3 && node.searchGeneratedVersion === 3 &&
+    node.searchIndexStatus === 'generated'), true)
+})
+
 test('权威快照对跨售后凭证和损坏最终轮次失败关闭', async () => {
   const crossEvidence = authoritativeSeed()
   crossEvidence.evidences[0].businessLineId = 'line-other'

@@ -116,8 +116,16 @@ function safeText(value, maximum = 10000) {
   return value
 }
 
-function safeSourceVersion(document, expected) {
-  return document && exactSafeInteger(document.searchSourceVersion) && document.searchSourceVersion === expected
+function safeSourceVersion(document, expected, { allowLagging = false } = {}) {
+  if (!document || !exactSafeInteger(document.searchSourceVersion) ||
+      !exactSafeInteger(document.searchGeneratedVersion) ||
+      document.searchGeneratedVersion > document.searchSourceVersion ||
+      !['pending', 'generated'].includes(document.searchIndexStatus) ||
+      document.searchIndexStatus === 'generated' &&
+        document.searchGeneratedVersion !== document.searchSourceVersion) return false
+  return allowLagging
+    ? document.searchSourceVersion <= expected
+    : document.searchSourceVersion === expected
 }
 
 function compareNodes(left, right) {
@@ -222,7 +230,7 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     if (!feedback || feedback.businessLineId !== lineId || feedback.nodeId !== node._id ||
         feedback.processingRoundNumber !== node.processingRoundNumber ||
         feedback.revision !== node.latestFeedbackRevision || feedback.publishState !== 'published' ||
-        !['save_progress', 'blocked'].includes(feedback.action)) throw sourceError()
+        !['save_progress', 'mark_blocked'].includes(feedback.action)) throw sourceError()
     return {
       fieldValues: safeFieldValues(feedback.fieldValues || []),
       processingComment: safeText(feedback.processingComment || ''),
@@ -262,7 +270,8 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     }
     const projected = []
     for (const node of nodes) {
-      if (!safeSourceVersion(node, sourceVersion) || node.businessLineId !== businessLineId ||
+      if (!safeSourceVersion(node, sourceVersion, { allowLagging: true }) ||
+          node.businessLineId !== businessLineId ||
           !exactString(node._id, { maximum: 128 }) || !exactString(node.name, { maximum: 500 }) ||
           !exactString(node.nodeCode, { maximum: 128 }) || !exactSafeInteger(node.processingRoundNumber, 1)) {
         throw sourceError()
@@ -337,12 +346,14 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       const currentNodes = []
       for (const nodeId of nodeIds) {
         const node = await readDocument(transaction, COLLECTIONS.nodes, nodeId)
-        if (!safeSourceVersion(node, sourceVersion) || node.businessLineId !== businessLineId) {
+        if (!safeSourceVersion(node, sourceVersion, { allowLagging: true }) ||
+            node.businessLineId !== businessLineId) {
           throw createError('VERSION_CONFLICT')
         }
         currentNodes.push(node)
       }
       const update = {
+        searchSourceVersion: sourceVersion,
         searchGeneratedVersion: sourceVersion,
         searchGenerationId: generationId,
         searchIndexStatus: 'generated',

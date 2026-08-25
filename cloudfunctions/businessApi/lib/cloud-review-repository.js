@@ -6,6 +6,7 @@ const { ownDataValue, ownExactAccountIds } = require('./account-relationship-sch
 const { deterministicVoteId } = require('./review-domain')
 const { fitsIndexedAccountArray } = require('./index-key-budget')
 const { isNotificationId } = require('./notification-id')
+const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
 
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_LINE_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
@@ -159,6 +160,21 @@ function voteResult(round, nodeStatus, lineStatus, nextNodeId = null) {
     lineStatus,
     nextNodeId
   }
+}
+
+function withSearchEnvelope(result, actorId, businessLineId, lineOrVersion) {
+  const state = typeof lineOrVersion === 'number'
+    ? { searchSourceVersion: lineOrVersion }
+    : currentSearchVersion(lineOrVersion)
+  Object.defineProperties(result, {
+    publicResult: { value: result },
+    searchEnvelope: { value: {
+      actorId,
+      businessLineId,
+      sourceVersion: state.searchSourceVersion
+    } }
+  })
+  return result
 }
 
 function instanceNodeId(lineId, sequence) {
@@ -882,7 +898,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       ]))
       if (recomputedDraftHash !== value.draftHash) throw createError('VERSION_CONFLICT')
       assertIdempotentRound(round, node, value, value.reviewRoundId)
-      return publicResult(round)
+      return withSearchEnvelope(publicResult(round), actor._id, line._id, line)
     })
   }
 
@@ -907,7 +923,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         const feedback = await readDocument(transaction, 'node_feedback', value.draft.feedbackId)
         validateDraft(value, node, feedback)
         assertIdempotentRound(existing, node, value, roundId)
-        return publicResult(existing)
+        return withSearchEnvelope(publicResult(existing), actor._id, line._id, line)
       }
       if (node.version !== value.input.expectedNodeVersion) throw createError('VERSION_CONFLICT')
       if (!ACTIVE_NODE_STATUSES.has(node.status)) throw createError('NODE_NOT_ACTIVE')
@@ -926,6 +942,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         node, 'reviewerDisplayNames', reviewers.length, '历史审核人'
       )
       const lockedNodeVersion = increment(node.version)
+      const nextLineSearch = advanceSearchVersion(line)
+      const nextNodeSearch = advanceSearchVersion(node)
       const reviewRoundNumber = increment(node.reviewRoundNumber === undefined ? 0 : node.reviewRoundNumber)
       const round = {
         businessLineId: line._id,
@@ -997,6 +1015,11 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         processingOverdueWorkMinutes: value.timing.processingOverdueWorkMinutes,
         processingCalendarVersion: value.timing.processingCalendarVersion || null,
         version: lockedNodeVersion,
+        ...nextNodeSearch,
+        updatedAt: db.serverDate()
+      } })
+      await transaction.collection('business_lines').doc(line._id).update({ data: {
+        ...nextLineSearch,
         updatedAt: db.serverDate()
       } })
       const notificationId = `review-start-${hash(roundId).slice(0, 40)}`
@@ -1021,7 +1044,10 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         reviewRoundNumber,
         createdAt: db.serverDate()
       } })
-      return publicResult({ _id: roundId, ...round })
+      return withSearchEnvelope(
+        publicResult({ _id: roundId, ...round }), actor._id, line._id,
+        nextLineSearch.searchSourceVersion
+      )
     })
   }
 
@@ -1126,7 +1152,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           transaction, 'node_review_votes', deterministicVoteId(round._id, actor._id)
         )
         assertMatchingVote(vote, actor, round, value)
-        return result
+        return withSearchEnvelope(result, actor._id, line._id, line)
       }
       const { processors, reviewers } = assertVoteAuthorization(actor, line, node, round, value.input)
       if (node.version !== context.nodeVersion || round.version !== context.roundVersion) {
@@ -1137,8 +1163,12 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       const existingVote = await readDocument(transaction, 'node_review_votes', voteId)
       if (existingVote) {
         assertMatchingVote(existingVote, actor, round, value)
-        return voteResult(round, node.status, line.status)
+        return withSearchEnvelope(
+          voteResult(round, node.status, line.status), actor._id, line._id, line
+        )
       }
+      const nextLineSearch = advanceSearchVersion(line)
+      const nextNodeSearch = advanceSearchVersion(node)
       validateCompletedReviewTiming(value.timing, context, round)
       validateReviewResponseTiming(value.timing, context, round)
       const displayName = reviewerDisplayName(actor)
@@ -1237,7 +1267,18 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           voteCount,
           updatedAt: db.serverDate()
         } })
-        return voteResult({ ...round, status: 'pending' }, node.status, line.status)
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          ...nextNodeSearch,
+          updatedAt: db.serverDate()
+        } })
+        await transaction.collection('business_lines').doc(line._id).update({ data: {
+          ...nextLineSearch,
+          updatedAt: db.serverDate()
+        } })
+        return withSearchEnvelope(
+          voteResult({ ...round, status: 'pending' }, node.status, line.status),
+          actor._id, line._id, nextLineSearch.searchSourceVersion
+        )
       }
 
       const reviewTiming = completedReviewTiming(round, value.timing, at)
@@ -1302,10 +1343,12 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           lastReviewOverdueWorkMinutes: reviewTiming.reviewOverdueWorkMinutes,
           lastReviewCalendarVersion: reviewTiming.reviewCalendarVersion,
           version: increment(node.version),
+          ...nextNodeSearch,
           updatedAt: db.serverDate()
         } })
         await transaction.collection('business_lines').doc(line._id).update({ data: {
           version: increment(line.version),
+          ...nextLineSearch,
           updatedAt: db.serverDate()
         } })
         recipients = processors
@@ -1326,6 +1369,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           lastReviewOverdueWorkMinutes: reviewTiming.reviewOverdueWorkMinutes,
           lastReviewCalendarVersion: reviewTiming.reviewCalendarVersion,
           version: increment(node.version),
+          ...nextNodeSearch,
           updatedAt: db.serverDate()
         } })
         if (expectedTransition === 'complete_line') {
@@ -1342,6 +1386,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
             analyticsSourceVersion: nextAnalyticsSourceVersion(line),
             analyticsCompletedAt: at,
             version: increment(line.version),
+            ...nextLineSearch,
             updatedAt: db.serverDate()
           } })
           recipients = [...new Set([...processors, ...reviewers])].sort()
@@ -1370,6 +1415,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
             currentNodeName: next.name,
             progress,
             version: increment(line.version),
+            ...nextLineSearch,
             updatedAt: db.serverDate()
           } })
           recipients = nextProcessors
@@ -1403,8 +1449,9 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           } })
         }
       }
-      return voteResult(
-        { ...round, status: finalStatus }, nodeStatus, lineStatus, nextNodeId
+      return withSearchEnvelope(
+        voteResult({ ...round, status: finalStatus }, nodeStatus, lineStatus, nextNodeId),
+        actor._id, line._id, nextLineSearch.searchSourceVersion
       )
     })
   }

@@ -57,9 +57,50 @@ function harness(overrides = {}) {
   return {
     actor: { _id: 'account-1', status: 'active' },
     calls,
-    service: createFeedbackService({ repository: { ...repository, ...overrides.repository } })
+    service: createFeedbackService({
+      repository: { ...repository, ...overrides.repository },
+      businessSearchClient: overrides.businessSearchClient
+    })
   }
 }
+
+test('发布处理进度后同步检索索引并仅返回公开结果', async () => {
+  const publicResult = { feedbackId: 'feedback-1', revision: 1, nodeStatus: 'in_progress', lineStatus: 'active' }
+  const envelope = { actorId: 'account-1', businessLineId: 'line-1', sourceVersion: 2 }
+  const indexed = []
+  const value = harness({
+    context: { ...context(), node: { ...context().node, workflowMode: 'review', requiresEvidence: false } },
+    repository: { async commitFeedback() { return { publicResult, searchEnvelope: envelope } } },
+    businessSearchClient: { async ensureIndexed(item) { indexed.push(item) } }
+  })
+  const result = await value.service.saveNodeProgress({
+    actor: value.actor,
+    input: {
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 3,
+      action: 'save_progress', fieldValues: input().fieldValues, comment: '当前内容',
+      evidenceIds: [], requestKey: 'progress-index-1'
+    }
+  })
+  assert.equal(result, publicResult)
+  assert.deepEqual(indexed, [envelope])
+})
+
+test('处理进度已发布重试会补建检索索引且失败返回稳定错误', async () => {
+  const publicResult = { feedbackId: 'feedback-1', revision: 1, nodeStatus: 'in_progress', lineStatus: 'active' }
+  const envelope = { actorId: 'account-1', businessLineId: 'line-1', sourceVersion: 2 }
+  const value = harness({
+    published: { publicResult, searchEnvelope: envelope },
+    businessSearchClient: { async ensureIndexed() { throw new Error('timeout') } }
+  })
+  await assert.rejects(value.service.saveNodeProgress({
+    actor: value.actor,
+    input: {
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 3,
+      action: 'save_progress', fieldValues: input().fieldValues, comment: '当前内容',
+      evidenceIds: [], requestKey: 'progress-index-1'
+    }
+  }), error => error.code === 'BUSINESS_SEARCH_PENDING')
+})
 
 test('submission snapshots typed field identity and delegates immutable normalized feedback', async () => {
   const { actor, calls, service } = harness()

@@ -2,6 +2,7 @@ const crypto = require('node:crypto')
 
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { isNotificationId } = require('./notification-id')
+const { stripSearchEnvelope } = require('./search-version')
 
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const REQUEST_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
@@ -250,7 +251,23 @@ function buildReviewResponseTiming(context, calculated, endedAt) {
   throw createError('VERSION_CONFLICT')
 }
 
-function createReviewService({ feedbackRepository, reviewRepository, workTimeService, clock = () => new Date() }) {
+async function synchronizeSearch(stored, businessSearchClient) {
+  const envelope = stored && Object.getOwnPropertyDescriptor(stored, 'searchEnvelope')
+  if (!envelope) return stored
+  try {
+    if (!Object.prototype.hasOwnProperty.call(envelope, 'value') || !businessSearchClient ||
+        typeof businessSearchClient.ensureIndexed !== 'function') throw new Error('search unavailable')
+    await businessSearchClient.ensureIndexed(envelope.value)
+    return stripSearchEnvelope(stored)
+  } catch (_) {
+    throw createError('BUSINESS_SEARCH_PENDING')
+  }
+}
+
+function createReviewService({
+  feedbackRepository, reviewRepository, workTimeService,
+  businessSearchClient = null, clock = () => new Date()
+}) {
   if (!feedbackRepository || typeof feedbackRepository.getCurrentProcessingRoundDraft !== 'function') {
     throw new TypeError('feedbackRepository.getCurrentProcessingRoundDraft is required')
   }
@@ -308,12 +325,12 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
         expectedNodeVersion: normalized.expectedNodeVersion,
         reviewRoundId: retryContext.reviewRoundId
       })
-      return reviewRepository.findReviewRoundRetry({
+      return synchronizeSearch(await reviewRepository.findReviewRoundRetry({
         actor, input: safeInput, requestKeyHash, inputHash,
         reviewRoundId: retryContext.reviewRoundId,
         draft: lockedDraft,
         draftHash: hashDraft(actor._id, normalized, lockedDraft)
-      })
+      }), businessSearchClient)
     }
     const draft = await feedbackRepository.getCurrentProcessingRoundDraft({
       actor,
@@ -332,7 +349,7 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
     if (!Number.isSafeInteger(reviewMinutes) || reviewMinutes <= 0) throw createError('VERSION_CONFLICT')
     const reviewDue = await workTimeService.tryAddWorkMinutes(new Date(at), reviewMinutes)
     const draftHash = hashDraft(actor._id, normalized, draft)
-    return reviewRepository.createReviewRound({
+    return synchronizeSearch(await reviewRepository.createReviewRound({
       actor,
       input: safeInput,
       draft,
@@ -343,7 +360,7 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
       requestKeyHash,
       inputHash,
       draftHash
-    })
+    }), businessSearchClient)
   }
 
   async function submitReviewVote({ actor, input }) {
@@ -408,14 +425,14 @@ function createReviewService({ feedbackRepository, reviewRepository, workTimeSer
         throw createError('VERSION_CONFLICT')
       }
     }
-    return reviewRepository.submitReviewVote({
+    return synchronizeSearch(await reviewRepository.submitReviewVote({
       actor,
       input: safeInput,
       context,
       timing,
       requestKeyHash,
       inputHash
-    })
+    }), businessSearchClient)
   }
 
   async function listMyPendingReviews({ actor, query }) {
