@@ -262,6 +262,14 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     }
   }
 
+  async function isGenerationCurrent({ businessLineId, sourceVersion }) {
+    if (!exactString(businessLineId, { maximum: 128 }) || !exactSafeInteger(sourceVersion)) return false
+    const line = await readDocument(db, COLLECTIONS.lines, businessLineId)
+    return Boolean(line && line.searchIndexStatus === 'generated' &&
+      line.searchSourceVersion === sourceVersion && line.searchGeneratedVersion === sourceVersion &&
+      exactString(line.searchGenerationId, { maximum: 128 }))
+  }
+
   async function publishGeneration({ businessLineId, sourceVersion, generationId, entries }) {
     if (!exactString(businessLineId, { maximum: 128 }) || !exactSafeInteger(sourceVersion) ||
         !exactString(generationId, { maximum: 128 }) || !Array.isArray(entries) || entries.length > 5000) {
@@ -475,6 +483,7 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
 
   return {
     consumeRequest,
+    isGenerationCurrent,
     loadAuthoritativeSnapshot,
     publishGeneration,
     queryAuthorized
