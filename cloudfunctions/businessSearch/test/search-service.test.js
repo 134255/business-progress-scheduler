@@ -92,7 +92,22 @@ test('可信周期固定四十条并隔离单条回填与恢复失败', async ()
   const result = await service.runCycle({ now: new Date('2026-08-25T12:00:00.000Z'), batchSize: 40 })
   assert.deepEqual(result, { examined: 3, generated: 2, failed: 1, cleaned: 0 })
   assert.equal(value.calls.find(call => call[0] === 'claimBackfillPage')[1].batchSize, 40)
+  assert.equal(value.calls.find(call => call[0] === 'claimRecoveryPage')[1].batchSize, 38)
   assert.equal(JSON.stringify(result).includes('private'), false)
+})
+
+test('回填占满四十条时不再领取会被丢弃的恢复候选', async () => {
+  const rows = Array.from({ length: 40 }, (_, index) => ({
+    businessLineId: `legacy-${index}`, sourceVersion: 1
+  }))
+  const value = entryRepository({
+    async claimBackfillPage(input) { value.calls.push(['claimBackfillPage', input]); return rows },
+    async claimRecoveryPage(input) { value.calls.push(['claimRecoveryPage', input]); return [] }
+  })
+  const service = createSearchService({ repository: value.repository, secret: SECRET })
+  const result = await service.runCycle({ now: new Date('2026-08-25T12:00:00.000Z'), batchSize: 40 })
+  assert.equal(result.examined, 40)
+  assert.equal(value.calls.some(call => call[0] === 'claimRecoveryPage'), false)
 })
 
 test('周期拒绝调用方扩大批量', async () => {

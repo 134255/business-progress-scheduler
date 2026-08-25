@@ -12,11 +12,21 @@ const COLLECTIONS = Object.freeze({
   rounds: 'node_review_rounds',
   votes: 'node_review_votes',
   evidences: 'evidences',
+  settings: 'system_settings',
   requests: 'business_search_requests',
   documents: 'business_search_documents'
 })
 const MAX_NODES = 24
 const MAX_QUERY_CANDIDATES = 100
+const MAX_GENERATION_ENTRIES = 5000
+const MAX_CYCLE_BATCH = 40
+const QUERY_CURSOR_TTL_MS = 5 * 60 * 1000
+const CURSOR_SCHEMA_VERSION = 1
+const CURSORS = Object.freeze({
+  backfill: Object.freeze({ id: 'business-search-backfill-cursor', kind: 'business_search_backfill' }),
+  recovery: Object.freeze({ id: 'business-search-recovery-cursor', kind: 'business_search_recovery' }),
+  cleanup: Object.freeze({ id: 'business-search-cleanup-cursor', kind: 'business_search_cleanup' })
+})
 
 function createError(code) {
   const error = new Error(code)
@@ -86,6 +96,10 @@ async function readDocument(store, collection, id) {
 
 function sourceError() {
   return createError('SEARCH_SOURCE_INVALID')
+}
+
+function cursorError() {
+  return createError('SEARCH_CURSOR_INVALID')
 }
 
 function safeFieldValues(value) {
@@ -201,6 +215,175 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
             endDate: safeEndDate
           }
     })
+  }
+
+  function readCursor(document, definition) {
+    if (!document) return { exists: false, revision: 0, cursorUpdatedAt: null, cursorId: null }
+    const kind = ownDataValue(document, 'kind')
+    const schemaVersion = ownDataValue(document, 'schemaVersion')
+    const revision = ownDataValue(document, 'revision')
+    const cursorUpdatedAt = ownDataValue(document, 'cursorUpdatedAt')
+    const cursorId = ownDataValue(document, 'cursorId')
+    if (!kind.valid || kind.value !== definition.kind ||
+        !schemaVersion.valid || schemaVersion.value !== CURSOR_SCHEMA_VERSION ||
+        !revision.valid || !exactSafeInteger(revision.value) || revision.value >= Number.MAX_SAFE_INTEGER ||
+        !cursorUpdatedAt.valid || !cursorId.valid ||
+        !((cursorUpdatedAt.value === null && cursorId.value === null) ||
+          (exactDate(cursorUpdatedAt.value) && exactString(cursorId.value, { maximum: 128 })))) {
+      throw cursorError()
+    }
+    return { exists: true, revision: revision.value,
+      cursorUpdatedAt: cursorUpdatedAt.value, cursorId: cursorId.value }
+  }
+
+  function sameCursor(left, right) {
+    return left.exists === right.exists && left.revision === right.revision && left.cursorId === right.cursorId &&
+      (left.cursorUpdatedAt === null && right.cursorUpdatedAt === null ||
+        exactDate(left.cursorUpdatedAt) && exactDate(right.cursorUpdatedAt) &&
+          left.cursorUpdatedAt.getTime() === right.cursorUpdatedAt.getTime())
+  }
+
+  function validateRawPage(rows, sortField) {
+    let previous = null
+    for (const row of rows) {
+      if (!isPlainObject(row) || !exactString(row._id, { maximum: 128 }) || !exactDate(row[sortField])) {
+        throw cursorError()
+      }
+      if (previous && (row[sortField].getTime() < previous[sortField].getTime() ||
+          row[sortField].getTime() === previous[sortField].getTime() && row._id <= previous._id)) {
+        throw cursorError()
+      }
+      previous = row
+    }
+  }
+
+  async function queryCursorPage({ collection, criteria, cursor, sortField, batchSize }) {
+    const order = query => query.orderBy(sortField, 'asc').orderBy('_id', 'asc')
+    const base = () => Object.keys(criteria).length > 0
+      ? db.collection(collection).where(criteria)
+      : db.collection(collection)
+    if (!cursor.cursorUpdatedAt) {
+      const result = await order(base()).limit(batchSize).get()
+      const rows = result.data || []
+      validateRawPage(rows, sortField)
+      return rows
+    }
+    const sameTime = await order(db.collection(collection).where({
+      ...criteria,
+      [sortField]: db.command.eq(cursor.cursorUpdatedAt),
+      _id: db.command.gt(cursor.cursorId)
+    })).limit(batchSize).get()
+    const rows = sameTime.data || []
+    if (rows.length < batchSize) {
+      const later = await order(db.collection(collection).where({
+        ...criteria,
+        [sortField]: db.command.gt(cursor.cursorUpdatedAt)
+      })).limit(batchSize - rows.length).get()
+      rows.push(...(later.data || []))
+    }
+    if (rows.length === 0) {
+      const wrapped = await order(base()).limit(batchSize).get()
+      rows.push(...(wrapped.data || []))
+    }
+    validateRawPage(rows, sortField)
+    return rows
+  }
+
+  async function claimRawPage({ definition, collection, criteria = {}, sortField, batchSize, now }) {
+    if (!exactDate(now) || !exactSafeInteger(batchSize, 1) || batchSize > MAX_CYCLE_BATCH) throw cursorError()
+    const observed = readCursor(await readDocument(db, COLLECTIONS.settings, definition.id), definition)
+    const rows = await queryCursorPage({ collection, criteria, cursor: observed, sortField, batchSize })
+    if (rows.length === 0 && !observed.cursorUpdatedAt) return []
+    const next = rows.length > 0
+      ? { cursorUpdatedAt: rows.at(-1)[sortField], cursorId: rows.at(-1)._id }
+      : { cursorUpdatedAt: null, cursorId: null }
+    const claimed = await db.runTransaction(async transaction => {
+      const current = readCursor(await readDocument(transaction, COLLECTIONS.settings, definition.id), definition)
+      if (!sameCursor(current, observed)) return false
+      const data = { kind: definition.kind, schemaVersion: CURSOR_SCHEMA_VERSION,
+        revision: current.revision + 1, cursorUpdatedAt: next.cursorUpdatedAt,
+        cursorId: next.cursorId, updatedAt: now }
+      if (current.exists) await transaction.collection(COLLECTIONS.settings).doc(definition.id).update({ data })
+      else await transaction.collection(COLLECTIONS.settings).doc(definition.id).set({ data })
+      return true
+    })
+    return claimed ? rows : []
+  }
+
+  const SEARCH_STATE_FIELDS = Object.freeze([
+    'searchSourceVersion', 'searchGeneratedVersion', 'searchGenerationId',
+    'searchIndexStatus', 'searchGeneratedAt'
+  ])
+
+  function hasAnySearchState(document) {
+    return SEARCH_STATE_FIELDS.some(field => ownDataValue(document, field).valid)
+  }
+
+  async function initializeLegacyLine(line, now) {
+    if (!isPlainObject(line) || !exactString(line._id, { maximum: 128 }) ||
+        ['creating', 'deleted'].includes(line.status) || hasAnySearchState(line) ||
+        !exactSafeInteger(line.nodeCount, 1) || line.nodeCount > MAX_NODES) return null
+    const response = await db.collection(COLLECTIONS.nodes)
+      .where({ businessLineId: line._id }).orderBy('sequence', 'asc').orderBy('_id', 'asc')
+      .limit(MAX_NODES + 1).get()
+    const nodes = (response.data || []).slice().sort(compareNodes)
+    if (nodes.length !== line.nodeCount || nodes.some(node => !isPlainObject(node) ||
+        node.businessLineId !== line._id || !exactString(node._id, { maximum: 128 }) || hasAnySearchState(node))) {
+      return null
+    }
+    return db.runTransaction(async transaction => {
+      const currentLine = await readDocument(transaction, COLLECTIONS.lines, line._id)
+      if (!currentLine || currentLine.status !== line.status || currentLine.nodeCount !== line.nodeCount ||
+          hasAnySearchState(currentLine)) return null
+      const currentNodes = []
+      for (const node of nodes) {
+        const current = await readDocument(transaction, COLLECTIONS.nodes, node._id)
+        if (!current || current.businessLineId !== line._id || hasAnySearchState(current)) return null
+        currentNodes.push(current)
+      }
+      const pending = { searchSourceVersion: 1, searchGeneratedVersion: 0,
+        searchIndexStatus: 'pending', searchUpdatedAt: now }
+      await transaction.collection(COLLECTIONS.lines).doc(line._id).update({ data: pending })
+      for (const node of currentNodes) {
+        await transaction.collection(COLLECTIONS.nodes).doc(node._id).update({ data: pending })
+      }
+      return { businessLineId: line._id, sourceVersion: 1 }
+    })
+  }
+
+  async function claimBackfillPage({ now, batchSize }) {
+    const rows = await claimRawPage({ definition: CURSORS.backfill, collection: COLLECTIONS.lines,
+      sortField: 'updatedAt', batchSize, now })
+    const requests = []
+    for (const line of rows) {
+      const initialized = await initializeLegacyLine(line, now)
+      if (initialized) requests.push(initialized)
+    }
+    return requests
+  }
+
+  async function claimRecoveryPage({ now, batchSize }) {
+    const rows = await claimRawPage({ definition: CURSORS.recovery, collection: COLLECTIONS.lines,
+      criteria: { searchIndexStatus: 'pending' }, sortField: 'updatedAt', batchSize, now })
+    return rows.flatMap(line => safeSourceVersion(line, line.searchSourceVersion) &&
+      !['creating', 'deleted'].includes(line.status)
+      ? [{ businessLineId: line._id, sourceVersion: line.searchSourceVersion }]
+      : [])
+  }
+
+  async function cleanupOldGeneration({ now, batchSize }) {
+    const rows = await claimRawPage({ definition: CURSORS.cleanup, collection: COLLECTIONS.documents,
+      sortField: 'createdAt', batchSize, now })
+    let cleaned = 0
+    for (const document of rows) {
+      if (!exactString(document.businessLineId, { maximum: 128 }) ||
+          !exactString(document.generationId, { maximum: 128 })) continue
+      const line = await readDocument(db, COLLECTIONS.lines, document.businessLineId)
+      if (line && line.searchGenerationId === document.generationId) continue
+      const result = await db.collection(COLLECTIONS.documents).doc(document._id).remove()
+      if (result && result.stats && result.stats.removed === 1) cleaned += 1
+    }
+    return { cleaned }
   }
 
   async function loadVotes(round, lineId, nodeId) {
@@ -379,9 +562,19 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
   function accountCanRead(actor, line) {
     if (!actor || actor.status !== 'active') return false
     if (actor.role === 'super_admin') return true
-    const managers = exactStringArray(ownDataValue(line, 'managerUserIds').value, { nonEmpty: true })
-    const members = exactStringArray(ownDataValue(line, 'memberUserIds').value, { nonEmpty: true })
-    return Boolean(managers && members && (managers.includes(actor._id) || members.includes(actor._id)))
+    const accountManagers = ownDataValue(line, 'managerUserIds')
+    const accountMembers = ownDataValue(line, 'memberUserIds')
+    if (accountManagers.valid || accountMembers.valid) {
+      const managers = exactStringArray(accountManagers.value, { nonEmpty: true })
+      const members = exactStringArray(accountMembers.value, { nonEmpty: true })
+      return Boolean(managers && members && (managers.includes(actor._id) || members.includes(actor._id)))
+    }
+    const legacyManagers = exactStringArray(ownDataValue(line, 'managerIds').value)
+    const legacyMembers = exactStringArray(ownDataValue(line, 'memberIds').value)
+    const openid = ownDataValue(actor, 'openid')
+    return Boolean(legacyManagers && legacyMembers && openid.valid &&
+      exactString(openid.value, { maximum: 128 }) &&
+      (legacyManagers.includes(openid.value) || legacyMembers.includes(openid.value)))
   }
 
   async function authorizeCandidate(actorId, lineId) {
@@ -408,12 +601,19 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     return hashHex(secret, payload)
   }
 
-  function encodeCursor({ actorId, digestInput, lastLineId }) {
-    const payload = Buffer.from(JSON.stringify({ v: 1, actorId, digestInput, lastLineId }), 'utf8').toString('base64url')
+  function encodeCursor({ actorId, filterDigest, accessMode, lastLineId, now }) {
+    const payload = Buffer.from(JSON.stringify({
+      v: 1,
+      actorId,
+      filterDigest,
+      accessMode,
+      lastLineId,
+      expiresAt: now.getTime() + QUERY_CURSOR_TTL_MS
+    }), 'utf8').toString('base64url')
     return `${payload}.${cursorSignature(payload)}`
   }
 
-  function decodeCursor(cursor, actorId, digestInput) {
+  function decodeCursor(cursor, actorId, filterDigest, accessMode, now) {
     if (!cursor) return ''
     if (!exactString(cursor, { maximum: 2048 })) throw createError('INVALID_SEARCH_QUERY')
     const [payload, signature, extra] = cursor.split('.')
@@ -423,7 +623,9 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     try {
       const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
       if (!isPlainObject(decoded) || decoded.v !== 1 || decoded.actorId !== actorId ||
-          decoded.digestInput !== digestInput || !exactString(decoded.lastLineId, { maximum: 128 })) {
+          decoded.filterDigest !== filterDigest || decoded.accessMode !== accessMode ||
+          !exactString(decoded.lastLineId, { maximum: 128 }) ||
+          !exactSafeInteger(decoded.expiresAt, 1) || decoded.expiresAt <= now.getTime()) {
         throw createError('INVALID_SEARCH_QUERY')
       }
       return decoded.lastLineId
@@ -438,20 +640,48 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     return hashToken(secret, points.slice(0, Math.min(3, points.length)).join(''))
   }
 
-  async function candidateLineIds(normalizedKeywords) {
-    let intersection = null
-    for (const keyword of normalizedKeywords) {
-      const response = await db.collection(COLLECTIONS.documents)
-        .where({ documentType: 'tokens', tokenHashes: anchorHash(keyword) })
-        .orderBy('businessLineId', 'asc').limit(MAX_QUERY_CANDIDATES).get()
-      const current = new Set((response.data || []).map(document => document.businessLineId)
-        .filter(lineId => exactString(lineId, { maximum: 128 })))
-      intersection = intersection === null
-        ? current
-        : new Set([...intersection].filter(lineId => current.has(lineId)))
-      if (intersection.size === 0) break
+  async function candidateLinePage(keyword, lastLineId) {
+    const criteria = { documentType: 'tokens', tokenHashes: anchorHash(keyword) }
+    if (lastLineId) criteria.businessLineId = db.command.gt(lastLineId)
+    const response = await db.collection(COLLECTIONS.documents)
+      .where(criteria).orderBy('businessLineId', 'asc')
+      .limit(MAX_QUERY_CANDIDATES).get()
+    const rows = response.data || []
+    const ids = []
+    const seen = new Set()
+    for (const row of rows) {
+      if (!isPlainObject(row) || !exactString(row.businessLineId, { maximum: 128 })) throw sourceError()
+      if (!seen.has(row.businessLineId)) {
+        seen.add(row.businessLineId)
+        ids.push(row.businessLineId)
+      }
     }
-    return [...(intersection || [])].sort()
+    return { ids, rawFull: rows.length === MAX_QUERY_CANDIDATES }
+  }
+
+  async function loadGenerationEntries(businessLineId, generationId) {
+    const entries = []
+    let afterEntryId = ''
+    while (entries.length < MAX_GENERATION_ENTRIES) {
+      const criteria = { documentType: 'entry', businessLineId, generationId }
+      if (afterEntryId) criteria.entryId = db.command.gt(afterEntryId)
+      const response = await db.collection(COLLECTIONS.documents)
+        .where(criteria).orderBy('entryId', 'asc').limit(MAX_QUERY_CANDIDATES).get()
+      const page = response.data || []
+      for (const entry of page) {
+        if (!isPlainObject(entry) || !exactString(entry.entryId, { maximum: 256 }) ||
+            (afterEntryId && entry.entryId <= afterEntryId) ||
+            !exactString(entry.normalizedText, { allowEmpty: true, maximum: 4096 })) throw sourceError()
+        entries.push(entry)
+        afterEntryId = entry.entryId
+      }
+      if (page.length < MAX_QUERY_CANDIDATES) return entries
+    }
+    const overflow = await db.collection(COLLECTIONS.documents)
+      .where({ documentType: 'entry', businessLineId, generationId, entryId: db.command.gt(afterEntryId) })
+      .orderBy('entryId', 'asc').limit(1).get()
+    if ((overflow.data || []).length) throw sourceError()
+    return entries
   }
 
   async function queryAuthorized({
@@ -465,8 +695,15 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
         (startDate && endDate && startDate > endDate)) {
       throw createError('INVALID_SEARCH_QUERY')
     }
-    const lastLineId = decodeCursor(cursor, actorId, digestInput)
-    const candidates = (await candidateLineIds(normalizedKeywords)).filter(id => id > lastLineId)
+    const now = clock()
+    if (!exactDate(now)) throw sourceError()
+    const currentActor = await readDocument(db, COLLECTIONS.users, actorId)
+    if (!currentActor || currentActor.status !== 'active') return { items: [], cursor: '', hasMore: false }
+    const accessMode = currentActor.role === 'super_admin' ? 'global' : 'scoped'
+    const filterDigest = [digestInput, startDate, endDate].join('\u0000')
+    const lastLineId = decodeCursor(cursor, actorId, filterDigest, accessMode, now)
+    const candidatePage = await candidateLinePage(normalizedKeywords[0], lastLineId)
+    const candidates = candidatePage.ids
     const items = []
     let scannedLast = ''
     for (const lineId of candidates) {
@@ -475,10 +712,7 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       if (!first) continue
       if ((startDate && (!first.plannedStartDate || first.plannedStartDate < startDate)) ||
           (endDate && (!first.plannedStartDate || first.plannedStartDate > endDate))) continue
-      const response = await db.collection(COLLECTIONS.documents)
-        .where({ documentType: 'entry', businessLineId: lineId, generationId: first.generationId })
-        .orderBy('entryId', 'asc').limit(MAX_QUERY_CANDIDATES).get()
-      const sourceEntries = response.data || []
+      const sourceEntries = await loadGenerationEntries(lineId, first.generationId)
       const everyKeywordMatched = normalizedKeywords.every(keyword => sourceEntries.some(entry =>
         typeof entry.normalizedText === 'string' && entry.normalizedText.includes(keyword)))
       if (!everyKeywordMatched) continue
@@ -519,11 +753,11 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       })
       if (items.length >= pageSize) break
     }
-    const hasMore = candidates.some(id => id > scannedLast)
+    const hasMore = candidatePage.rawFull || candidates.some(id => id > scannedLast)
     return {
       items,
       cursor: scannedLast && (hasMore || items.length >= pageSize)
-        ? encodeCursor({ actorId, digestInput, lastLineId: scannedLast })
+        ? encodeCursor({ actorId, filterDigest, accessMode, lastLineId: scannedLast, now })
         : '',
       hasMore
     }
@@ -531,6 +765,9 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
 
   return {
     consumeRequest,
+    claimBackfillPage,
+    claimRecoveryPage,
+    cleanupOldGeneration,
     isGenerationCurrent,
     loadAuthoritativeSnapshot,
     publishGeneration,

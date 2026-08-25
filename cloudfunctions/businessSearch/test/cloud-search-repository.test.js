@@ -38,7 +38,7 @@ function fieldValues(prefix) {
 function authoritativeSeed() {
   return {
     users: [
-      { _id: 'member-1', status: 'active', role: 'user' },
+      { _id: 'member-1', status: 'active', role: 'user', openid: 'openid-member-1' },
       { _id: 'manager-1', status: 'active', role: 'admin' },
       { _id: 'reviewer-1', status: 'active', role: 'user' },
       { _id: 'root-1', status: 'active', role: 'super_admin' },
@@ -138,10 +138,11 @@ function authoritativeSeed() {
 }
 
 function harness(seed = authoritativeSeed(), options = {}) {
-  const fake = createFakeCloudDatabase(seed, options)
+  const { clock = () => new Date(NOW), ...fakeOptions } = options
+  const fake = createFakeCloudDatabase(seed, fakeOptions)
   return {
     fake,
-    repository: createCloudSearchRepository({ db: fake.db, clock: () => new Date(NOW), secret: SECRET })
+    repository: createCloudSearchRepository({ db: fake.db, clock, secret: SECRET })
   }
 }
 
@@ -302,6 +303,61 @@ test('普通成员按现有关系检索，活动超级管理员可全局检索�
   assert.deepEqual(outsider.items, [])
 })
 
+test('单个代际超过100条安全内容仍能命中后续字段', async () => {
+  const value = await generatedHarness()
+  for (let index = 0; index < 100; index += 1) {
+    const suffix = String(index).padStart(3, '0')
+    value.fake.replace('business_search_documents', `decoy-entry-${suffix}`, {
+      _id: `decoy-entry-${suffix}`,
+      documentType: 'entry',
+      businessLineId: 'line-1',
+      generationId: 'generation-3',
+      entryId: `000-decoy-${suffix}`,
+      normalizedText: '无关占位内容',
+      safeExcerpt: '无关占位内容',
+      sourceKind: 'field',
+      label: '占位字段',
+      segmentIndex: index,
+      nodeName: '占位节点',
+      createdAt: NOW
+    })
+  }
+  const result = await value.repository.queryAuthorized({
+    actorId: 'member-1', normalizedKeywords: ['当前'], digestInput: '当前', pageSize: 20, cursor: ''
+  })
+  assert.equal(result.items.length, 1)
+  assert.ok(result.items[0].matches.some(match => match.excerpt.includes('当前')))
+})
+
+test('纯旧OpenID关系兼容授权，混合新旧关系不回退旧字段', async () => {
+  const legacy = await generatedHarness()
+  const current = legacy.fake.documents('business_lines')[0]
+  const { managerUserIds, memberUserIds, ...withoutAccountRelationships } = current
+  legacy.fake.replace('business_lines', current._id, {
+    ...withoutAccountRelationships,
+    managerIds: ['openid-manager-1'],
+    memberIds: ['openid-member-1']
+  })
+  const allowed = await legacy.repository.queryAuthorized({
+    actorId: 'member-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: ''
+  })
+  assert.equal(allowed.items.length, 1)
+
+  const mixed = await generatedHarness()
+  const line = mixed.fake.documents('business_lines')[0]
+  mixed.fake.replace('business_lines', line._id, {
+    ...line,
+    managerUserIds: [],
+    memberUserIds: [],
+    managerIds: [],
+    memberIds: ['openid-member-1']
+  })
+  const denied = await mixed.repository.queryAuthorized({
+    actorId: 'member-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: ''
+  })
+  assert.deepEqual(denied.items, [])
+})
+
 test('查询返回前撤权、账号停用或超级管理员降权会静默隐藏候选', async () => {
   for (const scenario of [
     { actorId: 'member-1', mutate(data) { data.memberUserIds = ['reviewer-1'] } },
@@ -345,4 +401,140 @@ test('查询游标绑定账号与关键词且创建中售后不返回', async ()
     actorId: 'root-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: ''
   })
   assert.deepEqual(hidden.items, [])
+})
+
+function legacyBackfillSeed() {
+  const seed = authoritativeSeed()
+  seed.business_lines = []
+  seed.business_nodes = []
+  seed.system_settings = []
+  for (let index = 1; index <= 41; index += 1) {
+    const suffix = String(index).padStart(3, '0')
+    const lineId = `legacy-line-${suffix}`
+    const nodeId = `${lineId}-node-1`
+    const alreadyIndexed = index <= 40
+    seed.business_lines.push({
+      _id: lineId,
+      code: `BL-${suffix}`,
+      name: `历史售后${suffix}`,
+      description: '',
+      status: 'active',
+      currentNodeId: nodeId,
+      nodeCount: 1,
+      managerUserIds: ['manager-1'],
+      memberUserIds: ['member-1'],
+      updatedAt: new Date(`2026-08-24T00:${String(index).padStart(2, '0')}:00.000Z`),
+      ...(alreadyIndexed ? {
+        searchSourceVersion: 1,
+        searchGeneratedVersion: 1,
+        searchGenerationId: `generation-${suffix}`,
+        searchIndexStatus: 'generated',
+        searchGeneratedAt: NOW
+      } : {})
+    })
+    seed.business_nodes.push({
+      _id: nodeId,
+      businessLineId: lineId,
+      sequence: 0,
+      name: '历史节点',
+      nodeCode: `${suffix}-N001`,
+      status: 'ready',
+      processingRoundNumber: 1,
+      updatedAt: new Date(`2026-08-24T00:${String(index).padStart(2, '0')}:00.000Z`),
+      ...(alreadyIndexed ? {
+        searchSourceVersion: 1,
+        searchGeneratedVersion: 1,
+        searchGenerationId: `generation-${suffix}`,
+        searchIndexStatus: 'generated',
+        searchGeneratedAt: NOW
+      } : {})
+    })
+  }
+  return seed
+}
+
+test('历史回填原始页全失效仍推进游标并使第41条有限可达', async () => {
+  const value = harness(legacyBackfillSeed())
+  assert.deepEqual(await value.repository.claimBackfillPage({ now: NOW, batchSize: 40 }), [])
+  const second = await value.repository.claimBackfillPage({ now: NOW, batchSize: 40 })
+  assert.deepEqual(second, [{ businessLineId: 'legacy-line-041', sourceVersion: 1 }])
+  const line = value.fake.documents('business_lines').find(item => item._id === 'legacy-line-041')
+  const node = value.fake.documents('business_nodes').find(item => item.businessLineId === line._id)
+  assert.equal(line.searchIndexStatus, 'pending')
+  assert.equal(node.searchIndexStatus, 'pending')
+  assert.ok(value.fake.transactionRuns.every(run => run.operations <= 100))
+})
+
+test('历史回填损坏游标与版本溢出失败关闭', async () => {
+  for (const cursor of [
+    { _id: 'business-search-backfill-cursor', kind: 'business_search_backfill', schemaVersion: 1,
+      revision: '1', cursorUpdatedAt: null, cursorId: null },
+    { _id: 'business-search-backfill-cursor', kind: 'business_search_backfill', schemaVersion: 1,
+      revision: Number.MAX_SAFE_INTEGER, cursorUpdatedAt: null, cursorId: null }
+  ]) {
+    const seed = legacyBackfillSeed()
+    seed.system_settings = [cursor]
+    await assert.rejects(harness(seed).repository.claimBackfillPage({ now: NOW, batchSize: 40 }), {
+      code: 'SEARCH_CURSOR_INVALID'
+    })
+  }
+})
+
+test('待恢复索引使用独立游标领取且旧代清理不删除当前代', async () => {
+  const seed = authoritativeSeed()
+  seed.business_lines[0].updatedAt = new Date('2026-08-25T09:00:00.000Z')
+  seed.system_settings = []
+  seed.business_search_documents = [
+    { _id: 'old-doc', documentType: 'entry', businessLineId: 'line-1', generationId: 'generation-old',
+      createdAt: new Date('2026-08-24T00:00:00.000Z') },
+    { _id: 'current-doc', documentType: 'entry', businessLineId: 'line-1', generationId: 'generation-current',
+      createdAt: new Date('2026-08-25T00:00:00.000Z') }
+  ]
+  seed.business_lines[0].searchGenerationId = 'generation-current'
+  const value = harness(seed)
+  assert.deepEqual(await value.repository.claimRecoveryPage({ now: NOW, batchSize: 40 }), [
+    { businessLineId: 'line-1', sourceVersion: 3 }
+  ])
+  assert.deepEqual(await value.repository.cleanupOldGeneration({ now: NOW, batchSize: 40 }), { cleaned: 1 })
+  assert.deepEqual(value.fake.documents('business_search_documents').map(item => item._id), ['current-doc'])
+})
+
+test('超过100个倒排文档时后续合法售后通过服务端游标到达', async () => {
+  const value = await generatedHarness()
+  const tokenHash = crypto.createHmac('sha256', SECRET).update('清闲', 'utf8')
+    .digest('base64url').slice(0, 22)
+  for (let index = 0; index < 100; index += 1) {
+    const id = String(index).padStart(3, '0')
+    await value.fake.db.collection('business_search_documents').doc(`decoy-${id}`).set({ data: {
+      documentType: 'tokens', businessLineId: `aa-decoy-${id}`, generationId: 'stale',
+      entryId: `decoy-${id}`, tokenHashes: [tokenHash], createdAt: NOW
+    } })
+  }
+  const first = await value.repository.queryAuthorized({
+    actorId: 'root-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: ''
+  })
+  assert.deepEqual(first.items, [])
+  assert.equal(first.hasMore, true)
+  assert.ok(first.cursor)
+
+  const root = value.fake.documents('users').find(item => item._id === 'root-1')
+  value.fake.replace('users', root._id, { ...root, role: 'user' })
+  await assert.rejects(value.repository.queryAuthorized({
+    actorId: 'root-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: first.cursor
+  }), { code: 'INVALID_SEARCH_QUERY' })
+  value.fake.replace('users', root._id, root)
+
+  const second = await value.repository.queryAuthorized({
+    actorId: 'root-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: first.cursor
+  })
+  assert.deepEqual(second.items.map(item => item._id), ['line-1'])
+
+  const expiredRepository = createCloudSearchRepository({
+    db: value.fake.db,
+    clock: () => new Date(NOW.getTime() + 5 * 60 * 1000 + 1),
+    secret: SECRET
+  })
+  await assert.rejects(expiredRepository.queryAuthorized({
+    actorId: 'root-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: first.cursor
+  }), { code: 'INVALID_SEARCH_QUERY' })
 })

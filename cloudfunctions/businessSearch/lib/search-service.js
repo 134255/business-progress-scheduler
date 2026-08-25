@@ -76,9 +76,12 @@ function createSearchService({
       throw createError('INVALID_SEARCH_CYCLE')
     }
     const backfill = await repository.claimBackfillPage({ now, batchSize })
-    const recovery = await repository.claimRecoveryPage({ now, batchSize })
-    const candidates = [...(Array.isArray(backfill) ? backfill : []), ...(Array.isArray(recovery) ? recovery : [])]
-      .slice(0, batchSize)
+    const safeBackfill = Array.isArray(backfill) ? backfill.slice(0, batchSize) : []
+    const remaining = batchSize - safeBackfill.length
+    const recovery = remaining > 0
+      ? await repository.claimRecoveryPage({ now, batchSize: remaining })
+      : []
+    const candidates = [...safeBackfill, ...(Array.isArray(recovery) ? recovery.slice(0, remaining) : [])]
     let generated = 0
     let failed = 0
     for (const request of candidates) {

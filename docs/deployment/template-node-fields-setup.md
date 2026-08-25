@@ -7,8 +7,8 @@
 ## 一、部署原则
 
 - 必须按“备份、集合、唯一性检查、索引、业务云函数、定时云函数、触发器、验收”的顺序执行。
-- `businessApi`、`calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 均选择“上传并部署：云端安装依赖”。不要上传本地 `node_modules`。
-- 首次验收时 `calendarSync`、`workflowReminder`、`evidenceRetention` 与 `operationsAnalytics` 均保持 `triggers: []`；仅在隔离验收通过后分阶段启用日历每日同步和小时级提醒，运营统计的 15 分钟周期任务必须另行批准。
+- `businessApi`、`businessSearch`、`calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 均选择“上传并部署：云端安装依赖”。不要上传本地 `node_modules`。
+- 首次验收时 `businessSearch`、`calendarSync`、`workflowReminder`、`evidenceRetention` 与 `operationsAnalytics` 均保持 `triggers: []`；仅在隔离验收通过后分阶段启用日历每日同步和小时级提醒，检索回填与运营统计的周期任务必须另行批准。
 - 不删除旧集合，不批量伪造旧业务编号，不用回滚为由删除凭证元数据或审计记录。
 - 所有客户端读写继续经过云函数；模板、业务、节点、反馈、凭证和审计集合禁止小程序端直接写入。
 - 每完成一阶段都记录时间、操作员、结果和可回退点，但只记录脱敏结论。
@@ -45,6 +45,8 @@
 - `public_node_share_chunks`
 - `operations_analytics_facts`
 - `operations_analytics_daily`
+- `business_search_documents`
+- `business_search_requests`
 
 对每份导出执行以下检查：
 
@@ -53,7 +55,7 @@
 3. 对比控制台记录数与导出记录数；若导出工具采用分片，核对所有分片总数。
 4. 把备份保存到受控位置，不提交 Git，不通过普通聊天发送。
 
-`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years`、`calendar_sync_requests`、`public_node_shares`、`public_node_share_chunks`、`operations_analytics_facts` 与 `operations_analytics_daily` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
+`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years`、`calendar_sync_requests`、`public_node_shares`、`public_node_share_chunks`、`operations_analytics_facts`、`operations_analytics_daily`、`business_search_documents` 与 `business_search_requests` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
 
 ## 三、集合准备
 
@@ -80,6 +82,8 @@
 | `public_node_share_chunks` | 每块最多 40 条的公开凭证快照 |
 | `operations_analytics_facts` | 完成业务与节点的确定性统计事实、权限受控下钻样本 |
 | `operations_analytics_daily` | 按上海自然日、模板、稳定节点和匿名参与人维度维护的每日汇总 |
+| `business_search_documents` | 当前内容代际的安全检索条目和 HMAC 倒排令牌 |
+| `business_search_requests` | `businessApi` 调用检索工作器的短效一次性票据摘要 |
 
 集合权限使用“仅云函数/服务端可读写”或等效的最严格配置。不要为了调试开放全体用户读写。
 
@@ -175,6 +179,13 @@
 | `operations_analytics_facts` | `timingStatus` 升序、`_id` 升序 | 否 | 待日历补算事实的单向转换游标 |
 | `operations_analytics_daily` | `templateId` 升序、`dimensionRole` 升序、`day` 升序、`_id` 升序 | 否 | 模板全局及角色每日汇总图表 |
 | `operations_analytics_daily` | `templateId` 升序、`dimensionRole` 升序、`dimensionFilterToken` 升序、`day` 升序、`_id` 升序 | 否 | 实际处理人或审核人匿名筛选后的每日汇总图表 |
+| `business_search_documents` | `documentType` 升序、`tokenHashes` 升序、`businessLineId` 升序 | 否 | 检索令牌候选的有界授权分页 |
+| `business_search_documents` | `documentType` 升序、`businessLineId` 升序、`generationId` 升序、`entryId` 升序 | 否 | 当前代际安全条目读取 |
+| `business_lines` | `searchIndexStatus` 升序、`updatedAt` 升序、`_id` 升序 | 否 | 检索失败恢复的持久游标扫描 |
+| `business_lines` | `updatedAt` 升序、`_id` 升序 | 否 | 历史售后检索状态回填游标 |
+| `business_search_documents` | `createdAt` 升序、`_id` 升序 | 否 | 旧内容代际有界清理游标 |
+
+控制台字段方向的等价精确记法为：`documentType ASC, tokenHashes ASC, businessLineId ASC`、`documentType ASC, businessLineId ASC, generationId ASC, entryId ASC`、`searchIndexStatus ASC, updatedAt ASC, _id ASC`、`updatedAt ASC, _id ASC` 和 `createdAt ASC, _id ASC`。
 
 `work_calendar_entries` 索引未在真实 CloudBase 验证前，不得将日历同步标记为可部署通过；索引错误应保留旧活动代际并返回安全失败。
 
@@ -209,7 +220,19 @@
 5. 查看一次函数日志，确认没有依赖安装错误、权限错误或集合/索引错误。
 6. 暂不删除旧云函数版本，保留部署前记录的可回退版本。
 
-### 6.1 上传小程序 `1.0.1`
+### 6.1 售后内容检索集合、密钥与 `businessSearch`
+
+1. 部署前导出 `business_lines`、`business_nodes`、`node_feedback`、`node_review_rounds`、`node_review_votes`、`evidences` 与 `system_settings`。新建检索集合没有历史数据时，记录“未创建、无历史数据”后继续。
+2. 创建 `business_search_documents` 与 `business_search_requests`，权限均设为“仅云函数读写”。不得开放客户端直接读写。
+3. 创建上表五条检索索引并等待索引生效。`tokenHashes` 为数组多键索引；单个令牌块继续遵守保守 768 字节预算。
+4. 使用密码管理器生成至少 32 字节高熵随机值，以同一个 `BUSINESS_SEARCH_HMAC_SECRET` 分别配置到 `businessApi` 和 `businessSearch`。不得写入 Git、日志、截图、项目记忆或验收记录，也不得与公开分享密钥复用。
+5. 右键 `cloudfunctions/businessSearch`，选择“上传并部署：云端安装依赖”。函数名为 `businessSearch`，入口为 `index.main`，Node.js 16，内存先用 256 MB，超时 60 秒。
+6. 首次部署、回滚和隔离验收结束后均保存并刷新确认 `{"triggers": []}`。不得通过控制台普通“测试”伪造 Timer 来源。
+7. 不要手工创建、修改或删除 `system_settings/business-search-backfill-cursor`、`business-search-recovery-cursor` 和 `business-search-cleanup-cursor`。工作器每轮总共最多领取 40 条，使用 `updatedAt/createdAt + _id` 复合 keyset，损坏结构和版本溢出会失败关闭。
+8. 仅在无敏感隔离数据、集合权限、索引和双函数密钥全部核对后，批准一次性 Timer 做历史回填。核对返回值只含 `examined/generated/failed/cleaned` 计数，普通用户只能命中原本有权查看的售后，活动超级管理员可检索全部售后；执行后立即恢复 `{"triggers": []}`。
+9. 正式周期 Timer 不在首次部署范围内。隔离回填、失败恢复、撤权隐藏、超过 100 个候选的服务端游标和幂等复跑均通过后，再单独批准调度频率。
+
+### 6.2 上传小程序 `1.0.1`
 
 1. 部署本次 `businessApi` 后重新编译小程序，确认登录、业务概览、模板管理、待我处理、待我审核和运营看板均可进入。
 2. 在开发者工具上传版本 `1.0.1`；版本备注只写“发起人唯一审核人、七日节点只读分享”，不得包含账号、业务正文、云文件编号或环境变量。
@@ -263,7 +286,7 @@
 
 ## 十一、配置触发器
 
-首次隔离验收前，依次打开 `calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 的“触发管理/触发器”，核对并保存为 `{"triggers": []}`。若发现遗留非空配置，仅恢复空数组并记录脱敏变更。`evidenceRetention` 在破坏性候选、再次备份和云对象归属全部核对完成并取得单独批准前，不得创建、预创建或保存任何非空触发器配置。
+首次隔离验收前，依次打开 `businessSearch`、`calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 的“触发管理/触发器”，核对并保存为 `{"triggers": []}`。若发现遗留非空配置，仅恢复空数组并记录脱敏变更。`businessSearch` 只允许在检索集合、索引、双函数密钥和无敏感隔离数据全部核对后使用一次性回填 Timer；`evidenceRetention` 在破坏性候选、再次备份和云对象归属全部核对完成并取得单独批准前，不得创建、预创建或保存任何非空触发器配置。
 
 隔离验收全部通过并取得单独批准后，才可按顺序单独处理 `calendarSync` 的每日同步触发器和 `workflowReminder` 的小时级提醒触发器：每次只启用一个函数，使用已批准的目标时刻，在控制台核对时区、下一次触发时间和脱敏日志后，再决定下一项。`evidenceRetention` 只允许为破坏性隔离验收临时保存一次性 Timer，每次执行并取得日志后立即恢复 `triggers: []`；正式周期调度属于后续独立变更，不包含在本手册的部署范围。
 
@@ -348,9 +371,9 @@
 发生权限错误、索引错误、异常删除、持续超时或客户端关键流程失败时按以下顺序回滚：
 
 1. **先停用新版模板**，阻止继续创建新版审核节点。
-2. **再停用 `calendarSync` 与 `workflowReminder` 的新触发器**；`evidenceRetention` 保持 `triggers: []`。
+2. **再停用 `businessSearch`、`calendarSync` 与 `workflowReminder` 的新触发器**；`evidenceRetention` 保持 `triggers: []`。
 3. 若仍有运行中的函数，等待其结束并检查脱敏日志；不要通过删除集合中断。
-4. 回退客户端、`businessApi`、`calendarSync` 与 `workflowReminder` 到部署前记录的版本，并确认既有环境变量仍存在。
+4. 回退客户端、`businessApi`、`businessSearch`、`calendarSync` 与 `workflowReminder` 到部署前记录的版本，并确认既有环境变量仍存在；检索密钥只保留在受控环境变量中，不导出到回滚资料。
 5. 重新编译小程序并验证登录、业务列表和旧业务只读访问。
 6. 保留审核轮次、投票、通知、审计、凭证元数据和索引；不要为了回滚代码而删除审核数据。
 7. 只有确认数据被错误写入时，才依据部署前备份设计单独、可审计的数据修复方案。禁止直接全量覆盖生产集合。
@@ -366,6 +389,7 @@
 唯一索引前置检查：通过 / 失败
 索引：通过 / 失败
 businessApi 部署：通过 / 失败 / 未验证
+businessSearch 部署与一次性历史回填：通过 / 失败 / 未验证
 calendarSync 部署与当前/下一年手工同步：通过 / 失败 / 未验证
 workflowReminder 部署：通过 / 失败 / 未验证
 evidenceRetention 部署：通过 / 失败 / 未验证
