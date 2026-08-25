@@ -107,6 +107,36 @@ function safeScalar(value) {
 }
 
 function safeFieldValues(value, definitions) {
+  if (Array.isArray(value)) {
+    if (value.length !== definitions.length || value.length > 100) throw createError('FORBIDDEN')
+    const definitionsByKey = new Map(definitions.map(item => [item.fieldKey, item]))
+    const result = {}
+    for (let index = 0; index < value.length; index += 1) {
+      const itemField = Object.getOwnPropertyDescriptor(value, String(index))
+      if (!itemField || !Object.hasOwn(itemField, 'value')) throw createError('FORBIDDEN')
+      const item = itemField.value
+      if (!item || typeof item !== 'object' || Array.isArray(item) ||
+          Reflect.ownKeys(item).some(key => typeof key !== 'string' ||
+            !['fieldKey', 'name', 'type', 'value'].includes(key))) {
+        throw createError('FORBIDDEN')
+      }
+      const keyField = ownDataValue(item, 'fieldKey')
+      const nameField = ownDataValue(item, 'name')
+      const typeField = ownDataValue(item, 'type')
+      const valueField = ownDataValue(item, 'value')
+      if (!keyField.valid || !nameField.valid || !typeField.valid || !valueField.valid ||
+          typeof keyField.value !== 'string' || typeof nameField.value !== 'string' ||
+          typeof typeField.value !== 'string' || Object.hasOwn(result, keyField.value)) {
+        throw createError('FORBIDDEN')
+      }
+      const definition = definitionsByKey.get(keyField.value)
+      if (!definition || definition.name !== nameField.value || definition.type !== typeField.value) {
+        throw createError('FORBIDDEN')
+      }
+      result[keyField.value] = safeScalar(valueField.value)
+    }
+    return result
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw createError('FORBIDDEN')
   const allowed = new Set(definitions.map(item => item.fieldKey))
   const result = {}

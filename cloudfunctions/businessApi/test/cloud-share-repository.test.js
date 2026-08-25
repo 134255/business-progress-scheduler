@@ -114,6 +114,42 @@ test('节点与最终通过轮次中的审核人可生成分享快照', async ()
   assert.equal(fake.documents('public_node_shares')[0].createdByUserId, 'reviewer')
 })
 
+test('真实审核轮次的字段快照数组不会被误判为无分享权限', async () => {
+  const data = seed(1)
+  data.users.push({ _id: 'reviewer', status: 'active', role: 'user' })
+  data.business_nodes[0].fieldDefinitions = []
+  data.node_review_rounds[0].fieldValues = []
+  const { fake, repository } = harness(1, data)
+
+  await repository.createSnapshot({
+    actor: { _id: 'reviewer', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 12).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: 'd'.repeat(64), inputHash: 'e'.repeat(64)
+  })
+
+  assert.equal(fake.documents('public_node_shares')[0].publishState, 'published')
+  assert.deepEqual(fake.documents('public_node_shares')[0].fieldValues, {})
+})
+
+test('真实审核轮次的非空字段快照数组按模板定义生成公开键值', async () => {
+  const data = seed(0)
+  data.users.push({ _id: 'reviewer', status: 'active', role: 'user' })
+  data.node_review_rounds[0].fieldValues = [{
+    fieldKey: 'summary', name: '摘要', type: 'short_text', value: '固定结果'
+  }]
+  const { fake, repository } = harness(0, data)
+
+  await repository.createSnapshot({
+    actor: { _id: 'reviewer', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 13).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: 'f'.repeat(64), inputHash: '1'.repeat(64)
+  })
+
+  assert.deepEqual(fake.documents('public_node_shares')[0].fieldValues, { summary: '固定结果' })
+})
+
 test('无关业务成员不能生成节点分享快照', async () => {
   const data = seed(0)
   data.users.push({ _id: 'observer', status: 'active', role: 'user' })
