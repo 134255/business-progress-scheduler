@@ -42,7 +42,7 @@ function exactIds(value, key, { nonEmpty = true } = {}) {
 function assertCreateAccess({ actor, line, node, round, businessLineId, nodeId }) {
   if (!actor || actor.status !== 'active' || line._id !== businessLineId || node._id !== nodeId ||
       node.businessLineId !== businessLineId || round.businessLineId !== businessLineId || round.nodeId !== nodeId ||
-      !['active', 'completed', 'closed', 'cancelled'].includes(line.status) ||
+      !['active', 'in_progress', 'completed', 'closed', 'cancelled'].includes(line.status) ||
       node.status !== 'completed' || node.workflowMode !== 'review' ||
       node.lastReviewRoundId !== round._id || round.status !== 'approved' || round.finalDecision !== 'approved') {
     throw createError('FORBIDDEN')

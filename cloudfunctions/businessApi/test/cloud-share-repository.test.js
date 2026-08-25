@@ -81,6 +81,23 @@ test('处理人创建不可变分享快照并以40条分块处理105个凭证', 
   assert.equal(fake.documents('audit_logs').length, 1)
 })
 
+test('进行中业务的已完成审核节点可立即生成分享快照', async () => {
+  const data = seed(0)
+  data.business_lines[0].status = 'in_progress'
+  data.business_lines[0].currentNodeId = 'node-2'
+  const { fake, repository } = harness(0, data)
+
+  await repository.createSnapshot({
+    actor: { _id: 'processor', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 9).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: '5'.repeat(64), inputHash: '6'.repeat(64)
+  })
+
+  assert.equal(fake.documents('public_node_shares').length, 1)
+  assert.equal(fake.documents('public_node_shares')[0].publishState, 'published')
+})
+
 test('分块中断后的同请求重试沿用原到期时间并完成发布', async () => {
   const { fake, repository } = harness(41)
   const token = Buffer.alloc(32, 4).toString('base64url')
