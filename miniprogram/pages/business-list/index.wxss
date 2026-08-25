@@ -5,3 +5,10 @@
 .name { font-size: 31rpx; font-weight: 650; }
 .block { display: block; margin-top: 12rpx; }
 .load-more { padding: 20rpx 0 40rpx; text-align: center; color: #9ca3af; }
+.search-help { display: block; margin-top: 12rpx; color: #6b7280; font-size: 24rpx; line-height: 1.5; }
+.search-matches { margin-top: 18rpx; padding-top: 14rpx; border-top: 1rpx solid #e5e7eb; }
+.search-match { padding: 12rpx 14rpx; margin-top: 10rpx; border-radius: 10rpx; background: #f0fdfa; }
+.search-match-label { display: block; color: #0f766e; font-size: 24rpx; font-weight: 600; }
+.search-match-excerpt { display: block; margin-top: 6rpx; color: #374151; font-size: 26rpx; line-height: 1.5; word-break: break-all; }
+.match-toggle { margin: 12rpx 0 0; padding: 0; border: 0; background: transparent; color: #0f766e; font-size: 24rpx; line-height: 1.8; text-align: left; }
+.match-toggle::after { border: 0; }

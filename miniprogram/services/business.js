@@ -26,7 +26,10 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   VALIDATION_ERROR: '提交内容不符合要求，请检查后重试',
   UNSUPPORTED_FILE_TYPE: '文件格式不受支持，请重新选择',
   FILE_TOO_LARGE: '文件大小超过限制，请重新选择',
-  EVIDENCE_NOT_ATTACHABLE: '当前凭证无法登记，请刷新后重试'
+  EVIDENCE_NOT_ATTACHABLE: '当前凭证无法登记，请刷新后重试',
+  BUSINESS_SEARCH_PENDING: '售后检索正在更新，请稍后重试',
+  BUSINESS_SEARCH_UNAVAILABLE: '售后检索暂时不可用，请稍后重试',
+  INVALID_SEARCH_QUERY: '请调整检索内容后重试'
 })
 
 function safeServiceError(error, fallback) {
@@ -112,7 +115,7 @@ function getPublicNodeShare(query) {
 }
 
 function listBusinessLines(filters) {
-  return callBusinessApi('listBusinessLines', filters)
+  return callProtected('listBusinessLines', filters, '售后列表加载失败，请稍后重试')
 }
 
 function getBusinessLine(id) {

@@ -1,8 +1,9 @@
 <view class="page">
   <view class="card">
     <view class="field">
-      <text class="field-label">名称或编号</text>
-      <input class="input" value="{{keyword}}" placeholder="输入售后线名称或编号" bindinput="onKeyword" confirm-type="search" bindconfirm="search" />
+      <text class="field-label">检索内容</text>
+      <input class="input" value="{{keyword}}" placeholder="输入售后、节点、字段或凭证名称" bindinput="onKeyword" confirm-type="search" bindconfirm="search" />
+      <text class="search-help">可检索售后、节点、字段和凭证名称；仅返回你有权查看的售后</text>
     </view>
     <view class="date-row">
       <picker mode="date" value="{{startDate}}" bindchange="onStartDate"><view class="date-box">{{startDate || '开始日期'}}</view></picker>
@@ -18,7 +19,16 @@
     <view class="row-between"><text class="name">{{item.name}}</text><status-pill status="{{item.status}}" /></view>
     <text class="muted block">{{item.code}} · {{item.plannedStartDate || '未设开始日期'}}</text>
     <text class="muted block">当前节点：{{item.currentNodeName || '待配置'}}</text>
+    <view class="search-matches" wx:if="{{item.matches.length}}">
+      <view class="search-match" wx:for="{{item.visibleMatches}}" wx:for-item="match" wx:key="id">
+        <text class="search-match-label">{{match.nodeName}} · {{match.label}}</text>
+        <text class="search-match-excerpt">{{match.excerpt}}</text>
+      </view>
+      <button class="match-toggle" wx:if="{{item.hasHiddenMatches}}" catchtap="toggleMatches" data-id="{{item._id}}">
+        {{item.matchesExpanded ? '收起命中内容' : '展开全部 ' + item.matches.length + ' 条命中'}}
+      </button>
+    </view>
   </view>
-  <view class="empty" wx:if="{{!loading && !items.length}}">没有匹配的售后线</view>
-  <view class="load-more" wx:if="{{items.length}}">{{loading ? '加载中…' : (hasMore ? '上拉加载更多' : '已加载全部 ' + total + ' 条')}}</view>
+  <view class="empty" wx:if="{{!loading && !items.length}}">没有匹配的售后</view>
+  <view class="load-more" wx:if="{{items.length}}">{{loading ? '加载中…' : loadMoreText}}</view>
 </view>
