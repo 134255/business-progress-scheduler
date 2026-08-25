@@ -20,6 +20,23 @@ function optionalVersion(record, key, fallback) {
   return descriptor.value
 }
 
+function currentSearchVersion(record, { allowMissing = false } = {}) {
+  const source = optionalVersion(record, 'searchSourceVersion', allowMissing ? 0 : -1)
+  const generated = optionalVersion(record, 'searchGeneratedVersion', allowMissing ? 0 : -1)
+  const status = Object.getOwnPropertyDescriptor(record, 'searchIndexStatus')
+  if (source < 0 || generated < 0 || generated > source || !status ||
+      !Object.prototype.hasOwnProperty.call(status, 'value') ||
+      !['pending', 'generated'].includes(status.value) ||
+      (status.value === 'generated' && generated !== source)) {
+    throw createError('SEARCH_STATE_INVALID')
+  }
+  return {
+    searchSourceVersion: source,
+    searchGeneratedVersion: generated,
+    searchIndexStatus: status.value
+  }
+}
+
 function advanceSearchVersion(record) {
   const source = optionalVersion(record, 'searchSourceVersion', 0)
   const generated = optionalVersion(record, 'searchGeneratedVersion', 0)
@@ -43,4 +60,4 @@ function stripSearchEnvelope(result) {
   return publicResult.value
 }
 
-module.exports = { advanceSearchVersion, stripSearchEnvelope }
+module.exports = { advanceSearchVersion, currentSearchVersion, stripSearchEnvelope }

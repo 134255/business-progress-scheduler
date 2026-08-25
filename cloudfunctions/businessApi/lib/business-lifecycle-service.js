@@ -1,4 +1,5 @@
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
+const { stripSearchEnvelope } = require('./search-version')
 
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const REQUEST_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
@@ -182,7 +183,20 @@ function normalizeFrozenQuery(query) {
   return { keyword: keyword.trim(), page, pageSize }
 }
 
-function createBusinessLifecycleService({ repository }) {
+async function synchronizeSearch(stored, businessSearchClient) {
+  const envelope = stored && Object.getOwnPropertyDescriptor(stored, 'searchEnvelope')
+  if (!envelope) return stored
+  try {
+    if (!Object.prototype.hasOwnProperty.call(envelope, 'value') || !businessSearchClient ||
+        typeof businessSearchClient.ensureIndexed !== 'function') throw new Error('search unavailable')
+    await businessSearchClient.ensureIndexed(envelope.value)
+    return stripSearchEnvelope(stored)
+  } catch (_) {
+    throw createError('BUSINESS_SEARCH_PENDING')
+  }
+}
+
+function createBusinessLifecycleService({ repository, businessSearchClient = null }) {
   if (!repository) throw new TypeError('repository is required')
 
   async function rejectPreviousNode({ actor, input }) {
@@ -201,7 +215,10 @@ function createBusinessLifecycleService({ repository }) {
   async function amendFrozenBusiness({ actor, input }) {
     requireActiveActor(actor)
     if (actor.role !== 'super_admin') throw createError('FORBIDDEN')
-    return repository.amendFrozenBusiness({ actor, ...normalizeAmendmentInput(input) })
+    return synchronizeSearch(
+      await repository.amendFrozenBusiness({ actor, ...normalizeAmendmentInput(input) }),
+      businessSearchClient
+    )
   }
 
   async function listFrozenBusinessesForAdmin({ actor, query = {} }) {

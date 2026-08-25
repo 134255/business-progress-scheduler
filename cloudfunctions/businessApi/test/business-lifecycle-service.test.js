@@ -212,6 +212,20 @@ test('超级管理员修订服务只接收白名单字段和去重后的修订�
   }])
 })
 
+test('冻结售后修订发布后同步检索并只返回公开结果', async () => {
+  const actor = { _id: 'root', status: 'active', role: 'super_admin' }
+  const envelope = { actorId: 'root', businessLineId: 'line-1', sourceVersion: 10 }
+  const publicResult = { businessLineId: 'line-1', amendmentId: 'amend-10', version: 10 }
+  const calls = []
+  const service = createBusinessLifecycleService({
+    repository: { async amendFrozenBusiness() { return { publicResult, searchEnvelope: envelope } } },
+    businessSearchClient: { async ensureIndexed(value) { calls.push(value) } }
+  })
+
+  assert.deepEqual(await service.amendFrozenBusiness({ actor, input: validAmendment() }), publicResult)
+  assert.deepEqual(calls, [envelope])
+})
+
 test('修订服务拒绝非超级管理员、可变结构字段和非法附件', async () => {
   const root = { _id: 'root', status: 'active', role: 'super_admin' }
   const cases = [

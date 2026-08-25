@@ -115,10 +115,19 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(line.currentNodeName, '启动')
   assert.equal(line.nodeCount, 2)
   assert.equal(line.version, 1)
+  assert.equal(line.searchSourceVersion, 1)
+  assert.equal(line.searchGeneratedVersion, 0)
+  assert.equal(line.searchIndexStatus, 'pending')
   assert.deepEqual(nodes.map(node => node.nodeCode), [
     'BL-20260807-0001-N001', 'BL-20260807-0001-N002'
   ])
   assert.deepEqual(nodes.map(node => node.status), ['ready', 'waiting'])
+  assert.deepEqual(nodes.map(node => [
+    node.searchSourceVersion, node.searchGeneratedVersion, node.searchIndexStatus
+  ]), [[1, 0, 'pending'], [1, 0, 'pending']])
+  assert.deepEqual(result.searchEnvelope, {
+    actorId: 'user-1', businessLineId: result.id, sourceVersion: 1
+  })
   assert.equal(nodes[0].workflowMode, 'review')
   assert.equal(nodes[0].processorAssignmentMode, 'fixed_accounts')
   assert.deepEqual(nodes[0].processorUserIds, ['user-2'])
@@ -1465,6 +1474,12 @@ test('account-id manager updates metadata atomically without changing immutable 
   assert.equal(line.name, '新名称')
   assert.equal(line.description, '新说明')
   assert.equal(line.version, 5)
+  assert.equal(line.searchSourceVersion, 1)
+  assert.equal(line.searchGeneratedVersion, 0)
+  assert.equal(line.searchIndexStatus, 'pending')
+  assert.deepEqual(result.searchEnvelope, {
+    actorId: 'user-1', businessLineId: 'business-1', sourceVersion: 1
+  })
   for (const field of ['code', 'managerUserIds', 'memberUserIds', 'sourceTemplateId', 'sourceTemplateVersion', 'currentNodeId', 'nodeCount']) {
     assert.deepEqual(line[field], original[field], field)
   }
@@ -1908,6 +1923,12 @@ test('超级管理员修订冻结业务时保存精确前后值且原节点反�
   assert.equal(line.description, '更正说明')
   assert.equal(line.status, 'closed')
   assert.equal(line.version, 10)
+  assert.equal(line.searchSourceVersion, 1)
+  assert.equal(line.searchGeneratedVersion, 0)
+  assert.equal(line.searchIndexStatus, 'pending')
+  assert.deepEqual(result.searchEnvelope, {
+    actorId: 'root', businessLineId: 'line-frozen', sourceVersion: 1
+  })
   assert.equal(line.code, 'BL-20260801-0001')
   assert.deepEqual(line.managerUserIds, ['manager'])
   assert.deepEqual(line.purgeDueAt, originalPurgeDueAt)

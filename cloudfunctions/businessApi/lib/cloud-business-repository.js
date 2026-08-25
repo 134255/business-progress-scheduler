@@ -5,6 +5,7 @@ const { createCloudWorkCalendarRepository } = require('./cloud-work-calendar-rep
 const { createWorkTimeService } = require('./work-time-service')
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { parseStrictTimestamp } = require('./evidence-retention')
+const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
 const {
   hasAccountRelationshipMarker,
   ownDataValue,
@@ -63,6 +64,21 @@ function clone(value) {
   if (Array.isArray(value)) return value.map(clone)
   if (!value || typeof value !== 'object') return value
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]))
+}
+
+function withSearchEnvelope(publicResult, actorId, lineOrVersion) {
+  const state = typeof lineOrVersion === 'number'
+    ? { searchSourceVersion: lineOrVersion }
+    : currentSearchVersion(lineOrVersion)
+  Object.defineProperties(publicResult, {
+    publicResult: { value: publicResult },
+    searchEnvelope: { value: {
+      actorId,
+      businessLineId: publicResult.businessLineId || publicResult.id,
+      sourceVersion: state.searchSourceVersion
+    } }
+  })
+  return publicResult
 }
 
 function isMissingDocumentError(error) {
@@ -1102,6 +1118,7 @@ function createCloudBusinessRepository({
         throw createError('VERSION_CONFLICT')
       }
       const nextVersion = line.version + 1
+      const nextSearch = advanceSearchVersion(line)
       await transaction.collection(COLLECTIONS.lines).doc(lineId).update({
         data: {
           name: metadata.name,
@@ -1109,6 +1126,7 @@ function createCloudBusinessRepository({
           plannedStartDate: metadata.plannedStartDate,
           plannedEndDate: metadata.plannedEndDate,
           version: nextVersion,
+          ...nextSearch,
           updatedAt: db.serverDate()
         }
       })
@@ -1123,7 +1141,7 @@ function createCloudBusinessRepository({
           createdAt: db.serverDate()
         }
       })
-      return { id: lineId, version: nextVersion }
+      return withSearchEnvelope({ id: lineId, version: nextVersion }, actor._id, nextSearch.searchSourceVersion)
     })
   }
 
@@ -1327,7 +1345,9 @@ function createCloudBusinessRepository({
       const existing = await readDocument(transaction, COLLECTIONS.audit, identity.amendmentId)
       if (existing) {
         assertAmendmentReservation(existing, input, identity)
-        if (existing.publishState === 'published') return { published: true, result: clone(existing.result) }
+        if (existing.publishState === 'published') {
+          return { published: true, result: withSearchEnvelope(clone(existing.result), actor._id, line) }
+        }
         if (existing.publishState !== 'reserved') throw createError('VERSION_CONFLICT')
         if (line.version !== input.expectedVersion || !FROZEN_BUSINESS_STATUSES.has(line.status)) {
           throw createError('VERSION_CONFLICT')
@@ -1385,7 +1405,9 @@ function createCloudBusinessRepository({
         if (!line || line.status === 'creating') throw createError('NOT_FOUND')
         const reservation = await readDocument(transaction, COLLECTIONS.audit, identity.amendmentId)
         assertAmendmentReservation(reservation, input, identity)
-        if (reservation.publishState === 'published') return { done: true, result: clone(reservation.result) }
+        if (reservation.publishState === 'published') {
+          return { done: true, result: withSearchEnvelope(clone(reservation.result), actor._id, line) }
+        }
         if (!FROZEN_BUSINESS_STATUSES.has(line.status) || line.version !== input.expectedVersion) {
           throw createError('VERSION_CONFLICT')
         }
@@ -1452,7 +1474,9 @@ function createCloudBusinessRepository({
       if (!line || line.status === 'creating') throw createError('NOT_FOUND')
       const reservation = await readDocument(transaction, COLLECTIONS.audit, identity.amendmentId)
       assertAmendmentReservation(reservation, input, identity)
-      if (reservation.publishState === 'published') return clone(reservation.result)
+      if (reservation.publishState === 'published') {
+        return withSearchEnvelope(clone(reservation.result), actor._id, line)
+      }
       if (!FROZEN_BUSINESS_STATUSES.has(line.status) || line.version !== input.expectedVersion) {
         throw createError('VERSION_CONFLICT')
       }
@@ -1462,7 +1486,13 @@ function createCloudBusinessRepository({
           reservation.claimedBytes > FEEDBACK_TOTAL_LIMIT) {
         throw createError('VERSION_CONFLICT')
       }
-      const changes = { ...clone(input.changes), version: identity.nextVersion, updatedAt: db.serverDate() }
+      const nextSearch = advanceSearchVersion(line)
+      const changes = {
+        ...clone(input.changes),
+        version: identity.nextVersion,
+        ...nextSearch,
+        updatedAt: db.serverDate()
+      }
       if (input.changes.status && input.changes.status !== line.status) {
         changes[`${input.changes.status}At`] = reservation.transitionAt
         if (input.changes.status === 'deleted' && !line.closedAt) changes.closedAt = reservation.transitionAt
@@ -1480,7 +1510,7 @@ function createCloudBusinessRepository({
         claimExpiresAt: db.command.remove(),
         updatedAt: db.serverDate()
       } })
-      return result
+      return withSearchEnvelope(result, actor._id, nextSearch.searchSourceVersion)
     })
   }
 
@@ -1500,6 +1530,7 @@ function createCloudBusinessRepository({
   }
 
   function preparedSnapshot(lineId, code, sourceNodes, firstProcessingDue, displayNames) {
+    const initialSearch = advanceSearchVersion({})
     return sourceNodes.slice().sort(compareNodes).map((source, index) => ({
       id: nodeId(lineId, index),
       data: {
@@ -1541,6 +1572,7 @@ function createCloudBusinessRepository({
         fieldDefinitions: clone(source.fields),
         status: index === 0 ? 'ready' : 'waiting',
         version: 1,
+        ...initialSearch,
         createdAt: db.serverDate(),
         updatedAt: db.serverDate()
       }
@@ -1590,7 +1622,9 @@ function createCloudBusinessRepository({
       if (!line) throw createError('NOT_FOUND')
       assertCurrentCreationAuthorization(actor, line, actorId)
       assertMatchingReservation(line, actorId, identity)
-      if (line.status !== 'creating') return { id: line._id, code: line.code }
+      if (line.status !== 'creating') {
+        return withSearchEnvelope({ id: line._id, code: line.code }, actorId, line)
+      }
 
       for (const expected of expectedNodes) {
         const stored = await readDocument(transaction, COLLECTIONS.nodes, expected.id)
@@ -1612,7 +1646,7 @@ function createCloudBusinessRepository({
           createdAt: db.serverDate()
         }
       })
-      return { id: lineId, code: line.code }
+      return withSearchEnvelope({ id: lineId, code: line.code }, actorId, line)
     })
   }
 
@@ -1811,6 +1845,7 @@ function createCloudBusinessRepository({
             creationRequestHash: identity.requestHash,
             creationInputHash: identity.inputHash,
             version: 1,
+            ...advanceSearchVersion({}),
             createdAt: db.serverDate(),
             updatedAt: db.serverDate()
           }

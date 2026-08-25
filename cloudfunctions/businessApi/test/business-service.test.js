@@ -72,6 +72,46 @@ test('an idempotent retry returns its reservation without requiring the template
   assert.equal(harness.workTimeCalls.length, 0)
 })
 
+test('创建与幂等重试在公开返回前同步检索且索引失败不重复写权威仓储', async () => {
+  const { createBusinessService } = require('../lib/business-service')
+  const envelope = { actorId: 'user-1', businessLineId: 'business-1', sourceVersion: 1 }
+  const stored = { id: 'business-1', code: 'BL-20260807-0001' }
+  Object.defineProperties(stored, {
+    searchEnvelope: { value: envelope },
+    publicResult: { value: stored }
+  })
+  let createCalls = 0
+  const indexCalls = []
+  const repository = {
+    async findCreationResult() { return null },
+    async getTemplateDefinition() { return businessTemplate() },
+    async createBusinessSnapshot() { createCalls += 1; return stored }
+  }
+  const service = createBusinessService({
+    repository,
+    workTimeService: { async tryAddWorkMinutes(at) {
+      return { status: 'calculated', dueAt: new Date(at.getTime() + 60_000), calendarVersion: 'v1' }
+    } },
+    clock: () => new Date('2026-08-07T02:30:00Z'),
+    businessSearchClient: { async ensureIndexed(value) { indexCalls.push(value) } }
+  })
+
+  assert.equal(await service.createFromTemplate({ actor: { _id: 'user-1', status: 'active' }, input: validInput() }), stored)
+  assert.equal(createCalls, 1)
+  assert.deepEqual(indexCalls, [envelope])
+
+  const failed = createBusinessService({
+    repository: { ...repository, async findCreationResult() { return stored } },
+    workTimeService: { async tryAddWorkMinutes() { throw new Error('not used') } },
+    businessSearchClient: { async ensureIndexed() { throw new Error('timeout') } }
+  })
+  await assert.rejects(
+    failed.createFromTemplate({ actor: { _id: 'user-1', status: 'active' }, input: validInput() }),
+    error => error.code === 'BUSINESS_SEARCH_PENDING'
+  )
+  assert.equal(createCalls, 1)
+})
+
 test('calendar gaps become a safe pending first-node timing instead of blocking business creation', async () => {
   const harness = createBusinessHarness({
     dueResult: { status: 'pending_calendar', dueAt: null, missingDate: '2026-08-07' }
@@ -251,4 +291,23 @@ test('metadata update accepts only normalized metadata and an expected version',
     )
   }
   assert.equal(calls.length, 1)
+})
+
+test('元数据修改成功后同步检索并剥离内部信封', async () => {
+  const { createBusinessService } = require('../lib/business-service')
+  const envelope = { actorId: 'user-1', businessLineId: 'business-1', sourceVersion: 2 }
+  const publicResult = { id: 'business-1', version: 5 }
+  const stored = { publicResult, searchEnvelope: envelope }
+  const calls = []
+  const service = createBusinessService({
+    repository: { async updateBusinessMetadata() { return stored } },
+    workTimeService: { async tryAddWorkMinutes() { throw new Error('not used') } },
+    businessSearchClient: { async ensureIndexed(value) { calls.push(value) } }
+  })
+  const result = await service.updateMetadata({
+    actor: { _id: 'user-1', status: 'active' },
+    input: { businessLineId: 'business-1', expectedVersion: 4, name: '新名称' }
+  })
+  assert.deepEqual(result, publicResult)
+  assert.deepEqual(calls, [envelope])
 })

@@ -1,4 +1,5 @@
 const { collectTemplateParticipantUserIds, validateTemplateForEnable } = require('./template-domain')
+const { stripSearchEnvelope } = require('./search-version')
 const {
   APPLICATION_ERROR_MARKER,
   MAX_TEMPLATE_NODES,
@@ -144,7 +145,20 @@ function firstProcessingDue(startedAt, result) {
   throw createError('BUSINESS_ERROR')
 }
 
-function createBusinessService({ repository, workTimeService, clock = () => new Date() }) {
+async function synchronizeSearch(stored, businessSearchClient) {
+  const envelope = stored && Object.getOwnPropertyDescriptor(stored, 'searchEnvelope')
+  if (!envelope) return stored
+  try {
+    if (!Object.prototype.hasOwnProperty.call(envelope, 'value') || !businessSearchClient ||
+        typeof businessSearchClient.ensureIndexed !== 'function') throw new Error('search unavailable')
+    await businessSearchClient.ensureIndexed(envelope.value)
+    return stripSearchEnvelope(stored)
+  } catch (_) {
+    throw createError('BUSINESS_SEARCH_PENDING')
+  }
+}
+
+function createBusinessService({ repository, workTimeService, businessSearchClient = null, clock = () => new Date() }) {
   if (!repository) throw new TypeError('repository is required')
   if (!workTimeService || typeof workTimeService.tryAddWorkMinutes !== 'function') {
     throw new TypeError('workTimeService.tryAddWorkMinutes is required')
@@ -155,7 +169,7 @@ function createBusinessService({ repository, workTimeService, clock = () => new 
     requireActiveActor(actor)
     const normalized = normalizeInput(input)
     const existing = await repository.findCreationResult({ actorId: actor._id, input: normalized })
-    if (existing) return existing
+    if (existing) return synchronizeSearch(existing, businessSearchClient)
     const definition = requireEnabledDefinition(
       await repository.getTemplateDefinition(normalized.templateId)
     )
@@ -172,7 +186,7 @@ function createBusinessService({ repository, workTimeService, clock = () => new 
         await workTimeService.tryAddWorkMinutes(new Date(startedAt), minutes)
       )
     }
-    return repository.createBusinessSnapshot(snapshotInput)
+    return synchronizeSearch(await repository.createBusinessSnapshot(snapshotInput), businessSearchClient)
   }
 
   async function listBusinessLines({ actor, query = {} }) {
@@ -198,7 +212,10 @@ function createBusinessService({ repository, workTimeService, clock = () => new 
   async function updateMetadata({ actor, input }) {
     requireActiveActor(actor)
     const normalized = normalizeMetadataInput(input)
-    return repository.updateBusinessMetadata({ actor, ...normalized })
+    return synchronizeSearch(
+      await repository.updateBusinessMetadata({ actor, ...normalized }),
+      businessSearchClient
+    )
   }
 
   return {

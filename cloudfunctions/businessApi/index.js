@@ -771,12 +771,33 @@ function createDefaultBusinessApi() {
     clock: () => new Date(),
     keyFactory: prefix => `${prefix}_${crypto.randomBytes(16).toString('hex')}`
   })
+  let configuredBusinessSearchClient
+  const getBusinessSearchClient = () => {
+    if (!configuredBusinessSearchClient) {
+      configuredBusinessSearchClient = createBusinessSearchClient({
+        db,
+        callFunction: data => cloud.callFunction(data),
+        secret: process.env.BUSINESS_SEARCH_HMAC_SECRET,
+        clock: () => new Date(),
+        randomBytes: crypto.randomBytes
+      })
+    }
+    return configuredBusinessSearchClient
+  }
+  const businessSearchClient = {
+    ensureIndexed: (...args) => getBusinessSearchClient().ensureIndexed(...args),
+    query: (...args) => getBusinessSearchClient().query(...args)
+  }
   const businessService = createBusinessService({
     repository: businessRepository,
     workTimeService,
+    businessSearchClient,
     clock: () => new Date()
   })
-  const businessLifecycleService = createBusinessLifecycleService({ repository: businessRepository })
+  const businessLifecycleService = createBusinessLifecycleService({
+    repository: businessRepository,
+    businessSearchClient
+  })
   const evidenceService = createEvidenceService({ repository: evidenceRepository })
   const feedbackService = createFeedbackService({ repository: feedbackRepository })
   const reviewService = createReviewService({
@@ -800,23 +821,6 @@ function createDefaultBusinessApi() {
     clock: () => new Date(),
     tokenFactory: () => crypto.randomBytes(32).toString('base64url')
   })
-  let configuredBusinessSearchClient
-  const getBusinessSearchClient = () => {
-    if (!configuredBusinessSearchClient) {
-      configuredBusinessSearchClient = createBusinessSearchClient({
-        db,
-        callFunction: data => cloud.callFunction(data),
-        secret: process.env.BUSINESS_SEARCH_HMAC_SECRET,
-        clock: () => new Date(),
-        randomBytes: crypto.randomBytes
-      })
-    }
-    return configuredBusinessSearchClient
-  }
-  const businessSearchClient = {
-    ensureIndexed: (...args) => getBusinessSearchClient().ensureIndexed(...args),
-    query: (...args) => getBusinessSearchClient().query(...args)
-  }
   return createBusinessApi({
     repository,
     authService,
