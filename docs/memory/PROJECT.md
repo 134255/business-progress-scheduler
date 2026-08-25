@@ -27,6 +27,7 @@ Approved V1 rules include:
 - 活动超级管理员可使用受保护运营看板和安全 CSV 导出。统计按上海自然日和权威状态计算；导出只含业务/节点编号、名称、固化参与人显示名、工作流、轮次、截止时间和累计/逾期分钟，并阻断电子表格公式注入。
 - 每个新版模板节点可分别选择固定候选账号或“业务发起人作为本节点唯一处理人/唯一审核人”。发起人模式不保存占位账号，业务创建事务把当前活动发起人和安全显示名固化为该节点唯一角色快照；同一节点解析后的处理人与审核人不得重叠，固定处理人恰为实际发起人时也拒绝创建，不自动改写模板。模板头以 SHA-256 `definitionDigest` 和按节点顺序排列的 `definitionNodeIds` 共同绑定已发布定义；发起人审核模板读取和业务创建必须验证两者。CloudBase 事务只支持固定文档读取，因此创建预约事务严格比较服务预读与当前模板头的权威节点编号清单，再逐个固定读取清单节点并重算摘要；模板服务的增删、改写会原子更新模板头并使在途创建失败关闭，未进入头清单的旁路额外文档只视为未发布孤立记录且不会进入业务快照，普通定义读取仍会报告集合损坏。业务创建预算按“源节点读取 + 业务节点写入 + 去重参与账号读取 + 固定操作”计算并保持不超过 100 次。创建预约、发布和已发布幂等返回均重新校验当前活动创建人及严格业务关系。业务节点的参与人显示名是创建时不可变快照，审核轮次与历史详情不得回查当前账号姓名覆盖历史；旧业务缺快照只使用固定安全占位。旧模板缺审核人来源时按固定账号兼容，旧业务不迁移；跨节点参与不受影响。每个处理轮只把工时归属实际提交审核账号，每张审核票只把响应工时归属实际投票账号；未提交者和未投票者不产生个人工时。日历缺失时保存不可变区间并由独立游标补算，旧记录缺字段只显示“历史未记录”。活动超级管理员可在运营看板查看这些逐轮安全快照；不提供人员排名，CSV 结构保持不变。详细决策见 `docs/memory/decisions/ADR-0009-initiator-processor-and-personal-worktime-snapshots.md` 与 `docs/memory/decisions/ADR-0011-initiator-reviewer-assignment.md`。
 - 运营历史统计按模板及稳定节点比较处理/审核工作分钟，并提供日、周、月趋势、模板版本、业务状态、业务、稳定节点和匿名参与人筛选。所有活动账号可查看不含业务明细的全局汇总；普通账号下钻时逐条复核当前业务关系，超级管理员可查看全部明细并保留原当前指标和安全 CSV。节点处理累计全部处理轮，节点审核累计全部终态审核轮，个人投票响应只进入轮次明细；待日历补算和历史未记录不会伪装成零值。派生事实与每日汇总由只信任平台 Timer 的 `operationsAnalytics` 幂等生成，详见 `docs/memory/decisions/ADR-0010-operations-analytics-materialized-facts.md`。
+- 售后列表支持对当前有效最新快照执行授权全文检索：覆盖售后和节点元数据、动态字段名称与值、处理说明、当前审核意见及凭证文件名，不索引旧驳回轮、被替换修订、永久云路径或内部身份/预约数据。检索使用独立 `businessSearch`、完整版本代际和 HMAC 倒排令牌；活动超级管理员可检索全部非创建中、非已删除售后，普通活动账号只限原有关系范围，每条候选返回前再次授权。历史回填、失败恢复和旧代清理共享单轮最多 40 条原始扫描预算并使用独立持久 keyset 游标；默认触发器保持空。详细决策见 `docs/memory/decisions/ADR-0012-authorized-after-sales-content-search.md`。
 
 The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-business-progress-v1-design.md`. The approved template, node, field, rejection, freeze, numbering, and evidence-retention refinement is in `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`. Account-administration execution steps are in `docs/superpowers/plans/2026-08-05-account-admin.md`.
 
@@ -41,7 +42,7 @@ The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-bus
 - `calendarSync` 使用 Node.js 内置 HTTPS 客户端，把每个完整验证的 AILCC 年份作为具有唯一编号的不可变代际写入 `work_calendar_entries`；只有全年每个自然日均写入成功后，`work_calendar_years` 才原子切换活动代际。过期工作器只能继续写自己的未选中代际，不能覆盖后继工作器。同版本跳过前会以每页最多 100 条、每年最多四页的方式核对所有日期和工作日标记；该查询依赖 `work_calendar_entries(sourceYear ASC, generationId ASC, date ASC)` 组合索引。`calendarSync`、`workflowReminder` 与 `evidenceRetention` 的计划入口只信任平台注入的服务端环境变量 `process.env.TRIGGER_SRC === 'timer'`，拒绝非空客户端 `OPENID`，并只使用服务端状态与时钟；事件载荷和 `getWXContext().TRIGGER_SRC` 均不能授权。人工日历同步只能通过已认证超级管理员接口签发并由服务端一次性消费短期票据；`evidenceRetention` 不提供人工 API，破坏性验收必须使用单独批准的一次性 Timer。持久边界见 `docs/memory/decisions/ADR-0007-trusted-timer-source.md`。
 - Enterprise WeChat sending must remain behind an adapter and disabled until approved secure configuration is supplied.
 
-Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `node_review_rounds`, `node_review_votes`, `evidences`, `work_calendar_entries`, `work_calendar_years`, `calendar_sync_requests`, `notifications`, notification-delivery records, `audit_logs`, `public_node_shares`, `public_node_share_chunks`, `operations_analytics_facts`, and `operations_analytics_daily`. 当前日历运行时只使用三个按代际拆分的日历集合；`work_calendar` 不是当前主存储，也不应作为本次部署创建或备份的必备集合。
+Primary collections include `users`, `user_credentials`, `auth_challenges`, `wechat_bindings`, `system_settings`, `templates`, `template_nodes`, `sequence_counters`, `business_lines`, `business_nodes`, `node_feedback`, `node_review_rounds`, `node_review_votes`, `evidences`, `work_calendar_entries`, `work_calendar_years`, `calendar_sync_requests`, `notifications`, notification-delivery records, `audit_logs`, `public_node_shares`, `public_node_share_chunks`, `operations_analytics_facts`, `operations_analytics_daily`, `business_search_documents`, and `business_search_requests`. 当前日历运行时只使用三个按代际拆分的日历集合；`work_calendar` 不是当前主存储，也不应作为本次部署创建或备份的必备集合。
 
 Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-account-transaction-invariants.md`.
 Unbounded-count feedback evidence attachment uses hidden, deterministic, chunked reservations under the existing `node_feedback` and `evidences` collections; the invariant and Task 11 recovery obligation are recorded in `docs/memory/decisions/ADR-0003-feedback-evidence-reservations.md`.
@@ -64,7 +65,7 @@ Task 9 已接入小程序端审核工作台：受保护的业务服务提供提�
 - CloudBase environment identifier: `cloud1-d5gxt99rh492670d9`.
 - Mini Program root: `miniprogram/`.
 - Cloud-function root: `cloudfunctions/`.
-- Cloud function names: ordinary authenticated API `businessApi`; calendar synchronization and pending-deadline worker `calendarSync`; hourly processing/review reminder worker `workflowReminder`; scheduled retention worker `evidenceRetention`; materialized operations analytics worker `operationsAnalytics`.
+- Cloud function names: ordinary authenticated API `businessApi`; authorized current-snapshot search worker `businessSearch`; calendar synchronization and pending-deadline worker `calendarSync`; hourly processing/review reminder worker `workflowReminder`; scheduled retention worker `evidenceRetention`; materialized operations analytics worker `operationsAnalytics`.
 - Default Git integration branch: `main`; remote tracking branch: `origin/main`.
 
 These identifiers are not credentials. Secret values, administrator passwords, recovery codes, account identity values, and customer records must be supplied through approved secure channels and never stored here.
@@ -75,6 +76,7 @@ Run from the repository root:
 
 ```powershell
 npm.cmd test --prefix cloudfunctions/businessApi
+npm.cmd test --prefix cloudfunctions/businessSearch
 npm.cmd test --prefix cloudfunctions/calendarSync
 npm.cmd test --prefix cloudfunctions/workflowReminder
 npm.cmd test --prefix cloudfunctions/evidenceRetention
