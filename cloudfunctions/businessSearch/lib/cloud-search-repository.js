@@ -146,22 +146,43 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       const expiresAt = ownDataValue(ticket, 'expiresAt')
       if (!ticketOperation.valid || ticketOperation.value !== operation ||
           !actorId.valid || !exactString(actorId.value, { maximum: 128 }) ||
-          !businessLineId.valid || !exactString(businessLineId.value, { maximum: 128 }) ||
-          !sourceVersion.valid || !exactSafeInteger(sourceVersion.value) ||
           !status.valid || status.value !== 'pending' ||
           !createdAt.valid || !exactDate(createdAt.value) ||
           !expiresAt.valid || !exactDate(expiresAt.value) || expiresAt.value.getTime() <= now.getTime()) {
         throw createError('FORBIDDEN')
       }
+      if (operation === 'index' && (!businessLineId.valid ||
+          !exactString(businessLineId.value, { maximum: 128 }) ||
+          !sourceVersion.valid || !exactSafeInteger(sourceVersion.value))) throw createError('FORBIDDEN')
+      const normalizedKeywords = ownDataValue(ticket, 'normalizedKeywords')
+      const digestInput = ownDataValue(ticket, 'digestInput')
+      const pageSize = ownDataValue(ticket, 'pageSize')
+      const cursor = ownDataValue(ticket, 'cursor')
+      const safeKeywords = operation === 'query'
+        ? exactStringArray(normalizedKeywords.value, { nonEmpty: true, maximum: 5 })
+        : null
+      if (operation === 'query' && (!normalizedKeywords.valid || !safeKeywords ||
+          !digestInput.valid || !exactString(digestInput.value, { maximum: 512 }) ||
+          !pageSize.valid || !exactSafeInteger(pageSize.value, 1) || pageSize.value > 20 ||
+          !cursor.valid || !exactString(cursor.value, { allowEmpty: true, maximum: 2048 }))) {
+        throw createError('FORBIDDEN')
+      }
       await transaction.collection(COLLECTIONS.requests).doc(id).update({
         data: { status: 'consumed', consumedAt: now }
       })
-      return {
+      const common = {
         actorId: actorId.value,
-        businessLineId: businessLineId.value,
-        sourceVersion: sourceVersion.value,
         operation: ticketOperation.value
       }
+      return operation === 'index'
+        ? { ...common, businessLineId: businessLineId.value, sourceVersion: sourceVersion.value }
+        : {
+            ...common,
+            normalizedKeywords: safeKeywords,
+            digestInput: digestInput.value,
+            pageSize: pageSize.value,
+            cursor: cursor.value
+          }
     })
   }
 

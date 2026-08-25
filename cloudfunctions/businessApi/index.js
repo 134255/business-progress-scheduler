@@ -39,6 +39,7 @@ const { createOperationsService } = require('./lib/operations-service')
 const { createCloudOperationsRepository } = require('./lib/cloud-operations-repository')
 const { createShareService } = require('./lib/share-service')
 const { createCloudShareRepository } = require('./lib/cloud-share-repository')
+const { createBusinessSearchClient } = require('./lib/business-search-client')
 
 const COLLECTIONS = {
   users: 'users',
@@ -388,6 +389,7 @@ function createBusinessApi({
   calendarAdminService,
   operationsService,
   shareService,
+  businessSearchClient,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
   getContext,
@@ -798,6 +800,23 @@ function createDefaultBusinessApi() {
     clock: () => new Date(),
     tokenFactory: () => crypto.randomBytes(32).toString('base64url')
   })
+  let configuredBusinessSearchClient
+  const getBusinessSearchClient = () => {
+    if (!configuredBusinessSearchClient) {
+      configuredBusinessSearchClient = createBusinessSearchClient({
+        db,
+        callFunction: data => cloud.callFunction(data),
+        secret: process.env.BUSINESS_SEARCH_HMAC_SECRET,
+        clock: () => new Date(),
+        randomBytes: crypto.randomBytes
+      })
+    }
+    return configuredBusinessSearchClient
+  }
+  const businessSearchClient = {
+    ensureIndexed: (...args) => getBusinessSearchClient().ensureIndexed(...args),
+    query: (...args) => getBusinessSearchClient().query(...args)
+  }
   return createBusinessApi({
     repository,
     authService,
@@ -811,6 +830,7 @@ function createDefaultBusinessApi() {
     calendarAdminService,
     operationsService,
     shareService,
+    businessSearchClient,
     getContext: () => cloud.getWXContext(),
     clock,
     legacyRoutes: createDefaultLegacyRoutes()
