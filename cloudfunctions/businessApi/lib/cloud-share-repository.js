@@ -166,7 +166,6 @@ function headerSnapshot({
 }) {
   const definitions = safeDefinitions(node.fieldDefinitions || [])
   return {
-    _id: shareId,
     publishState: 'reserved',
     businessLineId: line._id,
     nodeId: node._id,

@@ -36,8 +36,8 @@ function seed(evidenceCount = 2) {
   }
 }
 
-function harness(evidenceCount = 2, seeded = seed(evidenceCount)) {
-  const fake = createFakeCloudDatabase(seeded)
+function harness(evidenceCount = 2, seeded = seed(evidenceCount), databaseOptions = {}) {
+  const fake = createFakeCloudDatabase(seeded, databaseOptions)
   const tempCalls = []
   const repository = createCloudShareRepository({
     db: fake.db,
@@ -148,6 +148,21 @@ test('真实审核轮次的非空字段快照数组按模板定义生成公开�
   })
 
   assert.deepEqual(fake.documents('public_node_shares')[0].fieldValues, { summary: '固定结果' })
+})
+
+test('分享头通过文档路径指定编号且不把保留字段写入数据', async () => {
+  const data = seed(0)
+  const { fake, repository } = harness(0, data, { rejectExplicitIdOnSet: true })
+
+  await repository.createSnapshot({
+    actor: { _id: 'processor', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 14).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: '2'.repeat(64), inputHash: '3'.repeat(64)
+  })
+
+  assert.equal(fake.documents('public_node_shares').length, 1)
+  assert.equal(fake.documents('public_node_shares')[0].publishState, 'published')
 })
 
 test('无关业务成员不能生成节点分享快照', async () => {
