@@ -24,7 +24,7 @@ function seed(evidenceCount = 2) {
     }],
     node_review_rounds: [{
       _id: 'round-1', businessLineId: 'line-1', nodeId: 'node-1', status: 'approved', finalDecision: 'approved',
-      processorUserIds: ['processor'], reviewerUserIds: ['reviewer'], processorDisplayNames: ['处理人'],
+      reviewerUserIds: ['reviewer'], processorDisplayNames: ['处理人'],
       reviewerAssignmentMode: 'business_creator', reviewerDisplayNames: ['业务发起人'], processingRoundNumber: 1, reviewRoundNumber: 1,
       processingComment: '完成说明', fieldValues: { summary: '固定结果' }, evidenceIds, decidedAt: NOW
     }],

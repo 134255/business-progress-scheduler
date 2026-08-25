@@ -51,7 +51,6 @@ function assertCreateAccess({ actor, line, node, round, businessLineId, nodeId }
   const members = exactIds(line, 'memberUserIds')
   const processors = exactIds(node, 'processorUserIds')
   const reviewers = exactIds(node, 'reviewerUserIds')
-  exactIds(round, 'processorUserIds')
   const roundReviewers = exactIds(round, 'reviewerUserIds')
   const canShare = managers.includes(actor._id) || processors.includes(actor._id) ||
     reviewers.includes(actor._id) && roundReviewers.includes(actor._id)
