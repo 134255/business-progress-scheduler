@@ -8,6 +8,14 @@ function createError(code) {
   return error
 }
 
+function claimedPage(value, limit) {
+  if (!value || !Number.isSafeInteger(value.scanned) || value.scanned < 0 || value.scanned > limit ||
+      !Array.isArray(value.items) || value.items.length > value.scanned) {
+    throw createError('INVALID_SEARCH_CYCLE')
+  }
+  return { scanned: value.scanned, items: value.items.slice() }
+}
+
 function createSearchService({
   repository,
   secret,
@@ -75,13 +83,13 @@ function createSearchService({
         typeof repository.cleanupOldGeneration !== 'function') {
       throw createError('INVALID_SEARCH_CYCLE')
     }
-    const backfill = await repository.claimBackfillPage({ now, batchSize })
-    const safeBackfill = Array.isArray(backfill) ? backfill.slice(0, batchSize) : []
-    const remaining = batchSize - safeBackfill.length
+    const backfill = claimedPage(await repository.claimBackfillPage({ now, batchSize }), batchSize)
+    let remaining = batchSize - backfill.scanned
     const recovery = remaining > 0
-      ? await repository.claimRecoveryPage({ now, batchSize: remaining })
-      : []
-    const candidates = [...safeBackfill, ...(Array.isArray(recovery) ? recovery.slice(0, remaining) : [])]
+      ? claimedPage(await repository.claimRecoveryPage({ now, batchSize: remaining }), remaining)
+      : { scanned: 0, items: [] }
+    remaining -= recovery.scanned
+    const candidates = [...backfill.items, ...recovery.items]
     let generated = 0
     let failed = 0
     for (const request of candidates) {
@@ -93,11 +101,16 @@ function createSearchService({
       }
     }
     let cleaned = 0
-    try {
-      const cleanup = await repository.cleanupOldGeneration({ now, batchSize })
-      cleaned = Number.isSafeInteger(cleanup && cleanup.cleaned) && cleanup.cleaned >= 0 ? cleanup.cleaned : 0
-    } catch (_) {
-      failed += 1
+    if (remaining > 0) {
+      try {
+        const cleanup = await repository.cleanupOldGeneration({ now, batchSize: remaining })
+        if (!cleanup || !Number.isSafeInteger(cleanup.scanned) || cleanup.scanned < 0 ||
+            cleanup.scanned > remaining || !Number.isSafeInteger(cleanup.cleaned) || cleanup.cleaned < 0 ||
+            cleanup.cleaned > cleanup.scanned) throw createError('INVALID_SEARCH_CYCLE')
+        cleaned = cleanup.cleaned
+      } catch (_) {
+        failed += 1
+      }
     }
     return { examined: candidates.length, generated, failed, cleaned }
   }

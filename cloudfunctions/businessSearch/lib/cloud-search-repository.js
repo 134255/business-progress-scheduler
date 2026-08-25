@@ -359,16 +359,17 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       const initialized = await initializeLegacyLine(line, now)
       if (initialized) requests.push(initialized)
     }
-    return requests
+    return { scanned: rows.length, items: requests }
   }
 
   async function claimRecoveryPage({ now, batchSize }) {
     const rows = await claimRawPage({ definition: CURSORS.recovery, collection: COLLECTIONS.lines,
       criteria: { searchIndexStatus: 'pending' }, sortField: 'updatedAt', batchSize, now })
-    return rows.flatMap(line => safeSourceVersion(line, line.searchSourceVersion) &&
+    const items = rows.flatMap(line => safeSourceVersion(line, line.searchSourceVersion) &&
       !['creating', 'deleted'].includes(line.status)
       ? [{ businessLineId: line._id, sourceVersion: line.searchSourceVersion }]
       : [])
+    return { scanned: rows.length, items }
   }
 
   async function cleanupOldGeneration({ now, batchSize }) {
@@ -383,7 +384,7 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       const result = await db.collection(COLLECTIONS.documents).doc(document._id).remove()
       if (result && result.stats && result.stats.removed === 1) cleaned += 1
     }
-    return { cleaned }
+    return { scanned: rows.length, cleaned }
   }
 
   async function loadVotes(round, lineId, nodeId) {

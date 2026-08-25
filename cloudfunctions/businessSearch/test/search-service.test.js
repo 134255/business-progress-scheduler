@@ -26,9 +26,9 @@ function entryRepository(overrides = {}) {
       },
       async publishGeneration(input) { calls.push(['publishGeneration', input]); return { generatedVersion: 3 } },
       async queryAuthorized(input) { calls.push(['queryAuthorized', input]); return { items: [], cursor: '' } },
-      async claimBackfillPage(input) { calls.push(['claimBackfillPage', input]); return [] },
-      async claimRecoveryPage(input) { calls.push(['claimRecoveryPage', input]); return [] },
-      async cleanupOldGeneration(input) { calls.push(['cleanupOldGeneration', input]); return { cleaned: 0 } },
+      async claimBackfillPage(input) { calls.push(['claimBackfillPage', input]); return { scanned: 0, items: [] } },
+      async claimRecoveryPage(input) { calls.push(['claimRecoveryPage', input]); return { scanned: 0, items: [] } },
+      async cleanupOldGeneration(input) { calls.push(['cleanupOldGeneration', input]); return { scanned: 0, cleaned: 0 } },
       ...overrides
     }
   }
@@ -71,14 +71,21 @@ test('可信周期固定四十条并隔离单条回填与恢复失败', async ()
   const value = entryRepository({
     async claimBackfillPage(input) {
       value.calls.push(['claimBackfillPage', input])
-      return [
-        { businessLineId: 'line-ok', sourceVersion: 1 },
-        { businessLineId: 'line-fail', sourceVersion: 2 }
-      ]
+      return {
+        scanned: 2,
+        items: [
+          { businessLineId: 'line-ok', sourceVersion: 1 },
+          { businessLineId: 'line-fail', sourceVersion: 2 }
+        ]
+      }
     },
     async claimRecoveryPage(input) {
       value.calls.push(['claimRecoveryPage', input])
-      return [{ businessLineId: 'line-recovery', sourceVersion: 3 }]
+      return { scanned: 1, items: [{ businessLineId: 'line-recovery', sourceVersion: 3 }] }
+    },
+    async cleanupOldGeneration(input) {
+      value.calls.push(['cleanupOldGeneration', input])
+      return { scanned: 0, cleaned: 0 }
     },
     async loadAuthoritativeSnapshot(input) {
       value.calls.push(['loadAuthoritativeSnapshot', input])
@@ -93,21 +100,23 @@ test('可信周期固定四十条并隔离单条回填与恢复失败', async ()
   assert.deepEqual(result, { examined: 3, generated: 2, failed: 1, cleaned: 0 })
   assert.equal(value.calls.find(call => call[0] === 'claimBackfillPage')[1].batchSize, 40)
   assert.equal(value.calls.find(call => call[0] === 'claimRecoveryPage')[1].batchSize, 38)
+  assert.equal(value.calls.find(call => call[0] === 'cleanupOldGeneration')[1].batchSize, 37)
   assert.equal(JSON.stringify(result).includes('private'), false)
 })
 
-test('回填占满四十条时不再领取会被丢弃的恢复候选', async () => {
-  const rows = Array.from({ length: 40 }, (_, index) => ({
-    businessLineId: `legacy-${index}`, sourceVersion: 1
-  }))
+test('原始回填扫描占满四十条时不再领取恢复或清理候选', async () => {
   const value = entryRepository({
-    async claimBackfillPage(input) { value.calls.push(['claimBackfillPage', input]); return rows },
-    async claimRecoveryPage(input) { value.calls.push(['claimRecoveryPage', input]); return [] }
+    async claimBackfillPage(input) {
+      value.calls.push(['claimBackfillPage', input])
+      return { scanned: 40, items: [] }
+    },
+    async claimRecoveryPage(input) { value.calls.push(['claimRecoveryPage', input]); return { scanned: 0, items: [] } }
   })
   const service = createSearchService({ repository: value.repository, secret: SECRET })
   const result = await service.runCycle({ now: new Date('2026-08-25T12:00:00.000Z'), batchSize: 40 })
-  assert.equal(result.examined, 40)
+  assert.equal(result.examined, 0)
   assert.equal(value.calls.some(call => call[0] === 'claimRecoveryPage'), false)
+  assert.equal(value.calls.some(call => call[0] === 'cleanupOldGeneration'), false)
 })
 
 test('周期拒绝调用方扩大批量', async () => {

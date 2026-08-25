@@ -455,9 +455,15 @@ function legacyBackfillSeed() {
 
 test('历史回填原始页全失效仍推进游标并使第41条有限可达', async () => {
   const value = harness(legacyBackfillSeed())
-  assert.deepEqual(await value.repository.claimBackfillPage({ now: NOW, batchSize: 40 }), [])
+  assert.deepEqual(await value.repository.claimBackfillPage({ now: NOW, batchSize: 40 }), {
+    scanned: 40,
+    items: []
+  })
   const second = await value.repository.claimBackfillPage({ now: NOW, batchSize: 40 })
-  assert.deepEqual(second, [{ businessLineId: 'legacy-line-041', sourceVersion: 1 }])
+  assert.deepEqual(second, {
+    scanned: 1,
+    items: [{ businessLineId: 'legacy-line-041', sourceVersion: 1 }]
+  })
   const line = value.fake.documents('business_lines').find(item => item._id === 'legacy-line-041')
   const node = value.fake.documents('business_nodes').find(item => item.businessLineId === line._id)
   assert.equal(line.searchIndexStatus, 'pending')
@@ -492,10 +498,14 @@ test('待恢复索引使用独立游标领取且旧代清理不删除当前代',
   ]
   seed.business_lines[0].searchGenerationId = 'generation-current'
   const value = harness(seed)
-  assert.deepEqual(await value.repository.claimRecoveryPage({ now: NOW, batchSize: 40 }), [
-    { businessLineId: 'line-1', sourceVersion: 3 }
-  ])
-  assert.deepEqual(await value.repository.cleanupOldGeneration({ now: NOW, batchSize: 40 }), { cleaned: 1 })
+  assert.deepEqual(await value.repository.claimRecoveryPage({ now: NOW, batchSize: 40 }), {
+    scanned: 1,
+    items: [{ businessLineId: 'line-1', sourceVersion: 3 }]
+  })
+  assert.deepEqual(await value.repository.cleanupOldGeneration({ now: NOW, batchSize: 40 }), {
+    scanned: 2,
+    cleaned: 1
+  })
   assert.deepEqual(value.fake.documents('business_search_documents').map(item => item._id), ['current-doc'])
 })
 
