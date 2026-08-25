@@ -137,6 +137,18 @@ function formatBytes(bytes) {
   return `${bytes} B`
 }
 
+function isDesktopPlatform() {
+  try {
+    const info = typeof wx.getDeviceInfo === 'function'
+      ? wx.getDeviceInfo()
+      : typeof wx.getSystemInfoSync === 'function' ? wx.getSystemInfoSync() : {}
+    const platform = typeof info.platform === 'string' ? info.platform.toLowerCase() : ''
+    return platform === 'mac' || platform === 'windows'
+  } catch (error) {
+    return false
+  }
+}
+
 Page({
   data: {
     lineId: '',
@@ -465,6 +477,19 @@ Page({
 
   chooseMediaEvidence() {
     if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
+    if (isDesktopPlatform()) {
+      wx.chooseMessageFile({
+        count: 9,
+        type: 'file',
+        extension: ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'm4v'],
+        success: result => this.addSelectedFiles((result.tempFiles || []).map((file, index) => ({
+          name: displayName(file, `media-${index + 1}`),
+          path: file.path || file.tempFilePath,
+          size: file.size
+        })))
+      })
+      return
+    }
     wx.chooseMedia({
       count: 9,
       mediaType: ['image', 'video'],

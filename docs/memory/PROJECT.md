@@ -18,6 +18,7 @@ Approved V1 rules include:
 - In-app notifications as the fallback channel and a future Enterprise WeChat self-built application as the strong-reminder channel. Unfinished nodes are reminded every accumulated work hour during working time.
 - 需要持久化的处理与审核累计工作时长采用“已经完整经过的工作分钟”：权威工作区间的秒级结果向下取整，保留精确时间戳但不通过四舍五入提前累计分钟或判定逾期；提醒工作器继续使用精确秒级阈值。
 - Evidence supports JPG/JPEG/PNG up to 5 MB each, PDF up to 20 MB each, and MP4/MOV/M4V up to 20 MB each. A feedback may contain multiple files but no more than 20 MB in total.
+- 节点凭证在 iOS/Android 继续使用相册/相机媒体选择器；Mac/Windows 微信客户端使用本地文件选择器选择 JPG/JPEG/PNG/MP4/MOV/M4V，选中后统一进入同一格式、文件签名、单文件大小与 20 MB 合计限制。
 - For optional evidence, a strictly valid empty format allowlist means evidence is optional and every one of the seven system-supported formats is allowed. Required evidence still requires a non-empty allowlist; a non-empty allowlist always remains a strict format restriction. Malformed, inherited, accessor, duplicate, or unsupported policy values fail closed.
 - Evidence objects remain available for 60 calendar days after a business line is completed, cancelled, or closed. A scheduled idempotent cleanup then removes only the cloud file object while preserving metadata, hashes, feedback revisions, and audit history.
 - 第二批次采用短期能力令牌分享已完成节点的固定结果快照：发送者通过微信原生分享面板选择好友或群，接收者无需登录或业务成员权限，快照最长有效七个二十四小时；公开投影只含固化字段、处理说明和短期凭证地址，不暴露永久文件编号、身份值或内部预约数据。详细决策见 `docs/memory/decisions/ADR-0008-public-node-share-capabilities.md`。

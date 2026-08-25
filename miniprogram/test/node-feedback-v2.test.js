@@ -308,6 +308,53 @@ test('图片、PDF 和多个视频可分批选择，单文件与合计大小在�
   assert.match(toasts.at(-1).title, /合计.*20 MB/)
 })
 
+test('Mac 使用本地文件选择器选择图片视频，移动端继续使用相册接口', async () => {
+  const desktopFiles = []
+  let desktopPicker
+  let mobilePicker
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showToast: () => {},
+    getDeviceInfo: () => ({ platform: 'mac' }),
+    chooseMedia: () => assert.fail('Mac 不应调用手机相册接口'),
+    chooseMessageFile: options => { desktopPicker = options }
+  }
+  const desktopPage = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({
+      fieldDefinitions: [], allowedEvidenceTypes: ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'm4v']
+    })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+  })
+  await desktopPage.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+
+  desktopPage.chooseMediaEvidence()
+  assert.equal(desktopPicker.type, 'file')
+  assert.deepEqual(desktopPicker.extension, ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'm4v'])
+  desktopPicker.success({ tempFiles: [
+    { path: 'wxfile://desktop.png', name: 'desktop.png', size: 1024, type: 'file' }
+  ] })
+  desktopFiles.push(...desktopPage.data.files)
+  assert.deepEqual(desktopFiles.map(file => [file.path, file.category]), [['wxfile://desktop.png', 'image']])
+
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showToast: () => {},
+    getDeviceInfo: () => ({ platform: 'ios' }),
+    chooseMedia: options => { mobilePicker = options },
+    chooseMessageFile: () => assert.fail('移动端不应改走本地文件接口')
+  }
+  const mobilePage = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+  })
+  await mobilePage.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  mobilePage.chooseMediaEvidence()
+  assert.deepEqual(mobilePicker.mediaType, ['image', 'video'])
+})
+
 test('凭证按顺序上传并立即登记，失败重试不重复上传成功项且只提交 evidenceId', async () => {
   const events = []
   let secondAttempt = false
