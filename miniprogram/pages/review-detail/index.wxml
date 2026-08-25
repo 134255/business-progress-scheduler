@@ -4,7 +4,7 @@
   <view wx:else>
     <view class="card">
       <view class="row-between"><view class="title detail-title">{{businessName}}</view><text class="mode">{{reviewModeLabel}}</text></view>
-      <text class="muted block">业务编号：{{businessCode}}</text>
+      <text class="muted block">售后编号：{{businessCode}}</text>
       <text class="block">{{nodeName}}（{{nodeCode}}）</text>
       <text class="muted block">第 {{reviewRoundNumber}} 轮审核 · 投票 {{voteProgressText}}</text>
       <text class="muted block">处理人：{{processorNamesText || '未配置'}}</text>

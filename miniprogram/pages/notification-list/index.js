@@ -4,7 +4,7 @@ const TYPE_LABELS = Object.freeze({
   review_started: '有新的节点等待你审核',
   review_reminder: '节点审核尚未处理',
   node_review_rejected: '节点审核已驳回并进入返工',
-  business_completed: '业务线已完成',
+  business_completed: '售后线已完成',
   node_processing_started: '有新的节点等待处理',
   processing_reminder: '节点处理尚未完成',
   work_calendar_missing: '工作日历需要管理员处理',
@@ -23,7 +23,7 @@ function present(item) {
     read: Boolean(item.read),
     title: Object.prototype.hasOwnProperty.call(TYPE_LABELS, item.type)
       ? TYPE_LABELS[item.type]
-      : '业务进度有新消息',
+      : '售后进度有新消息',
     createdAtText: item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN') : ''
   }
   for (const key of ['businessLineId', 'nodeId', 'reviewRoundId']) {

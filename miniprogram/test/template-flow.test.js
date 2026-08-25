@@ -372,7 +372,7 @@ test('node editor read-only page exposes the per-node assignment source without 
   assert.equal(page.data.processorAssignmentMode, 'business_creator')
 
   const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8')
-  assert.match(wxml, /业务发起人作为本节点唯一处理人/)
+  assert.match(wxml, /售后发起人作为本节点唯一处理人/)
   assert.match(wxml, /processorAssignmentMode\s*===\s*'business_creator'/)
   assert.match(wxml, /disabled="{{readOnly\s*\|\|\s*processorAssignmentMode\s*===\s*'business_creator'}}"/)
 
@@ -383,7 +383,7 @@ test('node editor read-only page exposes the per-node assignment source without 
   })
   page.onReviewerAssignmentModeChange({ detail: { value: false } })
   assert.equal(page.data.reviewerAssignmentMode, 'business_creator')
-  assert.match(wxml, /业务发起人作为本节点唯一审核人/)
+  assert.match(wxml, /售后发起人作为本节点唯一审核人/)
   assert.match(wxml, /reviewerAssignmentMode\s*===\s*'business_creator'/)
   assert.match(wxml, /wx:if="{{reviewerAssignmentMode\s*===\s*'fixed_accounts'}}"/)
 

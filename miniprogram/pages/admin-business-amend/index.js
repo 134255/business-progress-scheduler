@@ -62,7 +62,7 @@ Page({
       return
     }
     this.actorId = actor._id
-    wx.setNavigationBarTitle({ title: '冻结业务审计式修订' })
+    wx.setNavigationBarTitle({ title: '冻结售后审计式修订' })
     if (query.id) await this.loadBusiness(String(query.id))
     else await this.search()
   },
@@ -88,7 +88,7 @@ Page({
       if (!this.actorStillCurrent()) return
       this.setData({ items: result.items || [], total: Number(result.total || 0) })
     } catch (error) {
-      if (this.actorStillCurrent()) this.setData({ errorMessage: error.message || '冻结业务检索失败' })
+      if (this.actorStillCurrent()) this.setData({ errorMessage: error.message || '冻结售后检索失败' })
     } finally {
       this.setData({ searching: false })
     }
@@ -126,7 +126,7 @@ Page({
         }))
       })
     } catch (error) {
-      if (this.actorStillCurrent()) this.setData({ errorMessage: error.message || '冻结业务加载失败' })
+      if (this.actorStillCurrent()) this.setData({ errorMessage: error.message || '冻结售后加载失败' })
     } finally {
       this.setData({ loading: false })
     }
@@ -281,7 +281,7 @@ Page({
       await this.loadBusiness(this.data.selectedId)
     } catch (error) {
       if (error.code === 'VERSION_CONFLICT') await this.loadBusiness(this.data.selectedId)
-      wx.showToast({ title: error.code === 'VERSION_CONFLICT' ? '业务版本已变化，请核对后重试' : (error.message || '修订失败'), icon: 'none' })
+      wx.showToast({ title: error.code === 'VERSION_CONFLICT' ? '售后版本已变化，请核对后重试' : (error.message || '修订失败'), icon: 'none' })
     } finally {
       this.setData({ submitting: false })
     }

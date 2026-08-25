@@ -41,7 +41,7 @@ Page({
       this.setData({ stats: data.stats, recent: data.recent || [] })
     } catch (error) {
       if (requestSequence === this.dashboardSequence && this.requireActiveUser(expectedUserId)) {
-        this.setData({ errorMessage: safeErrorMessage(error, '业务概览加载失败，请稍后重试') })
+        this.setData({ errorMessage: safeErrorMessage(error, '售后概览加载失败，请稍后重试') })
       }
     } finally {
       if (requestSequence === this.dashboardSequence && this.requireActiveUser(expectedUserId)) {

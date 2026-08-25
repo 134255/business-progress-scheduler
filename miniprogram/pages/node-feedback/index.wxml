@@ -1,6 +1,6 @@
 <view class="page">
   <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
-  <view wx:if="{{frozen}}" class="frozen-banner">业务已冻结，反馈历史和凭证保持只读。</view>
+  <view wx:if="{{frozen}}" class="frozen-banner">售后已冻结，反馈历史和凭证保持只读。</view>
 
   <view class="card">
     <text class="muted">当前节点 {{nodeCode}}</text>

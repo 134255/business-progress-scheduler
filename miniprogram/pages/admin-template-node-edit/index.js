@@ -168,7 +168,7 @@ Page({
       : 'fixed_accounts'
     if (processorAssignmentMode === this.data.processorAssignmentMode) return
     if (processorAssignmentMode === 'business_creator' && this.data.reviewerAssignmentMode === 'business_creator') {
-      this.setData({ errorMessage: '业务发起人不能同时作为本节点处理人和审核人' })
+      this.setData({ errorMessage: '售后发起人不能同时作为本节点处理人和审核人' })
       return
     }
     if (processorAssignmentMode === 'business_creator') {
@@ -194,7 +194,7 @@ Page({
       : 'fixed_accounts'
     if (reviewerAssignmentMode === this.data.reviewerAssignmentMode) return
     if (reviewerAssignmentMode === 'business_creator' && this.data.processorAssignmentMode === 'business_creator') {
-      this.setData({ errorMessage: '业务发起人不能同时作为本节点处理人和审核人' })
+      this.setData({ errorMessage: '售后发起人不能同时作为本节点处理人和审核人' })
       return
     }
     this.setData({
@@ -360,7 +360,7 @@ Page({
       return
     }
     if (node.processorAssignmentMode === 'business_creator' && node.reviewerAssignmentMode === 'business_creator') {
-      this.setData({ errorMessage: '业务发起人不能同时作为本节点处理人和审核人' })
+      this.setData({ errorMessage: '售后发起人不能同时作为本节点处理人和审核人' })
       return
     }
     if (node.processorUserIds.some(id => node.reviewerUserIds.includes(id))) {

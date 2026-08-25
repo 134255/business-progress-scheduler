@@ -4,7 +4,7 @@ const UNAVAILABLE_MESSAGES = Object.freeze({
   ASSIGNEE_INACTIVE: '模板负责人不可用，请联系管理员',
   TEMPLATE_LIMIT_EXCEEDED: '模板节点或负责人过多，请联系管理员调整'
 })
-const DEFAULT_UNAVAILABLE_MESSAGE = '模板当前不可创建业务，请联系管理员'
+const DEFAULT_UNAVAILABLE_MESSAGE = '模板当前不可创建售后，请联系管理员'
 
 function unavailableReasonMessage(reason) {
   if (typeof reason === 'string' && Object.prototype.hasOwnProperty.call(UNAVAILABLE_MESSAGES, reason)) {

@@ -5,7 +5,7 @@
     <view class="card">
       <view class="snapshot-label">公开只读快照</view>
       <view class="title">{{businessName}}</view>
-      <text class="muted block">业务编号：{{businessCode}}</text>
+      <text class="muted block">售后编号：{{businessCode}}</text>
       <view class="node-name">{{nodeName}}</view>
       <text class="muted block">节点编号：{{nodeCode}}</text>
       <text class="muted block">完成时间：{{completedAtText}}</text>

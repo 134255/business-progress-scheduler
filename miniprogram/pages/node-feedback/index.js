@@ -857,7 +857,7 @@ Page({
 
   async submit() {
     if (!this.data.canSubmit || this.data.frozen) {
-      wx.showToast({ title: this.data.frozen ? '业务已冻结，不可提交' : '当前节点不可提交', icon: 'none' })
+      wx.showToast({ title: this.data.frozen ? '售后已冻结，不可提交' : '当前节点不可提交', icon: 'none' })
       return
     }
     let fieldValues

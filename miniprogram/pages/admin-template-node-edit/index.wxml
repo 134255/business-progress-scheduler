@@ -25,9 +25,9 @@
       <text class="field-label">处理人来源</text>
       <label class="assignment-mode-row">
         <switch checked="{{processorAssignmentMode === 'business_creator'}}" disabled="{{readOnly}}" bindchange="onProcessorAssignmentModeChange" />
-        业务发起人作为本节点唯一处理人
+        售后发起人作为本节点唯一处理人
       </label>
-      <text class="muted" wx:if="{{processorAssignmentMode === 'business_creator'}}">创建业务时将当前业务发起人固化为唯一处理人；其他节点不受影响。</text>
+      <text class="muted" wx:if="{{processorAssignmentMode === 'business_creator'}}">创建售后时将当前售后发起人固化为唯一处理人；其他节点不受影响。</text>
     </view>
     <view class="field">
       <text class="field-label">处理人</text>
@@ -41,9 +41,9 @@
       <text class="field-label">审核人来源</text>
       <label class="assignment-mode-row">
         <switch checked="{{reviewerAssignmentMode === 'business_creator'}}" disabled="{{readOnly}}" bindchange="onReviewerAssignmentModeChange" />
-        业务发起人作为本节点唯一审核人
+        售后发起人作为本节点唯一审核人
       </label>
-      <text class="muted" wx:if="{{reviewerAssignmentMode === 'business_creator'}}">创建业务时将当前业务发起人固化为唯一审核人；本节点不再选择固定审核账号。</text>
+      <text class="muted" wx:if="{{reviewerAssignmentMode === 'business_creator'}}">创建售后时将当前售后发起人固化为唯一审核人；本节点不再选择固定审核账号。</text>
     </view>
     <view class="field" wx:if="{{reviewerAssignmentMode === 'fixed_accounts'}}">
       <text class="field-label">审核人</text>
@@ -59,7 +59,7 @@
     </view>
     <view class="field" wx:else>
       <text class="field-label">审核人</text>
-      <text>业务创建时自动使用该业务发起人</text>
+      <text>售后创建时自动使用该售后发起人</text>
     </view>
     <view class="field">
       <text class="field-label">凭证要求</text>

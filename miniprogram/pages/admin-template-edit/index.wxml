@@ -22,7 +22,7 @@
   <view wx:if="{{nodes.length}}">
     <view class="card node-card" wx:for="{{nodes}}" wx:key="_uiKey">
       <view class="row-between">
-        <view><view class="node-name">{{index + 1}}. {{item.name}}</view><text class="muted">处理人 {{item.processorAssignmentMode === 'business_creator' ? '业务发起人' : (item.workflowMode === undefined ? item.assigneeUserIds.length + ' 人' : (item.processorUserIds ? item.processorUserIds.length : 0) + ' 人')}} · 审核人 {{item.reviewerAssignmentMode === 'business_creator' ? '业务发起人' : (item.workflowMode === undefined ? '0 人' : (item.reviewerUserIds ? item.reviewerUserIds.length : 0) + ' 人')}} · {{item.reviewMode === 'all' ? '会签' : '或签'}} · 处理 {{item.processingSlaWorkHours === undefined ? 22 : item.processingSlaWorkHours}} 小时 · 审核 {{item.reviewSlaWorkHours === undefined ? 8 : item.reviewSlaWorkHours}} 小时</text></view>
+        <view><view class="node-name">{{index + 1}}. {{item.name}}</view><text class="muted">处理人 {{item.processorAssignmentMode === 'business_creator' ? '售后发起人' : (item.workflowMode === undefined ? item.assigneeUserIds.length + ' 人' : (item.processorUserIds ? item.processorUserIds.length : 0) + ' 人')}} · 审核人 {{item.reviewerAssignmentMode === 'business_creator' ? '售后发起人' : (item.workflowMode === undefined ? '0 人' : (item.reviewerUserIds ? item.reviewerUserIds.length : 0) + ' 人')}} · {{item.reviewMode === 'all' ? '会签' : '或签'}} · 处理 {{item.processingSlaWorkHours === undefined ? 22 : item.processingSlaWorkHours}} 小时 · 审核 {{item.reviewSlaWorkHours === undefined ? 8 : item.reviewSlaWorkHours}} 小时</text></view>
         <text class="muted">字段 {{item.fields.length}} 个</text>
       </view>
       <view class="node-meta">{{item.requiresEvidence ? '需要凭证' : '无需凭证'}}</view>

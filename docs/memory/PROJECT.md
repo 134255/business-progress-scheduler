@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact review: 2026-08-19 (Asia/Shanghai)
+Last stable-fact review: 2026-08-25 (Asia/Shanghai)
 
 ## Product
 
@@ -8,6 +8,7 @@ This is an internal business-progress management WeChat Mini Program. Super admi
 
 Approved V1 rules include:
 
+- 用户界面统一使用“售后”作为产品术语，包括页面标题、按钮、状态提示、通知、公开分享和运营看板；内部英文标识、集合名、字段名、接口名、路由及既有数据结构继续保持 `business*` 不变，避免无收益的数据迁移和兼容风险。
 - Account/password login with first-login password change, one-to-one WeChat identity binding, lockout, administrator reset, and at least one active super administrator.
 - Template snapshots, sequential nodes, multiple responsible accounts with first-completion-wins (`OR` signing), logical deletion, audit history, and optimistic/concurrent flow protection.
 - Templates contain stable node and dynamic-field identifiers. Enabled templates are read-only and must be disabled before editing. New business lines receive server-generated globally unique codes, and instance nodes receive immutable codes derived from the business code.

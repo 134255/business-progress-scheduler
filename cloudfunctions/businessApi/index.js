@@ -499,9 +499,9 @@ function now() {
 }
 
 async function getLine(id) {
-  assert(id, '缺少业务线 ID')
+  assert(id, '缺少售后线 ID')
   const result = await db.collection(COLLECTIONS.lines).doc(id).get()
-  assert(result.data && result.data.status !== 'deleted', '业务线不存在', 'NOT_FOUND')
+  assert(result.data && result.data.status !== 'deleted', '售后线不存在', 'NOT_FOUND')
   return result.data
 }
 
@@ -557,7 +557,7 @@ function dateText(value) {
 
 async function getNodeHistory(openid, payload) {
   const line = await getLine(payload.businessLineId)
-  assert(isMember(line, openid), '你不是该业务线的关联成员', 'FORBIDDEN')
+  assert(isMember(line, openid), '你不是该售后线的关联成员', 'FORBIDDEN')
   const nodeResult = await db.collection(COLLECTIONS.nodes).doc(payload.nodeId).get()
   const node = nodeResult.data
   assert(node && node.businessLineId === line._id, '节点不存在', 'NOT_FOUND')
@@ -576,20 +576,20 @@ async function getNodeHistory(openid, payload) {
 
 async function updateBusinessLine(openid, payload) {
   const line = await getLine(payload.id)
-  assert(isManager(line, openid), '只有业务线管理员可以编辑', 'FORBIDDEN')
-  assert(Number(payload.version) === Number(line.version), '业务线已被其他人更新，请刷新后重试', 'VERSION_CONFLICT')
+  assert(isManager(line, openid), '只有售后线管理员可以编辑', 'FORBIDDEN')
+  assert(Number(payload.version) === Number(line.version), '售后线已被其他人更新，请刷新后重试', 'VERSION_CONFLICT')
 
   const normalized = normalizeLineInput(payload)
-  assert(normalized.name, '业务线名称不能为空')
-  assert(normalized.code, '业务线编号不能为空')
+  assert(normalized.name, '售后线名称不能为空')
+  assert(normalized.code, '售后线编号不能为空')
   const duplicate = await db.collection(COLLECTIONS.lines).where({ code: normalized.code, status: _.neq('deleted') }).limit(5).get()
-  assert(!duplicate.data.some(item => item._id !== line._id), '业务线编号已存在', 'DUPLICATE_CODE')
+  assert(!duplicate.data.some(item => item._id !== line._id), '售后线编号已存在', 'DUPLICATE_CODE')
 
   const nodes = Array.isArray(payload.nodes) ? payload.nodes : []
   const replaceNodes = Boolean(payload.replaceNodes)
   if (replaceNodes) {
-    assert(Number(line.progress || 0) === 0, '业务已开始流转，不能再修改节点结构', 'NODE_STRUCTURE_LOCKED')
-    assert(nodes.length > 0 && nodes.every(node => String(node.name || '').trim()), '至少需要一个有效业务节点')
+    assert(Number(line.progress || 0) === 0, '售后已开始流转，不能再修改节点结构', 'NODE_STRUCTURE_LOCKED')
+    assert(nodes.length > 0 && nodes.every(node => String(node.name || '').trim()), '至少需要一个有效售后节点')
     const existingNodes = await db.collection(COLLECTIONS.nodes).where({ businessLineId: line._id }).get()
     assert(existingNodes.data.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment), '节点已有反馈，不能修改节点结构', 'NODE_STRUCTURE_LOCKED')
   }
@@ -602,7 +602,7 @@ async function updateBusinessLine(openid, payload) {
     lineChanges.currentNodeName = String(nodes[0].name).trim()
   }
   const updated = await db.collection(COLLECTIONS.lines).where({ _id: line._id, version: line.version }).update({ data: lineChanges })
-  assert(updated.stats && updated.stats.updated === 1, '业务线已被其他人更新，请刷新后重试', 'VERSION_CONFLICT')
+  assert(updated.stats && updated.stats.updated === 1, '售后线已被其他人更新，请刷新后重试', 'VERSION_CONFLICT')
 
   if (replaceNodes) {
     await db.collection(COLLECTIONS.nodes).where({ businessLineId: line._id }).remove()
@@ -633,7 +633,7 @@ async function updateBusinessLine(openid, payload) {
 
 async function deleteBusinessLine(openid, payload) {
   const line = await getLine(payload.id)
-  assert(isManager(line, openid), '只有业务线管理员可以删除', 'FORBIDDEN')
+  assert(isManager(line, openid), '只有售后线管理员可以删除', 'FORBIDDEN')
 
   await db.collection(COLLECTIONS.lines).doc(line._id).update({
     data: { status: 'deleted', deletedAt: now(), deletedBy: openid, updatedAt: now() }
@@ -643,14 +643,14 @@ async function deleteBusinessLine(openid, payload) {
 }
 
 async function submitNodeFeedback(openid, payload) {
-  assert(payload.businessLineId && payload.nodeId, '缺少业务线或节点 ID')
+  assert(payload.businessLineId && payload.nodeId, '缺少售后线或节点 ID')
   assert(['in_progress', 'blocked', 'completed'].includes(payload.status), '不支持的节点状态')
 
   const line = await getLine(payload.businessLineId)
   const nodeResult = await db.collection(COLLECTIONS.nodes).doc(payload.nodeId).get()
   const node = nodeResult.data
   assert(node && node.businessLineId === line._id, '节点不存在', 'NOT_FOUND')
-  assert(canFeedback(line, node, openid), '只有节点负责人或业务线管理员可以反馈', 'FORBIDDEN')
+  assert(canFeedback(line, node, openid), '只有节点负责人或售后线管理员可以反馈', 'FORBIDDEN')
   assert(canTransitionNode(node.status, payload.status), '当前节点状态不允许执行该操作', 'INVALID_TRANSITION')
 
   const evidences = Array.isArray(payload.evidences) ? payload.evidences : []

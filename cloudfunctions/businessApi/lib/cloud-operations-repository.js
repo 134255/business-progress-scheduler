@@ -582,7 +582,7 @@ function createCloudOperationsRepository({ db }) {
     }
     await requireCurrentActor(actor)
     return {
-      scopeNotice: '全局汇总可见；业务明细仍按当前账号权限过滤',
+      scopeNotice: '全局汇总可见；售后明细仍按当前账号权限过滤',
       templateMetrics: {
         businessCompletion: analyticsMetric(businessCompletionRows),
         nodeProcessingPerBusiness: analyticsMetric(facts.filter(item => item.metric === 'business_node_processing_total')),
@@ -751,7 +751,7 @@ function createCloudOperationsRepository({ db }) {
     return {
       globalSampleCount: facts.length,
       visibleSampleCount: visible.length,
-      visibilityNotice: facts.length > visible.length ? '全局样本多于当前账号可下钻的业务明细' : '',
+      visibilityNotice: facts.length > visible.length ? '全局样本多于当前账号可下钻的售后明细' : '',
       statistics: {
         averageMinutes: analyticsMetric(facts).averageMinutes,
         medianMinutes,

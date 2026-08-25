@@ -51,8 +51,8 @@ Page({
     rejectionReason: '',
     rejecting: false,
     closureOptions: [
-      { value: 'cancelled', label: '取消业务' },
-      { value: 'closed', label: '关闭业务' },
+      { value: 'cancelled', label: '取消售后' },
+      { value: 'closed', label: '关闭售后' },
       { value: 'deleted', label: '逻辑删除' }
     ],
     closureIndex: 0,
@@ -146,7 +146,7 @@ Page({
       this.setData(this.presentDetail(data))
     } catch (error) {
       if (this.pageAlive && requestSequence === this.detailSequence && this.actorStillCurrent()) {
-        this.setData({ errorMessage: safeErrorMessage(error, '业务详情加载失败，请稍后重试') })
+        this.setData({ errorMessage: safeErrorMessage(error, '售后详情加载失败，请稍后重试') })
       }
     } finally {
       if (this.pageAlive && requestSequence === this.detailSequence && activeUser() &&
@@ -271,7 +271,7 @@ Page({
       if (!this.pageAlive || !this.actorStillCurrent() || activeUser()._id !== requestedActorId ||
           this.data.id !== requestedBusinessLineId || this.data.line.version !== requestedLineVersion) return
       this.setData({ closureReason: '' })
-      wx.showToast({ title: '业务状态已更新', icon: 'success' })
+      wx.showToast({ title: '售后状态已更新', icon: 'success' })
       await this.loadDetail()
     } catch (error) {
       if (!this.pageAlive || !activeUser() || activeUser()._id !== requestedActorId ||
@@ -279,7 +279,7 @@ Page({
       if (error.code === 'VERSION_CONFLICT') await this.loadDetail()
       wx.showToast({
         title: error.code === 'VERSION_CONFLICT'
-          ? '业务版本已变化，请核对后重试'
+          ? '售后版本已变化，请核对后重试'
           : safeErrorMessage(error, '操作失败，请稍后重试'),
         icon: 'none'
       })

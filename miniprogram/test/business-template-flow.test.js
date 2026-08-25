@@ -72,7 +72,7 @@ function activeUser(id = 'user-1') {
 function fakeUnavailableReasonMessage(reason) {
   if (reason === 'ASSIGNEE_INACTIVE') return '模板负责人不可用，请联系管理员'
   if (reason === 'TEMPLATE_LIMIT_EXCEEDED') return '模板节点或负责人过多，请联系管理员调整'
-  return '模板当前不可创建业务，请联系管理员'
+  return '模板当前不可创建售后，请联系管理员'
 }
 
 test('business service creates only through the template route and builds dashboard from protected account-aware reads', async () => {
@@ -150,7 +150,7 @@ test('business creation maps a creator-reviewer conflict to a stable Chinese mes
       templateId: 'template-1', name: '冲突业务', description: '',
       plannedStartDate: '', plannedEndDate: '', requestKey: 'attempt-conflict'
     }),
-    error => error.code === 'CREATOR_REVIEWER_CONFLICT' && error.message === '业务发起人不能同时担任同一节点的处理人和审核人，请调整模板或由其他账号发起'
+    error => error.code === 'CREATOR_REVIEWER_CONFLICT' && error.message === '售后发起人不能同时担任同一节点的处理人和审核人，请调整模板或由其他账号发起'
   )
 })
 
@@ -272,7 +272,7 @@ test('create mode validates real planned dates before sending a request', async 
 
 test('template unavailability uses a prototype-safe string fallback consistently in list and create preview', async () => {
   const templatesService = freshRequire('services/templates.js')
-  const fallback = '模板当前不可创建业务，请联系管理员'
+  const fallback = '模板当前不可创建售后，请联系管理员'
   const item = {
     _id: 'template-unknown', name: '未知限制模板', description: '', nodeCount: 1,
     available: false, unavailableReason: 'constructor'

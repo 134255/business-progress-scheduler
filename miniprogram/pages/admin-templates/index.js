@@ -95,7 +95,7 @@ Page({
     const verb = nextStatus === 'enabled' ? '启用' : '停用'
     return this.runConfirmed({
       title: `确认${verb}模板`,
-      content: nextStatus === 'enabled' ? '启用后模板定义将变为只读，是否继续？' : '停用后不能用此模板创建新业务，是否继续？'
+      content: nextStatus === 'enabled' ? '启用后模板定义将变为只读，是否继续？' : '停用后不能用此模板创建新售后，是否继续？'
     }, () => templates.changeTemplateStatus(item._id, item.version, nextStatus))
   },
 
@@ -104,7 +104,7 @@ Page({
     if (!item || item.status === 'enabled') return
     return this.runConfirmed({
       title: '确认删除模板',
-      content: '模板将被逻辑删除，历史业务不受影响。是否继续？',
+      content: '模板将被逻辑删除，历史售后不受影响。是否继续？',
       confirmColor: '#be123c'
     }, () => templates.deleteTemplate(item._id, item.version))
   }

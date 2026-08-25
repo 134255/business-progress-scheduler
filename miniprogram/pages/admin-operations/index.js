@@ -3,7 +3,7 @@ const { toCsv } = require('../../utils/csv')
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const CSV_COLUMNS = Object.freeze([
-  ['businessCode', '业务编号'], ['businessName', '业务名称'], ['businessStatus', '业务状态'],
+  ['businessCode', '售后编号'], ['businessName', '售后名称'], ['businessStatus', '售后状态'],
   ['nodeCode', '节点编号'], ['nodeName', '节点名称'], ['nodeStatus', '节点状态'],
   ['workflowMode', '流程模式'], ['reviewMode', '审核模式'],
   ['processorDisplayNames', '处理人'], ['reviewerDisplayNames', '审核人'],
@@ -12,7 +12,7 @@ const CSV_COLUMNS = Object.freeze([
   ['processingDueAt', '处理截止时间'], ['processingOverdueWorkMinutes', '处理逾期工作分钟'],
   ['processingElapsedWorkMinutes', '处理累计工作分钟'], ['reviewDueStatus', '审核截止状态'],
   ['reviewDueAt', '审核截止时间'], ['reviewOverdueWorkMinutes', '审核逾期工作分钟'],
-  ['reviewElapsedWorkMinutes', '审核累计工作分钟'], ['businessCreatedAt', '业务创建时间'],
+  ['reviewElapsedWorkMinutes', '审核累计工作分钟'], ['businessCreatedAt', '售后创建时间'],
   ['nodeCompletedAt', '节点完成时间']
 ])
 
@@ -105,7 +105,7 @@ Page({
     nodeIndex: 0,
     nodeOptions: [option('全部节点', '')],
     businessIndex: 0,
-    businessOptions: [option('全部可访问业务', '')],
+    businessOptions: [option('全部可访问售后', '')],
     processorIndex: 0,
     processorOptions: [option('全部处理人', '')],
     reviewerIndex: 0,
@@ -212,7 +212,7 @@ Page({
       versionIndex: 0,
       nodeOptions: [option('全部节点', ''), ...(result.stableNodes || []).map(item => option(item.nodeName, item.stableNodeId))],
       nodeIndex: 0,
-      businessOptions: [option('全部可访问业务', ''), ...(result.businesses || []).map(item => option(`${item.businessCode} · ${item.businessName}`, item.businessLineId))],
+      businessOptions: [option('全部可访问售后', ''), ...(result.businesses || []).map(item => option(`${item.businessCode} · ${item.businessName}`, item.businessLineId))],
       businessIndex: 0,
       processorOptions: [option('全部处理人', ''), ...(result.processors || []).map(item => option(item.displayName, item.token))],
       processorIndex: 0,

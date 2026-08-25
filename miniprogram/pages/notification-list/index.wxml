@@ -4,7 +4,7 @@
     <view class="notice-main" data-id="{{item.notificationId}}" bindtap="openNotification">
       <view class="row-between"><text class="notice-title">{{item.title}}</text><text wx:if="{{!item.read}}" class="dot">未读</text></view>
       <text class="muted block">{{item.createdAtText}}</text>
-      <text class="action block">查看对应业务 →</text>
+      <text class="action block">查看对应售后 →</text>
     </view>
     <button wx:if="{{!item.read}}" size="mini" class="secondary-button read-button" data-id="{{item.notificationId}}" catchtap="markReadOnly">标记已读</button>
   </view>

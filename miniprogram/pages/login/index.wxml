@@ -1,6 +1,6 @@
 <view class="page login-page">
   <view class="card login-card">
-    <view class="title">登录业务进度</view>
+    <view class="title">登录售后进度</view>
     <text class="muted intro">使用管理员分配的账号登录</text>
 
     <view class="checking" wx:if="{{checking}}">正在检查登录状态…</view>

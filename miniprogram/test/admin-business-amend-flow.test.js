@@ -269,7 +269,7 @@ test('超级管理员可全局检索冻结业务、查看修订前后值并提�
   assert.match(wxml, /修订前/)
   assert.match(wxml, /修订后/)
   assert.match(wxml, /reason/)
-  assert.match(wxml, /冻结业务/)
+  assert.match(wxml, /冻结售后/)
 })
 
 test('超级管理员修订附件使用专用用途登记并只提交凭证标识', async () => {

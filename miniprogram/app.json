@@ -25,7 +25,7 @@
     "pages/profile/index"
   ],
   "window": {
-    "navigationBarTitleText": "业务进度",
+    "navigationBarTitleText": "售后进度",
     "navigationBarBackgroundColor": "#0f766e",
     "navigationBarTextStyle": "white",
     "backgroundColor": "#f4f7f7",

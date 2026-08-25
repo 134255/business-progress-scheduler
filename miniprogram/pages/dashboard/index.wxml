@@ -4,9 +4,9 @@
       <text class="muted">你好{{profile && profile.displayName ? '，' + profile.displayName : ''}}</text>
       <text class="profile-link" bindtap="openProfile">个人资料</text>
     </view>
-    <view class="title">让每条业务都有清晰的下一步</view>
+    <view class="title">让每条售后都有清晰的下一步</view>
     <view class="hero-actions">
-      <button class="primary-button action" bindtap="createBusiness">新建业务线</button>
+      <button class="primary-button action" bindtap="createBusiness">新建售后线</button>
       <button class="secondary-button action" bindtap="openList">查看全部</button>
     </view>
   </view>
@@ -29,7 +29,7 @@
   </view>
 
   <view class="row-between section-head">
-    <view class="section-title">最近业务</view>
+    <view class="section-title">最近售后</view>
     <view class="admin-links">
       <text wx:if="{{profile && profile.role === 'super_admin'}}" class="link" bindtap="openAdminUsers">用户管理</text>
       <text wx:if="{{profile && profile.status === 'active'}}" class="link" bindtap="openAdminOperations">运营看板</text>
@@ -51,5 +51,5 @@
       <text class="muted">当前节点：{{item.currentNodeName || '待配置'}}</text>
     </view>
   </view>
-  <view class="empty" wx:else>{{loading ? '加载中…' : '暂无业务线，先创建一条吧'}}</view>
+  <view class="empty" wx:else>{{loading ? '加载中…' : '暂无售后线，先创建一条吧'}}</view>
 </view>

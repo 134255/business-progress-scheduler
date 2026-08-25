@@ -12,20 +12,20 @@
     </view>
 
     <view wx:if="{{editMode}}" class="card immutable-summary">
-      <text class="field-label">业务线编号</text>
+      <text class="field-label">售后线编号</text>
       <text class="immutable-code">{{lineCode}}</text>
       <text class="muted block">编号和节点均由模板快照生成，不可编辑</text>
-      <text wx:if="{{frozen}}" class="frozen-note">业务已完成或关闭，结构化信息已冻结</text>
+      <text wx:if="{{frozen}}" class="frozen-note">售后已完成或关闭，结构化信息已冻结</text>
     </view>
 
     <view class="card">
       <view class="field">
-        <text class="field-label">业务线名称 *</text>
-        <input class="input" disabled="{{editMode && (!canManage || frozen)}}" data-field="name" value="{{form.name}}" bindinput="updateField" placeholder="请输入业务线名称" />
+        <text class="field-label">售后线名称 *</text>
+        <input class="input" disabled="{{editMode && (!canManage || frozen)}}" data-field="name" value="{{form.name}}" bindinput="updateField" placeholder="请输入售后线名称" />
       </view>
       <view class="field">
         <text class="field-label">说明</text>
-        <textarea class="textarea" disabled="{{editMode && (!canManage || frozen)}}" data-field="description" value="{{form.description}}" bindinput="updateField" placeholder="补充业务背景、目标或特别要求" />
+        <textarea class="textarea" disabled="{{editMode && (!canManage || frozen)}}" data-field="description" value="{{form.description}}" bindinput="updateField" placeholder="补充售后背景、目标或特别要求" />
       </view>
       <view class="date-grid">
         <picker disabled="{{editMode && (!canManage || frozen)}}" mode="date" value="{{form.plannedStartDate}}" data-field="plannedStartDate" bindchange="updateDate"><view class="date-box">{{form.plannedStartDate || '计划开始日期'}}</view></picker>
@@ -34,13 +34,13 @@
     </view>
 
     <view wx:if="{{editMode}}">
-      <view class="section-title">业务节点（只读）</view>
+      <view class="section-title">售后节点（只读）</view>
       <view class="card node" wx:for="{{nodes}}" wx:key="_id">
         <view class="row-between">
           <text class="node-name">{{index + 1}}. {{item.name}}</text>
           <status-pill status="{{item.status}}" />
         </view>
-        <text class="muted block">{{item.nodeCode || '旧业务节点暂无自动编号'}}</text>
+        <text class="muted block">{{item.nodeCode || '旧售后节点暂无自动编号'}}</text>
         <text class="muted block" wx:if="{{item.assigneeNamesText}}">负责人：{{item.assigneeNamesText}}</text>
       </view>
       <view class="empty" wx:if="{{!nodes.length}}">暂无节点快照</view>
@@ -52,6 +52,6 @@
       bindtap="save"
       loading="{{saving}}"
       disabled="{{saving || loading || (editMode ? (!canManage || frozen) : !templateAvailable)}}"
-    >{{editMode ? '保存基本信息' : '创建业务线'}}</button>
+    >{{editMode ? '保存基本信息' : '创建售后线'}}</button>
   </view>
 </view>

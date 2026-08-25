@@ -1,17 +1,17 @@
 <view class="page">
   <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
   <view class="card">
-    <view class="section-title compact-title">检索冻结业务</view>
-    <input class="input" value="{{keyword}}" bindinput="onKeyword" placeholder="业务名称或业务线编号" />
+    <view class="section-title compact-title">检索冻结售后</view>
+    <input class="input" value="{{keyword}}" bindinput="onKeyword" placeholder="售后名称或售后线编号" />
     <button class="primary-button" bindtap="search" loading="{{searching}}" disabled="{{searching}}">搜索</button>
   </view>
 
-  <view wx:if="{{items.length}}" class="section-title">冻结业务（{{total}}）</view>
+  <view wx:if="{{items.length}}" class="section-title">冻结售后（{{total}}）</view>
   <view class="card result-item" wx:for="{{items}}" wx:key="_id" data-id="{{item._id}}" bindtap="selectBusiness">
     <view class="row-between"><text class="item-name">{{item.name}}</text><status-pill status="{{item.status}}" /></view>
     <text class="muted block">{{item.code}} · 版本 {{item.version}}</text>
   </view>
-  <view wx:if="{{!searching && !items.length && !selectedId}}" class="empty">暂无符合条件的冻结业务</view>
+  <view wx:if="{{!searching && !items.length && !selectedId}}" class="empty">暂无符合条件的冻结售后</view>
 
   <block wx:if="{{line}}">
     <view class="section-title">审计式修订</view>
@@ -21,8 +21,8 @@
       <text class="warning block">修订会追加审计版本，不会覆盖节点反馈历史。</text>
     </view>
     <view class="card">
-      <view class="field"><text class="field-label">业务名称</text><input class="input" value="{{form.name}}" data-field="name" bindinput="onFormInput" /></view>
-      <view class="field"><text class="field-label">业务说明</text><textarea class="textarea" value="{{form.description}}" data-field="description" bindinput="onFormInput" /></view>
+      <view class="field"><text class="field-label">售后名称</text><input class="input" value="{{form.name}}" data-field="name" bindinput="onFormInput" /></view>
+      <view class="field"><text class="field-label">售后说明</text><textarea class="textarea" value="{{form.description}}" data-field="description" bindinput="onFormInput" /></view>
       <view class="date-grid">
         <view class="field"><text class="field-label">计划开始日期</text><picker mode="date" value="{{form.plannedStartDate}}" data-field="plannedStartDate" bindchange="onFormInput"><view class="input">{{form.plannedStartDate || '请选择'}}</view></picker></view>
         <view class="field"><text class="field-label">计划完成日期</text><picker mode="date" value="{{form.plannedEndDate}}" data-field="plannedEndDate" bindchange="onFormInput"><view class="input">{{form.plannedEndDate || '请选择'}}</view></picker></view>

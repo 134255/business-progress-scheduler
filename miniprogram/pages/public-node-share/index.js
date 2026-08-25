@@ -101,7 +101,7 @@ Page({
 
   onShareAppMessage() {
     return {
-      title: `${this.data.businessName || '业务结果'}·${this.data.nodeName || '节点结果'}`,
+      title: `${this.data.businessName || '售后结果'}·${this.data.nodeName || '节点结果'}`,
       path: `/pages/public-node-share/index?token=${encodeURIComponent(this.data.token)}`
     }
   }

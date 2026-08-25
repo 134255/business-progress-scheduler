@@ -1,5 +1,5 @@
 {
-  "navigationBarTitleText": "业务线",
+  "navigationBarTitleText": "售后线",
   "usingComponents": {
     "status-pill": "/components/status-pill/index"
   }

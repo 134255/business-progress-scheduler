@@ -25,8 +25,8 @@ function nextRequestKey() {
 }
 
 function messageFor(error) {
-  if (error && error.code === 'BUSINESS_FROZEN') return '业务已完成或关闭，结构化信息已冻结'
-  if (error && error.code === 'VERSION_CONFLICT') return '业务已被其他人更新，请返回详情后重试'
+  if (error && error.code === 'BUSINESS_FROZEN') return '售后已完成或关闭，结构化信息已冻结'
+  if (error && error.code === 'VERSION_CONFLICT') return '售后已被其他人更新，请返回详情后重试'
   if (error && error.code === 'TEMPLATE_NOT_ENABLED') return '模板已停用，请重新选择'
   if (error && error.code === 'ASSIGNEE_INACTIVE') return '模板负责人不可用，请联系管理员'
   if (error && error.code === 'TEMPLATE_INVALID') return '模板定义不完整，请联系管理员'
@@ -64,7 +64,7 @@ Page({
     const templateId = decode(query.templateId)
     const editMode = Boolean(id)
     this.setData({ id, templateId, editMode, loading: true, errorMessage: '' })
-    wx.setNavigationBarTitle({ title: editMode ? '编辑业务线' : '从模板创建业务' })
+    wx.setNavigationBarTitle({ title: editMode ? '编辑售后线' : '从模板创建售后' })
     if (!editMode && !templateId) {
       this.setData({ loading: false })
       wx.redirectTo({ url: '/pages/template-list/index' })
@@ -134,8 +134,8 @@ Page({
         plannedEndDate: line.plannedEndDate || ''
       },
       errorMessage: frozen
-        ? '业务已完成或关闭，结构化信息已冻结'
-        : (data.canManage ? '' : '只有业务线管理员可以编辑')
+        ? '售后已完成或关闭，结构化信息已冻结'
+        : (data.canManage ? '' : '只有售后线管理员可以编辑')
     })
   },
 
@@ -165,7 +165,7 @@ Page({
   },
 
   validate(metadata) {
-    if (!metadata.name) return '请填写业务线名称'
+    if (!metadata.name) return '请填写售后线名称'
     if (!validDate(metadata.plannedStartDate) || !validDate(metadata.plannedEndDate)) return '计划日期格式无效'
     if (metadata.plannedStartDate && metadata.plannedEndDate &&
         metadata.plannedStartDate > metadata.plannedEndDate) return '计划结束日期不能早于开始日期'

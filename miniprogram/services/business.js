@@ -11,7 +11,7 @@ function updateUserProfile(input) {
 const SAFE_ERROR_MESSAGES = Object.freeze({
   REVIEWER_INACTIVE: '审核账号已停用，请联系管理员',
   PROCESSOR_INACTIVE: '处理账号已停用，请联系管理员',
-  CREATOR_REVIEWER_CONFLICT: '业务发起人不能同时担任同一节点的处理人和审核人，请调整模板或由其他账号发起',
+  CREATOR_REVIEWER_CONFLICT: '售后发起人不能同时担任同一节点的处理人和审核人，请调整模板或由其他账号发起',
   ROLE_OVERLAP: '处理人与审核人不能重复',
   REVIEW_NOT_PENDING: '该审核已不在待处理状态，请刷新后查看',
   REVIEW_ALREADY_FINISHED: '该审核已结束，请刷新后查看',
@@ -20,7 +20,7 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   NODE_PENDING_REVIEW: '节点正在审核中，暂不能修改',
   NODE_VERSION_CONFLICT: '节点信息已变化，请刷新后重试',
   VERSION_CONFLICT: '数据已变化，请刷新后重试',
-  BUSINESS_NOT_ACTIVE: '业务已结束，不能继续操作',
+  BUSINESS_NOT_ACTIVE: '售后已结束，不能继续操作',
   BLOCKED_REASON_REQUIRED: '请填写受阻原因',
   FORBIDDEN: '你没有权限执行此操作',
   VALIDATION_ERROR: '提交内容不符合要求，请检查后重试',
@@ -120,7 +120,7 @@ function getBusinessLine(id) {
 }
 
 function createBusinessFromTemplate(input) {
-  return callProtected('createBusinessFromTemplate', input, '业务创建失败，请稍后重试')
+  return callProtected('createBusinessFromTemplate', input, '售后创建失败，请稍后重试')
 }
 
 function updateBusinessLine(input) {

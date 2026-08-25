@@ -1,5 +1,5 @@
 {
-  "navigationBarTitleText": "冻结业务审计式修订",
+  "navigationBarTitleText": "冻结售后审计式修订",
   "usingComponents": {
     "status-pill": "/components/status-pill/index"
   }
