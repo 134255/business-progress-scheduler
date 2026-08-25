@@ -166,13 +166,20 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       const digestInput = ownDataValue(ticket, 'digestInput')
       const pageSize = ownDataValue(ticket, 'pageSize')
       const cursor = ownDataValue(ticket, 'cursor')
+      const startDate = ownDataValue(ticket, 'startDate')
+      const endDate = ownDataValue(ticket, 'endDate')
+      const safeStartDate = startDate.valid ? startDate.value : ''
+      const safeEndDate = endDate.valid ? endDate.value : ''
       const safeKeywords = operation === 'query'
         ? exactStringArray(normalizedKeywords.value, { nonEmpty: true, maximum: 5 })
         : null
       if (operation === 'query' && (!normalizedKeywords.valid || !safeKeywords ||
           !digestInput.valid || !exactString(digestInput.value, { maximum: 512 }) ||
           !pageSize.valid || !exactSafeInteger(pageSize.value, 1) || pageSize.value > 20 ||
-          !cursor.valid || !exactString(cursor.value, { allowEmpty: true, maximum: 2048 }))) {
+          !cursor.valid || !exactString(cursor.value, { allowEmpty: true, maximum: 2048 }) ||
+          !/^$|^\d{4}-\d{2}-\d{2}$/.test(safeStartDate) ||
+          !/^$|^\d{4}-\d{2}-\d{2}$/.test(safeEndDate) ||
+          (safeStartDate && safeEndDate && safeStartDate > safeEndDate))) {
         throw createError('FORBIDDEN')
       }
       await transaction.collection(COLLECTIONS.requests).doc(id).update({
@@ -189,7 +196,9 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
             normalizedKeywords: safeKeywords,
             digestInput: digestInput.value,
             pageSize: pageSize.value,
-            cursor: cursor.value
+            cursor: cursor.value,
+            startDate: safeStartDate,
+            endDate: safeEndDate
           }
     })
   }
@@ -386,7 +395,8 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
             !exactString(line.searchGenerationId, { maximum: 128 })) return null
         return {
           _id: line._id, code: line.code || '', name: line.name || '', status: line.status,
-          currentNodeId: line.currentNodeId || '', generationId: line.searchGenerationId
+          currentNodeId: line.currentNodeId || '', generationId: line.searchGenerationId,
+          plannedStartDate: typeof line.plannedStartDate === 'string' ? line.plannedStartDate : ''
         }
       })
     } catch (_) {
@@ -444,11 +454,15 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     return [...(intersection || [])].sort()
   }
 
-  async function queryAuthorized({ actorId, normalizedKeywords, digestInput, pageSize, cursor = '' }) {
+  async function queryAuthorized({
+    actorId, normalizedKeywords, digestInput, pageSize, cursor = '', startDate = '', endDate = ''
+  }) {
     if (!exactString(actorId, { maximum: 128 }) || !Array.isArray(normalizedKeywords) ||
         normalizedKeywords.length < 1 || normalizedKeywords.length > 5 ||
         normalizedKeywords.some(keyword => !exactString(keyword, { maximum: 100 })) ||
-        !exactString(digestInput, { maximum: 512 }) || !exactSafeInteger(pageSize, 1) || pageSize > 20) {
+        !exactString(digestInput, { maximum: 512 }) || !exactSafeInteger(pageSize, 1) || pageSize > 20 ||
+        !/^$|^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^$|^\d{4}-\d{2}-\d{2}$/.test(endDate) ||
+        (startDate && endDate && startDate > endDate)) {
       throw createError('INVALID_SEARCH_QUERY')
     }
     const lastLineId = decodeCursor(cursor, actorId, digestInput)
@@ -459,6 +473,8 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       scannedLast = lineId
       const first = await authorizeCandidate(actorId, lineId)
       if (!first) continue
+      if ((startDate && (!first.plannedStartDate || first.plannedStartDate < startDate)) ||
+          (endDate && (!first.plannedStartDate || first.plannedStartDate > endDate))) continue
       const response = await db.collection(COLLECTIONS.documents)
         .where({ documentType: 'entry', businessLineId: lineId, generationId: first.generationId })
         .orderBy('entryId', 'asc').limit(MAX_QUERY_CANDIDATES).get()

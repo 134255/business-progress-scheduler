@@ -704,35 +704,42 @@ function createCloudBusinessRepository({
 
   async function listBusinessLines({ actor, query = {} }) {
     const currentActor = await requireCurrentReader(actor)
-    const accountMemberLines = await readAll(() => db.collection(COLLECTIONS.lines)
-      .where({ memberUserIds: currentActor._id })
-      .orderBy('updatedAt', 'desc'))
-    const accountManagerLines = await readAll(() => db.collection(COLLECTIONS.lines)
-      .where({ managerUserIds: currentActor._id })
-      .orderBy('updatedAt', 'desc'))
-    const legacyMemberLines = currentActor.openid
-      ? await readAll(() => db.collection(COLLECTIONS.lines)
-        .where({ memberIds: currentActor.openid })
+    let byId
+    if (currentActor.role === 'super_admin') {
+      const allLines = await readAll(() => db.collection(COLLECTIONS.lines)
         .orderBy('updatedAt', 'desc'))
-      : []
-    const legacyManagerLines = currentActor.openid
-      ? await readAll(() => db.collection(COLLECTIONS.lines)
-        .where({ managerIds: currentActor.openid })
+      byId = new Map(allLines.map(line => [line._id, line]))
+    } else {
+      const accountMemberLines = await readAll(() => db.collection(COLLECTIONS.lines)
+        .where({ memberUserIds: currentActor._id })
         .orderBy('updatedAt', 'desc'))
-      : []
-    const byId = new Map([
-      ...accountMemberLines,
-      ...accountManagerLines,
-      ...legacyMemberLines,
-      ...legacyManagerLines
-    ].map(line => [line._id, line]))
+      const accountManagerLines = await readAll(() => db.collection(COLLECTIONS.lines)
+        .where({ managerUserIds: currentActor._id })
+        .orderBy('updatedAt', 'desc'))
+      const legacyMemberLines = currentActor.openid
+        ? await readAll(() => db.collection(COLLECTIONS.lines)
+          .where({ memberIds: currentActor.openid })
+          .orderBy('updatedAt', 'desc'))
+        : []
+      const legacyManagerLines = currentActor.openid
+        ? await readAll(() => db.collection(COLLECTIONS.lines)
+          .where({ managerIds: currentActor.openid })
+          .orderBy('updatedAt', 'desc'))
+        : []
+      byId = new Map([
+        ...accountMemberLines,
+        ...accountManagerLines,
+        ...legacyMemberLines,
+        ...legacyManagerLines
+      ].map(line => [line._id, line]))
+    }
     const keyword = String(query.keyword || '').trim().toLowerCase()
     const start = query.startDate ? new Date(`${query.startDate}T00:00:00+08:00`) : null
     const end = query.endDate ? new Date(`${query.endDate}T23:59:59+08:00`) : null
-    const visible = [...byId.values()]
-      .filter(line => usesAccountMembership(line)
+    const initiallyVisible = [...byId.values()]
+      .filter(line => currentActor.role === 'super_admin' || (usesAccountMembership(line)
         ? safeNewLineMember(line, currentActor._id)
-        : isLegacyLineMember(line, currentActor.openid))
+        : isLegacyLineMember(line, currentActor.openid)))
       .filter(line => line.status !== 'creating' && line.status !== 'deleted')
       .filter(line => !keyword || [line.name, line.code]
         .some(value => String(value || '').toLowerCase().includes(keyword)))
@@ -741,12 +748,26 @@ function createCloudBusinessRepository({
         return (!start || (itemDate && itemDate >= start)) && (!end || (itemDate && itemDate <= end))
       })
       .sort(compareUpdatedDesc)
+    const finalActor = await requireCurrentReader(actor)
+    const visible = []
+    for (const candidate of initiallyVisible) {
+      const line = await readDocument(db, COLLECTIONS.lines, candidate._id)
+      if (!line || line.status === 'creating' || line.status === 'deleted') continue
+      if (finalActor.role !== 'super_admin' && !(usesAccountMembership(line)
+        ? safeNewLineMember(line, finalActor._id)
+        : isLegacyLineMember(line, finalActor.openid))) continue
+      if (keyword && ![line.name, line.code]
+        .some(value => String(value || '').toLowerCase().includes(keyword))) continue
+      const itemDate = line.plannedStartDate ? new Date(line.plannedStartDate) : null
+      if ((start && (!itemDate || itemDate < start)) || (end && (!itemDate || itemDate > end))) continue
+      visible.push(line)
+    }
+    visible.sort(compareUpdatedDesc)
     const page = Number.isSafeInteger(query.page) && query.page > 0 ? query.page : 1
     const pageSize = Number.isSafeInteger(query.pageSize) && query.pageSize >= 5 && query.pageSize <= 50
       ? query.pageSize
       : 20
     const offset = (page - 1) * pageSize
-    await requireCurrentReader(actor)
     return {
       items: visible.slice(offset, offset + pageSize).map(publicLineProjection),
       page,

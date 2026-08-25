@@ -31,6 +31,18 @@ function safeCursor(value) {
   return cursor
 }
 
+function safeDate(value) {
+  if (value === undefined || value === '') return ''
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw createError('INVALID_SEARCH_QUERY')
+  }
+  const date = new Date(`${value}T00:00:00.000Z`)
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    throw createError('INVALID_SEARCH_QUERY')
+  }
+  return value
+}
+
 function createBusinessSearchClient({ db, callFunction, secret, clock = () => new Date(), randomBytes }) {
   if (!db || typeof db.collection !== 'function' || typeof callFunction !== 'function' ||
       typeof secret !== 'string' || Array.from(secret).length < 32 || typeof clock !== 'function' ||
@@ -86,12 +98,17 @@ function createBusinessSearchClient({ db, callFunction, secret, clock = () => ne
     const normalized = normalizeKeyword(input.keyword)
     const pageSize = safePageSize(input.pageSize)
     const cursor = safeCursor(input.cursor)
+    const startDate = safeDate(input.startDate)
+    const endDate = safeDate(input.endDate)
+    if (startDate && endDate && startDate > endDate) throw createError('INVALID_SEARCH_QUERY')
     const ticket = await storeRequest('query', {
       actorId,
       normalizedKeywords: normalized.normalizedKeywords,
-      digestInput: normalized.digestInput,
+      digestInput: `${normalized.digestInput}\u0000${startDate}\u0000${endDate}`,
       pageSize,
-      cursor
+      cursor,
+      startDate,
+      endDate
     })
     return invoke('query', ticket)
   }

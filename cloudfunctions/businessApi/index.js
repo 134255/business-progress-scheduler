@@ -197,7 +197,12 @@ function createTemplateRoutes(templateService) {
 
 function createBusinessRoutes(businessService) {
   return {
-    listBusinessLines: ({ actor, payload }) => businessService.listBusinessLines({ actor, query: payload }),
+    listBusinessLines: ({ actor, payload }) => businessService.listBusinessLines({
+      actor,
+      query: selectProtectedPayload(payload, new Set([
+        'keyword', 'startDate', 'endDate', 'page', 'pageSize', 'cursor'
+      ]))
+    }),
     listMyPendingProcessing: ({ actor, payload }) => businessService.listMyPendingProcessing({
       actor,
       query: selectProtectedPayload(payload, new Set(['cursor', 'pageSize']))
@@ -325,7 +330,9 @@ function createShareRoutes(shareService) {
   }
 }
 
-const CLIENT_IDENTITY_KEYS = new Set(['actor', 'actorId', 'openid', 'openId', 'role'])
+const CLIENT_IDENTITY_KEYS = new Set([
+  'actor', 'actorId', 'openid', 'openId', 'role', 'visibleBusinessLineIds'
+])
 
 function selectProtectedPayload(payload, allowedKeys) {
   assert(payload && typeof payload === 'object' && !Array.isArray(payload),

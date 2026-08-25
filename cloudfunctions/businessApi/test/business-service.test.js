@@ -293,6 +293,64 @@ test('metadata update accepts only normalized metadata and an expected version',
   assert.equal(calls.length, 1)
 })
 
+test('非空关键词仅委托受保护检索客户端并剥离未知输入', async () => {
+  const searchCalls = []
+  const harness = createBusinessHarness({
+    businessSearchClient: {
+      async query(input) {
+        searchCalls.push(input)
+        return {
+          items: [{
+            _id: 'business-1', code: 'BL-1', name: '售后甲', status: 'active',
+            currentNodeName: '资料收集',
+            matches: [{ nodeName: '资料收集', label: '客户名称', excerpt: '命中客户甲' }],
+            secret: '不得返回'
+          }],
+          cursor: 'cursor-1', hasMore: true, internal: '不得返回'
+        }
+      }
+    }
+  })
+
+  const result = await harness.service.listBusinessLines({
+    actor: harness.actor,
+    query: { keyword: '  客户甲  合同  ', pageSize: 10, cursor: '' }
+  })
+
+  assert.deepEqual(searchCalls, [{
+    actorId: 'user-1',
+    query: { keyword: '客户甲 合同', pageSize: 10, cursor: '' }
+  }])
+  assert.deepEqual(result, {
+    items: [{
+      _id: 'business-1', code: 'BL-1', name: '售后甲', status: 'active',
+      currentNodeName: '资料收集',
+      matches: [{ nodeName: '资料收集', label: '客户名称', excerpt: '命中客户甲' }]
+    }],
+    cursor: 'cursor-1', hasMore: true, total: null
+  })
+  assert.equal(harness.calls.some(call => call[0] === 'listBusinessLines'), false)
+})
+
+test('售后列表严格校验关键词、日期和分页输入', async () => {
+  const harness = createBusinessHarness({ businessSearchClient: { async query() { return { items: [] } } } })
+  for (const query of [
+    { unknown: true },
+    { keyword: 42 },
+    { keyword: '一 二 三 四 五 六' },
+    { keyword: '甲'.repeat(101) },
+    { keyword: '客户', pageSize: 21 },
+    { keyword: '客户', cursor: 1 },
+    { startDate: '2026-02-30' },
+    { startDate: '2026-08-02', endDate: '2026-08-01' }
+  ]) {
+    await assert.rejects(
+      harness.service.listBusinessLines({ actor: harness.actor, query }),
+      error => error.code === 'VALIDATION_ERROR'
+    )
+  }
+})
+
 test('元数据修改成功后同步检索并剥离内部信封', async () => {
   const { createBusinessService } = require('../lib/business-service')
   const envelope = { actorId: 'user-1', businessLineId: 'business-1', sourceVersion: 2 }

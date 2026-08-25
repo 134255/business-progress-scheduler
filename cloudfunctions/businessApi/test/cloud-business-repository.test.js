@@ -871,6 +871,40 @@ test('business list and detail reads support account-id snapshots and legacy Ope
   assert.deepEqual(legacy.nodes[0].allowedEvidenceTypes, [])
 })
 
+test('活动超级管理员可全局列出合法售后且降权或停用立即失效', async () => {
+  const seed = seedDefinition({
+    users: [
+      { _id: 'root', status: 'active', role: 'super_admin', displayName: '超级管理员' },
+      { _id: 'owner', status: 'active', role: 'user', displayName: '成员' }
+    ],
+    extra: {
+      business_lines: [
+        { _id: 'foreign-a', name: '售后甲', code: 'BL-A', status: 'active', managerUserIds: ['owner'], memberUserIds: ['owner'], updatedAt: 3 },
+        { _id: 'foreign-b', name: '售后乙', code: 'BL-B', status: 'completed', managerUserIds: ['owner'], memberUserIds: ['owner'], updatedAt: 2 },
+        { _id: 'hidden', name: '创建中', code: 'BL-C', status: 'creating', managerUserIds: ['owner'], memberUserIds: ['owner'], updatedAt: 4 }
+      ]
+    }
+  })
+  const { fake, repository } = createRepositoryHarness(seed)
+  const actor = { _id: 'root', status: 'active', role: 'super_admin' }
+
+  assert.deepEqual(
+    (await repository.listBusinessLines({ actor, query: { page: 1, pageSize: 20 } })).items.map(item => item._id),
+    ['foreign-a', 'foreign-b']
+  )
+
+  fake.replace('users', 'root', { _id: 'root', status: 'active', role: 'user' })
+  assert.deepEqual(
+    (await repository.listBusinessLines({ actor, query: { page: 1, pageSize: 20 } })).items,
+    []
+  )
+  fake.replace('users', 'root', { _id: 'root', status: 'disabled', role: 'super_admin' })
+  await assert.rejects(
+    repository.listBusinessLines({ actor, query: { page: 1, pageSize: 20 } }),
+    error => error.code === 'FORBIDDEN'
+  )
+})
+
 test('新版业务详情只返回审核流程安全投影与负责人显示名', async () => {
   const seed = seedDefinition({
     users: [

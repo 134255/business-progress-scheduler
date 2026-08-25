@@ -65,12 +65,17 @@ test('调用失败映射稳定错误且再次同步签发新票据并复用来�
 test('查询票据绑定账号和规范化查询且不在调用事件暴露关键词', async () => {
   const value = harness({ invoke: () => ({ result: { items: [{ _id: 'line-1' }], cursor: '' } }) })
   const result = await value.client.query({
-    actorId: 'actor-1', query: { keyword: '  故障   当前  ', pageSize: 10, cursor: '' }
+    actorId: 'actor-1', query: {
+      keyword: '  故障   当前  ', pageSize: 10, cursor: '',
+      startDate: '2026-08-01', endDate: '2026-08-31'
+    }
   })
   assert.deepEqual(result.items, [{ _id: 'line-1' }])
   assert.equal(JSON.stringify(value.calls).includes('故障'), false)
   assert.deepEqual(value.writes[0].data.normalizedKeywords, ['故障', '当前'])
   assert.equal(value.writes[0].data.actorId, 'actor-1')
+  assert.equal(value.writes[0].data.startDate, '2026-08-01')
+  assert.equal(value.writes[0].data.endDate, '2026-08-31')
 })
 
 test('缺失或过短密钥失败关闭', () => {

@@ -436,6 +436,27 @@ test('business list and detail routes pass the trusted actor to the dual-schema 
   ])
 })
 
+test('售后检索路由只传递白名单查询字段和受信账号', async () => {
+  const calls = []
+  const businessService = {
+    async listBusinessLines(input) { calls.push(input); return { items: [], total: null } }
+  }
+  const harness = createRouteHarness({ businessService })
+  await harness.api.main({
+    action: 'listBusinessLines',
+    payload: {
+      keyword: '客户 合同', pageSize: 10, cursor: 'safe',
+      actorId: 'forged', role: 'super_admin', visibleBusinessLineIds: ['foreign']
+    }
+  })
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    },
+    query: { keyword: '客户 合同', pageSize: 10, cursor: 'safe' }
+  }])
+})
+
 test('待处理与概览路由剥离客户端身份并委托受保护服务', async () => {
   const calls = []
   const businessService = {

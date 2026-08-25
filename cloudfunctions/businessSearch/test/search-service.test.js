@@ -62,7 +62,8 @@ test('当前代际幂等返回且一次性查询只使用票据内安全参数',
   await queryService.queryRequest({ token: 'query-ticket' })
   const input = query.calls.find(call => call[0] === 'queryAuthorized')[1]
   assert.deepEqual(input, {
-    actorId: 'actor-1', normalizedKeywords: ['故障'], digestInput: '故障', pageSize: 20, cursor: ''
+    actorId: 'actor-1', normalizedKeywords: ['故障'], digestInput: '故障', pageSize: 20, cursor: '',
+    startDate: '', endDate: ''
   })
 })
 

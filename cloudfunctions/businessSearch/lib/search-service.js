@@ -62,7 +62,9 @@ function createSearchService({
       normalizedKeywords: request.normalizedKeywords,
       digestInput: request.digestInput,
       pageSize: request.pageSize,
-      cursor: request.cursor
+      cursor: request.cursor,
+      startDate: request.startDate || '',
+      endDate: request.endDate || ''
     })
   }
 

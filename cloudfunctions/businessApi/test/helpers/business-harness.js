@@ -39,7 +39,8 @@ function createBusinessHarness({
     status: 'calculated',
     dueAt: new Date('2026-08-07T10:30:00.000Z'),
     calendarVersion: 'calendar-v1'
-  }
+  },
+  businessSearchClient = null
 } = {}) {
   const calls = []
   const workTimeCalls = []
@@ -76,6 +77,7 @@ function createBusinessHarness({
   }
   const service = createBusinessService({
     repository,
+    businessSearchClient,
     clock: () => new Date('2026-08-07T02:30:00.000Z'),
     workTimeService: {
       async tryAddWorkMinutes(startAt, minutes) {

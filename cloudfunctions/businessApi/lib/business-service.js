@@ -12,6 +12,9 @@ const METADATA_INPUT_KEYS = new Set([
   'businessLineId', 'expectedVersion', 'name', 'description',
   'plannedStartDate', 'plannedEndDate'
 ])
+const LIST_QUERY_KEYS = new Set([
+  'keyword', 'startDate', 'endDate', 'page', 'pageSize', 'cursor'
+])
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -158,6 +161,66 @@ async function synchronizeSearch(stored, businessSearchClient) {
   }
 }
 
+function normalizeListQuery(query = {}) {
+  if (!query || typeof query !== 'object' || Array.isArray(query) ||
+      Object.keys(query).some(key => !LIST_QUERY_KEYS.has(key))) {
+    throw createError('VALIDATION_ERROR')
+  }
+  const keyword = query.keyword === undefined ? '' : query.keyword
+  if (typeof keyword !== 'string') throw createError('VALIDATION_ERROR')
+  const normalizedKeyword = keyword.normalize('NFKC').replace(/\s+/gu, ' ').trim()
+  const words = normalizedKeyword === '' ? [] : normalizedKeyword.split(' ')
+  const length = words.reduce((total, word) => total + Array.from(word).length, 0)
+  if (words.length > 5 || length > 100) throw createError('VALIDATION_ERROR')
+  const startDate = normalizeDate(query.startDate)
+  const endDate = normalizeDate(query.endDate)
+  if (startDate && endDate && startDate > endDate) throw createError('VALIDATION_ERROR')
+  const page = query.page === undefined ? 1 : query.page
+  if (!Number.isSafeInteger(page) || page < 1) throw createError('VALIDATION_ERROR')
+  const maximum = normalizedKeyword ? 20 : 50
+  const minimum = normalizedKeyword ? 1 : 5
+  const defaultPageSize = 20
+  const pageSize = query.pageSize === undefined ? defaultPageSize : query.pageSize
+  if (!Number.isSafeInteger(pageSize) || pageSize < minimum || pageSize > maximum) {
+    throw createError('VALIDATION_ERROR')
+  }
+  const cursor = query.cursor === undefined ? '' : query.cursor
+  if (typeof cursor !== 'string' || cursor.length > 2048) throw createError('VALIDATION_ERROR')
+  return {
+    keyword: normalizedKeyword,
+    startDate,
+    endDate,
+    page,
+    pageSize,
+    cursor
+  }
+}
+
+function safeSearchResult(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result) || !Array.isArray(result.items)) {
+    throw createError('BUSINESS_SEARCH_PENDING')
+  }
+  const items = result.items.map(item => ({
+    _id: typeof item._id === 'string' ? item._id : '',
+    code: typeof item.code === 'string' ? item.code : '',
+    name: typeof item.name === 'string' ? item.name : '',
+    status: typeof item.status === 'string' ? item.status : '',
+    currentNodeName: typeof item.currentNodeName === 'string' ? item.currentNodeName : '',
+    matches: Array.isArray(item.matches) ? item.matches.slice(0, 3).map(match => ({
+      nodeName: typeof match.nodeName === 'string' ? match.nodeName : '',
+      label: typeof match.label === 'string' ? match.label : '',
+      excerpt: typeof match.excerpt === 'string' ? match.excerpt : ''
+    })) : []
+  }))
+  if (items.some(item => !item._id)) throw createError('BUSINESS_SEARCH_PENDING')
+  return {
+    items,
+    cursor: typeof result.cursor === 'string' ? result.cursor : '',
+    hasMore: result.hasMore === true,
+    total: null
+  }
+}
+
 function createBusinessService({ repository, workTimeService, businessSearchClient = null, clock = () => new Date() }) {
   if (!repository) throw new TypeError('repository is required')
   if (!workTimeService || typeof workTimeService.tryAddWorkMinutes !== 'function') {
@@ -191,7 +254,36 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
 
   async function listBusinessLines({ actor, query = {} }) {
     requireActiveActor(actor)
-    return repository.listBusinessLines({ actor, query })
+    const normalized = normalizeListQuery(query)
+    if (normalized.keyword) {
+      if (!businessSearchClient || typeof businessSearchClient.query !== 'function') {
+        throw createError('BUSINESS_SEARCH_PENDING')
+      }
+      try {
+        return safeSearchResult(await businessSearchClient.query({
+          actorId: actor._id,
+          query: {
+            keyword: normalized.keyword,
+            pageSize: normalized.pageSize,
+            cursor: normalized.cursor,
+            ...(normalized.startDate ? { startDate: normalized.startDate } : {}),
+            ...(normalized.endDate ? { endDate: normalized.endDate } : {})
+          }
+        }))
+      } catch (error) {
+        if (error && error.code === 'VALIDATION_ERROR') throw error
+        throw createError('BUSINESS_SEARCH_PENDING')
+      }
+    }
+    return repository.listBusinessLines({
+      actor,
+      query: {
+        ...(normalized.startDate ? { startDate: normalized.startDate } : {}),
+        ...(normalized.endDate ? { endDate: normalized.endDate } : {}),
+        page: normalized.page,
+        pageSize: normalized.pageSize
+      }
+    })
   }
 
   async function getBusinessLine({ actor, lineId }) {
