@@ -263,6 +263,7 @@ function validateFieldValues(definitions, submitted) {
 module.exports = {
   FIELD_TYPES,
   MAX_REGEX_LENGTH,
+  isSafeRegularExpression,
   normalizeFieldDefinition,
   validateFieldValues
 }

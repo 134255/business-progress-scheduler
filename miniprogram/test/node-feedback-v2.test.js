@@ -93,6 +93,93 @@ function businessFixture(node = nodeFixture(), lineOverrides = {}) {
   }
 }
 
+test('当前处理人可粘贴文本识别并预览，确定空字段默认勾选且不覆盖已有值', async () => {
+  const calls = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向') }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'], reviewMode: 'any' })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核', status: 'ready' }, canSubmit: true, history: [] }),
+    recognizeNodeText: async input => {
+      calls.push(input)
+      return { nodeVersion: 3, candidates: [
+        { fieldKey: 'summary', value: '自动摘要', confidence: 0.96, sourceExcerpt: '摘要：自动摘要', matchKind: 'direct', requiresConfirmation: false, alternatives: [] },
+        { fieldKey: 'level', value: '高', confidence: 0.84, sourceExcerpt: '优先级高', matchKind: 'semantic', requiresConfirmation: false, alternatives: [] }
+      ] }
+    }
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({ 'fieldValues.summary': '手工内容' })
+  page.onRecognitionText({ detail: { value: '摘要：自动摘要，优先级高' } })
+
+  await page.onRecognizeText()
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].businessLineId, 'line-1')
+  assert.equal(calls[0].nodeId, 'node-1')
+  assert.equal(calls[0].expectedNodeVersion, 3)
+  assert.match(calls[0].requestKey, /^[A-Za-z0-9_-]{16,128}$/)
+  assert.deepEqual(page.data.recognitionCandidates.map(item => [item.fieldKey, item.group, item.selected]), [
+    ['summary', 'replacement', false],
+    ['level', 'direct', true]
+  ])
+
+  page.onApplyRecognitionCandidates()
+  assert.equal(page.data.fieldValues.summary, '手工内容')
+  assert.equal(page.data.fieldValues.level, '高')
+  assert.equal(page.data.recognitionText, '')
+})
+
+test('识别等待期间表单发生变化时丢弃迟到结果且不覆盖用户输入', async () => {
+  const pending = deferred()
+  const toasts = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, showToast: options => toasts.push(options.title), reLaunch: () => assert.fail('有效账号不应被重定向') }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'], reviewMode: 'any' })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核', status: 'ready' }, canSubmit: true, history: [] }),
+    recognizeNodeText: async () => pending.promise
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.onRecognitionText({ detail: { value: '摘要：旧内容' } })
+  const request = page.onRecognizeText()
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '用户新输入' } })
+  pending.resolve({ nodeVersion: 3, candidates: [
+    { fieldKey: 'summary', value: '旧内容', confidence: 0.99, sourceExcerpt: '摘要：旧内容', matchKind: 'direct', requiresConfirmation: false, alternatives: [] }
+  ] })
+  await request
+
+  assert.equal(page.data.fieldValues.summary, '用户新输入')
+  assert.deepEqual(page.data.recognitionCandidates, [])
+  assert.ok(toasts.includes('表单已变化，识别结果已丢弃，请重试'))
+})
+
+test('用户可取消识别且页面隐藏会清除原文并丢弃迟到结果', async () => {
+  for (const action of ['onCancelRecognition', 'onHide']) {
+    const pending = deferred()
+    global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+    global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向') }
+    const page = loadPage({
+      getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'], reviewMode: 'any' })),
+      getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核', status: 'ready' }, canSubmit: true, history: [] }),
+      recognizeNodeText: async () => pending.promise
+    })
+    await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+    page.onRecognitionText({ detail: { value: '客户姓名：张三' } })
+    const request = page.onRecognizeText()
+    page[action]()
+    assert.equal(page.data.recognizing, false)
+    assert.equal(page.data.recognitionText, '')
+    assert.deepEqual(page.data.recognitionCandidates, [])
+    pending.resolve({ candidates: [{
+      fieldKey: 'summary', value: '张三', confidence: 1, sourceExcerpt: '张三',
+      matchKind: 'direct', requiresConfirmation: false, alternatives: []
+    }] })
+    await request
+    assert.deepEqual(page.data.recognitionCandidates, [])
+  }
+})
+
 test('反馈页只接受标识参数，并以服务端节点快照和权限构建动态表单', async () => {
   const calls = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })

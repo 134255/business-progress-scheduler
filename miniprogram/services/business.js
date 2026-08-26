@@ -29,7 +29,13 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   EVIDENCE_NOT_ATTACHABLE: '当前凭证无法登记，请刷新后重试',
   BUSINESS_SEARCH_PENDING: '售后检索正在更新，请稍后重试',
   BUSINESS_SEARCH_UNAVAILABLE: '售后检索暂时不可用，请稍后重试',
-  INVALID_SEARCH_QUERY: '请调整检索内容后重试'
+  INVALID_SEARCH_QUERY: '请调整检索内容后重试',
+  NODE_TEXT_BUSY: '已有文本正在识别，请稍后重试',
+  NODE_TEXT_CONFIG_INVALID: '文本识别配置异常，请联系管理员',
+  NODE_TEXT_DAILY_LIMITED: '今日文本识别次数已用完，请明日再试',
+  NODE_TEXT_PARSE_FAILED: '文本识别失败，请稍后重试',
+  NODE_TEXT_RATE_LIMITED: '识别操作过于频繁，请稍后重试',
+  NODE_TEXT_STALE: '节点字段已变化，请刷新后重试'
 })
 
 function safeServiceError(error, fallback) {
@@ -186,6 +192,10 @@ function submitNodeForReview(input) {
   return callProtected('submitNodeForReview', input, '提交审核失败，请稍后重试')
 }
 
+function recognizeNodeText(input) {
+  return callProtected('recognizeNodeText', input, '文本识别失败，请稍后重试')
+}
+
 function submitReviewVote(input) {
   return callProtected('submitReviewVote', input, '提交审核意见失败，请稍后重试')
 }
@@ -235,6 +245,7 @@ module.exports = {
   listFrozenBusinessesForAdmin,
   getFrozenBusinessForAdmin,
   amendFrozenBusiness,
+  recognizeNodeText,
   submitNodeForReview,
   submitReviewVote,
   listMyPendingReviews,

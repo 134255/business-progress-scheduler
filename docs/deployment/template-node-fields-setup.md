@@ -7,8 +7,8 @@
 ## 一、部署原则
 
 - 必须按“备份、集合、唯一性检查、索引、业务云函数、定时云函数、触发器、验收”的顺序执行。
-- `businessApi`、`businessSearch`、`calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 均选择“上传并部署：云端安装依赖”。不要上传本地 `node_modules`。
-- 首次验收时 `businessSearch`、`calendarSync`、`workflowReminder`、`evidenceRetention` 与 `operationsAnalytics` 均保持 `triggers: []`；仅在隔离验收通过后分阶段启用日历每日同步和小时级提醒，检索回填与运营统计的周期任务必须另行批准。
+- `businessApi`、`businessSearch`、`nodeTextParser`、`calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 均选择“上传并部署：云端安装依赖”。不要上传本地 `node_modules`。
+- 首次验收时 `businessSearch`、`nodeTextParser`、`calendarSync`、`workflowReminder`、`evidenceRetention` 与 `operationsAnalytics` 均保持 `triggers: []`；`nodeTextParser` 不配置任何 Timer，仅能消费 `businessApi` 签发的一次性内部票据。仅在隔离验收通过后分阶段启用日历每日同步和小时级提醒，检索回填与运营统计的周期任务必须另行批准。
 - 不删除旧集合，不批量伪造旧业务编号，不用回滚为由删除凭证元数据或审计记录。
 - 所有客户端读写继续经过云函数；模板、业务、节点、反馈、凭证和审计集合禁止小程序端直接写入。
 - 每完成一阶段都记录时间、操作员、结果和可回退点，但只记录脱敏结论。
@@ -47,6 +47,8 @@
 - `operations_analytics_daily`
 - `business_search_documents`
 - `business_search_requests`
+- `node_text_parse_requests`
+- `node_text_parse_usage`
 
 对每份导出执行以下检查：
 
@@ -55,7 +57,7 @@
 3. 对比控制台记录数与导出记录数；若导出工具采用分片，核对所有分片总数。
 4. 把备份保存到受控位置，不提交 Git，不通过普通聊天发送。
 
-`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years`、`calendar_sync_requests`、`public_node_shares`、`public_node_share_chunks`、`operations_analytics_facts`、`operations_analytics_daily`、`business_search_documents` 与 `business_search_requests` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
+`node_review_rounds`、`node_review_votes`、`work_calendar_entries`、`work_calendar_years`、`calendar_sync_requests`、`public_node_shares`、`public_node_share_chunks`、`operations_analytics_facts`、`operations_analytics_daily`、`business_search_documents`、`business_search_requests`、`node_text_parse_requests` 与 `node_text_parse_usage` 可能在首次部署前尚不存在：控制台明确显示集合不存在时，记录“未创建、无历史数据”，继续后续集合创建；一旦集合存在，其导出失败、无法读取或数量不一致时停止部署。其余已存在集合任一导出失败、无法读取或数量不一致时同样停止部署。
 
 ## 三、集合准备
 
@@ -84,6 +86,8 @@
 | `operations_analytics_daily` | 按上海自然日、模板、稳定节点和匿名参与人维度维护的每日汇总 |
 | `business_search_documents` | 当前内容代际的安全检索条目和 HMAC 倒排令牌 |
 | `business_search_requests` | `businessApi` 调用检索工作器的短效一次性票据摘要 |
+| `node_text_parse_requests` | `businessApi` 调用 AI 解析工作器的五分钟单次票据摘要，不保存原文或候选值 |
+| `node_text_parse_usage` | 按账号不可逆摘要维护分钟/上海自然日额度与单飞锁 |
 
 集合权限使用“仅云函数/服务端可读写”或等效的最严格配置。不要为了调试开放全体用户读写。
 
@@ -184,6 +188,7 @@
 | `business_lines` | `searchIndexStatus` 升序、`updatedAt` 升序、`_id` 升序 | 否 | 检索失败恢复的持久游标扫描 |
 | `business_lines` | `updatedAt` 升序、`_id` 升序 | 否 | 历史售后检索状态回填游标 |
 | `business_search_documents` | `createdAt` 升序、`_id` 升序 | 否 | 旧内容代际有界清理游标 |
+| `node_text_parse_requests` | `expiresAt` 升序、`_id` 升序 | 否 | 每次合法解析后最多清理 20 条过期票据 |
 
 控制台字段方向的等价精确记法为：`documentType ASC, tokenHashes ASC, businessLineId ASC`、`documentType ASC, businessLineId ASC, generationId ASC, entryId ASC`、`searchIndexStatus ASC, updatedAt ASC, _id ASC`、`updatedAt ASC, _id ASC` 和 `createdAt ASC, _id ASC`。
 
@@ -212,6 +217,8 @@
 
 ## 六、上传 `businessApi`
 
+若本次同时上线“节点文本智能识别”，先不要执行本节上传操作。必须先完成 **6.2** 的集合、索引、AI+ 模型、`nodeTextParser` 部署及空触发器核对，再返回本节部署 `businessApi`；不得让已开放识别路由的 `businessApi` 先于解析函数上线。
+
 1. 在微信开发者工具中右键 `cloudfunctions/businessApi`。
 2. 选择“上传并部署：云端安装依赖（不上传 `node_modules`）”。
 3. 等待部署完成，不要在上传进度未结束时重复点击。
@@ -232,12 +239,23 @@
 8. 仅在无敏感隔离数据、集合权限、索引和双函数密钥全部核对后，批准一次性 Timer 做历史回填。核对返回值只含 `examined/generated/failed/cleaned` 计数，普通用户只能命中原本有权查看的售后，活动超级管理员可检索全部售后；执行后立即恢复 `{"triggers": []}`。
 9. 正式周期 Timer 不在首次部署范围内。隔离回填、失败恢复、撤权隐藏、超过 100 个候选的服务端游标和幂等复跑均通过后，再单独批准调度频率。
 
-### 6.2 上传小程序 `1.0.1`
+### 6.2 节点文本智能识别集合与 `nodeTextParser`
+
+1. 创建 `node_text_parse_requests` 与 `node_text_parse_usage`，权限均设为“仅云函数读写”。不得开放客户端直接读取；两个集合不得写入原始粘贴文本、识别候选、OpenID 原值、显示名或业务正文。
+2. 为 `node_text_parse_requests` 创建 `expiresAt ASC, _id ASC` 非唯一组合索引并等待生效；`node_text_parse_usage` 只按确定性文档编号固定读取，不需要组合索引。
+3. 在 CloudBase AI+ 控制台为目标环境开通并确认代码默认模型可用，同时设置费用/Token 告警。若默认模型在该环境不可用，应先选定控制台明确支持的替代模型，不得先部署后碰运气。
+4. 右键 `cloudfunctions/nodeTextParser`，选择“上传并部署：云端安装依赖”。函数名为 `nodeTextParser`，入口为 `index.main`，Node.js 16，内存先用 256 MB，超时至少 60 秒。
+5. `nodeTextParser` 的触发器必须保存并刷新确认为 `{"triggers": []}`。不得建立 Timer，也不得用控制台普通“测试”绕过票据；小程序只能调用 `businessApi.recognizeNodeText`。
+6. `NODE_TEXT_PARSE_MODEL` 可留空使用代码中的受支持默认模型；如目标环境需要指定模型，只能填写已在第 3 步确认可用的服务端模型名称，客户端不能覆盖。模型名称不是密钥，但仍不得由用户输入或写入日志。
+7. `businessApi` 的 `NODE_TEXT_PARSE_DAILY_LIMIT` 可不配置，此时每个账号每个上海自然日默认 300 次。若配置，只接受十进制整数 `1..1000`；空白、0、非整数或越界会使识别入口失败关闭。不得把额度放入小程序配置或请求参数。完成后返回“六、上传 `businessApi`”，部署该函数并核对它能成功嵌套调用 `nodeTextParser`。
+8. 首次隔离验收只使用无敏感测试文本，核对单飞、每分钟 10 次、每日 300 次边界、五分钟票据单次消费以及日志不含原文/候选/票据/身份/业务编号。
+
+### 6.3 上传小程序 `1.0.1`
 
 1. 部署本次 `businessApi` 后重新编译小程序，确认登录、业务概览、模板管理、待我处理、待我审核和运营看板均可进入。
 2. 在开发者工具上传版本 `1.0.1`；版本备注只写“发起人唯一审核人、七日节点只读分享”，不得包含账号、业务正文、云文件编号或环境变量。
 3. 先设置体验版并完成下表的发起人审核人与固定分享隔离验收，再决定是否提交审核；不要仅凭本地自动化通过直接发布。
-4. 本次不新增集合、索引、环境变量或 Timer，也不改变现有 `calendarSync`、`workflowReminder`、`evidenceRetention`、`operationsAnalytics` 触发器。
+4. 本次新增的仅是 `node_text_parse_requests`、`node_text_parse_usage`、前者的到期索引、`nodeTextParser` 以及可选的两个服务端环境变量；不得新增 Timer，也不改变现有 `calendarSync`、`workflowReminder`、`evidenceRetention`、`operationsAnalytics` 触发器。
 
 ## 七、上传 `calendarSync`
 
@@ -286,7 +304,7 @@
 
 ## 十一、配置触发器
 
-首次隔离验收前，依次打开 `businessSearch`、`calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 的“触发管理/触发器”，核对并保存为 `{"triggers": []}`。若发现遗留非空配置，仅恢复空数组并记录脱敏变更。`businessSearch` 只允许在检索集合、索引、双函数密钥和无敏感隔离数据全部核对后使用一次性回填 Timer；`evidenceRetention` 在破坏性候选、再次备份和云对象归属全部核对完成并取得单独批准前，不得创建、预创建或保存任何非空触发器配置。
+首次隔离验收前，依次打开 `businessSearch`、`nodeTextParser`、`calendarSync`、`workflowReminder`、`evidenceRetention` 和 `operationsAnalytics` 的“触发管理/触发器”，核对并保存为 `{"triggers": []}`。若发现遗留非空配置，仅恢复空数组并记录脱敏变更。`nodeTextParser` 始终保持空触发器；`businessSearch` 只允许在检索集合、索引、双函数密钥和无敏感隔离数据全部核对后使用一次性回填 Timer；`evidenceRetention` 在破坏性候选、再次备份和云对象归属全部核对完成并取得单独批准前，不得创建、预创建或保存任何非空触发器配置。
 
 隔离验收全部通过并取得单独批准后，才可按顺序单独处理 `calendarSync` 的每日同步触发器和 `workflowReminder` 的小时级提醒触发器：每次只启用一个函数，使用已批准的目标时刻，在控制台核对时区、下一次触发时间和脱敏日志后，再决定下一项。`evidenceRetention` 只允许为破坏性隔离验收临时保存一次性 Timer，每次执行并取得日志后立即恢复 `triggers: []`；正式周期调度属于后续独立变更，不包含在本手册的部署范围。
 
@@ -390,6 +408,7 @@
 索引：通过 / 失败
 businessApi 部署：通过 / 失败 / 未验证
 businessSearch 部署与一次性历史回填：通过 / 失败 / 未验证
+nodeTextParser 部署、AI+ 可用性与空触发器：通过 / 失败 / 未验证
 calendarSync 部署与当前/下一年手工同步：通过 / 失败 / 未验证
 workflowReminder 部署：通过 / 失败 / 未验证
 evidenceRetention 部署：通过 / 失败 / 未验证

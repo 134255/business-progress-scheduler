@@ -67,7 +67,7 @@ Task 9 已接入小程序端审核工作台：受保护的业务服务提供提�
 - CloudBase environment identifier: `cloud1-d5gxt99rh492670d9`.
 - Mini Program root: `miniprogram/`.
 - Cloud-function root: `cloudfunctions/`.
-- Cloud function names: ordinary authenticated API `businessApi`; authorized current-snapshot search worker `businessSearch`; approved but not yet implemented current-node AI parser `nodeTextParser`; calendar synchronization and pending-deadline worker `calendarSync`; hourly processing/review reminder worker `workflowReminder`; scheduled retention worker `evidenceRetention`; materialized operations analytics worker `operationsAnalytics`.
+- Cloud function names: ordinary authenticated API `businessApi`; authorized current-snapshot search worker `businessSearch`; ticket-protected current-node AI parser `nodeTextParser`; calendar synchronization and pending-deadline worker `calendarSync`; hourly processing/review reminder worker `workflowReminder`; scheduled retention worker `evidenceRetention`; materialized operations analytics worker `operationsAnalytics`.
 - Default Git integration branch: `main`; remote tracking branch: `origin/main`.
 
 These identifiers are not credentials. Secret values, administrator passwords, recovery codes, account identity values, and customer records must be supplied through approved secure channels and never stored here.
@@ -79,6 +79,7 @@ Run from the repository root:
 ```powershell
 npm.cmd test --prefix cloudfunctions/businessApi
 npm.cmd test --prefix cloudfunctions/businessSearch
+npm.cmd test --prefix cloudfunctions/nodeTextParser
 npm.cmd test --prefix cloudfunctions/calendarSync
 npm.cmd test --prefix cloudfunctions/workflowReminder
 npm.cmd test --prefix cloudfunctions/evidenceRetention

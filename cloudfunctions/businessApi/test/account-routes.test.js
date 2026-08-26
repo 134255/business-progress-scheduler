@@ -87,6 +87,7 @@ function createRouteHarness({
   reviewService,
   operationsService,
   shareService,
+  recognitionService,
   calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
@@ -141,6 +142,7 @@ function createRouteHarness({
     reviewService,
     operationsService,
     shareService,
+    recognitionService,
     calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
@@ -223,6 +225,33 @@ test('审核与通知路由只传递解析后的当前账号和白名单输入',
     ['listMyNotifications', { actor, query: { page: 2, pageSize: 10 } }],
     ['markNotificationRead', { actor, notificationId: 'notification-1' }]
   ])
+})
+
+test('节点文本识别路由只传递当前活动账号与白名单输入', async () => {
+  const calls = []
+  const harness = createRouteHarness({
+    recognitionService: {
+      async recognize(input) { calls.push(input); return { candidates: [] } }
+    }
+  })
+  const payload = {
+    businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 3,
+    text: '客户：张三', requestKey: 'request_1234567890123456', actorId: 'forged', openid: 'wx-forged'
+  }
+  const result = await harness.api.main({ action: 'recognizeNodeText', payload })
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls, [{
+    actor: { _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound' },
+    input: {
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 3,
+      text: '客户：张三', requestKey: 'request_1234567890123456'
+    }
+  }])
+
+  const invalid = await harness.api.main({
+    action: 'recognizeNodeText', payload: { ...payload, unknown: 'must-fail' }
+  })
+  assert.equal(invalid.code, 'VALIDATION_ERROR')
 })
 
 test('审核路由拒绝身份字段以外的未知输入且未知异常保持通用响应', async () => {

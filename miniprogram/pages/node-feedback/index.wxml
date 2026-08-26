@@ -23,6 +23,27 @@
       </picker>
     </view>
 
+    <view wx:if="{{workflowMode === 'review' && !readOnly && !reviewDraftLocked}}" class="recognition-panel">
+      <text class="field-label">粘贴文本智能填充</text>
+      <text class="muted field-description">粘贴微信或其他来源的文本，识别结果仅作预填，应用前可逐项确认。</text>
+      <textarea class="textarea recognition-text" maxlength="8000" disabled="{{recognizing || submitting}}" value="{{recognitionText}}" bindinput="onRecognitionText" placeholder="请粘贴需要识别的文本" />
+      <button class="secondary-button" bindtap="onRecognizeText" loading="{{recognizing}}" disabled="{{recognizing || submitting || !recognitionText}}">识别字段</button>
+      <button wx:if="{{recognizing}}" class="secondary-button" bindtap="onCancelRecognition">取消识别</button>
+      <view wx:if="{{recognitionCandidates.length}}" class="recognition-preview">
+        <view class="recognition-candidate" wx:for="{{recognitionCandidates}}" wx:key="fieldKey">
+          <checkbox-group data-index="{{index}}" bindchange="onRecognitionCandidateToggle">
+            <label><checkbox value="selected" checked="{{item.selected}}" />{{item.fieldName}}</label>
+          </checkbox-group>
+          <text class="muted block">当前：{{item.currentText}}</text>
+          <text class="block">建议：{{item.candidateText}}（{{item.confidenceText}}）</text>
+          <text class="muted block">依据：{{item.sourceExcerpt}}</text>
+          <text wx:if="{{item.group === 'replacement'}}" class="recognition-warning">已有内容，勾选后才会替换</text>
+          <text wx:if="{{item.group === 'manual'}}" class="recognition-warning">匹配存在歧义，请人工确认</text>
+        </view>
+        <button class="primary-button" bindtap="onApplyRecognitionCandidates" disabled="{{recognizing || submitting}}">应用选中结果</button>
+      </view>
+    </view>
+
     <view class="field dynamic-field" wx:for="{{fields}}" wx:key="fieldKey">
       <text class="field-label">{{item.name}}{{item.required ? ' *' : ''}}</text>
       <text wx:if="{{item.description}}" class="muted field-description">{{item.description}}</text>

@@ -40,6 +40,9 @@ const { createCloudOperationsRepository } = require('./lib/cloud-operations-repo
 const { createShareService } = require('./lib/share-service')
 const { createCloudShareRepository } = require('./lib/cloud-share-repository')
 const { createBusinessSearchClient } = require('./lib/business-search-client')
+const { createNodeTextRecognitionService } = require('./lib/node-text-recognition-service')
+const { createCloudNodeTextRecognitionRepository } = require('./lib/cloud-node-text-recognition-repository')
+const { createNodeTextParserClient } = require('./lib/node-text-parser-client')
 
 const COLLECTIONS = {
   users: 'users',
@@ -125,6 +128,12 @@ const LOGGABLE_ERROR_CODES = new Set([
   'NODE_ALREADY_COMPLETED',
   'NODE_NOT_ACTIVE',
   'NODE_PENDING_REVIEW',
+  'NODE_TEXT_BUSY',
+  'NODE_TEXT_CONFIG_INVALID',
+  'NODE_TEXT_DAILY_LIMITED',
+  'NODE_TEXT_PARSE_FAILED',
+  'NODE_TEXT_RATE_LIMITED',
+  'NODE_TEXT_STALE',
   'NOT_FOUND',
   'OPENID_ALREADY_BOUND',
   'PASSWORD_CHANGE_REQUIRED',
@@ -383,6 +392,18 @@ function createReviewRoutes(reviewService) {
   }
 }
 
+function createNodeTextRecognitionRoutes(recognitionService) {
+  if (!recognitionService) return null
+  return {
+    recognizeNodeText: ({ actor, payload }) => recognitionService.recognize({
+      actor,
+      input: selectProtectedPayload(payload, new Set([
+        'businessLineId', 'nodeId', 'expectedNodeVersion', 'text', 'requestKey'
+      ]))
+    })
+  }
+}
+
 function createBusinessApi({
   repository,
   authService,
@@ -396,6 +417,7 @@ function createBusinessApi({
   calendarAdminService,
   operationsService,
   shareService,
+  recognitionService,
   businessSearchClient,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
@@ -414,6 +436,7 @@ function createBusinessApi({
     createCalendarAdminRoutes(calendarAdminService),
     createOperationsRoutes(operationsService),
     createShareRoutes(shareService),
+    createNodeTextRecognitionRoutes(recognitionService),
     protectedRoutes
   )
 
@@ -832,6 +855,12 @@ function createDefaultBusinessApi() {
     clock: () => new Date(),
     tokenFactory: () => crypto.randomBytes(32).toString('base64url')
   })
+  const recognitionService = createNodeTextRecognitionService({
+    repository: createCloudNodeTextRecognitionRepository({ db, randomBytes: crypto.randomBytes }),
+    parserClient: createNodeTextParserClient({ callFunction: data => cloud.callFunction(data) }),
+    dailyLimit: process.env.NODE_TEXT_PARSE_DAILY_LIMIT,
+    clock: () => new Date()
+  })
   return createBusinessApi({
     repository,
     authService,
@@ -845,6 +874,7 @@ function createDefaultBusinessApi() {
     calendarAdminService,
     operationsService,
     shareService,
+    recognitionService,
     businessSearchClient,
     getContext: () => cloud.getWXContext(),
     clock,

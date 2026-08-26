@@ -23,3 +23,8 @@
 .review-actions { display: grid; gap: 14rpx; }
 .review-actions button { width: 100%; margin: 0; }
 .readonly-tip { display: block; margin-top: 8rpx; text-align: center; }
+.recognition-panel { margin-bottom: 26rpx; padding: 22rpx; border: 1rpx solid #99f6e4; border-radius: 16rpx; background: #f0fdfa; }
+.recognition-text { margin-bottom: 16rpx; background: #fff; }
+.recognition-preview { display: grid; gap: 16rpx; margin-top: 18rpx; }
+.recognition-candidate { padding: 18rpx; border: 1rpx solid #d1d5db; border-radius: 14rpx; background: #fff; }
+.recognition-warning { display: block; margin-top: 8rpx; color: #b45309; font-size: 22rpx; }

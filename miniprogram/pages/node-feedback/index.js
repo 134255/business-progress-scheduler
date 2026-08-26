@@ -1,5 +1,10 @@
 const businessService = require('../../services/business')
 const { safeErrorMessage } = require('../../utils/safe-error')
+const {
+  buildRecognitionPreview,
+  applyRecognitionPreview,
+  recognitionSnapshotStillCurrent
+} = require('../../utils/node-text-recognition')
 
 const FROZEN_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const STATUS_OPTIONS = Object.freeze([
@@ -50,6 +55,16 @@ function currentUserId() {
 
 function requestKey(prefix = 'feedback') {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+}
+
+function schemaFingerprint(fields) {
+  return JSON.stringify((Array.isArray(fields) ? fields : []).map(field => ({
+    fieldKey: field.fieldKey,
+    name: field.name,
+    type: field.type,
+    required: field.required,
+    constraints: field.constraints
+  })))
 }
 
 function dateTimeText(value) {
@@ -190,7 +205,10 @@ Page({
     allowedEvidenceTypes: [],
     videoPreview: null,
     downloading: false,
-    submitting: false
+    submitting: false,
+    recognitionText: '',
+    recognitionCandidates: [],
+    recognizing: false
   },
 
   async onLoad(query = {}) {
@@ -203,6 +221,8 @@ Page({
     this.pageAlive = true
     this.loadSequence = 0
     this.writeSequence = 0
+    this.recognitionSequence = 0
+    this.formRevision = 0
     this.progressExpectedNodeVersion = null
     this.reviewExpectedNodeVersion = null
     this.setData({ lineId: String(query.lineId || ''), nodeId: String(query.nodeId || '') })
@@ -213,9 +233,15 @@ Page({
     if (this.data.lineId && this.hasLoaded) return this.loadData()
   },
 
+  onHide() {
+    this.recognitionSequence += 1
+    this.setData({ recognizing: false, recognitionText: '', recognitionCandidates: [] })
+  },
+
   onUnload() {
     this.pageAlive = false
     this.loadSequence += 1
+    this.recognitionSequence += 1
   },
 
   actorStillCurrent() {
@@ -299,8 +325,12 @@ Page({
         serverDraftHasEvidence: Boolean(latestDraft && Array.isArray(latestDraft.evidences) &&
           latestDraft.evidences.some(evidence => evidence && evidence.storageStatus === 'available')),
         draftDirty: false,
+        recognitionText: '',
+        recognitionCandidates: [],
+        recognizing: false,
         readOnly
       })
+      this.formRevision += 1
       this.hasLoaded = true
       wx.setNavigationBarTitle({ title: node.name || '节点反馈' })
     } catch (error) {
@@ -329,14 +359,98 @@ Page({
 
   markDraftDirty() {
     if (this.data.submitting || this.data.reviewDraftLocked) return false
+    this.formRevision += 1
     this.savedProgress = null
     this.progressIntent = ''
     this.progressRequestKey = ''
     this.progressExpectedNodeVersion = null
     this.reviewRequestKey = ''
     this.reviewExpectedNodeVersion = null
-    this.setData({ draftDirty: true })
+    this.setData({ draftDirty: true, recognitionCandidates: [] })
     return true
+  },
+
+  onRecognitionText(event) {
+    if (this.data.readOnly || this.data.reviewDraftLocked || this.data.recognizing) return
+    this.setData({ recognitionText: String(event.detail.value || '').slice(0, 8000), recognitionCandidates: [] })
+  },
+
+  currentRecognitionSnapshot() {
+    return {
+      actorId: currentUserId(),
+      lineId: this.data.lineId,
+      nodeId: this.data.nodeId,
+      nodeVersion: this.data.expectedNodeVersion,
+      schemaDigest: schemaFingerprint(this.data.fields),
+      formRevision: this.formRevision
+    }
+  },
+
+  async onRecognizeText() {
+    const text = String(this.data.recognitionText || '').trim()
+    if (this.data.readOnly || this.data.reviewDraftLocked || this.data.recognizing) return
+    if (!text) {
+      wx.showToast({ title: '请粘贴需要识别的文本', icon: 'none' })
+      return
+    }
+    const sequence = ++this.recognitionSequence
+    const snapshot = this.currentRecognitionSnapshot()
+    this.setData({ recognizing: true, recognitionCandidates: [] })
+    try {
+      const result = await businessService.recognizeNodeText({
+        businessLineId: snapshot.lineId,
+        nodeId: snapshot.nodeId,
+        expectedNodeVersion: snapshot.nodeVersion,
+        text,
+        requestKey: requestKey('recognize').replace(/[^A-Za-z0-9_-]/g, '_')
+      })
+      if (!this.pageAlive || sequence !== this.recognitionSequence ||
+          !recognitionSnapshotStillCurrent(snapshot, this.currentRecognitionSnapshot())) {
+        wx.showToast({ title: '表单已变化，识别结果已丢弃，请重试', icon: 'none' })
+        return
+      }
+      const candidates = buildRecognitionPreview(this.data.fields, this.data.fieldValues, result && result.candidates)
+      this.setData({ recognitionCandidates: candidates })
+      wx.showToast({ title: candidates.length ? '识别完成，请确认结果' : '未识别到可填写内容', icon: 'none' })
+    } catch (error) {
+      if (this.pageAlive && sequence === this.recognitionSequence && this.actorStillCurrent()) {
+        wx.showToast({ title: safeErrorMessage(error, '文本识别失败，请稍后重试'), icon: 'none' })
+      }
+    } finally {
+      if (this.pageAlive && sequence === this.recognitionSequence) this.setData({ recognizing: false })
+    }
+  },
+
+  onCancelRecognition() {
+    if (!this.data.recognizing) return
+    this.recognitionSequence += 1
+    this.setData({ recognizing: false, recognitionText: '', recognitionCandidates: [] })
+    wx.showToast({ title: '已取消文本识别', icon: 'none' })
+  },
+
+  onRecognitionCandidateToggle(event) {
+    if (this.data.recognizing || this.data.readOnly || this.data.reviewDraftLocked) return
+    const index = Number(event.currentTarget.dataset.index)
+    if (!Number.isSafeInteger(index) || index < 0 || index >= this.data.recognitionCandidates.length) return
+    this.setData({ [`recognitionCandidates[${index}].selected`]: Boolean(event.detail.value.length) })
+  },
+
+  onApplyRecognitionCandidates() {
+    if (this.data.recognizing || this.data.readOnly || this.data.reviewDraftLocked) return
+    const selected = this.data.recognitionCandidates.filter(item => item.selected)
+    if (!selected.length) {
+      wx.showToast({ title: '请先选择需要填入的识别结果', icon: 'none' })
+      return
+    }
+    const applied = applyRecognitionPreview(this.data.fields, this.data.fieldValues, selected)
+    if (!this.markDraftDirty()) return
+    this.setData({
+      fields: applied.fields,
+      fieldValues: applied.fieldValues,
+      recognitionText: '',
+      recognitionCandidates: []
+    })
+    wx.showToast({ title: '已填入选中字段', icon: 'success' })
   },
 
   onComment(event) {
