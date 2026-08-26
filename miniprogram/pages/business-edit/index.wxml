@@ -12,24 +12,20 @@
     </view>
 
     <view wx:if="{{editMode}}" class="card immutable-summary">
+      <text class="field-label">售后线名称</text>
+      <text class="immutable-name">{{lineName}}</text>
       <text class="field-label">售后线编号</text>
       <text class="immutable-code">{{lineCode}}</text>
-      <text class="muted block">编号和节点均由模板快照生成，不可编辑</text>
+      <text class="muted block">名称、编号和节点均由模板快照生成，不可编辑</text>
+      <text wx:if="{{legacyPlannedStartDate || legacyPlannedEndDate}}" class="muted block">历史计划日期：{{legacyPlannedStartDate || '未设置'}} 至 {{legacyPlannedEndDate || '未设置'}}</text>
       <text wx:if="{{frozen}}" class="frozen-note">售后已完成或关闭，结构化信息已冻结</text>
     </view>
 
     <view class="card">
-      <view class="field">
-        <text class="field-label">售后线名称 *</text>
-        <input class="input" disabled="{{editMode && (!canManage || frozen)}}" data-field="name" value="{{form.name}}" bindinput="updateField" placeholder="请输入售后线名称" />
-      </view>
+      <view wx:if="{{!editMode}}" class="automatic-name-note">售后线名称将自动生成为：模板名称 + 售后线编号</view>
       <view class="field">
         <text class="field-label">说明</text>
         <textarea class="textarea" disabled="{{editMode && (!canManage || frozen)}}" data-field="description" value="{{form.description}}" bindinput="updateField" placeholder="补充售后背景、目标或特别要求" />
-      </view>
-      <view class="date-grid">
-        <picker disabled="{{editMode && (!canManage || frozen)}}" mode="date" value="{{form.plannedStartDate}}" data-field="plannedStartDate" bindchange="updateDate"><view class="date-box">{{form.plannedStartDate || '计划开始日期'}}</view></picker>
-        <picker disabled="{{editMode && (!canManage || frozen)}}" mode="date" value="{{form.plannedEndDate}}" data-field="plannedEndDate" bindchange="updateDate"><view class="date-box">{{form.plannedEndDate || '计划完成日期'}}</view></picker>
       </view>
     </view>
 

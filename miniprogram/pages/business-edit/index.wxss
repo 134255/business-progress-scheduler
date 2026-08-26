@@ -1,11 +1,11 @@
-.date-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16rpx; }
-.date-box { padding: 20rpx; border: 1rpx solid #d1d5db; border-radius: 12rpx; color: #6b7280; background: #f9fafb; }
 .save { margin-top: 30rpx; }
 .template-preview { border-left: 8rpx solid #0f766e; }
 .preview-name { font-size: 32rpx; font-weight: 650; }
 .node-count { color: #0f766e; }
 .block { display: block; margin-top: 12rpx; }
 .immutable-code { display: block; margin-top: 8rpx; font-size: 34rpx; font-weight: 700; letter-spacing: 1rpx; }
+.immutable-name { display: block; margin: 8rpx 0 20rpx; font-size: 34rpx; font-weight: 700; }
+.automatic-name-note { margin-bottom: 24rpx; padding: 18rpx; border-radius: 12rpx; color: #0f766e; background: #ecfdf5; }
 .frozen-note { display: block; margin-top: 18rpx; padding: 18rpx; border-radius: 12rpx; color: #92400e; background: #fef3c7; }
 .node-name { font-weight: 650; }
 .form-error { margin: 20rpx 0 0; padding: 20rpx; border-radius: 12rpx; color: #b91c1c; background: #fef2f2; }

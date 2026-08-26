@@ -109,6 +109,9 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(line.status, 'active')
   assert.equal(line.sourceTemplateId, 'template-1')
   assert.equal(line.sourceTemplateVersion, 4)
+  assert.equal(line.name, '交付模板-BL-20260807-0001')
+  assert.equal(line.plannedStartDate, '')
+  assert.equal(line.plannedEndDate, '')
   assert.deepEqual(line.managerUserIds, ['user-1'])
   assert.deepEqual(line.memberUserIds, ['user-1', 'user-2', 'user-3', 'user-4'])
   assert.equal(line.currentNodeId, nodes[0]._id)
@@ -168,6 +171,26 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(fake.documents('sequence_counters')[0].sequence, 1)
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.deepEqual(fake.transactionQueries, [])
+})
+
+test('creation derives the immutable line name from the trusted template and allocated code', async () => {
+  const { fake, repository } = createRepositoryHarness()
+  const source = await definition(repository)
+
+  await repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' },
+    input: input({
+      name: '客户端伪造名称',
+      plannedStartDate: '2099-01-01',
+      plannedEndDate: '2099-12-31'
+    }),
+    definition: source
+  })
+
+  const [line] = fake.documents('business_lines')
+  assert.equal(line.name, '交付模板-BL-20260807-0001')
+  assert.equal(line.plannedStartDate, '')
+  assert.equal(line.plannedEndDate, '')
 })
 
 test('发起人模式只替换当前节点处理人并固化唯一账号快照', async () => {
@@ -802,15 +825,19 @@ test('failed snapshot writes roll back the counter, line, nodes, and audit toget
   assert.equal(fake.documents('audit_logs').length, 0)
 })
 
-test('reusing a request key with different validated input fails closed', async () => {
+test('reusing a request key with a different description fails closed while legacy display fields are ignored', async () => {
   const { repository } = createRepositoryHarness()
   const request = { actor: { _id: 'user-1' }, input: input(), definition: await definition(repository) }
-  await repository.createBusinessSnapshot(request)
+  const created = await repository.createBusinessSnapshot(request)
 
   await assert.rejects(
-    repository.findCreationResult({ actorId: 'user-1', input: input({ name: '另一个业务' }) }),
+    repository.findCreationResult({ actorId: 'user-1', input: input({ description: '另一份说明' }) }),
     error => error.code === 'VERSION_CONFLICT'
   )
+  assert.deepEqual(await repository.findCreationResult({
+    actorId: 'user-1',
+    input: input({ name: '旧客户端名称', plannedStartDate: '2099-01-01', plannedEndDate: '2099-12-31' })
+  }), created)
 })
 
 test('business list and detail reads support account-id snapshots and legacy OpenID records', async () => {
@@ -869,6 +896,32 @@ test('business list and detail reads support account-id snapshots and legacy Ope
   assert.equal(legacy.nodes[0].assigneeNamesText, '旧用户')
   assert.equal(legacy.nodes[0].requiresEvidence, false)
   assert.deepEqual(legacy.nodes[0].allowedEvidenceTypes, [])
+})
+
+test('售后列表日期筛选使用创建日期而不是已取消填写的计划日期', async () => {
+  const seed = seedDefinition({
+    extra: {
+      business_lines: [
+        {
+          _id: 'created-in-range', code: 'BL-20260826-0001', name: '范围内售后', status: 'active',
+          managerUserIds: ['user-1'], memberUserIds: ['user-1'], plannedStartDate: '',
+          createdAt: new Date('2026-08-26T04:00:00.000Z'), updatedAt: 2
+        },
+        {
+          _id: 'created-before-range', code: 'BL-20260825-0001', name: '范围外售后', status: 'active',
+          managerUserIds: ['user-1'], memberUserIds: ['user-1'], plannedStartDate: '2099-01-01',
+          createdAt: new Date('2026-08-25T04:00:00.000Z'), updatedAt: 1
+        }
+      ]
+    }
+  })
+  const { repository } = createRepositoryHarness(seed)
+  const listed = await repository.listBusinessLines({
+    actor: { _id: 'user-1', openid: 'wx-user-1', status: 'active' },
+    query: { startDate: '2026-08-26', endDate: '2026-08-26', page: 1, pageSize: 20 }
+  })
+
+  assert.deepEqual(listed.items.map(item => item._id), ['created-in-range'])
 })
 
 test('活动超级管理员可全局列出合法售后且降权或停用立即失效', async () => {
@@ -1505,8 +1558,10 @@ test('account-id manager updates metadata atomically without changing immutable 
 
   assert.deepEqual(result, { id: 'business-1', version: 5 })
   const line = fake.documents('business_lines')[0]
-  assert.equal(line.name, '新名称')
+  assert.equal(line.name, '旧名称')
   assert.equal(line.description, '新说明')
+  assert.equal(line.plannedStartDate, '2026-08-08')
+  assert.equal(line.plannedEndDate, '2026-08-12')
   assert.equal(line.version, 5)
   assert.equal(line.searchSourceVersion, 1)
   assert.equal(line.searchGeneratedVersion, 0)
@@ -1514,7 +1569,7 @@ test('account-id manager updates metadata atomically without changing immutable 
   assert.deepEqual(result.searchEnvelope, {
     actorId: 'user-1', businessLineId: 'business-1', sourceVersion: 1
   })
-  for (const field of ['code', 'managerUserIds', 'memberUserIds', 'sourceTemplateId', 'sourceTemplateVersion', 'currentNodeId', 'nodeCount']) {
+  for (const field of ['code', 'name', 'plannedStartDate', 'plannedEndDate', 'managerUserIds', 'memberUserIds', 'sourceTemplateId', 'sourceTemplateVersion', 'currentNodeId', 'nodeCount']) {
     assert.deepEqual(line[field], original[field], field)
   }
   assert.deepEqual(fake.documents('business_nodes'), [

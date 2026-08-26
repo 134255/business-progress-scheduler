@@ -50,19 +50,11 @@ function normalizeDate(value) {
 
 function normalizeInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw createError('VALIDATION_ERROR')
-  const plannedStartDate = normalizeDate(input.plannedStartDate)
-  const plannedEndDate = normalizeDate(input.plannedEndDate)
-  if (plannedStartDate && plannedEndDate && plannedStartDate > plannedEndDate) {
-    throw createError('VALIDATION_ERROR')
-  }
   const requestKey = requireText(input.requestKey)
   if (!REQUEST_KEY_PATTERN.test(requestKey)) throw createError('VALIDATION_ERROR')
   return {
     templateId: requireText(input.templateId),
-    name: requireText(input.name),
     description: typeof input.description === 'string' ? input.description.trim() : '',
-    plannedStartDate,
-    plannedEndDate,
     requestKey
   }
 }
@@ -73,19 +65,11 @@ function normalizeMetadataInput(input) {
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
     throw createError('VALIDATION_ERROR')
   }
-  const plannedStartDate = normalizeDate(input.plannedStartDate)
-  const plannedEndDate = normalizeDate(input.plannedEndDate)
-  if (plannedStartDate && plannedEndDate && plannedStartDate > plannedEndDate) {
-    throw createError('VALIDATION_ERROR')
-  }
   return {
     lineId: requireText(input.businessLineId),
     expectedVersion: input.expectedVersion,
     metadata: {
-      name: requireText(input.name),
-      description: typeof input.description === 'string' ? input.description.trim() : '',
-      plannedStartDate,
-      plannedEndDate
+      description: typeof input.description === 'string' ? input.description.trim() : ''
     }
   }
 }

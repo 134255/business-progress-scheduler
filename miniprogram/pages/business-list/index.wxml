@@ -6,9 +6,9 @@
       <text class="search-help">可检索售后、节点、字段和凭证名称；仅返回你有权查看的售后</text>
     </view>
     <view class="date-row">
-      <picker mode="date" value="{{startDate}}" bindchange="onStartDate"><view class="date-box">{{startDate || '开始日期'}}</view></picker>
+      <picker mode="date" value="{{startDate}}" bindchange="onStartDate"><view class="date-box">{{startDate || '创建开始日期'}}</view></picker>
       <text class="muted">至</text>
-      <picker mode="date" value="{{endDate}}" bindchange="onEndDate"><view class="date-box">{{endDate || '结束日期'}}</view></picker>
+      <picker mode="date" value="{{endDate}}" bindchange="onEndDate"><view class="date-box">{{endDate || '创建结束日期'}}</view></picker>
     </view>
     <button class="primary-button" bindtap="search" loading="{{loading}}">检索</button>
   </view>
@@ -17,7 +17,7 @@
 
   <view class="card" wx:for="{{items}}" wx:key="_id" data-id="{{item._id}}" bindtap="openDetail">
     <view class="row-between"><text class="name">{{item.name}}</text><status-pill status="{{item.status}}" /></view>
-    <text class="muted block">{{item.code}} · {{item.plannedStartDate || '未设开始日期'}}</text>
+    <text class="muted block">{{item.code}}</text>
     <text class="muted block">当前节点：{{item.currentNodeName || '待配置'}}</text>
     <view class="search-matches" wx:if="{{item.matches.length}}">
       <view class="search-match" wx:for="{{item.visibleMatches}}" wx:for-item="match" wx:key="id">

@@ -30,10 +30,7 @@ test('creation accepts only validated template-backed metadata and returns gener
     actor: harness.actor,
     input: {
       templateId: 'template-1',
-      name: '新业务',
       description: '说明',
-      plannedStartDate: '2026-08-08',
-      plannedEndDate: '2026-08-12',
       requestKey: 'request-001'
     },
     definition: businessTemplate(),
@@ -44,6 +41,61 @@ test('creation accepts only validated template-backed metadata and returns gener
       processingCalendarVersion: 'calendar-v1',
       calendarNotificationStatus: 'not_required'
     }
+  }])
+})
+
+test('creation ignores legacy caller names and planned dates before reserving the snapshot', async () => {
+  const harness = createBusinessHarness()
+
+  await harness.service.createFromTemplate({
+    actor: harness.actor,
+    input: validInput({
+      name: '客户端旧名称',
+      plannedStartDate: '2099-01-01',
+      plannedEndDate: '2099-12-31'
+    })
+  })
+
+  const snapshotCall = harness.calls.find(call => call[0] === 'createBusinessSnapshot')
+  assert.deepEqual(snapshotCall[1].input, {
+    templateId: 'template-1',
+    description: '说明',
+    requestKey: 'request-001'
+  })
+})
+
+test('ordinary metadata updates can change only the description', async () => {
+  const calls = []
+  const { createBusinessService } = require('../lib/business-service')
+  const service = createBusinessService({
+    repository: {
+      async updateBusinessMetadata(input) {
+        calls.push(input)
+        return { id: input.lineId, version: input.expectedVersion + 1 }
+      }
+    },
+    clock: () => new Date(),
+    workTimeService: { async tryAddWorkMinutes() { throw new Error('not used') } }
+  })
+  const actor = { _id: 'user-1', status: 'active' }
+
+  await service.updateMetadata({
+    actor,
+    input: {
+      businessLineId: 'business-1',
+      expectedVersion: 4,
+      description: ' 新说明 ',
+      name: '旧客户端试图改名',
+      plannedStartDate: '2099-01-01',
+      plannedEndDate: '2099-12-31'
+    }
+  })
+
+  assert.deepEqual(calls, [{
+    actor,
+    lineId: 'business-1',
+    expectedVersion: 4,
+    metadata: { description: '新说明' }
   }])
 })
 
@@ -177,9 +229,8 @@ test('creation rejects unavailable templates and invalid account or request meta
 
   for (const item of [
     { name: 'inactive actor', actor: { _id: 'user-1', status: 'disabled' }, input: validInput(), code: 'FORBIDDEN' },
-    { name: 'missing name', actor: { _id: 'user-1', status: 'active' }, input: validInput({ name: ' ' }), code: 'VALIDATION_ERROR' },
+    { name: 'missing template', actor: { _id: 'user-1', status: 'active' }, input: validInput({ templateId: ' ' }), code: 'VALIDATION_ERROR' },
     { name: 'invalid request key', actor: { _id: 'user-1', status: 'active' }, input: validInput({ requestKey: 'bad key' }), code: 'VALIDATION_ERROR' },
-    { name: 'reversed dates', actor: { _id: 'user-1', status: 'active' }, input: validInput({ plannedStartDate: '2026-08-13' }), code: 'VALIDATION_ERROR' }
   ]) {
     await t.test(item.name, async () => {
       const harness = createBusinessHarness()
@@ -270,20 +321,13 @@ test('metadata update accepts only normalized metadata and an expected version',
     actor,
     lineId: 'business-1',
     expectedVersion: 4,
-    metadata: {
-      name: '新名称',
-      description: '新说明',
-      plannedStartDate: '2026-08-08',
-      plannedEndDate: '2026-08-12'
-    }
+    metadata: { description: '新说明' }
   }])
 
   for (const input of [
     { businessLineId: 'business-1', expectedVersion: 4, name: '名称', code: 'FORGED' },
     { businessLineId: 'business-1', expectedVersion: 0, name: '名称' },
-    { businessLineId: 'business-1', expectedVersion: 4, name: ' ', description: '' },
-    { businessLineId: 'business-1', expectedVersion: 4, name: '名称', plannedStartDate: '2026-02-30' },
-    { businessLineId: 'business-1', expectedVersion: 4, name: '名称', plannedStartDate: '2026-08-13', plannedEndDate: '2026-08-12' }
+    { businessLineId: ' ', expectedVersion: 4, description: '' }
   ]) {
     await assert.rejects(
       service.updateMetadata({ actor, input }),

@@ -106,10 +106,7 @@ function creationIdentity(actorId, input) {
   const inputHash = hash(JSON.stringify([
     actor,
     input.templateId,
-    input.name,
-    input.description,
-    input.plannedStartDate,
-    input.plannedEndDate
+    input.description
   ]))
   return { lineId: `business-${requestHash}`, requestHash, inputHash }
 }
@@ -744,7 +741,7 @@ function createCloudBusinessRepository({
       .filter(line => !keyword || [line.name, line.code]
         .some(value => String(value || '').toLowerCase().includes(keyword)))
       .filter(line => {
-        const itemDate = line.plannedStartDate ? new Date(line.plannedStartDate) : null
+        const itemDate = line.createdAt ? new Date(line.createdAt) : null
         return (!start || (itemDate && itemDate >= start)) && (!end || (itemDate && itemDate <= end))
       })
       .sort(compareUpdatedDesc)
@@ -758,7 +755,7 @@ function createCloudBusinessRepository({
         : isLegacyLineMember(line, finalActor.openid))) continue
       if (keyword && ![line.name, line.code]
         .some(value => String(value || '').toLowerCase().includes(keyword))) continue
-      const itemDate = line.plannedStartDate ? new Date(line.plannedStartDate) : null
+      const itemDate = line.createdAt ? new Date(line.createdAt) : null
       if ((start && (!itemDate || itemDate < start)) || (end && (!itemDate || itemDate > end))) continue
       visible.push(line)
     }
@@ -1142,10 +1139,7 @@ function createCloudBusinessRepository({
       const nextSearch = advanceSearchVersion(line)
       await transaction.collection(COLLECTIONS.lines).doc(lineId).update({
         data: {
-          name: metadata.name,
           description: metadata.description,
-          plannedStartDate: metadata.plannedStartDate,
-          plannedEndDate: metadata.plannedEndDate,
           version: nextVersion,
           ...nextSearch,
           updatedAt: db.serverDate()
@@ -1841,16 +1835,18 @@ function createCloudBusinessRepository({
           }
           attemptedSequence = Math.max(currentSequence + 1, minimumSequence)
           const code = formatBusinessCode(at, attemptedSequence)
+          const templateName = typeof template.name === 'string' ? template.name.trim() : ''
+          if (!templateName) throw createError('TEMPLATE_NOT_ENABLED')
           prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue, displayNames)
           await transaction.collection(COLLECTIONS.counters).doc(counterId).set({
             data: { sequence: attemptedSequence, dateKey: dayKey, updatedAt: db.serverDate() }
           })
           const line = {
             code,
-            name: input.name,
+            name: `${templateName}-${code}`,
             description: input.description,
-            plannedStartDate: input.plannedStartDate,
-            plannedEndDate: input.plannedEndDate,
+            plannedStartDate: '',
+            plannedEndDate: '',
             sourceTemplateId: template._id,
             sourceTemplateVersion: template.version,
             ...(template.definitionDigest ? { sourceTemplateDefinitionDigest: template.definitionDigest } : {}),

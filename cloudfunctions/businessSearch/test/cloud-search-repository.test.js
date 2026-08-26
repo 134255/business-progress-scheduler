@@ -47,6 +47,7 @@ function authoritativeSeed() {
     business_lines: [{
       _id: 'line-1', code: 'BL-20260825-0001', name: '清闲售后', description: '需要上门处理',
       status: 'active', currentNodeId: 'node-2', nodeCount: 4,
+      createdAt: new Date('2026-08-25T02:00:00.000Z'),
       managerUserIds: ['manager-1'], memberUserIds: ['member-1', 'reviewer-1'],
       searchSourceVersion: 3, searchGeneratedVersion: 0, searchIndexStatus: 'pending'
     }],
@@ -277,6 +278,21 @@ async function generatedHarness() {
   })
   return value
 }
+
+test('关键词检索日期筛选使用售后创建日期且不依赖计划日期', async () => {
+  const { repository } = await generatedHarness()
+  const included = await repository.queryAuthorized({
+    actorId: 'member-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: '',
+    startDate: '2026-08-25', endDate: '2026-08-25'
+  })
+  const excluded = await repository.queryAuthorized({
+    actorId: 'member-1', normalizedKeywords: ['清闲'], digestInput: '清闲', pageSize: 20, cursor: '',
+    startDate: '2026-08-26', endDate: '2026-08-26'
+  })
+
+  assert.deepEqual(included.items.map(item => item._id), ['line-1'])
+  assert.deepEqual(excluded.items, [])
+})
 
 test('普通成员按现有关系检索，活动超级管理员可全局检索且摘要最多三条', async () => {
   const { repository } = await generatedHarness()

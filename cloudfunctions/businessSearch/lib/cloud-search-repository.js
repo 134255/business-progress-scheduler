@@ -60,6 +60,11 @@ function exactDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
 }
 
+function shanghaiDateKey(value) {
+  if (!exactDate(value)) return ''
+  return new Date(value.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
 function exactStringArray(value, { nonEmpty = false, maximum = 100 } = {}) {
   if (!Array.isArray(value) || value.length > maximum || (nonEmpty && value.length === 0)) return null
   const result = []
@@ -590,7 +595,7 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
         return {
           _id: line._id, code: line.code || '', name: line.name || '', status: line.status,
           currentNodeId: line.currentNodeId || '', generationId: line.searchGenerationId,
-          plannedStartDate: typeof line.plannedStartDate === 'string' ? line.plannedStartDate : ''
+          createdDate: shanghaiDateKey(line.createdAt)
         }
       })
     } catch (_) {
@@ -711,8 +716,8 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       scannedLast = lineId
       const first = await authorizeCandidate(actorId, lineId)
       if (!first) continue
-      if ((startDate && (!first.plannedStartDate || first.plannedStartDate < startDate)) ||
-          (endDate && (!first.plannedStartDate || first.plannedStartDate > endDate))) continue
+      if ((startDate && (!first.createdDate || first.createdDate < startDate)) ||
+          (endDate && (!first.createdDate || first.createdDate > endDate))) continue
       const sourceEntries = await loadGenerationEntries(lineId, first.generationId)
       const everyKeywordMatched = normalizedKeywords.every(keyword => sourceEntries.some(entry =>
         typeof entry.normalizedText === 'string' && entry.normalizedText.includes(keyword)))

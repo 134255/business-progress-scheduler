@@ -9,16 +9,6 @@ function decode(value) {
   try { return decodeURIComponent(value) } catch (error) { return '' }
 }
 
-function validDate(value) {
-  if (!value) return true
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
-  if (!match) return false
-  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])))
-  return date.getUTCFullYear() === Number(match[1]) &&
-    date.getUTCMonth() === Number(match[2]) - 1 &&
-    date.getUTCDate() === Number(match[3])
-}
-
 function nextRequestKey() {
   requestSequence += 1
   return `create-${Date.now().toString(36)}-${requestSequence.toString(36)}-${Math.random().toString(36).slice(2, 10)}`
@@ -43,17 +33,17 @@ Page({
     canManage: false,
     frozen: false,
     lineCode: '',
+    lineName: '',
     lineStatus: '',
+    legacyPlannedStartDate: '',
+    legacyPlannedEndDate: '',
     nodes: [],
     templatePreview: null,
     templateAvailable: false,
     errorMessage: '',
     form: {
       version: 0,
-      name: '',
-      description: '',
-      plannedStartDate: '',
-      plannedEndDate: ''
+      description: ''
     }
   },
 
@@ -124,14 +114,14 @@ Page({
       canManage: Boolean(data.canManage),
       frozen,
       lineCode: line.code || '',
+      lineName: line.name || '',
       lineStatus: line.status || '',
+      legacyPlannedStartDate: line.plannedStartDate || '',
+      legacyPlannedEndDate: line.plannedEndDate || '',
       nodes: Array.isArray(data.nodes) ? data.nodes : [],
       form: {
         version: Number(line.version || 1),
-        name: line.name || '',
-        description: line.description || '',
-        plannedStartDate: line.plannedStartDate || '',
-        plannedEndDate: line.plannedEndDate || ''
+        description: line.description || ''
       },
       errorMessage: frozen
         ? '售后已完成或关闭，结构化信息已冻结'
@@ -142,34 +132,15 @@ Page({
   updateField(event) {
     if (this.data.editMode && (this.data.frozen || !this.data.canManage)) return
     const field = event.currentTarget.dataset.field
-    if (!['name', 'description'].includes(field)) return
-    this.pendingRequestKey = ''
-    this.setData({ [`form.${field}`]: event.detail.value, errorMessage: '' })
-  },
-
-  updateDate(event) {
-    if (this.data.editMode && (this.data.frozen || !this.data.canManage)) return
-    const field = event.currentTarget.dataset.field
-    if (!['plannedStartDate', 'plannedEndDate'].includes(field)) return
+    if (field !== 'description') return
     this.pendingRequestKey = ''
     this.setData({ [`form.${field}`]: event.detail.value, errorMessage: '' })
   },
 
   normalizedMetadata() {
     return {
-      name: String(this.data.form.name || '').trim(),
-      description: String(this.data.form.description || '').trim(),
-      plannedStartDate: this.data.form.plannedStartDate || '',
-      plannedEndDate: this.data.form.plannedEndDate || ''
+      description: String(this.data.form.description || '').trim()
     }
-  },
-
-  validate(metadata) {
-    if (!metadata.name) return '请填写售后线名称'
-    if (!validDate(metadata.plannedStartDate) || !validDate(metadata.plannedEndDate)) return '计划日期格式无效'
-    if (metadata.plannedStartDate && metadata.plannedEndDate &&
-        metadata.plannedStartDate > metadata.plannedEndDate) return '计划结束日期不能早于开始日期'
-    return ''
   },
 
   async save() {
@@ -178,11 +149,6 @@ Page({
     if (this.data.editMode && (!this.data.canManage || this.data.frozen)) return
     if (!this.data.editMode && !this.data.templateAvailable) return
     const metadata = this.normalizedMetadata()
-    const validationMessage = this.validate(metadata)
-    if (validationMessage) {
-      this.setData({ errorMessage: validationMessage })
-      return
-    }
 
     this.setData({ saving: true, errorMessage: '' })
     try {

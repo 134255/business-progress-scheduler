@@ -256,7 +256,7 @@ test('create mode loads a server-backed preview and blocks unavailable or missin
   assert.deepEqual(calls, [])
 })
 
-test('create mode validates real planned dates before sending a request', async () => {
+test('create mode ignores stale legacy name and planned-date form values', async () => {
   const calls = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = { setNavigationBarTitle: () => {}, reLaunch: () => assert.fail('must stay authenticated') }
@@ -272,8 +272,12 @@ test('create mode validates real planned dates before sending a request', async 
   })
 
   await page.save()
-  assert.deepEqual(calls, [])
-  assert.match(page.data.errorMessage, /日期/)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0], {
+    templateId: 'template-1',
+    description: '',
+    requestKey: calls[0].requestKey
+  })
 })
 
 test('template unavailability uses a prototype-safe string fallback consistently in list and create preview', async () => {
@@ -363,13 +367,51 @@ test('create mode uses one request key across retry, prevents rapid duplicates, 
   assert.match(calls[0].requestKey, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)
   assert.deepEqual(calls[1], {
     templateId: 'template-1',
-    name: '交付任务',
     description: '说明',
-    plannedStartDate: '2026-08-07',
-    plannedEndDate: '2026-08-08',
     requestKey: calls[0].requestKey
   })
   assert.deepEqual(redirects, [{ url: '/pages/business-detail/index?id=line-1' }])
+})
+
+test('create mode needs only a description and never submits a caller name or planned dates', async () => {
+  const calls = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    reLaunch: () => assert.fail('must stay authenticated'),
+    redirectTo: () => {},
+    showToast: () => {}
+  }
+  const page = loadPage('pages/business-edit/index.js', {
+    'services/templates.js': {
+      listEnabledTemplates: async () => ({
+        items: [{ _id: 'template-1', name: '交付模板', nodeCount: 1, available: true }]
+      })
+    },
+    'services/business.js': {
+      createBusinessFromTemplate: async input => {
+        calls.push(input)
+        return { id: 'line-1', code: 'BL-20260826-0001' }
+      }
+    }
+  })
+
+  await page.onLoad({ templateId: 'template-1' })
+  page.setData({ 'form.description': ' 仅填写说明 ' })
+  await page.save()
+
+  assert.deepEqual(calls, [{
+    templateId: 'template-1',
+    description: '仅填写说明',
+    requestKey: calls[0].requestKey
+  }])
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/business-edit/index.wxml'), 'utf8')
+  assert.doesNotMatch(wxml, /data-field="name"|data-field="plannedStartDate"|data-field="plannedEndDate"/)
+  assert.match(wxml, /模板名称.*售后线编号/)
+  const listWxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/business-list/index.wxml'), 'utf8')
+  assert.match(listWxml, /创建开始日期/)
+  assert.match(listWxml, /创建结束日期/)
+  assert.doesNotMatch(listWxml, /未设开始日期/)
 })
 
 test('edit mode renders immutable code and nodes and submits metadata with expected version only', async () => {
@@ -400,19 +442,21 @@ test('edit mode renders immutable code and nodes and submits metadata with expec
   await page.save()
 
   assert.equal(page.data.lineCode, 'YW-20260807-0001')
+  assert.equal(page.data.lineName, '旧名称')
+  assert.equal(page.data.legacyPlannedStartDate, '2026-08-07')
+  assert.equal(page.data.legacyPlannedEndDate, '2026-08-08')
   assert.equal(page.data.nodes[0].nodeCode, 'YW-20260807-0001-N001')
   assert.deepEqual(calls, [{
     businessLineId: 'line-1',
     expectedVersion: 4,
-    name: '新名称',
-    description: '新说明',
-    plannedStartDate: '2026-08-07',
-    plannedEndDate: '2026-08-08'
+    description: '新说明'
   }])
 
   const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/business-edit/index.wxml'), 'utf8')
   assert.doesNotMatch(wxml, /data-field="code"|bindinput="updateNodeName"|bindchange="toggleEvidence"|bindtap="addNode"|bindtap="removeNode"/)
   assert.match(wxml, /lineCode/)
+  assert.match(wxml, /lineName/)
+  assert.match(wxml, /历史计划日期/)
   assert.match(wxml, /nodes/)
 })
 
