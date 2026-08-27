@@ -3,6 +3,15 @@
 const MAX_TEXT_LENGTH = 8000
 const MAX_SOURCE_EXCERPT_LENGTH = 160
 const FIELD_TYPES = new Set(['short_text', 'long_text', 'number', 'boolean', 'date', 'single_select', 'multi_select'])
+const LABEL_ALIAS_GROUPS = [
+  ['型号', '机型', '规格型号', '产品型号'],
+  ['购买日期', '购入日期', '下单日期'],
+  ['出库仓库', '仓库', '发货仓库'],
+  ['订单号', '订单编号', '单号'],
+  ['客户姓名', '客户名称', '收件人', '收货人', '姓名'],
+  ['手机号', '手机号码', '联系电话', '联系电话号码', '电话'],
+  ['地址', '所在地址', '收货地址', '联系地址']
+]
 
 function fail(kind = 'schema') {
   const error = new Error(`invalid parser ${kind}`)
@@ -156,6 +165,84 @@ function normalizeParserSchema(definitions) {
   return normalized
 }
 
+function normalizeLabel(value) {
+  return value.normalize('NFKC').toLowerCase().replace(/[\s:：_\-—（）()\[\]【】]/g, '')
+}
+
+const NORMALIZED_ALIAS_GROUPS = LABEL_ALIAS_GROUPS.map(group => new Set(group.map(normalizeLabel)))
+
+function aliasesMatch(left, right) {
+  if (left === right) return true
+  return NORMALIZED_ALIAS_GROUPS.some(group => group.has(left) && group.has(right))
+}
+
+function exactOption(options, value) {
+  const normalized = normalizeLabel(value)
+  const matches = options.filter(option => normalizeLabel(option) === normalized)
+  return matches.length === 1 ? matches[0] : null
+}
+
+function directStructuredValue(definition, rawValue) {
+  const value = rawValue.trim()
+  if (!value) return null
+  if (definition.type === 'short_text' || definition.type === 'long_text') return value
+  if (definition.type === 'number') {
+    if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(value)) return null
+    const number = Number(value)
+    return Number.isFinite(number) ? number : null
+  }
+  if (definition.type === 'boolean') {
+    const normalized = normalizeLabel(value)
+    if (['是', '有', 'true', 'yes', '1'].includes(normalized)) return true
+    if (['否', '无', 'false', 'no', '0'].includes(normalized)) return false
+    return null
+  }
+  if (definition.type === 'date') {
+    const match = /^(\d{4})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})\s*(?:日)?$/.exec(value)
+    if (!match) return null
+    const date = `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`
+    return validDate(date) ? date : null
+  }
+  if (definition.type === 'single_select') return exactOption(definition.constraints.options, value)
+  if (definition.type === 'multi_select') {
+    const parts = value.split(/[、,，/;；]/).map(part => part.trim()).filter(Boolean)
+    if (!parts.length) return null
+    const options = parts.map(part => exactOption(definition.constraints.options, part))
+    if (options.some(option => !option) || new Set(options).size !== options.length) return null
+    return options
+  }
+  return null
+}
+
+function extractStructuredCandidates({ text, schema }) {
+  const normalizedSchema = normalizeParserSchema(schema)
+  const normalizedText = typeof text === 'string' ? text.trim() : ''
+  if (!normalizedText || normalizedText.length > MAX_TEXT_LENGTH) fail('text')
+  const candidates = []
+  const seen = new Set()
+  for (const rawLine of normalizedText.split(/\r?\n/)) {
+    const match = /^\s*([^:：\n]{1,100})\s*[:：]\s*(.+?)\s*$/.exec(rawLine)
+    if (!match) continue
+    const sourceLabel = normalizeLabel(match[1])
+    const definitions = normalizedSchema.filter(definition => aliasesMatch(sourceLabel, normalizeLabel(definition.name)))
+    if (definitions.length !== 1 || seen.has(definitions[0].fieldKey)) continue
+    const definition = definitions[0]
+    const value = directStructuredValue(definition, match[2])
+    if (value === null) continue
+    const candidate = {
+      fieldKey: definition.fieldKey,
+      value,
+      confidence: sourceLabel === normalizeLabel(definition.name) ? 1 : 0.95,
+      sourceExcerpt: rawLine.trim().slice(0, MAX_SOURCE_EXCERPT_LENGTH)
+    }
+    try {
+      candidates.push(validateModelCandidates([definition], [candidate])[0])
+      seen.add(definition.fieldKey)
+    } catch (_) {}
+  }
+  return candidates
+}
+
 function buildModelRequest({ text, schema }) {
   const normalizedText = typeof text === 'string' ? text.trim() : ''
   if (!normalizedText || normalizedText.length > MAX_TEXT_LENGTH) fail('text')
@@ -293,5 +380,6 @@ module.exports = {
   MAX_TEXT_LENGTH,
   normalizeParserSchema,
   buildModelRequest,
-  validateModelCandidates
+  validateModelCandidates,
+  extractStructuredCandidates
 }

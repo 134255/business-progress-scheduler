@@ -1,7 +1,7 @@
 'use strict'
 
 const crypto = require('node:crypto')
-const { normalizeParserSchema, buildModelRequest, validateModelCandidates } = require('./parser-domain')
+const { normalizeParserSchema, buildModelRequest, validateModelCandidates, extractStructuredCandidates } = require('./parser-domain')
 
 function digest(value) {
   return crypto.createHash('sha256').update(value).digest('hex')
@@ -30,6 +30,8 @@ function createParserService({ repository, aiClient } = {}) {
         textDigest: digest(input.text.trim()),
         requestKeyHash: input.requestKeyHash
       })
+      const structuredCandidates = extractStructuredCandidates({ text: input.text, schema })
+      if (structuredCandidates.length) return { candidates: structuredCandidates }
       const raw = await aiClient.parse(request)
       return { candidates: validateModelCandidates(schema, raw.candidates) }
     }
