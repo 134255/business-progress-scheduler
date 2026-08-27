@@ -4,17 +4,26 @@ const { createParserService } = require('./lib/parser-service')
 const { createCloudParseRepository } = require('./lib/cloud-parse-repository')
 const { createCloudbaseAiClient, resolveModelName } = require('./lib/cloudbase-ai-client')
 
+const INTERNAL_TICKET_ID = /^[A-Za-z0-9_-]{20,128}$/
+
 function safeError(code, message) {
   const error = new Error(message)
   error.code = code
   return error
 }
 
+function hasInternalTicket(event) {
+  if (!event || typeof event !== 'object') return false
+  const descriptor = Object.getOwnPropertyDescriptor(event, 'ticketId')
+  return Boolean(descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+    typeof descriptor.value === 'string' && INTERNAL_TICKET_ID.test(descriptor.value))
+}
+
 function createNodeTextParserHandler({ service, repository, getContext = () => ({}), logger = console } = {}) {
   if (!service || typeof service.parseAuthorizedText !== 'function') throw new TypeError('service is required')
   return async function handler(event = {}) {
     const context = getContext() || {}
-    if (context.OPENID) throw safeError('FORBIDDEN', '文本识别任务调用未经授权')
+    if (context.OPENID && !hasInternalTicket(event)) throw safeError('FORBIDDEN', '文本识别任务调用未经授权')
     try {
       const result = await service.parseAuthorizedText(event)
       if (repository && typeof repository.cleanupExpired === 'function') {
