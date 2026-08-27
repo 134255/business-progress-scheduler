@@ -11,16 +11,15 @@ test('CloudBase AI client calls managed model and parses fenced JSON', async () 
     createModel(group) {
       calls.push(group)
       return { async generateText(input) { calls.push(input); return { text: '```json\n{"candidates":[]}\n```' } } }
-    },
-    modelName: 'deepseek-v4-flash'
+    }
   })
   assert.deepEqual(await client.parse({ messages: [{ role: 'user', content: 'x' }] }), { candidates: [] })
   assert.equal(calls[0], 'cloudbase')
-  assert.equal(calls[1].model, 'deepseek-v4-flash')
+  assert.equal(calls[1].model, 'hy3')
 })
 
 test('CloudBase AI client fails closed on unsafe model configuration and response', () => {
-  assert.equal(resolveModelName(undefined), 'deepseek-v4-flash')
+  assert.equal(resolveModelName(undefined), 'hy3')
   assert.equal(resolveModelName('hy3'), 'hy3')
   assert.throws(() => resolveModelName(''), /config/i)
   assert.throws(() => resolveModelName('bad model!'), /config/i)

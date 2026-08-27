@@ -13,7 +13,7 @@ function responseError() {
 }
 
 function resolveModelName(value) {
-  if (value === undefined) return 'deepseek-v4-flash'
+  if (value === undefined) return 'hy3'
   if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{1,79}$/.test(value)) configError()
   return value
 }

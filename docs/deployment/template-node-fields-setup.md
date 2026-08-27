@@ -243,7 +243,7 @@
 
 1. 创建 `node_text_parse_requests` 与 `node_text_parse_usage`，权限均设为“仅云函数读写”。不得开放客户端直接读取；两个集合不得写入原始粘贴文本、识别候选、OpenID 原值、显示名或业务正文。
 2. 为 `node_text_parse_requests` 创建 `expiresAt ASC, _id ASC` 非唯一组合索引并等待生效；`node_text_parse_usage` 只按确定性文档编号固定读取，不需要组合索引。
-3. 在 CloudBase AI+ 控制台为目标环境开通并确认代码默认模型可用，同时设置费用/Token 告警。若默认模型在该环境不可用，应先选定控制台明确支持的替代模型，不得先部署后碰运气。
+3. 在 CloudBase AI+ 控制台确认代码默认的 `hy3` 模型已启用，同时设置费用/Token 告警；当前目标环境无需为此购买标准版。若默认模型在其他环境不可用，应先选定控制台明确支持的替代模型并通过服务端 `NODE_TEXT_PARSE_MODEL` 配置，不得先部署后碰运气。
 4. 右键 `cloudfunctions/nodeTextParser`，选择“上传并部署：云端安装依赖”。函数名为 `nodeTextParser`，入口为 `index.main`，Node.js 16，内存先用 256 MB，超时至少 60 秒。
 5. `nodeTextParser` 的触发器必须保存并刷新确认为 `{"triggers": []}`。不得建立 Timer，也不得用控制台普通“测试”绕过票据；小程序只能调用 `businessApi.recognizeNodeText`。
 6. `NODE_TEXT_PARSE_MODEL` 可留空使用代码中的受支持默认模型；如目标环境需要指定模型，只能填写已在第 3 步确认可用的服务端模型名称，客户端不能覆盖。模型名称不是密钥，但仍不得由用户输入或写入日志。
