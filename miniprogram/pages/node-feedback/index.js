@@ -230,7 +230,9 @@ Page({
   },
 
   onShow() {
-    if (this.data.lineId && this.hasLoaded) return this.loadData()
+    if (!this.data.lineId || !this.hasLoaded || this.data.draftDirty ||
+        this.data.submitting || this.data.reviewDraftLocked) return
+    return this.loadData()
   },
 
   onHide() {
@@ -357,7 +359,7 @@ Page({
     this.setData({ statusIndex: Number(event.detail.value) })
   },
 
-  markDraftDirty() {
+  markDraftDirty(update = {}) {
     if (this.data.submitting || this.data.reviewDraftLocked) return false
     this.formRevision += 1
     this.savedProgress = null
@@ -366,7 +368,7 @@ Page({
     this.progressExpectedNodeVersion = null
     this.reviewRequestKey = ''
     this.reviewExpectedNodeVersion = null
-    this.setData({ draftDirty: true, recognitionCandidates: [] })
+    this.setData({ draftDirty: true, recognitionCandidates: [], ...update })
     return true
   },
 
@@ -443,26 +445,23 @@ Page({
       return
     }
     const applied = applyRecognitionPreview(this.data.fields, this.data.fieldValues, selected)
-    if (!this.markDraftDirty()) return
-    this.setData({
+    if (!this.markDraftDirty({
       fields: applied.fields,
       fieldValues: applied.fieldValues,
       recognitionText: '',
       recognitionCandidates: []
-    })
+    })) return
     wx.showToast({ title: '已填入选中字段', icon: 'success' })
   },
 
   onComment(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    if (!this.markDraftDirty()) return
-    this.setData({ comment: event.detail.value })
+    this.markDraftDirty({ comment: event.detail.value })
   },
 
   onFieldInput(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    if (!this.markDraftDirty()) return
-    this.setData({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: event.detail.value })
+    this.markDraftDirty({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: event.detail.value })
   },
 
   onNumberInput(event) {
@@ -471,10 +470,9 @@ Page({
 
   onBooleanChange(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    if (!this.markDraftDirty()) return
     const raw = event.detail.value
     const value = raw === true || raw === 'true' ? true : raw === false || raw === 'false' ? false : null
-    this.setData({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: value })
+    this.markDraftDirty({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: value })
   },
 
   onDateChange(event) {
@@ -483,23 +481,21 @@ Page({
 
   onSingleSelectChange(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    if (!this.markDraftDirty()) return
     const key = event.currentTarget.dataset.fieldkey
     const field = this.data.fields.find(item => item.fieldKey === key)
     const options = field && field.constraints && field.constraints.options
     const value = Array.isArray(options) ? options[Number(event.detail.value)] : null
-    this.setData({ [`fieldValues.${key}`]: value === undefined ? null : value })
+    this.markDraftDirty({ [`fieldValues.${key}`]: value === undefined ? null : value })
   },
 
   onMultiSelectChange(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    if (!this.markDraftDirty()) return
     const key = event.currentTarget.dataset.fieldkey
     const selected = event.detail.value.slice()
     const fields = this.data.fields.map(field => field.fieldKey === key
       ? { ...field, optionItems: field.optionItems.map(option => ({ ...option, selected: selected.includes(option.value) })) }
       : field)
-    this.setData({ [`fieldValues.${key}`]: selected, fields })
+    this.markDraftDirty({ [`fieldValues.${key}`]: selected, fields })
   },
 
   normalizedFieldValues() {
@@ -585,8 +581,9 @@ Page({
         errorMessage: ''
       })
     }
-    if (files.length !== originalCount && !this.markDraftDirty()) return
-    this.setData({ files, selectedTotalBytes: total, selectedTotalText: formatBytes(total) })
+    if (files.length !== originalCount) {
+      this.markDraftDirty({ files, selectedTotalBytes: total, selectedTotalText: formatBytes(total) })
+    }
   },
 
   chooseMediaEvidence() {
@@ -642,11 +639,10 @@ Page({
     const index = Number(event.currentTarget.dataset.index)
     const current = this.data.files[index]
     if (!current || current.status === 'uploading') return
-    if (!this.markDraftDirty()) return
     const files = this.data.files.slice()
     files.splice(index, 1)
     const total = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
-    this.setData({ files, selectedTotalBytes: total, selectedTotalText: formatBytes(total) })
+    this.markDraftDirty({ files, selectedTotalBytes: total, selectedTotalText: formatBytes(total) })
   },
 
   updateLocalFile(index, changes) {

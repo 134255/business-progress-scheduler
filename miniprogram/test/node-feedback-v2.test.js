@@ -154,6 +154,74 @@ test('识别等待期间表单发生变化时丢弃迟到结果且不覆盖用�
   assert.ok(toasts.includes('表单已变化，识别结果已丢弃，请重试'))
 })
 
+test('连续输入不同字段时每次只原子更新一次且保留其他字段内容', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向') }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'], reviewMode: 'any' })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核', status: 'ready' }, canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+
+  const originalSetData = page.setData
+  const updates = []
+  page.setData = function (update) {
+    updates.push(update)
+    originalSetData.call(this, update)
+  }
+
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '第一个字段' } })
+  assert.equal(updates.length, 1, '一次输入不得分成两次视图更新')
+  assert.equal(updates[0].draftDirty, true)
+  assert.deepEqual(updates[0].recognitionCandidates, [])
+  assert.equal(updates[0]['fieldValues.summary'], '第一个字段')
+
+  updates.length = 0
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'detail' } }, detail: { value: '第二个字段' } })
+  assert.equal(updates.length, 1, '切换输入框后仍应单次原子更新')
+  assert.equal(updates[0]['fieldValues.detail'], '第二个字段')
+  assert.equal(page.data.fieldValues.summary, '第一个字段')
+  assert.equal(page.data.fieldValues.detail, '第二个字段')
+})
+
+test('本地草稿未保存时页面重新显示不得用服务端旧草稿覆盖，干净状态仍会刷新', async () => {
+  let lineReads = 0
+  let historyReads = 0
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向') }
+  const page = loadPage({
+    getBusinessLine: async () => {
+      lineReads += 1
+      return businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'], reviewMode: 'any' }))
+    },
+    getNodeHistory: async () => {
+      historyReads += 1
+      return {
+        node: { id: 'node-1', name: '资料审核', status: 'ready' },
+        canSubmit: true,
+        history: historyReads === 1 ? [] : [{
+          feedbackId: 'feedback-server', revision: 1, status: 'in_progress', comment: '服务端旧说明',
+          fieldValues: [{ fieldKey: 'summary', value: '服务端旧内容' }], evidences: []
+        }]
+      }
+    }
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '尚未保存的本地内容' } })
+
+  await page.onShow()
+  assert.equal(lineReads, 1)
+  assert.equal(historyReads, 1)
+  assert.equal(page.data.fieldValues.summary, '尚未保存的本地内容')
+
+  page.setData({ draftDirty: false })
+  await page.onShow()
+  assert.equal(lineReads, 2)
+  assert.equal(historyReads, 2)
+  assert.equal(page.data.fieldValues.summary, '服务端旧内容')
+  assert.equal(page.data.comment, '服务端旧说明')
+})
+
 test('用户可取消识别且页面隐藏会清除原文并丢弃迟到结果', async () => {
   for (const action of ['onCancelRecognition', 'onHide']) {
     const pending = deferred()
