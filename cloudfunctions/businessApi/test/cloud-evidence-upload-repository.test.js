@@ -251,6 +251,7 @@ test('scoped credential provider grants multipart upload actions to one exact ge
   assert.deepEqual(request.policy.statement[0].resource, [
     `qcs::cos:ap-shanghai:uid/1234567890:bucket-1234567890/${objectKey}`
   ])
-  assert.equal(JSON.stringify(request.policy).includes('*"'), true)
+  assert.equal(Object.hasOwn(request.policy.statement[0], 'principal'), false)
+  assert.equal(JSON.stringify(request.policy).includes('*"'), false)
   assert.equal(request.policy.statement[0].resource[0].includes('*'), false)
 })

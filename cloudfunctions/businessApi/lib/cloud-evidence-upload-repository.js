@@ -372,7 +372,6 @@ function createScopedCosCredentialProvider({ sts, secretId, secretKey, bucket, r
         statement: [{
           action: COS_UPLOAD_ACTIONS,
           effect: 'allow',
-          principal: { qcs: ['*'] },
           resource: [`qcs::cos:${region}:uid/${appId}:${bucket}/${objectKey}`]
         }]
       }
