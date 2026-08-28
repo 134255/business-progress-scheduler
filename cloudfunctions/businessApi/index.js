@@ -29,6 +29,12 @@ const { createCloudWorkCalendarRepository } = require('./lib/cloud-work-calendar
 const { createWorkTimeService } = require('./lib/work-time-service')
 const { createEvidenceService } = require('./lib/evidence-service')
 const { createCloudEvidenceRepository } = require('./lib/cloud-evidence-repository')
+const { createEvidenceUploadService } = require('./lib/evidence-upload-service')
+const {
+  createCloudEvidenceUploadRepository,
+  createCosStorageAdapter,
+  createScopedCosCredentialProvider
+} = require('./lib/cloud-evidence-upload-repository')
 const { createFeedbackService } = require('./lib/feedback-service')
 const { createCloudFeedbackRepository } = require('./lib/cloud-feedback-repository')
 const { createReviewService } = require('./lib/review-service')
@@ -104,6 +110,8 @@ const LOGGABLE_ERROR_CODES = new Set([
   'DUPLICATE_CODE',
   'EVIDENCE_EXPIRED',
   'EVIDENCE_NOT_ATTACHABLE',
+  'EVIDENCE_UPLOAD_EXPIRED',
+  'EVIDENCE_UPLOAD_UNAVAILABLE',
   'FEEDBACK_COMMIT_IN_PROGRESS',
   'FEEDBACK_TOTAL_TOO_LARGE',
   'FILE_TOO_LARGE',
@@ -267,6 +275,24 @@ function createEvidenceRoutes(evidenceService) {
   }
 }
 
+function createEvidenceUploadRoutes(evidenceUploadService) {
+  if (!evidenceUploadService) return null
+  return {
+    beginEvidenceUpload: ({ actor, payload }) => evidenceUploadService.beginEvidenceUpload({
+      actor,
+      input: selectProtectedPayload(payload, new Set([
+        'businessLineId', 'nodeId', 'expectedNodeVersion', 'fileName', 'declaredSize'
+      ]))
+    }),
+    finalizeEvidenceUpload: ({ actor, payload }) => evidenceUploadService.finalizeEvidenceUpload({
+      actor,
+      input: selectProtectedPayload(payload, new Set([
+        'evidenceId', 'uploadSessionToken', 'expectedNodeVersion'
+      ]))
+    })
+  }
+}
+
 function createFeedbackRoutes(feedbackService) {
   return {
     submitFeedback: ({ actor, payload }) => {
@@ -412,6 +438,7 @@ function createBusinessApi({
   businessService,
   businessLifecycleService,
   evidenceService,
+  evidenceUploadService,
   feedbackService,
   reviewService,
   calendarAdminService,
@@ -431,6 +458,7 @@ function createBusinessApi({
     businessService ? createBusinessRoutes(businessService) : null,
     businessLifecycleService ? createBusinessLifecycleRoutes(businessLifecycleService) : null,
     evidenceService ? createEvidenceRoutes(evidenceService) : null,
+    createEvidenceUploadRoutes(evidenceUploadService),
     feedbackService ? createFeedbackRoutes(feedbackService) : null,
     createReviewRoutes(reviewService),
     createCalendarAdminRoutes(calendarAdminService),
@@ -829,6 +857,44 @@ function createDefaultBusinessApi() {
     businessSearchClient
   })
   const evidenceService = createEvidenceService({ repository: evidenceRepository })
+  let configuredEvidenceUploadService
+  const getEvidenceUploadService = () => {
+    if (configuredEvidenceUploadService) return configuredEvidenceUploadService
+    const bucket = process.env.EVIDENCE_COS_BUCKET
+    const region = process.env.EVIDENCE_COS_REGION
+    const secretId = process.env.EVIDENCE_COS_SECRET_ID
+    const secretKey = process.env.EVIDENCE_COS_SECRET_KEY
+    const cloudFilePrefix = process.env.EVIDENCE_CLOUD_FILE_PREFIX
+    if (![bucket, region, secretId, secretKey, cloudFilePrefix].every(value => typeof value === 'string' && value)) {
+      const error = new Error('EVIDENCE_UPLOAD_UNAVAILABLE')
+      error.code = 'EVIDENCE_UPLOAD_UNAVAILABLE'
+      error[APPLICATION_ERROR_MARKER] = true
+      throw error
+    }
+    const COS = require('cos-nodejs-sdk-v5')
+    const STS = require('qcloud-cos-sts')
+    const client = new COS({ SecretId: secretId, SecretKey: secretKey })
+    configuredEvidenceUploadService = createEvidenceUploadService({
+      repository: createCloudEvidenceUploadRepository({
+        db,
+        storage: createCosStorageAdapter({ client, bucket, region }),
+        clock: () => new Date(),
+        cloudFilePrefix
+      }),
+      credentialProvider: createScopedCosCredentialProvider({
+        sts: STS, secretId, secretKey, bucket, region
+      }),
+      bucket,
+      region,
+      clock: () => new Date(),
+      randomBytes: crypto.randomBytes
+    })
+    return configuredEvidenceUploadService
+  }
+  const evidenceUploadService = {
+    beginEvidenceUpload: input => getEvidenceUploadService().beginEvidenceUpload(input),
+    finalizeEvidenceUpload: input => getEvidenceUploadService().finalizeEvidenceUpload(input)
+  }
   const feedbackService = createFeedbackService({
     repository: feedbackRepository,
     businessSearchClient
@@ -869,6 +935,7 @@ function createDefaultBusinessApi() {
     businessService,
     businessLifecycleService,
     evidenceService,
+    evidenceUploadService,
     feedbackService,
     reviewService,
     calendarAdminService,

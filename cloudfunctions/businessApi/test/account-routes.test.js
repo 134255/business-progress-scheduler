@@ -83,6 +83,7 @@ function createRouteHarness({
   businessService,
   businessLifecycleService,
   evidenceService,
+  evidenceUploadService,
   feedbackService,
   reviewService,
   operationsService,
@@ -138,6 +139,7 @@ function createRouteHarness({
     businessService,
     businessLifecycleService,
     evidenceService,
+    evidenceUploadService,
     feedbackService,
     reviewService,
     operationsService,
@@ -719,6 +721,48 @@ test('default evidence routes delegate trusted actors and exact registration/acc
     ['registerUpload', { actor, input: upload }],
     ['getAccessGrant', { actor, evidenceId: 'evidence-1' }]
   ])
+})
+
+test('scoped evidence upload routes use the trusted actor and an exact safe payload contract', async () => {
+  const calls = []
+  const evidenceUploadService = {
+    async beginEvidenceUpload(input) {
+      calls.push(['begin', input])
+      return { evidenceId: 'evidence-1', uploadSessionToken: 'opaque' }
+    },
+    async finalizeEvidenceUpload(input) {
+      calls.push(['finalize', input])
+      return { evidenceId: 'evidence-1', storageStatus: 'available' }
+    }
+  }
+  const harness = createRouteHarness({ evidenceUploadService })
+  const beginPayload = {
+    businessLineId: 'business-1', nodeId: 'node-1', expectedNodeVersion: 4,
+    fileName: 'proof.mov', declaredSize: 123, actorId: 'forged'
+  }
+  const finalizePayload = {
+    evidenceId: 'evidence-1', uploadSessionToken: 'opaque', expectedNodeVersion: 4,
+    actorId: 'forged'
+  }
+  assert.equal((await harness.api.main({ action: 'beginEvidenceUpload', payload: beginPayload })).ok, true)
+  assert.equal((await harness.api.main({ action: 'finalizeEvidenceUpload', payload: finalizePayload })).ok, true)
+  const actor = {
+    _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+  }
+  assert.deepEqual(calls, [
+    ['begin', { actor, input: {
+      businessLineId: 'business-1', nodeId: 'node-1', expectedNodeVersion: 4,
+      fileName: 'proof.mov', declaredSize: 123
+    } }],
+    ['finalize', { actor, input: {
+      evidenceId: 'evidence-1', uploadSessionToken: 'opaque', expectedNodeVersion: 4
+    } }]
+  ])
+  const forged = await harness.api.main({
+    action: 'beginEvidenceUpload', payload: { ...beginPayload, objectKey: 'attacker-selected' }
+  })
+  assert.equal(forged.ok, false)
+  assert.equal(forged.code, 'VALIDATION_ERROR')
 })
 
 test('default feedback routes use the trusted account and protect both writes and history', async () => {
