@@ -89,18 +89,17 @@ test('business service creates only through the template route and builds dashbo
           total: 2
         }
       }
-      if (action === 'getMyDashboardSummary') {
+      if (action === 'getDashboardWorkspace') {
         return {
-          stats: { active: 1, completed: 1, pendingProcessing: 2 },
+          stats: {
+            active: 1, pendingMine: 2, pendingMineAvailable: true,
+            pendingReviews: 0, unreadNotifications: 0, completed: 1, complete: true
+          },
           recent: [
             { _id: 'line-new', status: 'active' },
             { _id: 'line-done', status: 'completed' }
-          ],
-          complete: true
+          ]
         }
-      }
-      if (action === 'listMyPendingReviews' || action === 'listMyNotifications') {
-        return { items: [], hasMore: false }
       }
       return { id: 'line-new', code: 'YW-20260807-0001' }
     }
@@ -121,9 +120,7 @@ test('business service creates only through the template route and builds dashbo
       templateId: 'template-1', name: '交付', description: '',
       plannedStartDate: '2026-08-07', plannedEndDate: '2026-08-08', requestKey: 'attempt-1'
     }],
-    ['getMyDashboardSummary', {}],
-    ['listMyPendingReviews', { page: 1, pageSize: 50 }],
-    ['listMyNotifications', { page: 1, pageSize: 50 }],
+    ['getDashboardWorkspace', {}],
     ['updateBusinessMetadata', { businessLineId: 'line-new', expectedVersion: 1, name: '更新' }]
   ])
   assert.deepEqual(dashboard, {

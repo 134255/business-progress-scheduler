@@ -1,6 +1,9 @@
 const businessService = require('../../services/business')
 const { safeErrorMessage } = require('../../utils/safe-error')
 
+let cachedAccountId = ''
+let cachedDashboard = null
+
 Page({
   data: {
     loading: true,
@@ -13,7 +16,17 @@ Page({
   onShow() {
     const currentUser = this.requireActiveUser()
     if (!currentUser) return
+    if (cachedAccountId && cachedAccountId !== currentUser._id) cachedDashboard = null
+    cachedAccountId = currentUser._id
     this.setData({ profile: currentUser })
+    if (cachedDashboard) {
+      this.setData({
+        stats: cachedDashboard.stats,
+        recent: cachedDashboard.recent || [],
+        loading: false,
+        errorMessage: ''
+      })
+    }
     return this.loadDashboard(currentUser._id)
   },
 
@@ -34,10 +47,12 @@ Page({
   async loadDashboard(expectedUserId) {
     const requestSequence = (this.dashboardSequence || 0) + 1
     this.dashboardSequence = requestSequence
-    this.setData({ loading: true, errorMessage: '' })
+    this.setData({ loading: !cachedDashboard, errorMessage: '' })
     try {
       const data = await businessService.dashboard()
       if (requestSequence !== this.dashboardSequence || !this.requireActiveUser(expectedUserId)) return
+      cachedAccountId = expectedUserId
+      cachedDashboard = { stats: data.stats, recent: data.recent || [] }
       this.setData({ stats: data.stats, recent: data.recent || [] })
     } catch (error) {
       if (requestSequence === this.dashboardSequence && this.requireActiveUser(expectedUserId)) {

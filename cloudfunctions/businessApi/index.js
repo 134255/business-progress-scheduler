@@ -49,6 +49,7 @@ const { createBusinessSearchClient } = require('./lib/business-search-client')
 const { createNodeTextRecognitionService } = require('./lib/node-text-recognition-service')
 const { createCloudNodeTextRecognitionRepository } = require('./lib/cloud-node-text-recognition-repository')
 const { createNodeTextParserClient } = require('./lib/node-text-parser-client')
+const { createDashboardWorkspaceService } = require('./lib/dashboard-workspace-service')
 
 const COLLECTIONS = {
   users: 'users',
@@ -275,6 +276,16 @@ function createEvidenceRoutes(evidenceService) {
   }
 }
 
+function createDashboardWorkspaceRoutes(dashboardWorkspaceService) {
+  if (!dashboardWorkspaceService) return null
+  return {
+    getDashboardWorkspace: ({ actor, payload }) => {
+      selectProtectedPayload(payload, new Set())
+      return dashboardWorkspaceService.getDashboardWorkspace({ actor })
+    }
+  }
+}
+
 function createEvidenceUploadRoutes(evidenceUploadService) {
   if (!evidenceUploadService) return null
   return {
@@ -445,6 +456,7 @@ function createBusinessApi({
   operationsService,
   shareService,
   recognitionService,
+  dashboardWorkspaceService,
   businessSearchClient,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
@@ -456,6 +468,7 @@ function createBusinessApi({
     Object.create(null),
     templateService ? createTemplateRoutes(templateService) : null,
     businessService ? createBusinessRoutes(businessService) : null,
+    createDashboardWorkspaceRoutes(dashboardWorkspaceService),
     businessLifecycleService ? createBusinessLifecycleRoutes(businessLifecycleService) : null,
     evidenceService ? createEvidenceRoutes(evidenceService) : null,
     createEvidenceUploadRoutes(evidenceUploadService),
@@ -906,6 +919,10 @@ function createDefaultBusinessApi() {
     businessSearchClient,
     clock: () => new Date()
   })
+  const dashboardWorkspaceService = createDashboardWorkspaceService({
+    businessService,
+    reviewService
+  })
   const calendarAdminService = createCalendarAdminService({
     db,
     invokeCalendarSync: data => cloud.callFunction({ name: 'calendarSync', data }),
@@ -942,6 +959,7 @@ function createDefaultBusinessApi() {
     operationsService,
     shareService,
     recognitionService,
+    dashboardWorkspaceService,
     businessSearchClient,
     getContext: () => cloud.getWXContext(),
     clock,

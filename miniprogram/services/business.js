@@ -67,24 +67,7 @@ async function listAll(method, pageSize = 50) {
 }
 
 async function dashboard() {
-  const [summary, pendingReviews, notifications] = await Promise.all([
-    callBusinessApi('getMyDashboardSummary', {}),
-    listAll(listMyPendingReviews),
-    listAll(listMyNotifications)
-  ])
-  const stats = summary && summary.stats || {}
-  return {
-    stats: {
-      active: Number(stats.active || 0),
-      pendingMine: Number(stats.pendingProcessing || 0),
-      pendingMineAvailable: true,
-      pendingReviews: pendingReviews.length,
-      unreadNotifications: notifications.filter(item => !item.read).length,
-      completed: Number(stats.completed || 0),
-      complete: summary && summary.complete !== false
-    },
-    recent: Array.isArray(summary && summary.recent) ? summary.recent : []
-  }
+  return callProtected('getDashboardWorkspace', {}, '售后概览加载失败，请稍后重试')
 }
 
 function listMyPendingProcessing(query) {

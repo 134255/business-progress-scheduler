@@ -89,6 +89,7 @@ function createRouteHarness({
   operationsService,
   shareService,
   recognitionService,
+  dashboardWorkspaceService,
   calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
@@ -145,6 +146,7 @@ function createRouteHarness({
     operationsService,
     shareService,
     recognitionService,
+    dashboardWorkspaceService,
     calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
@@ -721,6 +723,30 @@ test('default evidence routes delegate trusted actors and exact registration/acc
     ['registerUpload', { actor, input: upload }],
     ['getAccessGrant', { actor, evidenceId: 'evidence-1' }]
   ])
+})
+
+test('聚合概览路由只使用受信账号且拒绝多余参数', async () => {
+  const calls = []
+  const dashboardWorkspaceService = {
+    async getDashboardWorkspace(input) {
+      calls.push(input)
+      return { stats: {}, recent: [] }
+    }
+  }
+  const harness = createRouteHarness({ dashboardWorkspaceService })
+  const result = await harness.api.main({ action: 'getDashboardWorkspace', payload: {} })
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    }
+  }])
+
+  const rejected = await harness.api.main({
+    action: 'getDashboardWorkspace', payload: { actorId: 'forged', unexpected: true }
+  })
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.code, 'VALIDATION_ERROR')
 })
 
 test('scoped evidence upload routes use the trusted actor and an exact safe payload contract', async () => {
