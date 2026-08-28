@@ -135,7 +135,7 @@ test('rejects a declared size above the universal evidence limit before reposito
     input: {
       businessLineId: 'business-1', nodeId: 'node-1',
       fileId: 'cloud://env/oversized.pdf', fileName: 'oversized.pdf',
-      declaredSize: 20 * 1024 * 1024 + 1
+      declaredSize: 120 * 1024 * 1024 + 1
     }
   }), assertCode('FILE_TOO_LARGE'))
   assert.deepEqual(harness.calls, [])

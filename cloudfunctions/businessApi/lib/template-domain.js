@@ -18,7 +18,9 @@ const REVIEWER_ASSIGNMENT_MODE = Object.freeze({
   FIXED_ACCOUNTS: 'fixed_accounts',
   BUSINESS_CREATOR: 'business_creator'
 })
-const ALLOWED_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+const ALLOWED_EVIDENCE_TYPES = Object.freeze([
+  'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'mp4', 'mov', 'm4v'
+])
 
 function createError(code, message = code) {
   const error = new Error(message)

@@ -492,10 +492,10 @@ test('rejects external or malformed file IDs without invoking the cloud adapter'
   }
 })
 
-test('rejects a declared size above 20 MB before authorization or cloud download', async () => {
+test('rejects a declared size above 120 MiB before authorization or cloud download', async () => {
   const harness = createHarness()
   await assert.rejects(harness.repository.registerUpload(registration({
-    declaredSize: 20 * 1024 * 1024 + 1
+    declaredSize: 120 * 1024 * 1024 + 1
   })), assertCode('FILE_TOO_LARGE'))
   assert.deepEqual(harness.calls, [])
   assert.equal(harness.fake.transactionRuns.length, 0)
@@ -507,10 +507,13 @@ test('optional evidence nodes with an empty allowlist accept every supported sig
     { extension: 'jpg', bytes: Buffer.from([0xff, 0xd8, 0xff, 0x00]) },
     { extension: 'jpeg', bytes: Buffer.from([0xff, 0xd8, 0xff, 0x00]) },
     { extension: 'png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
+    { extension: 'webp', bytes: Buffer.from('RIFF0000WEBP') },
+    { extension: 'heic', bytes: Buffer.from('0000ftypheic') },
+    { extension: 'heif', bytes: Buffer.from('0000ftypmif1') },
     { extension: 'pdf', bytes: Buffer.from('%PDF-safe-fixture') },
-    { extension: 'mp4', bytes: Buffer.from('0000ftyp0000') },
-    { extension: 'mov', bytes: Buffer.from('0000ftyp0000') },
-    { extension: 'm4v', bytes: Buffer.from('0000ftyp0000') }
+    { extension: 'mp4', bytes: Buffer.from('0000ftypisom') },
+    { extension: 'mov', bytes: Buffer.from('0000ftypqt  ') },
+    { extension: 'm4v', bytes: Buffer.from('0000ftypM4V ') }
   ]) {
     const documents = seed({ business_nodes: [{
       _id: 'node-1', businessLineId: 'business-1', sequence: 0, status: 'ready',
@@ -580,7 +583,7 @@ test('effective evidence allowlists fail closed for malformed own data and inher
   }, true), assertCode('UNSUPPORTED_FILE_TYPE'))
   assert.deepEqual(effectiveAllowedEvidenceTypes({
     allowedEvidenceTypes: [], requiresEvidence: false
-  }, true), ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+  }, true), ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'mp4', 'mov', 'm4v'])
 })
 
 test('effective evidence allowlists reject inherited or accessor requiresEvidence', () => {
@@ -787,7 +790,7 @@ test('rejects spoofed, disallowed, mismatched, oversized, or malformed downloads
     { bytes: Buffer.from([0xff, 0xd8, 0xff, 0x00]), input: {}, code: 'UNSUPPORTED_FILE_TYPE' },
     { bytes: PDF_BYTES, input: { fileName: 'report.jpg' }, code: 'UNSUPPORTED_FILE_TYPE' },
     { bytes: PDF_BYTES, input: { declaredSize: PDF_BYTES.length - 1 }, code: 'EVIDENCE_NOT_ATTACHABLE' },
-    { bytes: Buffer.concat([Buffer.from('%PDF'), Buffer.alloc(20 * 1024 * 1024 - 3)]), input: {}, code: 'FILE_TOO_LARGE' },
+    { bytes: PDF_BYTES, input: { declaredSize: 120 * 1024 * 1024 + 1 }, code: 'FILE_TOO_LARGE' },
     { bytes: new Uint8Array(PDF_BYTES), input: {}, code: 'UNSUPPORTED_FILE_TYPE' }
   ]
   for (const item of downloads) {

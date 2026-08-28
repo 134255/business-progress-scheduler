@@ -156,14 +156,14 @@ test('in-progress and blocked revisions may omit evidence and preserve null opti
   }
 })
 
-test('aggregate evidence validation has an exact 20MB boundary and no count cap', async () => {
+test('aggregate evidence validation has an exact 120 MiB boundary and no count cap', async () => {
   const tiny = Array.from({ length: 150 }, (_, index) => ({ _id: `evidence-${index}`, size: 1 }))
   const ids = tiny.map(item => item._id)
   const allowed = harness({ context: { ...context(), evidences: tiny } })
   await allowed.service.submitFeedback({ actor: allowed.actor, input: input({ evidenceIds: ids }) })
   assert.equal(allowed.calls[2][1].evidenceTotalBytes, 150)
 
-  const tooLarge = harness({ context: { ...context(), evidences: [{ _id: 'evidence-1', size: 20 * 1024 * 1024 + 1 }] } })
+  const tooLarge = harness({ context: { ...context(), evidences: [{ _id: 'evidence-1', size: 120 * 1024 * 1024 + 1 }] } })
   await assert.rejects(
     tooLarge.service.submitFeedback({ actor: tooLarge.actor, input: input({ evidenceIds: ['evidence-1'] }) }),
     error => error.code === 'FEEDBACK_TOTAL_TOO_LARGE'

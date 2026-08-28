@@ -2130,10 +2130,10 @@ test('审计修订在权限、冻结状态、版本和附件归属变化时失�
     }
   })
 
-  await t.test('修订附件总量超过二十兆字节', async () => {
+  await t.test('修订附件总量超过一百二十兆字节', async () => {
     const seed = amendmentSeed()
-    seed.evidences[0].size = 10 * 1024 * 1024
-    seed.evidences[1].size = 10 * 1024 * 1024 + 1
+    seed.evidences[0].size = 60 * 1024 * 1024
+    seed.evidences[1].size = 60 * 1024 * 1024 + 1
     const { fake, repository } = createRepositoryHarness(seed)
     await assert.rejects(
       repository.amendFrozenBusiness(amendmentInput()),

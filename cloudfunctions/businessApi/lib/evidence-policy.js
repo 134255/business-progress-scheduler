@@ -3,17 +3,25 @@ const crypto = require('node:crypto')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 
 const MB = 1024 * 1024
-const MAX_SINGLE_FILE_SIZE = 20 * MB
-const FEEDBACK_TOTAL_LIMIT = 20 * MB
+const FEEDBACK_TOTAL_LIMIT = 120 * MB
+const MAX_SINGLE_FILE_SIZE = FEEDBACK_TOTAL_LIMIT
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const HEIF_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1'])
+const VIDEO_BRANDS = new Set(['isom', 'iso2', 'avc1', 'mp41', 'mp42', 'qt  ', 'M4V '])
+const SUPPORTED_EVIDENCE_EXTENSIONS = Object.freeze([
+  'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'mp4', 'mov', 'm4v'
+])
 const TYPE_POLICY = Object.freeze({
-  jpg: { category: 'image', maximum: 5 * MB, signature: 'jpeg' },
-  jpeg: { category: 'image', maximum: 5 * MB, signature: 'jpeg' },
-  png: { category: 'image', maximum: 5 * MB, signature: 'png' },
+  jpg: { category: 'image', signature: 'jpeg' },
+  jpeg: { category: 'image', signature: 'jpeg' },
+  png: { category: 'image', signature: 'png' },
+  webp: { category: 'image', signature: 'webp' },
+  heic: { category: 'image', signature: 'heif' },
+  heif: { category: 'image', signature: 'heif' },
   pdf: { category: 'pdf', maximum: MAX_SINGLE_FILE_SIZE, signature: 'pdf' },
-  mp4: { category: 'video', maximum: MAX_SINGLE_FILE_SIZE, signature: 'video' },
-  mov: { category: 'video', maximum: MAX_SINGLE_FILE_SIZE, signature: 'video' },
-  m4v: { category: 'video', maximum: MAX_SINGLE_FILE_SIZE, signature: 'video' }
+  mp4: { category: 'video', signature: 'video' },
+  mov: { category: 'video', signature: 'video' },
+  m4v: { category: 'video', signature: 'video' }
 })
 
 function createError(code) {
@@ -42,27 +50,55 @@ function detectSignature(bytes) {
   if (bytes.length >= 4 && bytes.subarray(0, 4).toString('ascii') === '%PDF') return 'pdf'
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'jpeg'
   if (bytes.length >= PNG_SIGNATURE.length && bytes.subarray(0, 8).equals(PNG_SIGNATURE)) return 'png'
-  if (bytes.length >= 12 && bytes.subarray(4, 8).toString('ascii') === 'ftyp') return 'video'
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'webp'
+  if (bytes.length >= 12 && bytes.subarray(4, 8).toString('ascii') === 'ftyp') {
+    const brand = bytes.subarray(8, 12).toString('ascii')
+    if (HEIF_BRANDS.has(brand)) return 'heif'
+    if (VIDEO_BRANDS.has(brand)) return 'video'
+  }
   throw createError('UNSUPPORTED_FILE_TYPE')
 }
 
-function classifyAndValidateFile({ fileName, declaredSize, bytes, allowedTypes }) {
+function normalizedAllowedTypes(allowedTypes) {
+  if (!Array.isArray(allowedTypes)) throw createError('UNSUPPORTED_FILE_TYPE')
+  const normalized = []
+  for (let index = 0; index < allowedTypes.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(allowedTypes, String(index))
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+        typeof descriptor.value !== 'string') throw createError('UNSUPPORTED_FILE_TYPE')
+    normalized.push(descriptor.value.toLowerCase())
+  }
+  return normalized
+}
+
+function classifyHeader({ fileName, declaredSize, bytes, allowedTypes }) {
   const extension = normalizedExtension(fileName)
-  if (!Array.isArray(allowedTypes) || !allowedTypes.every(value => typeof value === 'string') ||
-      !allowedTypes.map(value => value.toLowerCase()).includes(extension)) {
+  if (!normalizedAllowedTypes(allowedTypes).includes(extension)) {
     throw createError('UNSUPPORTED_FILE_TYPE')
   }
   if (!Buffer.isBuffer(bytes)) throw createError('UNSUPPORTED_FILE_TYPE')
-  const policy = TYPE_POLICY[extension]
-  if (bytes.length > policy.maximum) throw createError('FILE_TOO_LARGE')
-  if (!Number.isSafeInteger(declaredSize) || declaredSize < 0 || declaredSize !== bytes.length) {
+  if (!Number.isSafeInteger(declaredSize) || declaredSize < 1 || bytes.length > declaredSize) {
     throw createError('EVIDENCE_NOT_ATTACHABLE')
   }
+  if (declaredSize > MAX_SINGLE_FILE_SIZE) throw createError('FILE_TOO_LARGE')
+  const policy = TYPE_POLICY[extension]
   if (detectSignature(bytes) !== policy.signature) throw createError('UNSUPPORTED_FILE_TYPE')
   return {
     category: policy.category,
     extension,
-    size: bytes.length,
+    size: declaredSize
+  }
+}
+
+function classifyAndValidateFile({ fileName, declaredSize, bytes, allowedTypes }) {
+  if (!Buffer.isBuffer(bytes)) throw createError('UNSUPPORTED_FILE_TYPE')
+  if (!Number.isSafeInteger(declaredSize) || declaredSize < 0 || declaredSize !== bytes.length) {
+    throw createError('EVIDENCE_NOT_ATTACHABLE')
+  }
+  const result = classifyHeader({ fileName, declaredSize, bytes, allowedTypes })
+  return {
+    ...result,
     sha256: crypto.createHash('sha256').update(bytes).digest('hex')
   }
 }
@@ -82,6 +118,8 @@ function validateFeedbackTotalSize(sizes) {
 module.exports = {
   FEEDBACK_TOTAL_LIMIT,
   MAX_SINGLE_FILE_SIZE,
+  SUPPORTED_EVIDENCE_EXTENSIONS,
+  classifyHeader,
   classifyAndValidateFile,
   validateFeedbackTotalSize
 }

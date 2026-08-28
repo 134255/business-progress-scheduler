@@ -1683,7 +1683,7 @@ test('当前处理轮草稿只接受最新反馈的自有字符串处理说明�
   assert.equal(getterCalls, 0)
 })
 
-test('当前处理轮草稿拒绝跨轮次、错误归属和超过20MB的凭证集合', async () => {
+test('当前处理轮草稿拒绝跨轮次、错误归属和超过120MiB的凭证集合', async () => {
   const data = reviewWorkflowSeed()
   data.node_feedback = [{
     _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', publishState: 'published',
@@ -1696,7 +1696,7 @@ test('当前处理轮草稿拒绝跨轮次、错误归属和超过20MB的凭证�
     _id: 'evidence-large', businessLineId: 'line-1', nodeId: 'node-1', feedbackId: 'feedback-current',
     feedbackRevision: 1, processingRoundNumber: 1, attachmentState: 'attached',
     retentionScope: 'business_line', retentionSource: 'node_feedback', storageStatus: 'available',
-    size: 20 * 1024 * 1024 + 1, purgedAt: null, purgeDueAt: null
+    size: 120 * 1024 * 1024 + 1, purgedAt: null, purgeDueAt: null
   }, {
     _id: 'evidence-wrong-round', businessLineId: 'line-1', nodeId: 'node-1', feedbackId: 'feedback-current',
     feedbackRevision: 1, processingRoundNumber: 2, attachmentState: 'attached',

@@ -2,6 +2,10 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 
 const {
+  FEEDBACK_TOTAL_LIMIT,
+  MAX_SINGLE_FILE_SIZE,
+  SUPPORTED_EVIDENCE_EXTENSIONS,
+  classifyHeader,
   classifyAndValidateFile,
   validateFeedbackTotalSize
 } = require('../lib/evidence-policy')
@@ -13,7 +17,19 @@ const png = size => Buffer.concat([
   Buffer.alloc(size - 8)
 ])
 const pdf = size => Buffer.concat([Buffer.from('%PDF'), Buffer.alloc(size - 4)])
-const video = size => Buffer.concat([Buffer.alloc(4), Buffer.from('ftyp'), Buffer.from('isom'), Buffer.alloc(size - 12)])
+const ftyp = (brand, size = 24) => Buffer.concat([
+  Buffer.alloc(4),
+  Buffer.from('ftyp'),
+  Buffer.from(brand),
+  Buffer.alloc(size - 12)
+])
+const video = size => ftyp('isom', size)
+const webp = size => Buffer.concat([
+  Buffer.from('RIFF'),
+  Buffer.alloc(4),
+  Buffer.from('WEBP'),
+  Buffer.alloc(size - 12)
+])
 
 function assertCode(code) {
   return error => error && error.code === code
@@ -41,6 +57,75 @@ test('classifies supported signatures and normalizes extension case without usin
   }
 })
 
+test('bounded headers classify every approved image, video, and document extension', () => {
+  assert.equal(FEEDBACK_TOTAL_LIMIT, 120 * MB)
+  assert.equal(MAX_SINGLE_FILE_SIZE, FEEDBACK_TOTAL_LIMIT)
+  assert.deepEqual(SUPPORTED_EVIDENCE_EXTENSIONS, [
+    'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'mp4', 'mov', 'm4v'
+  ])
+
+  const fixtures = [
+    { fileName: 'photo.jpg', bytes: jpeg(24), allowedTypes: ['jpg'], want: ['image', 'jpg'] },
+    { fileName: 'photo.jpeg', bytes: jpeg(24), allowedTypes: ['jpeg'], want: ['image', 'jpeg'] },
+    { fileName: 'photo.png', bytes: png(24), allowedTypes: ['png'], want: ['image', 'png'] },
+    { fileName: 'photo.webp', bytes: webp(24), allowedTypes: ['webp'], want: ['image', 'webp'] },
+    { fileName: 'photo.heic', bytes: ftyp('heic'), allowedTypes: ['heic'], want: ['image', 'heic'] },
+    { fileName: 'photo.heif', bytes: ftyp('mif1'), allowedTypes: ['heif'], want: ['image', 'heif'] },
+    { fileName: 'report.pdf', bytes: pdf(24), allowedTypes: ['pdf'], want: ['pdf', 'pdf'] },
+    { fileName: 'clip.mp4', bytes: ftyp('mp42'), allowedTypes: ['mp4'], want: ['video', 'mp4'] },
+    { fileName: 'clip.mov', bytes: ftyp('qt  '), allowedTypes: ['mov'], want: ['video', 'mov'] },
+    { fileName: 'clip.m4v', bytes: ftyp('M4V '), allowedTypes: ['m4v'], want: ['video', 'm4v'] }
+  ]
+
+  for (const fixture of fixtures) {
+    const result = classifyHeader({
+      ...fixture,
+      declaredSize: 120 * MB
+    })
+    assert.deepEqual([result.category, result.extension, result.size], [...fixture.want, 120 * MB])
+    assert.equal(Object.hasOwn(result, 'sha256'), false)
+  }
+})
+
+test('bounded header classifier accepts approved HEIF brands and rejects spoofed or unknown brands', () => {
+  for (const brand of ['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1']) {
+    assert.equal(classifyHeader({
+      fileName: 'capture.heif',
+      declaredSize: 24,
+      bytes: ftyp(brand),
+      allowedTypes: ['heif']
+    }).category, 'image')
+  }
+
+  for (const fixture of [
+    { fileName: 'photo.webp', bytes: jpeg(24), allowedTypes: ['webp'] },
+    { fileName: 'photo.heic', bytes: ftyp('isom'), allowedTypes: ['heic'] },
+    { fileName: 'clip.mp4', bytes: ftyp('heic'), allowedTypes: ['mp4'] },
+    { fileName: 'clip.mov', bytes: ftyp('zzzz'), allowedTypes: ['mov'] },
+    { fileName: 'photo.heif', bytes: ftyp('avif'), allowedTypes: ['heif'] }
+  ]) {
+    assert.throws(() => classifyHeader({
+      ...fixture,
+      declaredSize: fixture.bytes.length
+    }), assertCode('UNSUPPORTED_FILE_TYPE'))
+  }
+})
+
+test('bounded header classifier derives the single-object ceiling from the 120 MiB round total', () => {
+  assert.equal(classifyHeader({
+    fileName: 'report.pdf',
+    declaredSize: 120 * MB,
+    bytes: pdf(24),
+    allowedTypes: ['pdf']
+  }).size, 120 * MB)
+  assert.throws(() => classifyHeader({
+    fileName: 'report.pdf',
+    declaredSize: 120 * MB + 1,
+    bytes: pdf(24),
+    allowedTypes: ['pdf']
+  }), assertCode('FILE_TOO_LARGE'))
+})
+
 test('rejects spoofed, unsupported, malformed, and disallowed file types', () => {
   const rejected = [
     { fileName: 'report.jpg', bytes: pdf(20), allowedTypes: ['jpg', 'pdf'] },
@@ -62,29 +147,18 @@ test('rejects spoofed, unsupported, malformed, and disallowed file types', () =>
   }
 })
 
-test('accepts exact per-file byte boundaries and rejects one byte over', () => {
+test('legacy full-buffer compatibility delegates to the same expanded policy', () => {
   for (const fixture of [
-    { fileName: 'photo.jpg', bytes: jpeg(5 * MB), allowedTypes: ['jpg'] },
-    { fileName: 'photo.png', bytes: png(5 * MB), allowedTypes: ['png'] },
-    { fileName: 'report.pdf', bytes: pdf(20 * MB), allowedTypes: ['pdf'] },
-    { fileName: 'clip.mp4', bytes: video(20 * MB), allowedTypes: ['mp4'] }
+    { fileName: 'photo.webp', bytes: webp(24), allowedTypes: ['webp'] },
+    { fileName: 'photo.heif', bytes: ftyp('heix'), allowedTypes: ['heif'] },
+    { fileName: 'clip.mov', bytes: ftyp('qt  '), allowedTypes: ['mov'] }
   ]) {
-    assert.equal(classifyAndValidateFile({
+    const result = classifyAndValidateFile({
       ...fixture,
       declaredSize: fixture.bytes.length
-    }).size, fixture.bytes.length)
-  }
-
-  for (const fixture of [
-    { fileName: 'photo.jpeg', bytes: jpeg(5 * MB + 1), allowedTypes: ['jpeg'] },
-    { fileName: 'photo.png', bytes: png(5 * MB + 1), allowedTypes: ['png'] },
-    { fileName: 'report.pdf', bytes: pdf(20 * MB + 1), allowedTypes: ['pdf'] },
-    { fileName: 'clip.mov', bytes: video(20 * MB + 1), allowedTypes: ['mov'] }
-  ]) {
-    assert.throws(() => classifyAndValidateFile({
-      ...fixture,
-      declaredSize: fixture.bytes.length
-    }), assertCode('FILE_TOO_LARGE'))
+    })
+    assert.equal(result.size, fixture.bytes.length)
+    assert.match(result.sha256, /^[a-f0-9]{64}$/)
   }
 })
 
@@ -97,16 +171,16 @@ test('requires declared size to be a safe exact byte count', () => {
   }
 })
 
-test('rejects an oversized downloaded buffer as too large even when declared size is spoofed smaller', () => {
+test('rejects a full buffer whose byte count disagrees with its declaration', () => {
   assert.throws(() => classifyAndValidateFile({
-    fileName: 'photo.jpg', declaredSize: 1, bytes: jpeg(5 * MB + 1), allowedTypes: ['jpg']
-  }), assertCode('FILE_TOO_LARGE'))
+    fileName: 'photo.jpg', declaredSize: 1, bytes: jpeg(24), allowedTypes: ['jpg']
+  }), assertCode('EVIDENCE_NOT_ATTACHABLE'))
 })
 
-test('feedback total helper allows 20 MB exactly and rejects malformed or oversized totals', () => {
-  assert.equal(validateFeedbackTotalSize([5 * MB, 15 * MB]), 20 * MB)
+test('feedback total helper allows 120 MiB exactly and rejects malformed or oversized totals', () => {
+  assert.equal(validateFeedbackTotalSize([40 * MB, 80 * MB]), 120 * MB)
   assert.equal(validateFeedbackTotalSize([]), 0)
-  assert.throws(() => validateFeedbackTotalSize([20 * MB, 1]), assertCode('FEEDBACK_TOTAL_TOO_LARGE'))
+  assert.throws(() => validateFeedbackTotalSize([120 * MB, 1]), assertCode('FEEDBACK_TOTAL_TOO_LARGE'))
   assert.throws(() => validateFeedbackTotalSize([Number.MAX_SAFE_INTEGER]), assertCode('FEEDBACK_TOTAL_TOO_LARGE'))
   for (const sizes of [null, [1, -1], [1.5], ['1']]) {
     assert.throws(() => validateFeedbackTotalSize(sizes), assertCode('EVIDENCE_NOT_ATTACHABLE'))

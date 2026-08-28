@@ -228,8 +228,8 @@ test('负责人来源只接受自有数据属性，访问器或继承值不得�
 
 test('拒绝无效双 SLA、审核配置、凭证规则和重复稳定键', () => {
   assert.deepEqual(normalizeTemplateNode(createNode({
-    allowedEvidenceTypes: ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v']
-  })).allowedEvidenceTypes, ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+    allowedEvidenceTypes: ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'mp4', 'mov', 'm4v']
+  })).allowedEvidenceTypes, ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'mp4', 'mov', 'm4v'])
   assert.throws(() => normalizeTemplateNode(createNode({ processingSlaWorkHours: 0 })), error => error.code === 'TEMPLATE_INVALID')
   assert.throws(() => normalizeTemplateNode(createNode({ reviewSlaWorkHours: 0 })), error => error.code === 'TEMPLATE_INVALID')
   assert.throws(() => normalizeTemplateNode(createNode({ processingSlaWorkHours: 0.333 })), error => error.code === 'TEMPLATE_INVALID')
