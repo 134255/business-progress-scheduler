@@ -27,6 +27,9 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   UNSUPPORTED_FILE_TYPE: '文件格式不受支持，请重新选择',
   FILE_TOO_LARGE: '文件大小超过限制，请重新选择',
   EVIDENCE_NOT_ATTACHABLE: '当前凭证无法登记，请刷新后重试',
+  EVIDENCE_UPLOAD_EXPIRED: '上传授权已过期，正在重新尝试',
+  EVIDENCE_UPLOAD_UNAVAILABLE: '上传服务暂时不可用，请稍后重试',
+  FEEDBACK_TOTAL_TOO_LARGE: '本轮凭证合计不能超过 120 MB',
   BUSINESS_SEARCH_PENDING: '售后检索正在更新，请稍后重试',
   BUSINESS_SEARCH_UNAVAILABLE: '售后检索暂时不可用，请稍后重试',
   INVALID_SEARCH_QUERY: '请调整检索内容后重试',
@@ -156,6 +159,14 @@ function registerEvidenceUpload(input) {
   return callProtected('registerEvidenceUpload', input, '凭证上传失败，请重试')
 }
 
+function beginEvidenceUpload(input) {
+  return callProtected('beginEvidenceUpload', input, '凭证上传授权失败，请重试')
+}
+
+function finalizeEvidenceUpload(input) {
+  return callProtected('finalizeEvidenceUpload', input, '凭证上传确认失败，请重试')
+}
+
 function getEvidenceAccess(evidenceId) {
   return callProtected(
     'getEvidenceAccess',
@@ -238,6 +249,8 @@ module.exports = {
   submitNodeFeedback,
   getNodeHistory,
   registerEvidenceUpload,
+  beginEvidenceUpload,
+  finalizeEvidenceUpload,
   getEvidenceAccess,
   submitFeedback,
   rejectPreviousNode,
