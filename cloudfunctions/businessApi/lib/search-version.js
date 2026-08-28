@@ -60,4 +60,25 @@ function stripSearchEnvelope(result) {
   return publicResult.value
 }
 
-module.exports = { advanceSearchVersion, currentSearchVersion, stripSearchEnvelope }
+async function synchronizeSearchResult(stored, businessSearchClient) {
+  const envelope = stored && Object.getOwnPropertyDescriptor(stored, 'searchEnvelope')
+  if (!envelope) return stored
+  if (!Object.prototype.hasOwnProperty.call(envelope, 'value')) throw createError('SEARCH_STATE_INVALID')
+  const publicResult = stripSearchEnvelope(stored)
+  try {
+    if (!businessSearchClient || typeof businessSearchClient.ensureIndexed !== 'function') {
+      throw new Error('search unavailable')
+    }
+    await businessSearchClient.ensureIndexed(envelope.value)
+    return publicResult
+  } catch (_) {
+    return Object.assign({}, publicResult, { searchIndexStatus: 'pending' })
+  }
+}
+
+module.exports = {
+  advanceSearchVersion,
+  currentSearchVersion,
+  stripSearchEnvelope,
+  synchronizeSearchResult
+}

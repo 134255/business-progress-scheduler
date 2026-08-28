@@ -226,6 +226,25 @@ test('冻结售后修订发布后同步检索并只返回公开结果', async ()
   assert.deepEqual(calls, [envelope])
 })
 
+test('冻结售后修订已发布时检索延迟不推翻权威成功', async () => {
+  const actor = { _id: 'root', status: 'active', role: 'super_admin' }
+  const publicResult = { businessLineId: 'line-1', amendmentId: 'amend-10', version: 10 }
+  const service = createBusinessLifecycleService({
+    repository: { async amendFrozenBusiness() {
+      return {
+        publicResult,
+        searchEnvelope: { actorId: 'root', businessLineId: 'line-1', sourceVersion: 10 }
+      }
+    } },
+    businessSearchClient: { async ensureIndexed() { throw new Error('timeout') } }
+  })
+
+  assert.deepEqual(await service.amendFrozenBusiness({ actor, input: validAmendment() }), {
+    ...publicResult,
+    searchIndexStatus: 'pending'
+  })
+})
+
 test('修订服务拒绝非超级管理员、可变结构字段和非法附件', async () => {
   const root = { _id: 'root', status: 'active', role: 'super_admin' }
   const cases = [

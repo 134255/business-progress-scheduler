@@ -157,9 +157,9 @@ test('创建与幂等重试在公开返回前同步检索且索引失败不重�
     workTimeService: { async tryAddWorkMinutes() { throw new Error('not used') } },
     businessSearchClient: { async ensureIndexed() { throw new Error('timeout') } }
   })
-  await assert.rejects(
-    failed.createFromTemplate({ actor: { _id: 'user-1', status: 'active' }, input: validInput() }),
-    error => error.code === 'BUSINESS_SEARCH_PENDING'
+  assert.deepEqual(
+    await failed.createFromTemplate({ actor: { _id: 'user-1', status: 'active' }, input: validInput() }),
+    { id: 'business-1', code: 'BL-20260807-0001', searchIndexStatus: 'pending' }
   )
   assert.equal(createCalls, 1)
 })

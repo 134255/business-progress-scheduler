@@ -85,21 +85,21 @@ test('发布处理进度后同步检索索引并仅返回公开结果', async ()
   assert.deepEqual(indexed, [envelope])
 })
 
-test('处理进度已发布重试会补建检索索引且失败返回稳定错误', async () => {
+test('处理进度已发布重试会补建检索索引且索引失败仍返回权威成功', async () => {
   const publicResult = { feedbackId: 'feedback-1', revision: 1, nodeStatus: 'in_progress', lineStatus: 'active' }
   const envelope = { actorId: 'account-1', businessLineId: 'line-1', sourceVersion: 2 }
   const value = harness({
     published: { publicResult, searchEnvelope: envelope },
     businessSearchClient: { async ensureIndexed() { throw new Error('timeout') } }
   })
-  await assert.rejects(value.service.saveNodeProgress({
+  assert.deepEqual(await value.service.saveNodeProgress({
     actor: value.actor,
     input: {
       businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 3,
       action: 'save_progress', fieldValues: input().fieldValues, comment: '当前内容',
       evidenceIds: [], requestKey: 'progress-index-1'
     }
-  }), error => error.code === 'BUSINESS_SEARCH_PENDING')
+  }), { ...publicResult, searchIndexStatus: 'pending' })
 })
 
 test('submission snapshots typed field identity and delegates immutable normalized feedback', async () => {

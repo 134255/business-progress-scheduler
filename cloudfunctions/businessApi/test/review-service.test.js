@@ -154,7 +154,7 @@ test('提交审核同步检索索引并剥离内部信封', async () => {
   assert.deepEqual(indexed, [envelope])
 })
 
-test('审核投票同步检索索引且失败返回稳定错误', async () => {
+test('审核投票同步检索索引且索引失败仍返回权威成功', async () => {
   const publicResult = {
     reviewRoundId: 'review-feedback-current', status: 'approved',
     nodeStatus: 'completed', lineStatus: 'active', nextNodeId: 'line-1-node-002'
@@ -169,13 +169,13 @@ test('审核投票同步检索索引且失败返回稳定错误', async () => {
     },
     businessSearchClient: { async ensureIndexed() { throw new Error('timeout') } }
   })
-  await assert.rejects(value.service.submitReviewVote({
+  assert.deepEqual(await value.service.submitReviewVote({
     actor: { _id: 'reviewer-1', status: 'active' },
     input: {
       reviewRoundId: 'review-feedback-current', expectedRoundVersion: 1,
       decision: 'approve', comment: '', requestKey: 'vote-index-1'
     }
-  }), error => error.code === 'BUSINESS_SEARCH_PENDING')
+  }), { ...publicResult, searchIndexStatus: 'pending' })
 })
 
 test('提交审核采用当前轮最新字段与全部有效凭证并计算双时限快照', async () => {
