@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact review: 2026-08-27 (Asia/Shanghai)
+Last stable-fact review: 2026-08-28 (Asia/Shanghai)
 
 ## Product
 
@@ -19,9 +19,8 @@ Approved V1 rules include:
 - China workday calculations from a locally cached holiday adapter; default working hours are 09:00–20:00 without lunch break. Default node SLA is two workdays (22 work hours), and template nodes may override it.
 - In-app notifications as the fallback channel and a future Enterprise WeChat self-built application as the strong-reminder channel. Unfinished nodes are reminded every accumulated work hour during working time.
 - 需要持久化的处理与审核累计工作时长采用“已经完整经过的工作分钟”：权威工作区间的秒级结果向下取整，保留精确时间戳但不通过四舍五入提前累计分钟或判定逾期；提醒工作器继续使用精确秒级阈值。
-- Evidence supports JPG/JPEG/PNG up to 5 MB each, PDF up to 20 MB each, and MP4/MOV/M4V up to 20 MB each. A feedback may contain multiple files but no more than 20 MB in total.
-- 节点凭证在 iOS/Android 继续使用相册/相机媒体选择器；Mac/Windows 微信客户端使用本地文件选择器选择 JPG/JPEG/PNG/MP4/MOV/M4V，选中后统一进入同一格式、文件签名、单文件大小与 20 MB 合计限制。
-- For optional evidence, a strictly valid empty format allowlist means evidence is optional and every one of the seven system-supported formats is allowed. Required evidence still requires a non-empty allowlist; a non-empty allowlist always remains a strict format restriction. Malformed, inherited, accessor, duplicate, or unsupported policy values fail closed.
+- 同一处理轮的当前有效凭证合计上限为 120 MiB，不另设业务层文件数量上限；单个文件仍受该合计上限的物理约束。系统支持 JPG/JPEG/PNG/WebP/HEIC/HEIF、PDF、MP4/MOV/M4V，并按真实对象大小、文件签名和 ISO-BMFF 容器品牌失败关闭，不信任客户端 MIME、扩展名或声明大小。可选凭证的严格空白名单表示允许全部十种系统格式；必填凭证仍要求非空白名单，任何损坏、继承、访问器、重复或不支持的策略值失败关闭。
+- 节点凭证在 iOS/Android/HarmonyOS 使用相册/相机媒体选择器和文件选择能力，Mac/Windows 微信客户端使用本地文件选择器；各端选中后进入同一 120 MiB 合计、签名、容器和节点白名单校验。客户端通过服务端生成的精确对象键和 15 分钟单对象 STS 临时凭证直传 COS，高级 SDK 自动选择简单或分块上传，页面最多并发 3 个文件并仅重试可恢复网络错误；服务端 `headObject` 与有界头部核验成功后才把隐藏的 `uploading` 预约转换为 `available`。长期 COS Secret 只存在于云函数环境变量，客户端、日志、Git 和项目记忆均不得出现。
 - Evidence objects remain available for 60 calendar days after a business line is completed, cancelled, or closed. A scheduled idempotent cleanup then removes only the cloud file object while preserving metadata, hashes, feedback revisions, and audit history.
 - 第二批次采用短期能力令牌分享已完成节点的固定结果快照：发送者通过微信原生分享面板选择好友或群，接收者无需登录或业务成员权限，快照最长有效七个二十四小时；公开投影只含固化字段、处理说明和短期凭证地址，不暴露永久文件编号、身份值或内部预约数据。详细决策见 `docs/memory/decisions/ADR-0008-public-node-share-capabilities.md`。
 - 概览页的“待我处理”由服务端权威查询提供；新版审核节点按当前处理账号关系查询，纯旧节点只在没有任何新账号关系标记时兼容 OpenID。结果返回前重新校验活动账号、业务、当前节点和处理关系；超过 2,000 条安全扫描边界时只返回诚实下界。
@@ -50,8 +49,8 @@ Account transaction invariants are recorded in `docs/memory/decisions/ADR-0002-a
 Unbounded-count feedback evidence attachment uses hidden, deterministic, chunked reservations under the existing `node_feedback` and `evidences` collections; the invariant and Task 11 recovery obligation are recorded in `docs/memory/decisions/ADR-0003-feedback-evidence-reservations.md`.
 For ordinary feedback evidence, a strict non-null completed-line `purgeDueAt` is authoritative for the whole business line; every terminal line state (`completed`, `cancelled`, `closed`, or `deleted`) must carry that valid deadline or evidence access/history fails closed. Attached evidence records declare `retentionScope: business_line` with `retentionSource: node_feedback`; future Task 9 amendment evidence may explicitly use `retentionScope: evidence` with `retentionSource: audit_amendment` and its own required strict deadline. One shared classifier enforces these exact scope/source pairs for access and history, while missing scope is accepted only by the explicit legacy `evidenceIds` adapter. Unknown or inconsistent scope/source metadata fails closed. Task 11 must scan due terminal lines and purge every associated evidence object by `businessLineId` in bounded chunks; earlier revisions therefore inherit the same deadline as the final revision.
 Task 9 已落地业务驳回、关闭冻结和超级管理员审计修订。普通凭证继续继承业务线统一清理期限；审计修订附件从各自上传时间起独立保留 60 个自然日，并通过确定性、分块、可重试的 `audit_logs` 预约完成认领与发布。中断预约的 Task 11 回收义务记录在 `docs/memory/decisions/ADR-0004-business-lifecycle-amendment-reservations.md`。
-Task 10 已落地原生小程序动态反馈和凭证交互。节点页从受保护接口重新读取字段快照、版本、提交权限与历史；凭证只能通过云存储上传后登记为 `evidenceId`，所有查看和下载先申请短期地址。超级管理员使用独立受保护接口全局检索冻结业务和查看脱敏修订历史，普通业务成员读取边界保持不变。
-Task 11 已落地独立 `evidenceRetention` 定时云函数。它先分块回收反馈和审计修订的过期预约，再处理 24 小时孤立凭证、提前 15/7/1 天提醒和两种 60 天保留来源；文件清理使用带随机令牌的短期事务租约，云端删除成功或对象已不存在后才写入 `purged`，失败只保存安全分类与重试计数。真实定时触发器和目标环境索引由部署任务配置。完整的安全部署、索引、回滚和脱敏验收顺序记录在 `docs/deployment/template-node-fields-setup.md`。
+Task 10 已落地原生小程序动态反馈和凭证交互。节点页通过单一受保护工作区读取字段快照、版本、提交权限与历史；大凭证先领取单对象短期授权并直传 COS，完成服务端核验后只以 `evidenceId` 参与保存或提交。所有查看和下载仍先申请短期地址。超级管理员使用独立受保护接口全局检索冻结售后和查看脱敏修订历史，普通成员读取边界保持不变。
+Task 11 已落地独立 `evidenceRetention` 定时云函数。它先分块回收反馈和审计修订的过期预约，再处理过期 `uploading` 会话、24 小时孤立凭证、提前 15/7/1 天提醒和两种 60 天保留来源；文件清理使用带随机令牌的短期事务租约，云端删除成功或对象已不存在后才写入 `purged`，失败只保存安全分类与重试计数。真实定时触发器和目标环境索引由部署任务配置。完整的安全部署、索引、回滚和脱敏验收顺序记录在 `docs/deployment/template-node-fields-setup.md`。
 
 第二批次公开分享把头记录写入 `public_node_shares`，凭证顺序按每块最多 40 条写入 `public_node_share_chunks`。创建令牌由仅存在于 `businessApi` 环境变量的高熵密钥执行 HMAC-SHA256 派生；同一账号、业务、节点和幂等请求键恢复同一预约。有效分享通过 `publicShareHoldUntil` 暂缓凭证清理；到期后由 `evidenceRetention` 有界删除分享块和头记录。首版不提供手动提前撤销。
 
@@ -59,7 +58,7 @@ Task 11 已落地独立 `evidenceRetention` 定时云函数。它先分块回收
 
 Account deployment requires the `system_settings/account_admin_state` guard, deterministic `wechat_bindings/<sha256(openid)>` backfill, and removal of the legacy `users.openid` unique index only after a verified migration. The security-redacted operator procedure is `docs/deployment/account-admin-setup.md`.
 
-Task 9 已接入小程序端审核工作台：受保护的业务服务提供提交审核、提交投票、审核待办、审核详情、消息通知和标记已读六个方法；节点处理采用“幂等保存草稿后提交审核”的两步流程，服务端反馈结果返回并持久化最新节点版本，保证第二步按真实版本提交且失败可使用原请求键重试。审核、通知、概览和业务详情页面只使用服务端安全投影与编号导航，页面重新显示时刷新服务端状态，并在账号、页面请求或版本变化时丢弃旧异步响应。
+Task 9 已接入小程序端审核工作台：受保护的业务服务提供审核、投票、待办、详情、通知和标记已读能力；当前节点工作区一次返回节点、字段、草稿、历史与权限，脏草稿“保存并提交审核”由一个幂等服务端入口完成，避免保存成功但第二次请求失败时向用户误报失败。概览也由单一工作区接口聚合；检索投影是可恢复派生状态，不能把权威保存或提交包装成失败。业务详情保留已渲染内容并后台刷新，账号变化时立即清除旧账号数据并重新登录；所有页面继续在账号、页面请求或版本变化时丢弃旧异步响应。
 
 ## Environment
 

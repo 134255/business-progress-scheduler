@@ -239,6 +239,15 @@ test('scoped credential provider grants multipart upload actions to one exact ge
   assert.equal(result.credentials.tmpSecretId, 'tmp-id')
   assert.equal(request.durationSeconds, 900)
   assert.deepEqual(request.policy.statement[0].action, COS_UPLOAD_ACTIONS)
+  assert.deepEqual(request.policy.statement[0].action, [
+    'name/cos:PutObject',
+    'name/cos:InitiateMultipartUpload',
+    'name/cos:ListMultipartUploads',
+    'name/cos:ListParts',
+    'name/cos:UploadPart',
+    'name/cos:CompleteMultipartUpload',
+    'name/cos:AbortMultipartUpload'
+  ])
   assert.deepEqual(request.policy.statement[0].resource, [
     `qcs::cos:ap-shanghai:uid/1234567890:bucket-1234567890/${objectKey}`
   ])

@@ -21,6 +21,7 @@ const HEADER_BYTES = 64
 const COS_UPLOAD_ACTIONS = Object.freeze([
   'name/cos:PutObject',
   'name/cos:InitiateMultipartUpload',
+  'name/cos:ListMultipartUploads',
   'name/cos:ListParts',
   'name/cos:UploadPart',
   'name/cos:CompleteMultipartUpload',
