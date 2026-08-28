@@ -35,7 +35,7 @@ function seed(overrides = {}) {
 }
 
 function harness(documents = seed(), overrides = {}) {
-  const fake = createFakeCloudDatabase(documents)
+  const fake = createFakeCloudDatabase(documents, overrides.databaseOptions)
   const calls = []
   const storage = overrides.storage || {
     async headObject(value) {
@@ -254,4 +254,45 @@ test('scoped credential provider grants multipart upload actions to one exact ge
   assert.equal(Object.hasOwn(request.policy.statement[0], 'principal'), false)
   assert.equal(JSON.stringify(request.policy).includes('*"'), false)
   assert.equal(request.policy.statement[0].resource[0].includes('*'), false)
+})
+
+test('reservation never attempts to write the immutable CloudBase _id field', async () => {
+  const { fake, repository } = harness(seed(), { databaseOptions: { rejectExplicitIdOnSet: true } })
+
+  await reserve(repository)
+
+  const stored = fake.documents('evidences')[0]
+  assert.equal(stored._id, EVIDENCE_ID)
+  assert.equal(stored.storageStatus, 'uploading')
+})
+
+test('scoped credential provider waits for the callback-only qcloud STS contract', async () => {
+  let callbackReceived = false
+  const sts = {
+    getCredential(input, callback) {
+      assert.equal(typeof callback, 'function')
+      setImmediate(() => {
+        callbackReceived = true
+        callback(null, {
+          credentials: { tmpSecretId: 'tmp-id', tmpSecretKey: 'tmp-key', sessionToken: 'token' },
+          startTime: 1,
+          expiredTime: 901
+        })
+      })
+    }
+  }
+  const provider = createScopedCosCredentialProvider({
+    sts,
+    secretId: 'permanent-id',
+    secretKey: 'permanent-key',
+    bucket: 'bucket-1234567890',
+    region: 'ap-shanghai'
+  })
+
+  const result = await provider.issue({
+    objectKey: `evidence-uploads/business-1/node-1/${EVIDENCE_ID}.pdf`
+  })
+
+  assert.equal(callbackReceived, true)
+  assert.equal(result.credentials.tmpSecretId, 'tmp-id')
 })

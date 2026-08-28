@@ -58,6 +58,47 @@ function exactTemporaryCredentials(value) {
   }
 }
 
+function ownData(value, key) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return undefined
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ? descriptor.value
+    : undefined
+}
+
+function nestedData(value, path) {
+  let current = value
+  for (const key of path) current = ownData(current, key)
+  return current
+}
+
+function firstDefined(values) {
+  return values.find(value => value !== undefined && value !== null)
+}
+
+function safeCredentialDiagnostic(error) {
+  const result = {}
+  const code = firstDefined([
+    ownData(error, 'code'), ownData(error, 'Code'),
+    nestedData(error, ['Response', 'Error', 'Code']),
+    nestedData(error, ['response', 'data', 'Response', 'Error', 'Code']),
+    nestedData(error, ['response', 'data', 'Error', 'Code'])
+  ])
+  const requestId = firstDefined([
+    ownData(error, 'RequestId'), ownData(error, 'requestId'),
+    nestedData(error, ['Response', 'RequestId']),
+    nestedData(error, ['response', 'data', 'Response', 'RequestId'])
+  ])
+  const statusCode = Number(firstDefined([
+    ownData(error, 'statusCode'), ownData(error, 'status'),
+    nestedData(error, ['response', 'status'])
+  ]))
+  if (typeof code === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(code)) result.code = code
+  if (Number.isSafeInteger(statusCode) && statusCode >= 100 && statusCode <= 599) result.statusCode = statusCode
+  if (typeof requestId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(requestId)) result.requestId = requestId
+  return result
+}
+
 function createEvidenceUploadService({
   repository,
   credentialProvider,
@@ -65,7 +106,8 @@ function createEvidenceUploadService({
   region,
   clock = () => new Date(),
   randomBytes = crypto.randomBytes,
-  sha256 = value => crypto.createHash('sha256').update(String(value)).digest('hex')
+  sha256 = value => crypto.createHash('sha256').update(String(value)).digest('hex'),
+  onCredentialError = () => {}
 }) {
   if (!repository || !credentialProvider || typeof credentialProvider.issue !== 'function') {
     throw new TypeError('repository and credentialProvider are required')
@@ -73,6 +115,7 @@ function createEvidenceUploadService({
   if (typeof bucket !== 'string' || !bucket || typeof region !== 'string' || !region) {
     throw new TypeError('bucket and region are required')
   }
+  if (typeof onCredentialError !== 'function') throw new TypeError('onCredentialError must be a function')
 
   async function beginEvidenceUpload({ actor, input }) {
     if (!validActor(actor) || !input || typeof input !== 'object' || Array.isArray(input)) {
@@ -110,14 +153,35 @@ function createEvidenceUploadService({
       uploadSessionExpiresAt,
       orphanExpiresAt
     }
-    await repository.reserveUpload({ actor, reservation })
+    try {
+      await repository.reserveUpload({ actor, reservation })
+    } catch (error) {
+      if (error && error[APPLICATION_ERROR_MARKER] === true) throw error
+      if (error && typeof error === 'object') error.diagnostic = { stage: 'reserve_upload' }
+      throw error
+    }
     let issued
     try {
       issued = exactTemporaryCredentials(await credentialProvider.issue({ objectKey, expiresAt: uploadSessionExpiresAt }))
     } catch (error) {
-      throw createError('EVIDENCE_UPLOAD_UNAVAILABLE')
+      const diagnostic = safeCredentialDiagnostic(error)
+      try {
+        onCredentialError(diagnostic)
+      } catch (diagnosticError) {
+        // Diagnostics must never alter the fail-closed upload authorization path.
+      }
+      const unavailable = createError('EVIDENCE_UPLOAD_UNAVAILABLE')
+      const publicDiagnostic = { stage: 'credential_issue' }
+      if (diagnostic.code) publicDiagnostic.code = diagnostic.code
+      if (diagnostic.statusCode) publicDiagnostic.statusCode = diagnostic.statusCode
+      if (Object.keys(publicDiagnostic).length) unavailable.diagnostic = publicDiagnostic
+      throw unavailable
     }
-    if (!issued) throw createError('EVIDENCE_UPLOAD_UNAVAILABLE')
+    if (!issued) {
+      const unavailable = createError('EVIDENCE_UPLOAD_UNAVAILABLE')
+      unavailable.diagnostic = { stage: 'credential_shape' }
+      throw unavailable
+    }
     return {
       evidenceId,
       uploadSessionToken,

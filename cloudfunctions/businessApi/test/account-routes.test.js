@@ -818,6 +818,68 @@ test('scoped evidence upload routes use the trusted actor and an exact safe payl
   assert.equal(forged.code, 'VALIDATION_ERROR')
 })
 
+test('evidence upload authorization failure returns only a safe provider diagnostic', async () => {
+  const evidenceUploadService = {
+    async beginEvidenceUpload() {
+      const error = new Error('EVIDENCE_UPLOAD_UNAVAILABLE')
+      error.code = 'EVIDENCE_UPLOAD_UNAVAILABLE'
+      error.diagnostic = { code: 'UnauthorizedOperation', statusCode: 403 }
+      error[APPLICATION_ERROR_MARKER] = true
+      throw error
+    },
+    async finalizeEvidenceUpload() {}
+  }
+  const harness = createRouteHarness({ evidenceUploadService })
+  const result = await harness.api.main({
+    action: 'beginEvidenceUpload',
+    payload: {
+      businessLineId: 'business-1', nodeId: 'node-1', expectedNodeVersion: 4,
+      fileName: 'proof.mov', declaredSize: 123
+    }
+  })
+
+  assert.deepEqual(result, {
+    ok: false,
+    code: 'EVIDENCE_UPLOAD_UNAVAILABLE',
+    message: 'EVIDENCE_UPLOAD_UNAVAILABLE',
+    diagnostic: { code: 'UnauthorizedOperation', statusCode: 403 }
+  })
+})
+
+test('evidence upload internal failure retains only a safe provider diagnostic', async () => {
+  const evidenceUploadService = {
+    async beginEvidenceUpload() {
+      const error = new Error('must-not-leak')
+      error.diagnostic = {
+        stage: 'credential_issue',
+        code: 'AuthFailure.UnauthorizedOperation',
+        statusCode: 403,
+        secretId: 'must-not-leak'
+      }
+      throw error
+    },
+    async finalizeEvidenceUpload() {}
+  }
+  const harness = createRouteHarness({ evidenceUploadService })
+  const result = await harness.api.main({
+    action: 'beginEvidenceUpload',
+    payload: {
+      businessLineId: 'business-1', nodeId: 'node-1', expectedNodeVersion: 4,
+      fileName: 'proof.mov', declaredSize: 123
+    }
+  })
+
+  assert.deepEqual(result, {
+    ok: false,
+    code: 'INTERNAL_ERROR',
+    message: 'Service error',
+    diagnostic: {
+      stage: 'credential_issue', code: 'AuthFailure.UnauthorizedOperation', statusCode: 403
+    }
+  })
+  assert.equal(JSON.stringify(result).includes('must-not-leak'), false)
+})
+
 test('保存并提交审核路由只传递受信账号和严格的一次提交载荷', async () => {
   const calls = []
   const nodeSubmitService = {

@@ -159,3 +159,71 @@ test('begin fails closed when the credential provider returns a permanent or mal
     )
   }
 })
+
+test('begin reports only safe credential-provider diagnostics before failing closed', async () => {
+  const diagnostics = []
+  const providerError = new Error('request contained secret material')
+  providerError.code = 'AccessDenied'
+  providerError.statusCode = 403
+  providerError.RequestId = 'sts-request-123'
+  providerError.secretId = 'must-not-leak'
+  const { service } = harness({
+    credentialProvider: { async issue() { throw providerError } },
+    onCredentialError: value => diagnostics.push(value)
+  })
+
+  let caught
+  await assert.rejects(
+    service.beginEvidenceUpload({ actor: actor(), input: beginInput() }),
+    error => {
+      caught = error
+      return assertCode('EVIDENCE_UPLOAD_UNAVAILABLE')(error)
+    }
+  )
+  assert.deepEqual(diagnostics, [{
+    code: 'AccessDenied',
+    statusCode: 403,
+    requestId: 'sts-request-123'
+  }])
+  assert.deepEqual(caught.diagnostic, {
+    stage: 'credential_issue',
+    code: 'AccessDenied',
+    statusCode: 403
+  })
+  assert.equal(JSON.stringify(diagnostics).includes('must-not-leak'), false)
+  assert.equal(JSON.stringify(diagnostics).includes('request contained'), false)
+})
+
+test('begin extracts the nested Tencent Cloud API error code without exposing the response body', async () => {
+  const providerError = new Error('response contained secret material')
+  providerError.response = {
+    status: 403,
+    data: {
+      Response: {
+        Error: {
+          Code: 'AuthFailure.SecretIdNotFound',
+          Message: 'must-not-leak'
+        },
+        RequestId: 'nested-request-123'
+      }
+    }
+  }
+  const { service } = harness({
+    credentialProvider: { async issue() { throw providerError } }
+  })
+
+  let caught
+  await assert.rejects(
+    service.beginEvidenceUpload({ actor: actor(), input: beginInput() }),
+    error => {
+      caught = error
+      return assertCode('EVIDENCE_UPLOAD_UNAVAILABLE')(error)
+    }
+  )
+  assert.deepEqual(caught.diagnostic, {
+    stage: 'credential_issue',
+    code: 'AuthFailure.SecretIdNotFound',
+    statusCode: 403
+  })
+  assert.equal(JSON.stringify(caught).includes('must-not-leak'), false)
+})

@@ -30,6 +30,7 @@ const { createWorkTimeService } = require('./lib/work-time-service')
 const { createEvidenceService } = require('./lib/evidence-service')
 const { createCloudEvidenceRepository } = require('./lib/cloud-evidence-repository')
 const { createEvidenceUploadService } = require('./lib/evidence-upload-service')
+const { readEvidenceUploadConfig } = require('./lib/evidence-upload-config')
 const {
   createCloudEvidenceUploadRepository,
   createCosStorageAdapter,
@@ -183,6 +184,20 @@ function safeTargetUserId(action, payload) {
 
 function safeErrorCode(value) {
   return LOGGABLE_ERROR_CODES.has(value) ? value : 'INTERNAL_ERROR'
+}
+
+function safePublicDiagnostic(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const result = {}
+  const code = hasOwn(value, 'code') ? value.code : undefined
+  const statusCode = hasOwn(value, 'statusCode') ? value.statusCode : undefined
+  const stage = hasOwn(value, 'stage') ? value.stage : undefined
+  if (typeof code === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(code)) result.code = code
+  if (Number.isSafeInteger(statusCode) && statusCode >= 100 && statusCode <= 599) result.statusCode = statusCode
+  if (['service_init', 'reserve_upload', 'credential_issue', 'credential_shape'].includes(stage)) {
+    result.stage = stage
+  }
+  return Object.keys(result).length ? result : null
 }
 
 function isPublicAction(action) {
@@ -570,9 +585,10 @@ function createBusinessApi({
         requestId: context.REQUESTID || context.requestId || '',
         targetUserId: safeTargetUserId(action, payload)
       })
+      const diagnostic = safePublicDiagnostic(error.diagnostic)
       return responseCode === 'INTERNAL_ERROR'
-        ? fail('Service error', responseCode)
-        : fail(error.message || 'Service error', responseCode)
+        ? fail('Service error', responseCode, diagnostic)
+        : fail(error.message || 'Service error', responseCode, diagnostic)
     }
   }
 
@@ -583,8 +599,10 @@ function ok(data) {
   return { ok: true, data }
 }
 
-function fail(message, code) {
-  return { ok: false, code: code || 'BUSINESS_ERROR', message }
+function fail(message, code, diagnostic) {
+  const result = { ok: false, code: code || 'BUSINESS_ERROR', message }
+  if (diagnostic) result.diagnostic = diagnostic
+  return result
 }
 
 function assert(condition, message, code) {
@@ -902,17 +920,14 @@ function createDefaultBusinessApi() {
   let configuredEvidenceUploadService
   const getEvidenceUploadService = () => {
     if (configuredEvidenceUploadService) return configuredEvidenceUploadService
-    const bucket = process.env.EVIDENCE_COS_BUCKET
-    const region = process.env.EVIDENCE_COS_REGION
-    const secretId = process.env.EVIDENCE_COS_SECRET_ID
-    const secretKey = process.env.EVIDENCE_COS_SECRET_KEY
-    const cloudFilePrefix = process.env.EVIDENCE_CLOUD_FILE_PREFIX
-    if (![bucket, region, secretId, secretKey, cloudFilePrefix].every(value => typeof value === 'string' && value)) {
-      const error = new Error('EVIDENCE_UPLOAD_UNAVAILABLE')
-      error.code = 'EVIDENCE_UPLOAD_UNAVAILABLE'
-      error[APPLICATION_ERROR_MARKER] = true
+    let uploadConfig
+    try {
+      uploadConfig = readEvidenceUploadConfig(process.env)
+    } catch (error) {
+      if (error && typeof error === 'object') error[APPLICATION_ERROR_MARKER] = true
       throw error
     }
+    const { bucket, region, secretId, secretKey, cloudFilePrefix } = uploadConfig
     const COS = require('cos-nodejs-sdk-v5')
     const STS = require('qcloud-cos-sts')
     const client = new COS({ SecretId: secretId, SecretKey: secretKey })
@@ -929,13 +944,24 @@ function createDefaultBusinessApi() {
       bucket,
       region,
       clock: () => new Date(),
-      randomBytes: crypto.randomBytes
+      randomBytes: crypto.randomBytes,
+      onCredentialError: details => console.error('[businessApi:evidence-upload-credential]', details)
     })
     return configuredEvidenceUploadService
   }
+  function initializedEvidenceUploadService() {
+    try {
+      return getEvidenceUploadService()
+    } catch (error) {
+      if (error && typeof error === 'object') {
+        error.diagnostic = { stage: error.configStage || 'service_init' }
+      }
+      throw error
+    }
+  }
   const evidenceUploadService = {
-    beginEvidenceUpload: input => getEvidenceUploadService().beginEvidenceUpload(input),
-    finalizeEvidenceUpload: input => getEvidenceUploadService().finalizeEvidenceUpload(input)
+    beginEvidenceUpload: input => initializedEvidenceUploadService().beginEvidenceUpload(input),
+    finalizeEvidenceUpload: input => initializedEvidenceUploadService().finalizeEvidenceUpload(input)
   }
   const feedbackService = createFeedbackService({
     repository: feedbackRepository,

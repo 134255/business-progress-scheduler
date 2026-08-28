@@ -160,7 +160,6 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
       const fileId = `${cloudFilePrefix}/${reservation.objectKey}`
       await transaction.collection(COLLECTIONS.evidences).doc(value.evidenceId).set({
         data: {
-          _id: value.evidenceId,
           businessLineId: value.businessLineId,
           nodeId: value.nodeId,
           processingRoundNumber: current.processingRoundNumber,
@@ -375,7 +374,26 @@ function createScopedCosCredentialProvider({ sts, secretId, secretKey, bucket, r
           resource: [`qcs::cos:${region}:uid/${appId}:${bucket}/${objectKey}`]
         }]
       }
-      return sts.getCredential({ secretId, secretKey, durationSeconds, region, policy })
+      return new Promise((resolve, reject) => {
+        let settled = false
+        const finish = (error, data) => {
+          if (settled) return
+          settled = true
+          if (error) reject(error)
+          else resolve(data)
+        }
+        try {
+          const returned = sts.getCredential(
+            { secretId, secretKey, durationSeconds, region, policy },
+            finish
+          )
+          if (returned && typeof returned.then === 'function') {
+            returned.then(data => finish(null, data), finish)
+          }
+        } catch (error) {
+          finish(error)
+        }
+      })
     }
   }
 }
