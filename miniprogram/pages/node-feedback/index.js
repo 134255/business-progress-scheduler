@@ -895,6 +895,31 @@ Page({
     return this.performProgressAction('mark_blocked')
   },
 
+  finishReviewSubmission(operation) {
+    if (!this.operationStillOwnsPage(operation)) return false
+    this.progressRequestKey = ''
+    this.progressIntent = ''
+    this.reviewRequestKey = ''
+    this.progressExpectedNodeVersion = null
+    this.reviewExpectedNodeVersion = null
+    this.savedProgress = null
+    this.setData({ readOnly: true, reviewDraftLocked: true, canSubmit: false })
+    wx.showToast({ title: '已提交审核', icon: 'success' })
+    if (typeof wx.navigateBack === 'function') wx.navigateBack()
+    return true
+  },
+
+  async reviewSubmissionVisible(operation) {
+    try {
+      const workspace = await businessService.getNodeWorkspace(operation.lineId, operation.nodeId)
+      if (!this.operationStillOwnsPage(operation)) return false
+      const node = workspace && workspace.node
+      return Boolean(node && node._id === operation.nodeId && node.status === 'pending_review')
+    } catch (_) {
+      return false
+    }
+  },
+
   async onSubmitReview() {
     if (!this.canWriteReviewNode() || this.data.submitting) return
     const savedProgress = this.savedProgress && !this.data.files.length ? this.savedProgress : null
@@ -951,57 +976,46 @@ Page({
       reviewExpectedNodeVersion: this.reviewExpectedNodeVersion
     })
     this.setData({ submitting: true, reviewDraftLocked: true, errorMessage: '' })
-    let reviewNodeVersion = operation.reviewExpectedNodeVersion
     try {
       if (!useStoredDraft) {
         const payload = savedProgress ? operation.draftPayload : await this.progressPayload(operation)
         if (!this.writeStillCurrent(operation)) return
-        const progressResult = await businessService.submitFeedback({
-          ...payload,
+        const result = await businessService.saveAndSubmitNodeForReview({
+          businessLineId: operation.lineId,
+          nodeId: operation.nodeId,
           expectedNodeVersion: operation.progressExpectedNodeVersion,
-          action: 'save_progress',
-          requestKey: operation.progressRequestKey
+          fieldValues: payload.fieldValues,
+          comment: payload.comment,
+          evidenceIds: payload.evidenceIds,
+          progressRequestKey: operation.progressRequestKey,
+          reviewRequestKey: operation.reviewRequestKey
         })
         if (!this.writeStillCurrent(operation)) return
-        if (!Number.isSafeInteger(progressResult && progressResult.nodeVersion) ||
-            progressResult.nodeVersion <= operation.progressExpectedNodeVersion) {
-          throw new Error('处理进度保存结果无效，请刷新后重试')
+        if (!result || result.nodeStatus !== 'pending_review' ||
+            !Number.isSafeInteger(result.nodeVersion) ||
+            result.nodeVersion <= operation.progressExpectedNodeVersion) {
+          throw new Error('提交审核结果无效，请刷新后重试')
         }
-        if (Number.isSafeInteger(operation.reviewExpectedNodeVersion) &&
-            operation.reviewExpectedNodeVersion !== progressResult.nodeVersion) {
-          throw new Error('节点版本已变化，请刷新后重试')
-        }
-        reviewNodeVersion = progressResult.nodeVersion
-        this.reviewExpectedNodeVersion = reviewNodeVersion
-        this.savedProgress = {
-          payload: { ...payload },
-          requestKey: operation.progressRequestKey,
-          expectedNodeVersion: operation.progressExpectedNodeVersion,
-          nodeVersion: progressResult.nodeVersion
-        }
+      } else {
+        await businessService.submitNodeForReview({
+          businessLineId: operation.lineId,
+          nodeId: operation.nodeId,
+          expectedNodeVersion: operation.reviewExpectedNodeVersion,
+          requestKey: operation.reviewRequestKey
+        })
       }
-      await businessService.submitNodeForReview({
-        businessLineId: operation.lineId,
-        nodeId: operation.nodeId,
-        expectedNodeVersion: reviewNodeVersion,
-        requestKey: operation.reviewRequestKey
-      })
       if (!this.writeStillCurrent(operation)) {
         this.actorStillCurrent()
         return
       }
-      this.progressRequestKey = ''
-      this.progressIntent = ''
-      this.reviewRequestKey = ''
-      this.progressExpectedNodeVersion = null
-      this.reviewExpectedNodeVersion = null
-      this.savedProgress = null
-      this.setData({ readOnly: true, reviewDraftLocked: true, canSubmit: false })
-      wx.showToast({ title: '已提交审核', icon: 'success' })
-      if (typeof wx.navigateBack === 'function') wx.navigateBack()
+      this.finishReviewSubmission(operation)
     } catch (error) {
       if (this.writeStillCurrent(operation)) {
-        wx.showToast({ title: safeErrorMessage(error, '提交审核失败，请重试'), icon: 'none' })
+        const committed = await this.reviewSubmissionVisible(operation)
+        if (committed) this.finishReviewSubmission(operation)
+        else if (this.writeStillCurrent(operation)) {
+          wx.showToast({ title: safeErrorMessage(error, '提交审核失败，请重试'), icon: 'none' })
+        }
       }
     } finally {
       if (this.writeStillCurrent(operation)) this.setData({ submitting: false })

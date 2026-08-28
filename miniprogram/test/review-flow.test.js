@@ -46,6 +46,20 @@ function loadPage(relativePath, businessFake) {
       }
     }
   }
+  if (!normalizedFake.saveAndSubmitNodeForReview && normalizedFake.submitFeedback && normalizedFake.submitNodeForReview) {
+    normalizedFake.saveAndSubmitNodeForReview = async input => {
+      const progress = await normalizedFake.submitFeedback({
+        businessLineId: input.businessLineId, nodeId: input.nodeId,
+        expectedNodeVersion: input.expectedNodeVersion, action: 'save_progress',
+        fieldValues: input.fieldValues, comment: input.comment, evidenceIds: input.evidenceIds,
+        requestKey: input.progressRequestKey
+      })
+      return normalizedFake.submitNodeForReview({
+        businessLineId: input.businessLineId, nodeId: input.nodeId,
+        expectedNodeVersion: progress.nodeVersion, requestKey: input.reviewRequestKey
+      })
+    }
+  }
   try {
     withFakeModule('services/business.js', normalizedFake, () => {
       delete require.cache[require.resolve(pagePath)]
@@ -131,7 +145,7 @@ test('已完成节点可生成固定分享快照并进入公开只读页', async
   assert.equal(page.data.shareCreatingNodeId, '')
 })
 
-test('业务服务的六个审核方法只透传业务参数并安全映射错误', async () => {
+test('业务服务的审核方法只透传业务参数并安全映射错误', async () => {
   const calls = []
   const cloud = {
     callBusinessApi: async (action, payload, options) => {
@@ -150,6 +164,11 @@ test('业务服务的六个审核方法只透传业务参数并安全映射错�
   })
 
   await service.submitNodeForReview({ businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4, requestKey: 'review-1' })
+  await service.saveAndSubmitNodeForReview({
+    businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4,
+    fieldValues: [], comment: '', evidenceIds: [],
+    progressRequestKey: 'progress-1', reviewRequestKey: 'review-composed-1'
+  })
   await assert.rejects(service.submitReviewVote({
     reviewRoundId: 'round-1', expectedRoundVersion: 2, decision: 'reject', comment: '', requestKey: 'vote-1'
   }), error => error.message === '请填写驳回原因')
@@ -161,6 +180,11 @@ test('业务服务的六个审核方法只透传业务参数并安全映射错�
 
   assert.deepEqual(calls.map(item => [item[0], item[1]]), [
     ['submitNodeForReview', { businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4, requestKey: 'review-1' }],
+    ['saveAndSubmitNodeForReview', {
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4,
+      fieldValues: [], comment: '', evidenceIds: [],
+      progressRequestKey: 'progress-1', reviewRequestKey: 'review-composed-1'
+    }],
     ['submitReviewVote', { reviewRoundId: 'round-1', expectedRoundVersion: 2, decision: 'reject', comment: '', requestKey: 'vote-1' }],
     ['listMyPendingReviews', { page: 1, pageSize: 20 }],
     ['getReviewDetail', { reviewRoundId: 'round-1' }],
@@ -172,7 +196,7 @@ test('业务服务的六个审核方法只透传业务参数并安全映射错�
   assert.ok(calls.every(item => item[2] && item[2].silent === true))
 })
 
-test('审核节点提交先幂等保存处理版本再提交审核，第二步失败时两种请求键稳定复用', async () => {
+test('审核节点以单次调用幂等保存并提交审核，失败重试时两种请求键稳定复用', async () => {
   const calls = []
   let reviewAttempts = 0
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
@@ -184,15 +208,11 @@ test('审核节点提交先幂等保存处理版本再提交审核，第二步�
   const page = loadPage('pages/node-feedback/index.js', {
     getBusinessLine: async () => ({ line: { _id: 'line-1', status: 'active', version: 8 }, nodes: [node] }),
     getNodeHistory: async () => ({ node, canSubmit: true, history: [] }),
-    submitFeedback: async input => {
-      calls.push({ method: 'submitFeedback', input })
-      return { feedbackId: 'feedback-1', nodeVersion: 5 }
-    },
-    submitNodeForReview: async input => {
-      calls.push({ method: 'submitNodeForReview', input })
+    saveAndSubmitNodeForReview: async input => {
+      calls.push({ method: 'saveAndSubmitNodeForReview', input })
       reviewAttempts += 1
       if (reviewAttempts === 1) throw new Error('临时网络异常')
-      return { reviewRoundId: 'round-1' }
+      return { feedbackId: 'feedback-1', reviewRoundId: 'round-1', nodeVersion: 5, nodeStatus: 'pending_review' }
     }
   })
   await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
@@ -210,22 +230,20 @@ test('审核节点提交先幂等保存处理版本再提交审核，第二步�
   await page.onSubmitReview()
 
   assert.deepEqual(calls.map(item => item.method), [
-    'submitFeedback', 'submitNodeForReview', 'submitFeedback', 'submitNodeForReview'
+    'saveAndSubmitNodeForReview', 'saveAndSubmitNodeForReview'
   ])
-  assert.equal(calls[0].input.action, 'save_progress')
-  assert.equal(calls[0].input.requestKey, calls[2].input.requestKey)
-  assert.equal(calls[1].input.requestKey, calls[3].input.requestKey)
-  assert.notEqual(calls[0].input.requestKey, calls[1].input.requestKey)
+  assert.equal(calls[0].input.progressRequestKey, calls[1].input.progressRequestKey)
+  assert.equal(calls[0].input.reviewRequestKey, calls[1].input.reviewRequestKey)
+  assert.notEqual(calls[0].input.progressRequestKey, calls[0].input.reviewRequestKey)
   assert.equal(calls[0].input.expectedNodeVersion, 4)
-  assert.equal(calls[2].input.expectedNodeVersion, 4)
-  assert.equal(calls[1].input.expectedNodeVersion, 5)
-  assert.equal(calls[3].input.expectedNodeVersion, 5)
+  assert.equal(calls[1].input.expectedNodeVersion, 4)
+  assert.equal(calls[0].input.fieldValues[0].value, '资料已齐')
+  assert.deepEqual(calls[0].input.evidenceIds, ['evidence-1'])
   assert.equal(page.data.readOnly, true)
 })
 
-test('提交审核等待两步响应期间冻结草稿文件并保持不可变请求快照', async () => {
-  const progress = deferred()
-  const review = deferred()
+test('提交审核等待单次响应期间冻结草稿文件并保持不可变请求快照', async () => {
+  const submit = deferred()
   const calls = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = {
@@ -236,8 +254,7 @@ test('提交审核等待两步响应期间冻结草稿文件并保持不可变�
   const page = loadPage('pages/node-feedback/index.js', {
     getBusinessLine: async () => ({ line: { _id: 'line-1', status: 'active', version: 8 }, nodes: [node] }),
     getNodeHistory: async () => ({ node, canSubmit: true, history: [] }),
-    submitFeedback: input => { calls.push(['feedback', input]); return progress.promise },
-    submitNodeForReview: input => { calls.push(['review', input]); return review.promise }
+    saveAndSubmitNodeForReview: input => { calls.push(['submit', input]); return submit.promise }
   })
   await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
   page.setData({
@@ -261,19 +278,49 @@ test('提交审核等待两步响应期间冻结草稿文件并保持不可变�
   assert.equal(page.progressRequestKey, progressKey)
   assert.equal(page.reviewRequestKey, reviewKey)
 
-  progress.resolve({ feedbackId: 'feedback-1', nodeVersion: 5 })
   await new Promise(resolve => setImmediate(resolve))
-  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '第二步篡改' } })
-  assert.equal(page.data.fieldValues.summary, '提交前草稿')
-  assert.equal(page.progressRequestKey, progressKey)
-  assert.equal(page.reviewRequestKey, reviewKey)
-  assert.deepEqual(calls.map(call => call[0]), ['feedback', 'review'])
+  assert.deepEqual(calls.map(call => call[0]), ['submit'])
   assert.equal(calls[0][1].fieldValues[0].value, '提交前草稿')
-  assert.equal(calls[0][1].requestKey, progressKey)
-  assert.equal(calls[1][1].requestKey, reviewKey)
+  assert.equal(calls[0][1].progressRequestKey, progressKey)
+  assert.equal(calls[0][1].reviewRequestKey, reviewKey)
 
-  review.resolve({ reviewRoundId: 'round-1' })
+  submit.resolve({ feedbackId: 'feedback-1', reviewRoundId: 'round-1', nodeVersion: 5, nodeStatus: 'pending_review' })
   await pending
+})
+
+test('提交响应丢失但服务端已进入待审核时按权威状态恢复为成功', async () => {
+  const toasts = []
+  const navigations = []
+  let workspaceReads = 0
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {}, reLaunch: () => {},
+    showToast: value => toasts.push(value), navigateBack: () => navigations.push('back'),
+    cloud: { uploadFile: async () => assert.fail('无新凭证不应上传') }
+  }
+  const initialNode = reviewNode()
+  const page = loadPage('pages/node-feedback/index.js', {
+    async getNodeWorkspace() {
+      workspaceReads += 1
+      const node = workspaceReads === 1
+        ? initialNode
+        : reviewNode({ status: 'pending_review', version: 5, activeReviewRoundId: 'round-1' })
+      return { line: { _id: 'line-1', status: 'active', version: 8 }, node, canSubmit: workspaceReads === 1, history: [] }
+    },
+    async saveAndSubmitNodeForReview() {
+      throw new Error('网络响应丢失')
+    }
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({ 'fieldValues.summary': '资料已齐', comment: '提交审核' })
+
+  await page.onSubmitReview()
+
+  assert.equal(workspaceReads, 2)
+  assert.equal(page.data.readOnly, true)
+  assert.deepEqual(navigations, ['back'])
+  assert.equal(toasts.some(item => item.title === '提交审核失败，请重试'), false)
+  assert.equal(toasts.at(-1).title, '已提交审核')
 })
 
 test('三种审核处理操作遇字段校验错误时中文提示且不污染写操作状态', async () => {

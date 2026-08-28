@@ -190,6 +190,10 @@ function submitNodeForReview(input) {
   return callProtected('submitNodeForReview', input, '提交审核失败，请稍后重试')
 }
 
+function saveAndSubmitNodeForReview(input) {
+  return callProtected('saveAndSubmitNodeForReview', input, '提交审核失败，请稍后重试')
+}
+
 function recognizeNodeText(input) {
   return callProtected('recognizeNodeText', input, '文本识别失败，请稍后重试')
 }
@@ -248,6 +252,7 @@ module.exports = {
   amendFrozenBusiness,
   recognizeNodeText,
   submitNodeForReview,
+  saveAndSubmitNodeForReview,
   submitReviewVote,
   listMyPendingReviews,
   getReviewDetail,

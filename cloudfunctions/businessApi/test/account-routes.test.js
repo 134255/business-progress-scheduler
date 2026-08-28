@@ -91,6 +91,7 @@ function createRouteHarness({
   recognitionService,
   dashboardWorkspaceService,
   nodeWorkspaceService,
+  nodeSubmitService,
   calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
@@ -149,6 +150,7 @@ function createRouteHarness({
     recognitionService,
     dashboardWorkspaceService,
     nodeWorkspaceService,
+    nodeSubmitService,
     calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
@@ -814,6 +816,41 @@ test('scoped evidence upload routes use the trusted actor and an exact safe payl
   })
   assert.equal(forged.ok, false)
   assert.equal(forged.code, 'VALIDATION_ERROR')
+})
+
+test('保存并提交审核路由只传递受信账号和严格的一次提交载荷', async () => {
+  const calls = []
+  const nodeSubmitService = {
+    async saveAndSubmitNodeForReview(value) {
+      calls.push(value)
+      return { feedbackId: 'feedback-1', reviewRoundId: 'round-1', nodeStatus: 'pending_review' }
+    }
+  }
+  const harness = createRouteHarness({ nodeSubmitService })
+  const payload = {
+    businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4,
+    fieldValues: [{ fieldKey: 'summary', value: '资料已齐' }], comment: '提交审核',
+    evidenceIds: ['evidence-1'], progressRequestKey: 'progress-1', reviewRequestKey: 'review-1',
+    actorId: 'forged', openid: 'wx-forged'
+  }
+  const result = await harness.api.main({ action: 'saveAndSubmitNodeForReview', payload })
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    },
+    input: {
+      businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4,
+      fieldValues: [{ fieldKey: 'summary', value: '资料已齐' }], comment: '提交审核',
+      evidenceIds: ['evidence-1'], progressRequestKey: 'progress-1', reviewRequestKey: 'review-1'
+    }
+  }])
+  const rejected = await harness.api.main({
+    action: 'saveAndSubmitNodeForReview', payload: { ...payload, reviewExpectedNodeVersion: 5 }
+  })
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.code, 'VALIDATION_ERROR')
 })
 
 test('default feedback routes use the trusted account and protect both writes and history', async () => {
