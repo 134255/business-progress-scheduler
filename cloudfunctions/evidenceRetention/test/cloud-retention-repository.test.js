@@ -138,14 +138,44 @@ test('孤立清理只选择到期且未被反馈或修订预约占用的可用�
   const { repository } = repositoryFor({
     evidences: [
       { _id: 'orphan-due', fileId: 'cloud://env/due', storageStatus: 'available', orphanExpiresAt: NOW, feedbackId: null, amendmentId: null, attachmentState: 'unattached' },
+      { _id: 'upload-expired', fileId: 'cloud://env/upload-expired', storageStatus: 'uploading', orphanExpiresAt: NOW, uploadSessionExpiresAt: new Date(NOW.getTime() - 1), uploadSessionTokenHash: 'a'.repeat(64), objectKey: 'evidence-uploads/line/node/evidence.bin', feedbackId: null, amendmentId: null, attachmentState: 'unattached' },
+      { _id: 'upload-live', fileId: 'cloud://env/upload-live', storageStatus: 'uploading', orphanExpiresAt: new Date(NOW.getTime() + 1), uploadSessionExpiresAt: new Date(NOW.getTime() + 1), uploadSessionTokenHash: 'b'.repeat(64), objectKey: 'evidence-uploads/line/node/live.bin', feedbackId: null, amendmentId: null, attachmentState: 'unattached' },
       { _id: 'orphan-later', fileId: 'cloud://env/later', storageStatus: 'available', orphanExpiresAt: new Date(NOW.getTime() + 1), feedbackId: null, amendmentId: null, attachmentState: 'unattached' },
       { _id: 'feedback-claimed', fileId: 'cloud://env/feedback', storageStatus: 'available', orphanExpiresAt: NOW, feedbackId: 'feedback-1', amendmentId: null, attachmentState: 'feedback_claimed' },
       { _id: 'amendment-claimed', fileId: 'cloud://env/amend', storageStatus: 'available', orphanExpiresAt: NOW, feedbackId: null, amendmentId: 'amend-1', attachmentState: 'amendment_claimed' }
     ]
   })
   assert.deepEqual(await repository.listExpiredOrphans({ now: NOW, afterId: '', limit: 20 }), [
-    { evidenceId: 'orphan-due' }
+    { evidenceId: 'orphan-due' },
+    { evidenceId: 'upload-expired' }
   ])
+})
+
+test('过期上传预约沿用孤立清理租约且成功后清除会话与对象定位字段', async () => {
+  const { fake, repository } = repositoryFor({
+    evidences: [{
+      _id: 'upload-expired', fileId: 'cloud://env/upload-expired', storageStatus: 'uploading',
+      orphanExpiresAt: NOW, uploadSessionExpiresAt: new Date(NOW.getTime() - 1),
+      uploadSessionTokenHash: 'a'.repeat(64), objectKey: 'evidence-uploads/line/node/evidence.bin',
+      declaredSize: 123, uploadedBy: 'account-1', feedbackId: null, amendmentId: null,
+      attachmentState: 'unattached'
+    }]
+  })
+
+  const claimed = await repository.claimEvidenceForPurge({ evidenceId: 'upload-expired', mode: 'orphan', now: NOW })
+  assert.deepEqual(claimed, {
+    evidenceId: 'upload-expired', fileId: 'cloud://env/upload-expired', claimToken: 'claim-a'
+  })
+  assert.equal(await repository.markEvidencePurged({
+    evidenceId: 'upload-expired', mode: 'orphan', now: NOW, claimToken: 'claim-a', objectWasAbsent: true
+  }), true)
+  const stored = fake.documents('evidences')[0]
+  assert.equal(stored.storageStatus, 'purged')
+  assert.equal(stored.fileId, undefined)
+  assert.equal(stored.uploadSessionTokenHash, undefined)
+  assert.equal(stored.uploadSessionExpiresAt, undefined)
+  assert.equal(stored.objectKey, undefined)
+  assert.equal(stored.declaredSize, undefined)
 })
 
 test('工作器中断后只有租约已过期的清理中记录重新进入对应候选集', async () => {

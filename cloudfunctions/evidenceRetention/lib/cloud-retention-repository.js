@@ -74,7 +74,7 @@ function pageCandidates(values, afterId, limit) {
 }
 
 function purgeCandidateStatus(evidence, now) {
-  return ['available', 'purge_failed'].includes(evidence.storageStatus) ||
+  return ['available', 'uploading', 'purge_failed'].includes(evidence.storageStatus) ||
     (evidence.storageStatus === 'purge_pending' && due(evidence.purgeClaimExpiresAt, now))
 }
 
@@ -436,7 +436,7 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
   }
 
   async function listExpiredOrphans({ now, limit }) {
-    const phases = ['available', 'purge_failed', 'purge_pending'].map(storageStatus => ({
+    const phases = ['available', 'purge_failed', 'purge_pending', 'uploading'].map(storageStatus => ({
       key: storageStatus,
       sortField: storageStatus === 'purge_pending' ? 'purgeClaimExpiresAt' : 'orphanExpiresAt',
       sortType: 'date'
@@ -481,7 +481,7 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
     return db.runTransaction(async transaction => {
       const evidence = await readDocument(transaction, 'evidences', evidenceId)
       if (!evidence || typeof evidence.fileId !== 'string' || !evidence.fileId) return null
-      const reclaimable = ['available', 'purge_failed'].includes(evidence.storageStatus) ||
+      const reclaimable = ['available', 'uploading', 'purge_failed'].includes(evidence.storageStatus) ||
         (evidence.storageStatus === 'purge_pending' && due(evidence.purgeClaimExpiresAt, now))
       if (!reclaimable || heldByPublicShare(evidence, now)) return null
       const eligible = mode === 'orphan'
@@ -555,6 +555,10 @@ function createCloudRetentionRepository({ db, clock = () => new Date(), tokenFac
       await transaction.collection('evidences').doc(evidenceId).update({ data: {
         storageStatus: 'purged',
         fileId: db.command.remove(),
+        uploadSessionTokenHash: db.command.remove(),
+        uploadSessionExpiresAt: db.command.remove(),
+        objectKey: db.command.remove(),
+        declaredSize: db.command.remove(),
         purgeClaimToken: db.command.remove(),
         purgeClaimExpiresAt: db.command.remove(),
         purgedAt: now,
