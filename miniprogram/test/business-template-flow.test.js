@@ -487,6 +487,54 @@ test('business edit registers every custom component used by its WXML', () => {
   assert.equal(config.usingComponents && config.usingComponents['status-pill'], '/components/status-pill/index')
 })
 
+test('business detail keeps rendered content during refresh and clears it when the account changes', async () => {
+  const refresh = deferred()
+  const app = { globalData: { currentUser: activeUser('user-before') } }
+  const launches = []
+  let reads = 0
+  global.getApp = () => app
+  global.wx = { reLaunch: options => launches.push(options) }
+  const page = loadPage('pages/business-detail/index.js', {
+    'services/business.js': {
+      getBusinessLine: async () => {
+        reads += 1
+        if (reads === 1) {
+          return {
+            canManage: false,
+            line: { _id: 'line-1', status: 'active', currentNodeId: 'node-1' },
+            nodes: [{ _id: 'node-1', sequence: 1, status: 'ready' }]
+          }
+        }
+        return refresh.promise
+      }
+    }
+  })
+
+  page.onLoad({ id: 'line-1' })
+  await page.onShow()
+  const backgroundRefresh = page.onShow()
+
+  assert.equal(page.data.line._id, 'line-1')
+  assert.equal(page.data.loading, false)
+  assert.equal(page.data.refreshing, true)
+
+  app.globalData.currentUser = activeUser('user-after')
+  refresh.resolve({
+    canManage: false,
+    line: { _id: 'line-stale', status: 'active', currentNodeId: '' },
+    nodes: []
+  })
+  await backgroundRefresh
+
+  assert.equal(page.data.line, null)
+  assert.deepEqual(page.data.nodes, [])
+  assert.equal(page.data.refreshing, false)
+  assert.deepEqual(launches, [{ url: '/pages/login/index' }])
+
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/business-detail/index.wxml'), 'utf8')
+  assert.match(wxml, /refreshing/)
+})
+
 test('pending server reads fail closed when the authenticated account changes', async () => {
   const pending = deferred()
   const app = { globalData: { currentUser: activeUser('user-before') } }

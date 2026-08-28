@@ -39,6 +39,7 @@ Page({
   data: {
     id: '',
     loading: true,
+    refreshing: false,
     line: null,
     nodes: [],
     canManage: false,
@@ -80,12 +81,29 @@ Page({
   },
 
   onShow() {
+    if (!this.actorStillCurrent()) return
     if (this.data.id) return this.loadDetail()
   },
 
   actorStillCurrent() {
     const user = activeUser()
     if (user && user._id === this.actorId) return user
+    this.detailSequence += 1
+    this.setData({
+      loading: false,
+      refreshing: false,
+      line: null,
+      nodes: [],
+      canManage: false,
+      frozen: false,
+      canClose: false,
+      canRejectPrevious: false,
+      previousNode: null,
+      currentNode: null,
+      showAmendmentEntry: false,
+      shareCreatingNodeId: '',
+      errorMessage: ''
+    })
     wx.reLaunch({ url: '/pages/login/index' })
     return null
   },
@@ -136,9 +154,11 @@ Page({
   },
 
   async loadDetail() {
+    if (!this.actorStillCurrent()) return
     const requestSequence = ++this.detailSequence
     const requestedActorId = this.actorId
-    this.setData({ loading: true, errorMessage: '' })
+    const hasRenderedDetail = Boolean(this.data.line && this.data.line._id === this.data.id)
+    this.setData({ loading: !hasRenderedDetail, refreshing: hasRenderedDetail, errorMessage: '' })
     try {
       const data = await businessService.getBusinessLine(this.data.id)
       if (!this.pageAlive || requestSequence !== this.detailSequence ||
@@ -150,7 +170,7 @@ Page({
       }
     } finally {
       if (this.pageAlive && requestSequence === this.detailSequence && activeUser() &&
-          activeUser()._id === requestedActorId) this.setData({ loading: false })
+          activeUser()._id === requestedActorId) this.setData({ loading: false, refreshing: false })
     }
   },
 

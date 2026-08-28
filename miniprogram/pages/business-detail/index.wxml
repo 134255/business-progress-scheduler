@@ -2,6 +2,7 @@
   <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
   <view wx:if="{{frozen}}" class="frozen-banner">售后已冻结，普通信息、节点反馈和状态不可再修改。</view>
   <view class="card">
+    <text wx:if="{{refreshing}}" class="muted block">正在刷新最新状态…</text>
     <view class="row-between"><view class="title detail-title">{{line.name}}</view><status-pill status="{{line.status}}" /></view>
     <text class="muted block">编号：{{line.code}}</text>
     <text class="muted block">版本：{{line.version}}</text>
