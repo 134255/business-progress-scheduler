@@ -421,7 +421,7 @@ test('不可变历史按反馈版本显示字段快照和凭证状态，七类�
   assert.match(wxml, /已清理/)
 })
 
-test('图片、PDF 和多个视频可分批选择，单文件与合计大小在上传前校验', async () => {
+test('图片、PDF 和多个视频可反复选择，不设产品单文件上限且单轮合计限制为 120 MiB', async () => {
   const mebibyte = 1024 * 1024
   const toasts = []
   let mediaSuccess
@@ -452,15 +452,15 @@ test('图片、PDF 和多个视频可分批选择，单文件与合计大小在�
   assert.deepEqual(page.data.files.map(item => item.category), ['image', 'video', 'video', 'pdf'])
   assert.equal(page.data.selectedTotalBytes, 19 * mebibyte)
 
-  page.chooseMediaEvidence()
-  mediaSuccess({ tempFiles: [{ tempFilePath: 'wxfile://oversize.jpg', size: 6 * mebibyte, fileType: 'image' }] })
-  assert.equal(page.data.files.length, 4)
-  assert.match(toasts.at(-1).title, /图片.*5 MB/)
+  page.choosePdfEvidence()
+  pdfSuccess({ tempFiles: [{ path: 'wxfile://large.pdf', name: 'large.pdf', size: 101 * mebibyte }] })
+  assert.equal(page.data.files.length, 5)
+  assert.equal(page.data.selectedTotalBytes, 120 * mebibyte)
 
   page.choosePdfEvidence()
-  pdfSuccess({ tempFiles: [{ path: 'wxfile://more.pdf', name: 'more.pdf', size: 2 * mebibyte }] })
-  assert.equal(page.data.files.length, 4)
-  assert.match(toasts.at(-1).title, /合计.*20 MB/)
+  pdfSuccess({ tempFiles: [{ path: 'wxfile://over.pdf', name: 'over.pdf', size: 1 }] })
+  assert.equal(page.data.files.length, 5)
+  assert.match(toasts.at(-1).title, /合计.*120 MB/)
 })
 
 test('Mac 使用本地文件选择器选择图片视频，移动端继续使用相册接口', async () => {
@@ -485,8 +485,8 @@ test('Mac 使用本地文件选择器选择图片视频，移动端继续使用�
   await desktopPage.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
 
   desktopPage.chooseMediaEvidence()
-  assert.equal(desktopPicker.type, 'file')
-  assert.deepEqual(desktopPicker.extension, ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'm4v'])
+  assert.equal(desktopPicker.type, 'all')
+  assert.equal(Object.hasOwn(desktopPicker, 'extension'), false)
   desktopPicker.success({ tempFiles: [
     { path: 'wxfile://desktop.png', name: 'desktop.png', size: 1024, type: 'file' }
   ] })
@@ -510,32 +510,23 @@ test('Mac 使用本地文件选择器选择图片视频，移动端继续使用�
   assert.deepEqual(mobilePicker.mediaType, ['image', 'video'])
 })
 
-test('凭证按顺序上传并立即登记，失败重试不重复上传成功项且只提交 evidenceId', async () => {
+test('凭证最多三个并发上传，失败重试不重复上传成功项且只提交 evidenceId', async () => {
   const events = []
   let secondAttempt = false
   let feedbackInput
+  let active = 0
+  let maximumActive = 0
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = {
     setNavigationBarTitle: () => {},
     reLaunch: () => assert.fail('有效账号不应被重定向'),
     showToast: options => events.push(['toast', options.title]),
-    cloud: {
-      uploadFile: async ({ filePath }) => {
-        events.push(['upload', filePath])
-        if (filePath === 'wxfile://b.mp4' && !secondAttempt) throw new Error('网络中断')
-        return { fileID: `cloud://${filePath.split('//')[1]}` }
-      }
-    }
   }
   const page = loadPage({
     getBusinessLine: async () => businessFixture(nodeFixture({
       fieldDefinitions: [], requiresEvidence: true, allowedEvidenceTypes: ['pdf', 'mp4']
     })),
     getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] }),
-    registerEvidenceUpload: async input => {
-      events.push(['register', input.fileName, input.fileId])
-      return { evidenceId: input.fileName === 'a.pdf' ? 'evidence-a' : 'evidence-b' }
-    },
     submitFeedback: async input => { feedbackInput = input; events.push(['submit']) }
   })
   await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
@@ -543,9 +534,23 @@ test('凭证按顺序上传并立即登记，失败重试不重复上传成功�
     statusIndex: 2,
     files: [
       { localKey: 'a', name: 'a.pdf', path: 'wxfile://a.pdf', size: 1024, category: 'pdf', extension: 'pdf', status: 'pending' },
-      { localKey: 'b', name: 'b.mp4', path: 'wxfile://b.mp4', size: 2048, category: 'video', extension: 'mp4', status: 'pending' }
+      { localKey: 'b', name: 'b.mp4', path: 'wxfile://b.mp4', size: 2048, category: 'video', extension: 'mp4', status: 'pending' },
+      { localKey: 'c', name: 'c.pdf', path: 'wxfile://c.pdf', size: 1024, category: 'pdf', extension: 'pdf', status: 'pending' },
+      { localKey: 'd', name: 'd.pdf', path: 'wxfile://d.pdf', size: 1024, category: 'pdf', extension: 'pdf', status: 'pending' }
     ],
-    selectedTotalBytes: 3072
+    selectedTotalBytes: 5120
+  })
+  page.createEvidenceUploader = () => ({
+    upload: async ({ file, onProgress }) => {
+      events.push(['upload', file.path])
+      active += 1
+      maximumActive = Math.max(maximumActive, active)
+      onProgress(50)
+      await new Promise(resolve => setImmediate(resolve))
+      active -= 1
+      if (file.path === 'wxfile://b.mp4' && !secondAttempt) throw new Error('网络中断')
+      return { evidenceId: `evidence-${file.localKey}`, storageStatus: 'available' }
+    }
   })
 
   await page.submit()
@@ -553,19 +558,20 @@ test('凭证按顺序上传并立即登记，失败重试不重复上传成功�
   assert.equal(page.data.files[0].status, 'registered')
   assert.equal(page.data.files[0].evidenceId, 'evidence-a')
   assert.equal(page.data.files[1].status, 'failed')
+  assert.equal(page.data.files[2].status, 'registered')
+  assert.equal(page.data.files[3].status, 'registered')
+  assert.equal(maximumActive, 3)
 
   secondAttempt = true
   await page.submit()
-  assert.deepEqual(events.filter(item => item[0] === 'upload'), [
-    ['upload', 'wxfile://a.pdf'],
-    ['upload', 'wxfile://b.mp4'],
-    ['upload', 'wxfile://b.mp4']
+  assert.deepEqual(events.filter(item => item[0] === 'upload').map(item => item[1]), [
+    'wxfile://a.pdf', 'wxfile://b.mp4', 'wxfile://c.pdf', 'wxfile://d.pdf', 'wxfile://b.mp4'
   ])
-  assert.deepEqual(feedbackInput.evidenceIds, ['evidence-a', 'evidence-b'])
+  assert.deepEqual(feedbackInput.evidenceIds, ['evidence-a', 'evidence-b', 'evidence-c', 'evidence-d'])
   assert.equal(Object.prototype.hasOwnProperty.call(feedbackInput, 'evidences'), false)
 })
 
-test('可选空白名单允许七种受支持格式，有限名单仍在本地拒绝未允许格式', async () => {
+test('可选空白名单允许全部十种受支持格式，有限名单仍在本地拒绝未允许格式', async () => {
   const toasts = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = {
@@ -578,14 +584,15 @@ test('可选空白名单允许七种受支持格式，有限名单仍在本地�
     getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
   })
   await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
-  assert.deepEqual(page.data.allowedEvidenceTypes, ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
-  page.addSelectedFiles(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'].map(extension => ({
+  const supported = ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'mp4', 'mov', 'm4v']
+  assert.deepEqual(page.data.allowedEvidenceTypes, supported)
+  page.addSelectedFiles(supported.map(extension => ({
     name: `evidence.${extension}`,
     path: `wxfile://evidence.${extension}`,
     size: 1,
-    category: ['jpg', 'jpeg', 'png'].includes(extension) ? 'image' : extension === 'pdf' ? 'pdf' : 'video'
+    category: ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(extension) ? 'image' : extension === 'pdf' ? 'pdf' : 'video'
   })))
-  assert.deepEqual(page.data.files.map(file => file.extension), ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+  assert.deepEqual(page.data.files.map(file => file.extension), supported)
   assert.ok(page.data.files.every(file => file.status === 'pending'))
 
   const restricted = loadPage({
@@ -711,20 +718,17 @@ test('云文件上传中文前缀异常不会进入文件状态', async () => {
   global.wx = {
     setNavigationBarTitle: () => {},
     reLaunch: () => assert.fail('有效账号不应被重定向'),
-    showToast: () => {},
-    cloud: {
-      uploadFile: async () => {
-        throw new Error('网络异常 errCode=600001 cloud://private/upload')
-      }
-    }
+    showToast: () => {}
   }
   const page = loadPage({
     getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: ['pdf'] })),
     getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] }),
-    registerEvidenceUpload: async () => assert.fail('上传失败时不得登记凭证'),
     submitFeedback: async () => assert.fail('上传失败时不得提交反馈')
   })
   await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.createEvidenceUploader = () => ({
+    upload: async () => { throw new Error('网络异常 errCode=600001 cloud://private/upload') }
+  })
   page.setData({ statusIndex: 2, files: [{ localKey: 'one', name: 'evidence.pdf', path: 'wxfile://evidence.pdf', size: 1, category: 'pdf', extension: 'pdf', status: 'pending' }] })
 
   await page.submit()
@@ -741,12 +745,7 @@ test('审核处理上传异常不会向保存进度或提交审核的外层提�
     global.wx = {
       setNavigationBarTitle: () => {},
       reLaunch: () => assert.fail('有效账号不应被重定向'),
-      showToast: options => toasts.push(options),
-      cloud: {
-        uploadFile: async () => {
-          throw new Error('网络异常 errCode=600001 cloud://private/upload')
-        }
-      }
+      showToast: options => toasts.push(options)
     }
     const page = loadPage({
       getBusinessLine: async () => businessFixture(nodeFixture({
@@ -754,11 +753,13 @@ test('审核处理上传异常不会向保存进度或提交审核的外层提�
         allowedEvidenceTypes: ['pdf']
       })),
       getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] }),
-      registerEvidenceUpload: async () => assert.fail('上传失败时不得登记凭证'),
       submitFeedback: async () => assert.fail('上传失败时不得保存处理进度'),
       submitNodeForReview: async () => assert.fail('上传失败时不得提交审核')
     })
     await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+    page.createEvidenceUploader = () => ({
+      upload: async () => { throw new Error('网络异常 errCode=600001 cloud://private/upload') }
+    })
     page.setData({ files: [{ localKey: 'one', name: 'evidence.pdf', path: 'wxfile://evidence.pdf', size: 1, category: 'pdf', extension: 'pdf', status: 'pending' }] })
 
     await page[action]()
@@ -802,16 +803,17 @@ test('凭证登记失败仅保存服务层固定中文安全错误', async () =>
   global.wx = {
     setNavigationBarTitle: () => {},
     reLaunch: () => assert.fail('有效账号不应被重定向'),
-    showToast: () => {},
-    cloud: { uploadFile: async () => ({ fileID: 'cloud://masked/upload' }) }
+    showToast: () => {}
   }
   const page = loadPage({
     getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], requiresEvidence: false, allowedEvidenceTypes: ['pdf'] })),
     getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] }),
-    registerEvidenceUpload: async () => { throw Object.assign(new Error('文件格式不受支持，请重新选择'), { code: 'UNSUPPORTED_FILE_TYPE' }) },
     submitFeedback: async () => assert.fail('登记失败时不得提交反馈')
   })
   await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.createEvidenceUploader = () => ({
+    upload: async () => { throw Object.assign(new Error('文件格式不受支持，请重新选择'), { code: 'UNSUPPORTED_FILE_TYPE' }) }
+  })
   page.setData({ statusIndex: 2, files: [{ localKey: 'one', name: 'evidence.pdf', path: 'wxfile://evidence.pdf', size: 1, category: 'pdf', extension: 'pdf', status: 'pending' }] })
   await page.submit()
   assert.equal(page.data.files[0].status, 'failed')
@@ -859,6 +861,39 @@ test('凭证预览先获取短期授权，图片、PDF、视频分别使用安�
   assert.match(wxml, /<video\b/)
   assert.match(wxml, /data-evidenceid/)
   assert.doesNotMatch(wxml, /data-fileid|item\.fileId/)
+})
+
+test('HEIC 和 HEIF 历史凭证使用受保护的下载兜底而不调用图片预览', async () => {
+  const calls = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {},
+    reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showLoading: () => {},
+    hideLoading: () => {},
+    showToast: options => calls.push(['toast', options.title]),
+    previewImage: () => assert.fail('HEIC 不应直接进入图片预览'),
+    downloadFile: async options => { calls.push(['download', options.url]); return { tempFilePath: 'wxfile://evidence.heic' } },
+    saveFile: async options => calls.push(['save', options.tempFilePath])
+  }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: false, history: [] }),
+    getEvidenceAccess: async () => ({
+      url: 'https://temporary.example/evidence.heic', fileName: 'evidence.heic', category: 'image'
+    })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+
+  await page.previewEvidence({ currentTarget: { dataset: {
+    evidenceid: 'image-heic', category: 'image', status: 'available', filename: 'evidence.heic'
+  } } })
+
+  assert.deepEqual(calls, [
+    ['download', 'https://temporary.example/evidence.heic'],
+    ['save', 'wxfile://evidence.heic'],
+    ['toast', '文件已下载，请从下载记录打开']
+  ])
 })
 
 test('批量下载逐个申请授权并按历史顺序保存，单项失败后停止并报告进度', async () => {

@@ -1,5 +1,6 @@
 const businessService = require('../../services/business')
 const { safeErrorMessage } = require('../../utils/safe-error')
+const { createEvidenceUploader } = require('../../utils/evidence-upload')
 const {
   buildRecognitionPreview,
   applyRecognitionPreview,
@@ -16,9 +17,23 @@ const STATUS_LABELS = Object.freeze({
   in_progress: '处理中', blocked: '受阻', completed: '已完成'
 })
 const MEBIBYTE = 1024 * 1024
-const FEEDBACK_TOTAL_LIMIT = 20 * MEBIBYTE
-const CATEGORY_LIMITS = Object.freeze({ image: 5 * MEBIBYTE, pdf: 20 * MEBIBYTE, video: 20 * MEBIBYTE })
-const ALL_EVIDENCE_TYPES = Object.freeze(['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov', 'm4v'])
+const FEEDBACK_TOTAL_LIMIT = 120 * MEBIBYTE
+const ALL_EVIDENCE_TYPES = Object.freeze([
+  'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'mp4', 'mov', 'm4v'
+])
+const UPLOAD_CONCURRENCY = 3
+const SAFE_UPLOAD_ERROR_CODES = new Set([
+  'UNSUPPORTED_FILE_TYPE', 'EVIDENCE_TOTAL_LIMIT_EXCEEDED', 'EVIDENCE_UPLOAD_EXPIRED',
+  'EVIDENCE_UPLOAD_MISMATCH', 'EVIDENCE_UPLOAD_NOT_FOUND', 'EVIDENCE_UPLOAD_CANCELLED'
+])
+
+function safeUploadError(error) {
+  const code = error && typeof error.code === 'string' ? error.code : 'EVIDENCE_UPLOAD_FAILED'
+  const message = SAFE_UPLOAD_ERROR_CODES.has(code)
+    ? safeErrorMessage(error, '上传失败，请重试')
+    : '上传失败，请重试'
+  return Object.assign(new Error(message), { code })
+}
 
 function effectiveClientEvidenceTypes(requiresEvidence, allowedTypes) {
   if (typeof requiresEvidence !== 'boolean' || !Array.isArray(allowedTypes)) return null
@@ -107,6 +122,7 @@ function formattedHistory(history) {
     evidences: (Array.isArray(item.evidences) ? item.evidences : []).map(evidence => ({
       ...evidence,
       canPreview: evidence.storageStatus === 'available',
+      downloadOnly: ['heic', 'heif'].includes(extensionOf(evidence.fileName)),
       storageStatusLabel: evidence.storageStatus === 'purged' ? '已清理' :
         evidence.storageStatus === 'available' ? '可查看' : '暂不可用'
     }))
@@ -133,7 +149,7 @@ function extensionOf(name) {
 }
 
 function categoryFor(extension, mediaType) {
-  if (mediaType === 'image' || ['jpg', 'jpeg', 'png'].includes(extension)) return 'image'
+  if (mediaType === 'image' || ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(extension)) return 'image'
   if (mediaType === 'video' || ['mp4', 'mov', 'm4v'].includes(extension)) return 'video'
   if (extension === 'pdf') return 'pdf'
   return ''
@@ -201,6 +217,7 @@ Page({
     files: [],
     selectedTotalBytes: 0,
     selectedTotalText: '0 B',
+    uploadProgressPercent: 0,
     requiresEvidence: false,
     allowedEvidenceTypes: [],
     videoPreview: null,
@@ -556,14 +573,8 @@ Page({
         wx.showToast({ title: `当前节点不允许 ${extension.toUpperCase()} 格式`, icon: 'none' })
         continue
       }
-      if (size > CATEGORY_LIMITS[category]) {
-        const limit = category === 'image' ? '5 MB' : '20 MB'
-        const label = category === 'image' ? '图片' : category === 'video' ? '视频' : 'PDF'
-        wx.showToast({ title: `${label}单文件不能超过 ${limit}`, icon: 'none' })
-        continue
-      }
       if (total + size > FEEDBACK_TOTAL_LIMIT) {
-        wx.showToast({ title: '单次反馈文件合计不能超过 20 MB', icon: 'none' })
+        wx.showToast({ title: '本轮凭证文件合计不能超过 120 MB', icon: 'none' })
         continue
       }
       total += size
@@ -577,8 +588,11 @@ Page({
         extension,
         status: 'pending',
         statusLabel: '待上传',
+        progressPercent: 0,
         evidenceId: '',
-        errorMessage: ''
+        errorMessage: '',
+        errorCode: '',
+        canRetry: false
       })
     }
     if (files.length !== originalCount) {
@@ -590,9 +604,8 @@ Page({
     if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
     if (isDesktopPlatform()) {
       wx.chooseMessageFile({
-        count: 9,
-        type: 'file',
-        extension: ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'm4v'],
+        count: 100,
+        type: 'all',
         success: result => this.addSelectedFiles((result.tempFiles || []).map((file, index) => ({
           name: displayName(file, `media-${index + 1}`),
           path: file.path || file.tempFilePath,
@@ -648,7 +661,27 @@ Page({
   updateLocalFile(index, changes) {
     const files = this.data.files.slice()
     files[index] = { ...files[index], ...changes }
-    this.setData({ files })
+    const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
+    const uploadedBytes = files.reduce((sum, file) => {
+      const progress = file.status === 'registered' ? 100 : Number(file.progressPercent || 0)
+      return sum + Number(file.size || 0) * Math.max(0, Math.min(100, progress)) / 100
+    }, 0)
+    const uploadProgressPercent = totalBytes ? Math.round(uploadedBytes * 100 / totalBytes) : 0
+    this.setData({ files, uploadProgressPercent })
+  },
+
+  createEvidenceUploader() {
+    return createEvidenceUploader({
+      beginUpload: input => businessService.beginEvidenceUpload(input),
+      finalizeUpload: input => businessService.finalizeEvidenceUpload(input),
+      cosFactory: options => {
+        if (typeof globalThis === 'object' && typeof globalThis.window === 'undefined') globalThis.window = globalThis
+        const COS = require('../../vendor/cos-wx-sdk-v5')
+        return new COS({
+          getAuthorization: (request, callback) => callback(options.getAuthorization())
+        })
+      }
+    })
   },
 
   writeStillCurrent(operation) {
@@ -664,57 +697,69 @@ Page({
   },
 
   async uploadAndRegisterEvidence(operation) {
-    for (let index = 0; index < this.data.files.length; index += 1) {
-      const file = this.data.files[index]
-      if (file.status === 'registered' && file.evidenceId) continue
-      if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
-      this.updateLocalFile(index, { status: 'uploading', statusLabel: '上传中', errorMessage: '' })
-      let upload
-      try {
-        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || `evidence.${file.extension}`
-        const cloudPath = `evidence/${operation.lineId}/${operation.nodeId}/${Date.now()}-${index}-${safeName}`
-        upload = await wx.cloud.uploadFile({ cloudPath, filePath: file.path })
-        if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
-      } catch (error) {
-        if (this.writeStillCurrent(operation)) {
-          this.updateLocalFile(index, {
-            status: 'failed', statusLabel: '上传失败', errorMessage: '上传失败，请重试'
-          })
-        }
-        throw Object.assign(new Error('上传失败，请重试'), { code: 'EVIDENCE_UPLOAD_FAILED' })
-      }
-      try {
-        const registered = await businessService.registerEvidenceUpload({
-          businessLineId: operation.lineId,
-          nodeId: operation.nodeId,
-          fileId: upload.fileID,
-          fileName: file.name,
-          declaredSize: file.size
-        })
+    const indexes = this.data.files.map((file, index) => ({ file, index }))
+      .filter(item => item.file.status !== 'registered' || !item.file.evidenceId)
+      .map(item => item.index)
+    const uploader = this.createEvidenceUploader()
+    let cursor = 0
+    let firstError = null
+    const worker = async () => {
+      while (cursor < indexes.length) {
+        const index = indexes[cursor++]
+        const file = this.data.files[index]
         if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
         this.updateLocalFile(index, {
-          status: 'registered', statusLabel: '已登记', evidenceId: registered.evidenceId, errorMessage: ''
+          status: 'uploading', statusLabel: '上传中 0%', progressPercent: 0,
+          errorMessage: '', errorCode: '', canRetry: false
         })
-      } catch (error) {
-        if (this.writeStillCurrent(operation)) {
-          this.updateLocalFile(index, {
-            status: 'failed', statusLabel: '上传失败', errorMessage: safeErrorMessage(error, '上传失败，请重试')
+        try {
+          const registered = await uploader.upload({
+            businessLineId: operation.lineId,
+            nodeId: operation.nodeId,
+            expectedNodeVersion: operation.nodeVersion,
+            file,
+            onProgress: progressPercent => {
+              if (this.writeStillCurrent(operation)) this.updateLocalFile(index, {
+                progressPercent,
+                statusLabel: `上传中 ${progressPercent}%`
+              })
+            }
           })
+          if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
+          this.updateLocalFile(index, {
+            status: 'registered', statusLabel: '已登记', progressPercent: 100,
+            evidenceId: registered.evidenceId, errorMessage: '', errorCode: '', canRetry: false
+          })
+        } catch (error) {
+          const safeError = safeUploadError(error)
+          if (this.writeStillCurrent(operation)) this.updateLocalFile(index, {
+            status: 'failed', statusLabel: '上传失败',
+            errorMessage: safeError.message,
+            errorCode: safeError.code,
+            canRetry: true
+          })
+          if (!firstError) firstError = safeError
         }
-        throw error
       }
     }
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, indexes.length) }, () => worker()))
+    if (firstError) throw firstError
     return this.data.files.map(file => file.evidenceId)
   },
 
   async previewEvidence(event) {
-    const { evidenceid, category, status } = event.currentTarget.dataset
+    const { evidenceid, category, status, filename } = event.currentTarget.dataset
     if (status !== 'available' || !evidenceid) return
     wx.showLoading({ title: '正在获取访问授权' })
     try {
       const grant = await businessService.getEvidenceAccess(evidenceid)
       const safeCategory = grant.category || category
-      if (safeCategory === 'image') {
+      const extension = extensionOf(grant.fileName || filename)
+      if (safeCategory === 'image' && ['heic', 'heif'].includes(extension)) {
+        const downloaded = await wx.downloadFile({ url: grant.url })
+        if (typeof wx.saveFile === 'function') await wx.saveFile({ tempFilePath: downloaded.tempFilePath })
+        wx.showToast({ title: '文件已下载，请从下载记录打开', icon: 'none' })
+      } else if (safeCategory === 'image') {
         wx.previewImage({ current: grant.url, urls: [grant.url] })
       } else if (safeCategory === 'video') {
         this.setData({ videoPreview: { evidenceId: evidenceid, url: grant.url, fileName: grant.fileName } })
@@ -830,7 +875,7 @@ Page({
       }
       this.progressRequestKey = ''
       this.progressIntent = ''
-      this.setData({ files: [], selectedTotalBytes: 0, selectedTotalText: '0 B' })
+      this.setData({ files: [], selectedTotalBytes: 0, selectedTotalText: '0 B', uploadProgressPercent: 0 })
       wx.showToast({ title: action === 'mark_blocked' ? '已标记受阻' : '处理进度已保存', icon: 'success' })
       await this.loadData()
       return true
@@ -1022,7 +1067,7 @@ Page({
       }
       wx.showToast({ title: '反馈成功', icon: 'success' })
       this.feedbackRequestKey = ''
-      this.setData({ comment: '', files: [], selectedTotalBytes: 0, selectedTotalText: '0 B' })
+      this.setData({ comment: '', files: [], selectedTotalBytes: 0, selectedTotalText: '0 B', uploadProgressPercent: 0 })
       await this.loadData()
     } catch (error) {
       if (this.writeStillCurrent(operation)) {

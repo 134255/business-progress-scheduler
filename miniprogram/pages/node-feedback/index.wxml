@@ -74,12 +74,13 @@
     <view class="field">
       <view class="row-between">
         <text class="field-label">节点凭证{{requiresEvidence ? ' *' : ''}}</text>
-        <text class="muted">合计 {{selectedTotalText}} / 20 MB</text>
+        <text class="muted">合计 {{selectedTotalText}} / 120 MB</text>
       </view>
       <view class="evidence-actions">
         <button size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked || submitting}}" bindtap="chooseMediaEvidence">选择图片或视频</button>
         <button size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked || submitting}}" bindtap="choosePdfEvidence">选择 PDF</button>
       </view>
+      <view wx:if="{{submitting && files.length}}" class="muted">本轮上传进度 {{uploadProgressPercent}}%</view>
       <view class="local-file" wx:for="{{files}}" wx:key="localKey">
         <view class="local-file-main">
           <text class="file-name">{{item.name}}</text>
@@ -115,9 +116,9 @@
       </view>
     </view>
     <text class="history-comment">{{item.comment || '未填写说明'}}</text>
-    <view class="history-evidence" wx:for="{{item.evidences}}" wx:for-item="evidence" wx:key="evidenceId" data-evidenceid="{{evidence.evidenceId}}" data-category="{{evidence.category}}" data-status="{{evidence.storageStatus}}" bindtap="previewEvidence">
+    <view class="history-evidence" wx:for="{{item.evidences}}" wx:for-item="evidence" wx:key="evidenceId" data-evidenceid="{{evidence.evidenceId}}" data-category="{{evidence.category}}" data-status="{{evidence.storageStatus}}" data-filename="{{evidence.fileName}}" bindtap="previewEvidence">
       <text class="file-name">{{evidence.fileName}}</text>
-      <text class="muted">{{evidence.storageStatusLabel}}{{evidence.storageStatus === 'purged' ? '（已清理）' : evidence.canPreview ? ' · 查看' : ''}}</text>
+      <text class="muted">{{evidence.storageStatusLabel}}{{evidence.storageStatus === 'purged' ? '（已清理）' : evidence.canPreview ? (evidence.downloadOnly ? ' · 下载' : ' · 查看') : ''}}</text>
     </view>
   </view>
   <view class="empty" wx:if="{{!loadingHistory && !history.length}}">暂无反馈记录</view>

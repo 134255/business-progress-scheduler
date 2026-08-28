@@ -309,11 +309,7 @@ for (const item of [
     const app = { globalData: { currentUser: activeUser() } }
     global.getApp = () => app
     global.wx = {
-      setNavigationBarTitle: () => {}, reLaunch: () => {}, showToast: () => {},
-      cloud: { uploadFile: async () => {
-        item.invalidate({ app, page })
-        throw new Error('模拟上传失败')
-      } }
+      setNavigationBarTitle: () => {}, reLaunch: () => {}, showToast: () => {}
     }
     const node = reviewNode()
     const page = loadPage('pages/node-feedback/index.js', {
@@ -323,6 +319,10 @@ for (const item of [
       submitFeedback: async () => assert.fail('上传失败后不应提交')
     })
     await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+    page.createEvidenceUploader = () => ({ upload: async () => {
+      item.invalidate({ app, page })
+      throw new Error('模拟上传失败')
+    } })
     page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '有效草稿' } })
     page.addSelectedFiles([{ name: 'proof.pdf', path: 'wxfile://proof.pdf', size: 10, category: 'pdf' }])
     await page.onSaveProgress()
