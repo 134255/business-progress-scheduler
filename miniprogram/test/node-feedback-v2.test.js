@@ -33,8 +33,23 @@ function loadPage(businessFake) {
   const pagePath = path.join(miniProgramRoot, 'pages/node-feedback/index.js')
   let definition
   global.Page = value => { definition = value }
+  const normalizedFake = { ...businessFake }
+  if (!normalizedFake.getNodeWorkspace && normalizedFake.getBusinessLine && normalizedFake.getNodeHistory) {
+    normalizedFake.getNodeWorkspace = async (lineId, nodeId) => {
+      const [detail, historyResult] = await Promise.all([
+        normalizedFake.getBusinessLine(lineId),
+        normalizedFake.getNodeHistory(lineId, nodeId)
+      ])
+      return {
+        line: detail.line,
+        node: (detail.nodes || []).find(item => item._id === nodeId),
+        canSubmit: historyResult.canSubmit,
+        history: historyResult.history
+      }
+    }
+  }
   try {
-    withFakeModule('services/business.js', businessFake, () => {
+    withFakeModule('services/business.js', normalizedFake, () => {
       delete require.cache[require.resolve(pagePath)]
       require(pagePath)
     })
@@ -253,10 +268,10 @@ test('反馈页只接受标识参数，并以服务端节点快照和权限构�
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = { setNavigationBarTitle: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向') }
   const page = loadPage({
-    getBusinessLine: async id => { calls.push(['line', id]); return businessFixture() },
-    getNodeHistory: async (lineId, nodeId) => {
-      calls.push(['history', lineId, nodeId])
-      return { node: { id: nodeId, name: '资料审核', nodeCode: 'YW-1-N001', status: 'ready' }, canSubmit: true, history: [] }
+    getNodeWorkspace: async (lineId, nodeId) => {
+      calls.push(['workspace', lineId, nodeId])
+      const detail = businessFixture()
+      return { line: detail.line, node: detail.nodes[0], canSubmit: true, history: [] }
     }
   })
 
@@ -265,7 +280,7 @@ test('反馈页只接受标识参数，并以服务端节点快照和权限构�
     nodeName: encodeURIComponent('伪造名称'), canFeedback: '0', expectedNodeVersion: '999'
   })
 
-  assert.deepEqual(calls, [['line', 'line-1'], ['history', 'line-1', 'node-1']])
+  assert.deepEqual(calls, [['workspace', 'line-1', 'node-1']])
   assert.equal(page.data.nodeName, '资料审核')
   assert.equal(page.data.canSubmit, true)
   assert.equal(page.data.expectedNodeVersion, 3)

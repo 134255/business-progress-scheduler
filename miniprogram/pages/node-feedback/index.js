@@ -274,12 +274,10 @@ Page({
     const requestedActorId = this.loadActorId || currentUserId()
     this.setData({ loadingHistory: true, errorMessage: '' })
     try {
-      const detail = await businessService.getBusinessLine(this.data.lineId)
+      const workspace = await businessService.getNodeWorkspace(this.data.lineId, this.data.nodeId)
       if (!this.pageAlive || requestSequence !== this.loadSequence || currentUserId() !== requestedActorId) return
-      const node = (detail.nodes || []).find(item => item._id === this.data.nodeId)
+      const node = workspace && workspace.node
       if (!node) throw new Error('未找到节点')
-      const historyResult = await businessService.getNodeHistory(this.data.lineId, this.data.nodeId)
-      if (!this.pageAlive || requestSequence !== this.loadSequence || currentUserId() !== requestedActorId) return
       const requiresEvidenceField = ownDataValue(node, 'requiresEvidence')
       const allowedEvidenceTypesField = ownDataValue(node, 'allowedEvidenceTypes')
       const requiresEvidence = requiresEvidenceField.state === 'missing' ? false : requiresEvidenceField.value
@@ -296,7 +294,7 @@ Page({
             : []
         }))
       const legacyMode = node.workflowMode !== 'review'
-      const latestDraft = !legacyMode && Array.isArray(historyResult.history) ? historyResult.history[0] : null
+      const latestDraft = !legacyMode && Array.isArray(workspace.history) ? workspace.history[0] : null
       const latestValues = new Map(
         latestDraft && Array.isArray(latestDraft.fieldValues)
           ? latestDraft.fieldValues
@@ -313,19 +311,19 @@ Page({
         const selected = Array.isArray(fieldValues[field.fieldKey]) ? fieldValues[field.fieldKey] : []
         field.optionItems = field.optionItems.map(option => ({ ...option, selected: selected.includes(option.value) }))
       }
-      const frozen = FROZEN_STATUSES.has(detail.line && detail.line.status)
-      const canSubmit = Boolean(historyResult.canSubmit) && !frozen
+      const frozen = FROZEN_STATUSES.has(workspace.line && workspace.line.status)
+      const canSubmit = Boolean(workspace.canSubmit) && !frozen
       const readOnly = frozen || !canSubmit || !legacyMode && node.status === 'pending_review'
       this.setData({
-        nodeName: node.name || (historyResult.node && historyResult.node.name) || '',
-        nodeCode: node.nodeCode || (historyResult.node && historyResult.node.nodeCode) || '',
+        nodeName: node.name || '',
+        nodeCode: node.nodeCode || '',
         expectedNodeVersion: node.version,
-        lineVersion: detail.line.version,
+        lineVersion: workspace.line.version,
         fields,
         fieldValues,
         requiresEvidence,
         allowedEvidenceTypes,
-        history: formattedHistory(historyResult.history),
+        history: formattedHistory(workspace.history),
         canSubmit,
         frozen,
         legacyMode,

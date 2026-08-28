@@ -90,6 +90,7 @@ function createRouteHarness({
   shareService,
   recognitionService,
   dashboardWorkspaceService,
+  nodeWorkspaceService,
   calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
@@ -147,6 +148,7 @@ function createRouteHarness({
     shareService,
     recognitionService,
     dashboardWorkspaceService,
+    nodeWorkspaceService,
     calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
@@ -747,6 +749,29 @@ test('聚合概览路由只使用受信账号且拒绝多余参数', async () =>
   })
   assert.equal(rejected.ok, false)
   assert.equal(rejected.code, 'VALIDATION_ERROR')
+})
+
+test('节点工作区路由只传递受信账号和两个节点标识', async () => {
+  const calls = []
+  const nodeWorkspaceService = {
+    async getNodeWorkspace(input) {
+      calls.push(input)
+      return { line: { _id: 'line-1' }, node: { _id: 'node-1' }, canSubmit: true, history: [] }
+    }
+  }
+  const harness = createRouteHarness({ nodeWorkspaceService })
+  const result = await harness.api.main({
+    action: 'getNodeWorkspace',
+    payload: { businessLineId: 'line-1', nodeId: 'node-1', actorId: 'forged' }
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls, [{
+    actor: {
+      _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
+    },
+    businessLineId: 'line-1',
+    nodeId: 'node-1'
+  }])
 })
 
 test('scoped evidence upload routes use the trusted actor and an exact safe payload contract', async () => {

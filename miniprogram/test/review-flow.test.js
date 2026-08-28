@@ -31,8 +31,23 @@ function loadPage(relativePath, businessFake) {
   const pagePath = path.join(miniProgramRoot, relativePath)
   let definition
   global.Page = value => { definition = value }
+  const normalizedFake = { ...businessFake }
+  if (!normalizedFake.getNodeWorkspace && normalizedFake.getBusinessLine && normalizedFake.getNodeHistory) {
+    normalizedFake.getNodeWorkspace = async (lineId, nodeId) => {
+      const [detail, historyResult] = await Promise.all([
+        normalizedFake.getBusinessLine(lineId),
+        normalizedFake.getNodeHistory(lineId, nodeId)
+      ])
+      return {
+        line: detail.line,
+        node: (detail.nodes || []).find(item => item._id === nodeId),
+        canSubmit: historyResult.canSubmit,
+        history: historyResult.history
+      }
+    }
+  }
   try {
-    withFakeModule('services/business.js', businessFake, () => {
+    withFakeModule('services/business.js', normalizedFake, () => {
       delete require.cache[require.resolve(pagePath)]
       require(pagePath)
     })

@@ -138,6 +138,10 @@ function getNodeHistory(businessLineId, nodeId) {
   return callBusinessApi('getNodeHistory', { businessLineId, nodeId })
 }
 
+function getNodeWorkspace(businessLineId, nodeId) {
+  return callProtected('getNodeWorkspace', { businessLineId, nodeId }, '节点信息加载失败，请稍后重试')
+}
+
 function registerEvidenceUpload(input) {
   return callProtected('registerEvidenceUpload', input, '凭证上传失败，请重试')
 }
@@ -231,6 +235,7 @@ module.exports = {
   deleteBusinessLine,
   submitNodeFeedback,
   getNodeHistory,
+  getNodeWorkspace,
   registerEvidenceUpload,
   beginEvidenceUpload,
   finalizeEvidenceUpload,
