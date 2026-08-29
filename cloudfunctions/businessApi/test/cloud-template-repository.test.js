@@ -1,8 +1,9 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 
 const { createCloudTemplateRepository } = require('../lib/cloud-template-repository')
-const { templateDefinitionDigest } = require('../lib/template-domain')
+const { normalizeTemplateNode, templateDefinitionDigest } = require('../lib/template-domain')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 
 function createRepositoryHarness(seed = {}) {
@@ -28,6 +29,16 @@ function node(overrides = {}) {
     fields: [],
     ...overrides
   }
+}
+
+function preActivationModeDigest(nodes) {
+  const normalized = nodes.map(item => {
+    const { activationMode, ...legacy } = normalizeTemplateNode(item)
+    return legacy
+  })
+  return crypto.createHash('sha256')
+    .update(JSON.stringify({ workflowMode: 'review', nodes: normalized }))
+    .digest('hex')
 }
 
 test('creation atomically writes metadata, nodes, server dates, and one audit record', async () => {
@@ -95,6 +106,68 @@ test('definition reads fail closed when stored nodes no longer match the templat
       definitionDigest: templateDefinitionDigest([storedNode])
     }],
     template_nodes: [{ ...storedNode, name: '被绕过仓储修改的节点' }]
+  })
+
+  await assert.rejects(
+    repository.getTemplateDefinition('t1'),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+})
+
+test('definition reads accept intact review templates published before activation mode existed', async () => {
+  const storedNode = {
+    _id: 'n1', templateId: 't1', nodeKey: 'node-a', sequence: 0, name: '启动', description: '',
+    workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'],
+    reviewMode: 'any', processingSlaWorkHours: 8, reviewSlaWorkHours: 4,
+    requiresEvidence: false, allowedEvidenceTypes: [], fields: [], version: 1
+  }
+  const { repository } = createRepositoryHarness({
+    templates: [{
+      _id: 't1', name: '历史模板', status: 'enabled', version: 1, nodeCount: 1,
+      definitionDigest: preActivationModeDigest([storedNode])
+    }],
+    template_nodes: [storedNode]
+  })
+
+  const definition = await repository.getTemplateDefinition('t1')
+  assert.equal(definition.template._id, 't1')
+  assert.equal(definition.nodes[0]._id, 'n1')
+})
+
+test('legacy activation-mode compatibility still rejects a tampered historical review node', async () => {
+  const storedNode = {
+    _id: 'n1', templateId: 't1', nodeKey: 'node-a', sequence: 0, name: '启动', description: '',
+    workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'],
+    reviewMode: 'any', processingSlaWorkHours: 8, reviewSlaWorkHours: 4,
+    requiresEvidence: false, allowedEvidenceTypes: [], fields: [], version: 1
+  }
+  const { repository } = createRepositoryHarness({
+    templates: [{
+      _id: 't1', name: '历史模板', status: 'enabled', version: 1, nodeCount: 1,
+      definitionDigest: preActivationModeDigest([storedNode])
+    }],
+    template_nodes: [{ ...storedNode, name: '被篡改的节点' }]
+  })
+
+  await assert.rejects(
+    repository.getTemplateDefinition('t1'),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+})
+
+test('legacy activation-mode digest is rejected once a stored node declares activation mode', async () => {
+  const storedNode = {
+    _id: 'n1', templateId: 't1', nodeKey: 'node-a', sequence: 0, name: '启动', description: '',
+    workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'],
+    reviewMode: 'any', processingSlaWorkHours: 8, reviewSlaWorkHours: 4,
+    requiresEvidence: false, allowedEvidenceTypes: [], fields: [], version: 1
+  }
+  const { repository } = createRepositoryHarness({
+    templates: [{
+      _id: 't1', name: '新模板', status: 'enabled', version: 1, nodeCount: 1,
+      definitionDigest: preActivationModeDigest([storedNode])
+    }],
+    template_nodes: [{ ...storedNode, activationMode: 'required' }]
   })
 
   await assert.rejects(

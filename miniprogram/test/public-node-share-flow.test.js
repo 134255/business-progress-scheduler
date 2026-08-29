@@ -62,4 +62,7 @@ test('公开只读页无需登录即可读取固定快照、分页凭证并使�
   const wxml = fs.readFileSync(path.join(root, 'pages/public-node-share/index.wxml'), 'utf8')
   assert.match(wxml, /公开只读快照/)
   assert.match(wxml, /open-type="share"/)
+
+  const pageConfig = JSON.parse(fs.readFileSync(path.join(root, 'pages/public-node-share/index.json'), 'utf8'))
+  assert.equal(Object.hasOwn(pageConfig, 'enableShareAppMessage'), false)
 })

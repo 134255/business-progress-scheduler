@@ -258,6 +258,20 @@ function templateDefinitionDigest(nodes) {
     .digest('hex')
 }
 
+function preActivationModeTemplateDefinitionDigest(nodes) {
+  const values = ownArrayValues(nodes)
+  if (values.length === 0) return templateDefinitionDigest(values)
+  const definition = normalizeDefinitionNodes(values)
+  if (definition.workflowMode !== WORKFLOW_MODE) return templateDefinitionDigest(values)
+  const legacyNodes = definition.nodes.map(node => {
+    const { activationMode, ...legacyNode } = node
+    return legacyNode
+  })
+  return crypto.createHash('sha256')
+    .update(JSON.stringify({ workflowMode: definition.workflowMode, nodes: legacyNodes }))
+    .digest('hex')
+}
+
 function collectTemplateParticipantUserIds(nodes) {
   const definition = normalizeDefinitionNodes(nodes)
   const userIds = definition.workflowMode === WORKFLOW_MODE
@@ -322,6 +336,7 @@ module.exports = {
   ALLOWED_EVIDENCE_TYPES,
   normalizeTemplateNode,
   templateDefinitionDigest,
+  preActivationModeTemplateDefinitionDigest,
   collectTemplateParticipantUserIds,
   validateTemplateForEnable,
   assertTemplateEditable

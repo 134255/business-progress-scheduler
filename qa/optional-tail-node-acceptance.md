@@ -10,7 +10,7 @@
 ## 2. 索引与部署顺序
 
 1. 创建或核对以下非唯一组合索引并等待生效：
-   - `business_nodes(optionalTailState ASC, nextDecisionReminderWorkHour ASC, decisionStartedAt ASC, _id ASC)`；
+   - `business_nodes(status ASC, activationMode ASC, decisionReminderStatus ASC, _id ASC)`；
    - `business_nodes(decisionTimingStatus ASC, _id ASC)`；
    - `business_nodes(processingTimingStatus ASC, _id ASC)`；
    - `evidences(feedbackId ASC, _id ASC)`。

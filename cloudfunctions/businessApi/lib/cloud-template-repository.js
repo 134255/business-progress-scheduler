@@ -1,5 +1,9 @@
 const crypto = require('node:crypto')
-const { REVIEWER_ASSIGNMENT_MODE, templateDefinitionDigest } = require('./template-domain')
+const {
+  REVIEWER_ASSIGNMENT_MODE,
+  templateDefinitionDigest,
+  preActivationModeTemplateDefinitionDigest
+} = require('./template-domain')
 
 const COLLECTIONS = Object.freeze({
   templates: 'templates',
@@ -132,8 +136,12 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     } catch (error) {
       throw createError('TEMPLATE_INVALID')
     }
-    if (typeof template.definitionDigest !== 'string' || !/^[a-f0-9]{64}$/.test(template.definitionDigest) ||
-        actualDigest !== template.definitionDigest) {
+    const storedDigest = template.definitionDigest
+    const storedDigestIsValid = typeof storedDigest === 'string' && /^[a-f0-9]{64}$/.test(storedDigest)
+    const legacyDigestMatches = storedDigestIsValid && actualDigest !== storedDigest &&
+      nodes.every(node => !Object.prototype.hasOwnProperty.call(node, 'activationMode')) &&
+      preActivationModeTemplateDefinitionDigest(nodes) === storedDigest
+    if (!storedDigestIsValid || (actualDigest !== storedDigest && !legacyDigestMatches)) {
       throw createError('TEMPLATE_INVALID')
     }
   }
