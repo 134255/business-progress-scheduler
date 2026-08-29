@@ -6,7 +6,10 @@ const STATUS_LABELS = {
   deleted: '已删除',
   pending: '待开始',
   ready: '待处理',
-  in_progress: '处理中'
+  in_progress: '处理中',
+  pending_review: '待审核',
+  awaiting_decision: '待决定',
+  skipped: '未启用'
 }
 
 function statusLabel(status) {

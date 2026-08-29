@@ -48,6 +48,12 @@ Page({
     canRejectPrevious: false,
     previousNode: null,
     currentNode: null,
+    displayProgress: 0,
+    optionalTailSummary: '',
+    optionalDecisionPanelOpen: false,
+    optionalDecision: '',
+    optionalDecisionComment: '',
+    optionalDecisionSubmitting: false,
     showAmendmentEntry: false,
     rejectionReason: '',
     rejecting: false,
@@ -100,6 +106,12 @@ Page({
       canRejectPrevious: false,
       previousNode: null,
       currentNode: null,
+      displayProgress: 0,
+      optionalTailSummary: '',
+      optionalDecisionPanelOpen: false,
+      optionalDecision: '',
+      optionalDecisionComment: '',
+      optionalDecisionSubmitting: false,
       showAmendmentEntry: false,
       shareCreatingNodeId: '',
       errorMessage: ''
@@ -113,7 +125,12 @@ Page({
     const line = data.line || null
     const nodes = (data.nodes || []).slice().sort((left, right) =>
       Number(left.sequence) - Number(right.sequence)).map(node => node.workflowMode === 'review'
-      ? {
+      ? (() => {
+        const decisionParts = []
+        if (node.decisionActorDisplayName) decisionParts.push(node.decisionActorDisplayName)
+        if (node.decisionAt) decisionParts.push(dateTimeText(node.decisionAt))
+        if (node.decisionComment) decisionParts.push(node.decisionComment)
+        return {
           ...node,
           processorNamesText: Array.isArray(node.processorDisplayNames) ? node.processorDisplayNames.join('、') : '',
           reviewerNamesText: Array.isArray(node.reviewerDisplayNames) ? node.reviewerDisplayNames.join('、') : '',
@@ -122,8 +139,11 @@ Page({
           reviewDueText: dueText(node.reviewDueStatus, node.reviewDueAt),
           reviewStartedText: dateTimeText(node.reviewStartedAt),
           processingOverdueText: workMinutesText(node.processingOverdueWorkMinutes),
-          reviewOverdueText: workMinutesText(node.reviewOverdueWorkMinutes)
+          reviewOverdueText: workMinutesText(node.reviewOverdueWorkMinutes),
+          optionalDecisionText: node.status === 'skipped' ? '未启用' : '',
+          decisionMetadataText: decisionParts.join(' · ')
         }
+      })()
       : node)
     const frozen = Boolean(line && FROZEN_STATUSES.has(line.status))
     const currentIndex = line ? nodes.findIndex(node => node._id === line.currentNodeId) : -1
@@ -140,6 +160,8 @@ Page({
       previousNode.status === 'completed' && isCurrentAssignee
     )
     const superAdmin = Boolean(user && user.role === 'super_admin')
+    const pendingOptional = Boolean(line && line.optionalTailState === 'pending')
+    const activatedOptional = Boolean(line && line.optionalTailState === 'activated')
     return {
       ...data,
       line,
@@ -147,6 +169,10 @@ Page({
       frozen,
       currentNode,
       previousNode,
+      displayProgress: pendingOptional ? Math.min(99, Number(line && line.progress || 0)) : Number(line && line.progress || 0),
+      optionalTailSummary: pendingOptional
+        ? '必经流程已完成 · 待决定'
+        : activatedOptional ? '必经流程已完成 · 追加处理中' : '',
       canRejectPrevious,
       canClose: Boolean(line && line.status === 'active' && (data.canManage || superAdmin)),
       showAmendmentEntry: frozen && superAdmin
@@ -180,6 +206,81 @@ Page({
     wx.navigateTo({
       url: `/pages/node-feedback/index?lineId=${encodeURIComponent(this.data.id)}&nodeId=${encodeURIComponent(node._id)}`
     })
+  },
+
+  openOptionalDecision(event) {
+    const decision = String(event.currentTarget.dataset.decision || '')
+    if (!['activate', 'skip'].includes(decision) || !this.data.currentNode ||
+        !this.data.currentNode.canDecideOptionalTail || this.data.optionalDecisionSubmitting) return
+    this.optionalDecisionRequestKey = ''
+    this.setData({
+      optionalDecisionPanelOpen: true,
+      optionalDecision: decision,
+      optionalDecisionComment: ''
+    })
+  },
+
+  onOptionalDecisionComment(event) {
+    if (!this.data.optionalDecisionSubmitting) {
+      this.setData({ optionalDecisionComment: String(event.detail.value || '') })
+    }
+  },
+
+  cancelOptionalDecision() {
+    if (this.data.optionalDecisionSubmitting) return
+    this.optionalDecisionRequestKey = ''
+    this.setData({
+      optionalDecisionPanelOpen: false,
+      optionalDecision: '',
+      optionalDecisionComment: ''
+    })
+  },
+
+  async confirmOptionalDecision() {
+    if (this.data.optionalDecisionSubmitting || !this.data.optionalDecisionPanelOpen) return false
+    const node = this.data.currentNode
+    const line = this.data.line
+    const decision = this.data.optionalDecision
+    const comment = this.data.optionalDecisionComment.trim()
+    if (!node || !line || !node.canDecideOptionalTail || !['activate', 'skip'].includes(decision)) return false
+    if (decision === 'skip' && !comment) {
+      wx.showToast({ title: '请填写不启用原因', icon: 'none' })
+      return false
+    }
+    if (!this.optionalDecisionRequestKey) this.optionalDecisionRequestKey = newRequestKey('optional-tail')
+    const actorId = this.actorId
+    const lineId = line._id
+    const lineVersion = line.version
+    const nodeId = node._id
+    const nodeVersion = node.version
+    this.setData({ optionalDecisionSubmitting: true })
+    try {
+      await businessService.decideOptionalTailNode({
+        businessLineId: lineId,
+        nodeId,
+        expectedLineVersion: lineVersion,
+        expectedNodeVersion: nodeVersion,
+        decision,
+        comment,
+        requestKey: this.optionalDecisionRequestKey
+      })
+      if (!this.pageAlive || !this.actorStillCurrent() || this.actorId !== actorId || this.data.id !== lineId) return false
+      this.optionalDecisionRequestKey = ''
+      this.setData({ optionalDecisionPanelOpen: false, optionalDecision: '', optionalDecisionComment: '' })
+      wx.showToast({ title: decision === 'activate' ? '追加节点已启用' : '售后已完成', icon: 'success' })
+      await this.loadDetail()
+      return true
+    } catch (error) {
+      if (this.pageAlive && this.actorStillCurrent() && this.actorId === actorId && this.data.id === lineId) {
+        if (error.code === 'VERSION_CONFLICT') await this.loadDetail()
+        wx.showToast({ title: safeErrorMessage(error, '追加节点决定失败，请稍后重试'), icon: 'none' })
+      }
+      return false
+    } finally {
+      if (this.pageAlive && activeUser() && activeUser()._id === actorId && this.data.id === lineId) {
+        this.setData({ optionalDecisionSubmitting: false })
+      }
+    }
   },
 
   async createNodeShare(event) {

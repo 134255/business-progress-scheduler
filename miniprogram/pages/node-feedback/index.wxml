@@ -94,8 +94,9 @@
     <view wx:else class="review-actions">
       <button class="secondary-button" bindtap="onSaveProgress" loading="{{submitting}}" disabled="{{submitting || readOnly || reviewDraftLocked}}">保存处理进度</button>
       <button class="secondary-button" bindtap="onMarkBlocked" loading="{{submitting}}" disabled="{{submitting || readOnly || reviewDraftLocked}}">标记受阻</button>
-      <button class="primary-button" bindtap="onSubmitReview" loading="{{submitting}}" disabled="{{submitting || readOnly}}">提交审核</button>
-      <text wx:if="{{reviewDraftLocked && !readOnly}}" class="muted readonly-tip">处理草稿已保存，内容已锁定；可再次点击提交审核继续重试。</text>
+      <button wx:if="{{requiresReview}}" class="primary-button" bindtap="onPrimaryAction" loading="{{submitting}}" disabled="{{submitting || readOnly}}">提交审核</button>
+      <button wx:else class="primary-button" bindtap="onPrimaryAction" loading="{{submitting}}" disabled="{{submitting || readOnly}}">完成节点</button>
+      <text wx:if="{{requiresReview && reviewDraftLocked && !readOnly}}" class="muted readonly-tip">处理草稿已保存，内容已锁定；可再次点击提交审核继续重试。</text>
       <text wx:if="{{readOnly}}" class="muted readonly-tip">当前节点不可编辑，审核结果以服务端最新状态为准。</text>
     </view>
   </view>

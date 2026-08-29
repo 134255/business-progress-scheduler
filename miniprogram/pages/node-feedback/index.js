@@ -191,6 +191,8 @@ Page({
     canSubmit: false,
     legacyMode: true,
     workflowMode: 'legacy',
+    requiresReview: true,
+    primaryActionLabel: '提交审核',
     reviewMode: '',
     reviewModeLabel: '',
     processorNamesText: '',
@@ -313,7 +315,9 @@ Page({
       }
       const frozen = FROZEN_STATUSES.has(workspace.line && workspace.line.status)
       const canSubmit = Boolean(workspace.canSubmit) && !frozen
-      const readOnly = frozen || !canSubmit || !legacyMode && node.status === 'pending_review'
+      const requiresReview = legacyMode ? true : node.requiresReview !== false
+      const readOnlyStatuses = new Set(['pending_review', 'awaiting_decision', 'skipped', 'completed'])
+      const readOnly = frozen || !canSubmit || !legacyMode && readOnlyStatuses.has(node.status)
       this.setData({
         nodeName: node.name || '',
         nodeCode: node.nodeCode || '',
@@ -328,6 +332,8 @@ Page({
         frozen,
         legacyMode,
         workflowMode: legacyMode ? 'legacy' : 'review',
+        requiresReview,
+        primaryActionLabel: requiresReview ? '提交审核' : '完成节点',
         reviewMode: legacyMode ? '' : node.reviewMode,
         reviewModeLabel: node.reviewMode === 'all' ? '会签' : node.reviewMode === 'any' ? '或签' : '',
         processorNamesText: Array.isArray(node.processorDisplayNames) ? node.processorDisplayNames.join('、') : '',
@@ -812,6 +818,28 @@ Page({
     return this.data.workflowMode === 'review' && this.data.canSubmit && !this.data.frozen && !this.data.readOnly
   },
 
+  primaryActionLabel() {
+    return this.data.requiresReview === false ? '完成节点' : '提交审核'
+  },
+
+  onPrimaryAction() {
+    return this.data.requiresReview === false
+      ? this.performProgressAction('complete_node')
+      : this.onSubmitReview()
+  },
+
+  async refreshPreservingDraft(operation) {
+    const fieldValues = { ...this.data.fieldValues }
+    const comment = this.data.comment
+    const files = this.data.files.slice()
+    const selectedTotalBytes = this.data.selectedTotalBytes
+    const selectedTotalText = this.data.selectedTotalText
+    await this.loadData()
+    if (!this.operationStillOwnsPage(operation)) return
+    this.formRevision += 1
+    this.setData({ fieldValues, comment, files, selectedTotalBytes, selectedTotalText, draftDirty: true })
+  },
+
   async progressPayload(operation) {
     const draftPayload = operation.draftPayload || {
       fieldValues: this.normalizedFieldValues(),
@@ -860,11 +888,26 @@ Page({
     }
     this.setData({ submitting: true, errorMessage: '' })
     try {
-      const payload = await this.progressPayload(operation)
+      const needsUpload = this.data.files.some(file => file.status !== 'registered' || !file.evidenceId)
+      const payload = needsUpload
+        ? await this.progressPayload(operation)
+        : {
+            businessLineId: operation.lineId,
+            nodeId: operation.nodeId,
+            expectedNodeVersion: operation.nodeVersion,
+            fieldValues: operation.draftPayload.fieldValues,
+            comment: operation.draftPayload.comment,
+            evidenceIds: this.data.files.map(file => file.evidenceId).filter(Boolean)
+          }
       if (!this.writeStillCurrent(operation)) return false
       const usedRequestKey = this.progressRequestKey
       const progressResult = await businessService.submitFeedback({ ...payload, action, requestKey: usedRequestKey })
       if (!this.writeStillCurrent(operation)) return false
+      if (action === 'complete_node' && (!progressResult || progressResult.nodeStatus !== 'completed' ||
+          !Number.isSafeInteger(progressResult.nodeVersion) ||
+          progressResult.nodeVersion <= payload.expectedNodeVersion)) {
+        throw new Error('完成节点结果无效，请刷新后重试')
+      }
       if (action === 'save_progress') {
         if (!Number.isSafeInteger(progressResult && progressResult.nodeVersion) ||
             progressResult.nodeVersion <= payload.expectedNodeVersion) {
@@ -880,12 +923,16 @@ Page({
       this.progressRequestKey = ''
       this.progressIntent = ''
       this.setData({ files: [], selectedTotalBytes: 0, selectedTotalText: '0 B', uploadProgressPercent: 0 })
-      wx.showToast({ title: action === 'mark_blocked' ? '已标记受阻' : '处理进度已保存', icon: 'success' })
+      wx.showToast({
+        title: action === 'mark_blocked' ? '已标记受阻' : action === 'complete_node' ? '节点已完成' : '处理进度已保存',
+        icon: 'success'
+      })
       await this.loadData()
       return true
     } catch (error) {
       if (this.writeStillCurrent(operation)) {
-        wx.showToast({ title: safeErrorMessage(error, '处理进度保存失败，请重试'), icon: 'none' })
+        if (error.code === 'VERSION_CONFLICT') await this.refreshPreservingDraft(operation)
+        wx.showToast({ title: safeErrorMessage(error, action === 'complete_node' ? '完成节点失败，请重试' : '处理进度保存失败，请重试'), icon: 'none' })
       }
       return false
     } finally {

@@ -535,6 +535,83 @@ test('business detail keeps rendered content during refresh and clears it when t
   assert.match(wxml, /refreshing/)
 })
 
+test('business detail presents optional-tail decisions without premature 100 percent completion', async () => {
+  const calls = []
+  const refreshes = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser('processor-2') } })
+  global.wx = { reLaunch: () => {}, showToast: () => {} }
+  const page = loadPage('pages/business-detail/index.js', {
+    'services/business.js': {
+      decideOptionalTailNode: async input => { calls.push(input); return { optionalTailState: 'activated' } }
+    }
+  })
+  page.pageAlive = true
+  page.actorId = 'processor-2'
+  page.detailSequence = 0
+  page.setData({ id: 'line-1' })
+  const pending = page.presentDetail({
+    canManage: false,
+    line: {
+      _id: 'line-1', status: 'active', version: 7, progress: 100,
+      currentNodeId: 'node-2', optionalTailState: 'pending', optionalTailNodeId: 'node-2'
+    },
+    nodes: [{
+      _id: 'node-2', sequence: 2, name: '追加回访', status: 'awaiting_decision', version: 3,
+      workflowMode: 'review', isOptionalTail: true, requiresReview: false,
+      canDecideOptionalTail: true, processorDisplayNames: ['候选人'], reviewerDisplayNames: []
+    }]
+  })
+  page.setData(pending)
+  page.loadDetail = async () => { refreshes.push('refresh') }
+
+  assert.equal(page.data.displayProgress, 99)
+  assert.equal(page.data.optionalTailSummary, '必经流程已完成 · 待决定')
+  assert.equal(page.data.currentNode.canDecideOptionalTail, true)
+  page.openOptionalDecision({ currentTarget: { dataset: { decision: 'activate' } } })
+  page.onOptionalDecisionComment({ detail: { value: '继续处理' } })
+  await page.confirmOptionalDecision()
+
+  assert.deepEqual(calls, [{
+    businessLineId: 'line-1', nodeId: 'node-2', expectedLineVersion: 7,
+    expectedNodeVersion: 3, decision: 'activate', comment: '继续处理', requestKey: calls[0].requestKey
+  }])
+  assert.equal(refreshes.length, 1)
+
+  const skipped = page.presentDetail({
+    line: { _id: 'line-1', status: 'completed', progress: 100, optionalTailState: 'skipped' },
+    nodes: [{
+      _id: 'node-2', sequence: 2, name: '追加回访', status: 'skipped', workflowMode: 'review',
+      isOptionalTail: true, requiresReview: false, canDecideOptionalTail: false,
+      processorDisplayNames: ['候选人'], reviewerDisplayNames: [],
+      decisionAt: '2026-08-29T02:00:00.000Z', decisionActorDisplayName: '候选人', decisionComment: '无需回访'
+    }]
+  })
+  assert.equal(skipped.nodes[0].optionalDecisionText, '未启用')
+  assert.match(skipped.nodes[0].decisionMetadataText, /候选人/)
+  assert.match(skipped.nodes[0].decisionMetadataText, /无需回访/)
+
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/business-detail/index.wxml'), 'utf8')
+  assert.match(wxml, /必经流程已完成/)
+  assert.match(wxml, /启用追加节点/)
+  assert.match(wxml, /不启用并完成售后/)
+})
+
+test('optional-tail decision cancellation does not call the backend or alter the line', () => {
+  let calls = 0
+  global.getApp = () => ({ globalData: { currentUser: activeUser('processor-2') } })
+  global.wx = { reLaunch: () => {} }
+  const page = loadPage('pages/business-detail/index.js', {
+    'services/business.js': { decideOptionalTailNode: async () => { calls += 1 } }
+  })
+  const line = { _id: 'line-1', status: 'active', version: 2 }
+  page.setData({ line, currentNode: { _id: 'node-2', canDecideOptionalTail: true } })
+  page.openOptionalDecision({ currentTarget: { dataset: { decision: 'skip' } } })
+  page.cancelOptionalDecision()
+  assert.equal(calls, 0)
+  assert.deepEqual(page.data.line, line)
+  assert.equal(page.data.optionalDecisionPanelOpen, false)
+})
+
 test('pending server reads fail closed when the authenticated account changes', async () => {
   const pending = deferred()
   const app = { globalData: { currentUser: activeUser('user-before') } }

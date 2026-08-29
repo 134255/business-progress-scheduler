@@ -7,8 +7,9 @@
     <text class="muted block">编号：{{line.code}}</text>
     <text class="muted block">版本：{{line.version}}</text>
     <text class="muted block">{{line.description || '暂无说明'}}</text>
-    <view class="progress"><view class="progress-value" style="width: {{line.progress || 0}}%"></view></view>
-    <text class="muted">总体进度 {{line.progress || 0}}%</text>
+    <view class="progress"><view class="progress-value" style="width: {{displayProgress || 0}}%"></view></view>
+    <text class="muted">总体进度 {{displayProgress || 0}}%</text>
+    <text wx:if="{{optionalTailSummary}}" class="optional-summary">必经流程已完成{{line.optionalTailState === 'pending' ? ' · 待决定' : ' · 追加处理中'}}</text>
     <button wx:if="{{canManage && !frozen}}" class="secondary-button edit-button" bindtap="editLine">编辑售后线</button>
     <button wx:if="{{showAmendmentEntry}}" class="secondary-button edit-button" bindtap="openAmendment">审计式修订</button>
   </view>
@@ -30,9 +31,25 @@
         </view>
         <text wx:else class="muted block">负责人：{{item.assigneeNamesText || '待分配'}}</text>
         <text class="muted block" wx:if="{{item.requiresEvidence}}">需上传凭证</text>
+        <text wx:if="{{item.optionalDecisionText}}" class="optional-summary">{{item.optionalDecisionText}}</text>
+        <text wx:if="{{item.decisionMetadataText}}" class="muted block">决定记录：{{item.decisionMetadataText}}</text>
         <text class="action-tip">{{item.canFeedback ? '反馈进度并查看凭证' : '查看节点记录与凭证'}} →</text>
+        <view wx:if="{{item.canDecideOptionalTail}}" class="optional-actions">
+          <button class="primary-button" data-decision="activate" catchtap="openOptionalDecision" disabled="{{optionalDecisionSubmitting}}">启用追加节点</button>
+          <button class="secondary-button" data-decision="skip" catchtap="openOptionalDecision" disabled="{{optionalDecisionSubmitting}}">不启用并完成售后</button>
+        </view>
         <button wx:if="{{item.canShareResult}}" class="secondary-button" data-index="{{index}}" catchtap="createNodeShare" loading="{{shareCreatingNodeId === item._id}}" disabled="{{!!shareCreatingNodeId}}">生成固定分享快照</button>
       </view>
+    </view>
+  </view>
+
+  <view wx:if="{{optionalDecisionPanelOpen}}" class="card operation-card optional-decision-panel">
+    <view class="section-title compact-title">{{optionalDecision === 'activate' ? '启用追加节点' : '不启用并完成售后'}}</view>
+    <text class="muted block">{{optionalDecision === 'activate' ? '确认后追加节点开始处理。说明可选填。' : '确认后售后立即完成，请填写不启用原因。'}}</text>
+    <textarea class="textarea" value="{{optionalDecisionComment}}" maxlength="500" disabled="{{optionalDecisionSubmitting}}" bindinput="onOptionalDecisionComment" placeholder="{{optionalDecision === 'activate' ? '可填写启用说明' : '请填写不启用原因'}}" />
+    <view class="decision-confirm-actions">
+      <button class="secondary-button" bindtap="cancelOptionalDecision" disabled="{{optionalDecisionSubmitting}}">取消</button>
+      <button class="primary-button" bindtap="confirmOptionalDecision" loading="{{optionalDecisionSubmitting}}" disabled="{{optionalDecisionSubmitting}}">确认</button>
     </view>
   </view>
 

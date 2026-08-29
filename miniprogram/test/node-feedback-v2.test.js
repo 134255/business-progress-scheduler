@@ -835,6 +835,30 @@ test('凭证登记失败仅保存服务层固定中文安全错误', async () =>
   assert.equal(page.data.files[0].errorMessage, '文件格式不受支持，请重新选择')
 })
 
+test('待决定的可选追加节点保持只读且不能选择或上传凭证', async () => {
+  const writes = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, reLaunch: () => {}, showToast: () => {} }
+  const node = nodeFixture({
+    workflowMode: 'review', status: 'awaiting_decision', requiresReview: false,
+    reviewerDisplayNames: [], allowedEvidenceTypes: ['pdf']
+  })
+  const page = loadPage({
+    getNodeWorkspace: async () => ({
+      line: { _id: 'line-1', status: 'active', version: 2 }, node, canSubmit: false, history: []
+    }),
+    submitFeedback: async input => writes.push(input)
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.addSelectedFiles([{ name: 'proof.pdf', path: 'wxfile://proof.pdf', size: 10, category: 'pdf' }])
+  await page.onPrimaryAction()
+
+  assert.equal(page.data.readOnly, true)
+  assert.equal(page.data.canSubmit, false)
+  assert.deepEqual(page.data.files, [])
+  assert.deepEqual(writes, [])
+})
+
 test('凭证预览先获取短期授权，图片、PDF、视频分别使用安全查看方式', async () => {
   const calls = []
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })

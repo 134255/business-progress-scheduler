@@ -606,6 +606,36 @@ function createCloudBusinessRepository({
             !node.reviewStartedAt && !node.activeReviewRoundId
           ? 'not_started'
           : undefined
+      const processorDisplayNames = persistedDisplayNames(
+        node, 'processorDisplayNames', processors.length, '历史处理人'
+      )
+      const reviewerDisplayNames = persistedDisplayNames(
+        node, 'reviewerDisplayNames', reviewers.length, '历史审核人'
+      )
+      const decisionAtField = ownDataValue(node, 'decisionAt')
+      const decisionActorField = ownDataValue(node, 'decisionActorId')
+      const decisionCommentField = ownDataValue(node, 'decisionComment')
+      const decisionMinutesField = ownDataValue(node, 'decisionWorkMinutes')
+      let optionalDecision = {}
+      if (activationMode === ACTIVATION_MODE.OPTIONAL_TAIL && decisionAtField.present) {
+        const decisionAt = decisionAtField.valid ? new Date(decisionAtField.value) : new Date(NaN)
+        const actorIndex = decisionActorField.valid ? processors.indexOf(decisionActorField.value) : -1
+        const comment = decisionCommentField.present && decisionCommentField.valid
+          ? decisionCommentField.value
+          : ''
+        const workMinutes = decisionMinutesField.present && decisionMinutesField.valid
+          ? decisionMinutesField.value
+          : 0
+        if (Number.isNaN(decisionAt.getTime()) || actorIndex < 0 || typeof comment !== 'string' ||
+            comment.length > 500 || /[\u0000-\u001f\u007f]/.test(comment) ||
+            !Number.isSafeInteger(workMinutes) || workMinutes < 0) throw createError('FORBIDDEN')
+        optionalDecision = {
+          decisionAt,
+          decisionActorDisplayName: processorDisplayNames[actorIndex],
+          decisionComment: comment,
+          decisionWorkMinutes: workMinutes
+        }
+      }
       return {
         ...base,
         workflowMode: 'review',
@@ -613,8 +643,8 @@ function createCloudBusinessRepository({
         requiresReview: reviewers.length > 0,
         canDecideOptionalTail: activationMode === ACTIVATION_MODE.OPTIONAL_TAIL &&
           node.status === 'awaiting_decision' && processors.includes(actor._id),
-        processorDisplayNames: persistedDisplayNames(node, 'processorDisplayNames', processors.length, '历史处理人'),
-        reviewerDisplayNames: persistedDisplayNames(node, 'reviewerDisplayNames', reviewers.length, '历史审核人'),
+        processorDisplayNames,
+        reviewerDisplayNames,
         reviewMode: node.reviewMode,
         processingRoundNumber: node.processingRoundNumber,
         reviewRoundNumber: node.reviewRoundNumber,
@@ -629,6 +659,7 @@ function createCloudBusinessRepository({
         canFeedback: processors.includes(actor._id),
         canShareResult: node.status === 'completed' &&
           (canManage || processors.includes(actor._id) || reviewers.includes(actor._id)),
+        ...optionalDecision,
         ...evidencePolicy,
         fieldDefinitions
       }

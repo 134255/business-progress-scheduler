@@ -214,7 +214,7 @@ test('business detail exposes optional-tail decision and reviewerless flags only
       activationMode: 'optional_tail', processorUserIds: ['user-4'], reviewerUserIds: []
     })
   ]
-  const { repository } = createRepositoryHarness(seedDefinition({ nodes }))
+  const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes }))
   const created = await repository.createBusinessSnapshot({
     actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
   })
@@ -228,6 +228,22 @@ test('business detail exposes optional-tail decision and reviewerless flags only
   assert.equal(candidate.nodes[1].isOptionalTail, true)
   assert.equal(candidate.nodes[1].requiresReview, false)
   assert.equal(candidate.nodes[1].canDecideOptionalTail, true)
+
+  const storedOptional = fake.documents('business_nodes').find(node => node._id === `${created.id}-node-002`)
+  fake.replace('business_nodes', storedOptional._id, {
+    ...storedOptional,
+    status: 'skipped',
+    decisionAt: new Date('2026-08-29T02:00:00.000Z'),
+    decisionActorId: 'user-4',
+    decisionComment: '无需回访',
+    decisionWorkMinutes: 3
+  })
+  const skipped = await repository.getBusinessLine({ actor: { _id: 'user-4' }, lineId: created.id })
+  assert.equal(skipped.nodes[1].decisionAt.toISOString(), '2026-08-29T02:00:00.000Z')
+  assert.equal(skipped.nodes[1].decisionActorDisplayName, '用户四')
+  assert.equal(skipped.nodes[1].decisionComment, '无需回访')
+  assert.equal(skipped.nodes[1].decisionWorkMinutes, 3)
+  assert.equal(Object.hasOwn(skipped.nodes[1], 'decisionActorId'), false)
 
   const manager = await repository.getBusinessLine({ actor: { _id: 'user-1' }, lineId: created.id })
   assert.equal(manager.nodes[1].canDecideOptionalTail, false)

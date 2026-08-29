@@ -94,6 +94,7 @@ function reviewNode(overrides = {}) {
     reviewerDisplayNames: ['审核甲', '审核乙'], reviewMode: 'all', processingRoundNumber: 1,
     reviewRoundNumber: 0, processingDueStatus: 'calculated', processingDueAt: '2026-08-12T12:00:00.000Z',
     processingOverdueWorkMinutes: 0, reviewDueStatus: 'not_started', reviewDueAt: null,
+    requiresReview: true,
     requiresEvidence: false, allowedEvidenceTypes: ['jpg', 'pdf', 'mp4'],
     fieldDefinitions: [{ fieldKey: 'summary', sequence: 0, name: '摘要', type: 'short_text', required: true, constraints: {} }],
     ...overrides
@@ -177,6 +178,10 @@ test('业务服务的审核方法只透传业务参数并安全映射错误', as
   await service.getEvidenceAccess('evidence-1')
   await service.listMyNotifications({ page: 1, pageSize: 20 })
   await service.markNotificationRead('notice-1')
+  await service.decideOptionalTailNode({
+    businessLineId: 'line-1', nodeId: 'node-2', expectedLineVersion: 8,
+    expectedNodeVersion: 3, decision: 'activate', comment: '', requestKey: 'optional-1'
+  })
 
   assert.deepEqual(calls.map(item => [item[0], item[1]]), [
     ['submitNodeForReview', { businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4, requestKey: 'review-1' }],
@@ -190,7 +195,11 @@ test('业务服务的审核方法只透传业务参数并安全映射错误', as
     ['getReviewDetail', { reviewRoundId: 'round-1' }],
     ['getEvidenceAccess', { evidenceId: 'evidence-1' }],
     ['listMyNotifications', { page: 1, pageSize: 20 }],
-    ['markNotificationRead', { notificationId: 'notice-1' }]
+    ['markNotificationRead', { notificationId: 'notice-1' }],
+    ['decideOptionalTailNode', {
+      businessLineId: 'line-1', nodeId: 'node-2', expectedLineVersion: 8,
+      expectedNodeVersion: 3, decision: 'activate', comment: '', requestKey: 'optional-1'
+    }]
   ])
   assert.ok(calls.every(item => !Object.keys(item[1]).some(key => ['actor', 'openid', 'role', 'userId'].includes(key))))
   assert.ok(calls.every(item => item[2] && item[2].silent === true))
@@ -422,10 +431,76 @@ test('待审核节点禁止字段、文件和所有处理写操作', async () =>
   assert.match(wxml, /legacyMode/)
 })
 
-test('新版审核节点页面不展示旧直接完成或旧驳回入口', () => {
+test('新版审核节点根据审核人配置显示提交审核或直接完成入口', async () => {
+  const calls = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, reLaunch: () => {}, showToast: () => {}, navigateBack: () => {} }
+  const node = reviewNode({ requiresReview: false, reviewerDisplayNames: [] })
+  const page = loadPage('pages/node-feedback/index.js', {
+    getNodeWorkspace: async () => ({
+      line: { _id: 'line-1', status: 'active', version: 8 }, node, canSubmit: true, history: []
+    }),
+    submitFeedback: async input => {
+      calls.push(input)
+      return { feedbackId: 'feedback-1', nodeStatus: 'completed', nodeVersion: 5, lineStatus: 'completed' }
+    }
+  })
+
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '已完成' } })
+
+  assert.equal(page.data.requiresReview, false)
+  assert.equal(page.data.primaryActionLabel, '完成节点')
+  await page.onPrimaryAction()
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].action, 'complete_node')
+
+  const reviewedPage = loadPage('pages/node-feedback/index.js', {})
+  reviewedPage.setData({ workflowMode: 'review', requiresReview: true })
+  assert.equal(reviewedPage.primaryActionLabel(), '提交审核')
   const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/node-feedback/index.wxml'), 'utf8')
-  assert.doesNotMatch(wxml, /完成节点|直接完成|驳回上一节点/)
+  assert.match(wxml, /完成节点/)
   assert.match(wxml, /提交审核/)
+  assert.doesNotMatch(wxml, /驳回上一节点/)
+})
+
+test('无审核人节点完成请求单飞且版本冲突刷新时保留本地草稿', async () => {
+  const pending = deferred()
+  const calls = []
+  let workspaceReads = 0
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, reLaunch: () => {}, showToast: () => {} }
+  const page = loadPage('pages/node-feedback/index.js', {
+    getNodeWorkspace: async () => {
+      workspaceReads += 1
+      return {
+        line: { _id: 'line-1', status: 'active', version: 8 + workspaceReads },
+        node: reviewNode({
+          version: 3 + workspaceReads, requiresReview: false, reviewerDisplayNames: []
+        }),
+        canSubmit: true,
+        history: []
+      }
+    },
+    submitFeedback: async input => { calls.push(input); return pending.promise }
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '本地未丢失' } })
+  page.onComment({ detail: { value: '本地说明' } })
+
+  const first = page.onPrimaryAction()
+  const second = page.onPrimaryAction()
+  assert.equal(calls.length, 1)
+  const conflict = new Error('VERSION_CONFLICT')
+  conflict.code = 'VERSION_CONFLICT'
+  pending.reject(conflict)
+  await Promise.all([first, second])
+
+  assert.equal(workspaceReads, 2)
+  assert.equal(page.data.expectedNodeVersion, 5)
+  assert.equal(page.data.fieldValues.summary, '本地未丢失')
+  assert.equal(page.data.comment, '本地说明')
+  assert.equal(page.data.draftDirty, true)
 })
 
 test('单独保存处理进度后清除已登记本地文件并恢复服务端最新字段草稿', async () => {

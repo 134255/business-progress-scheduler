@@ -206,6 +206,10 @@ function submitReviewVote(input) {
   return callProtected('submitReviewVote', input, '提交审核意见失败，请稍后重试')
 }
 
+function decideOptionalTailNode(input) {
+  return callProtected('decideOptionalTailNode', input, '追加节点决定失败，请稍后重试')
+}
+
 function listMyPendingReviews(query) {
   return callProtected('listMyPendingReviews', query, '审核待办加载失败，请稍后重试')
 }
@@ -259,6 +263,7 @@ module.exports = {
   submitNodeForReview,
   saveAndSubmitNodeForReview,
   submitReviewVote,
+  decideOptionalTailNode,
   listMyPendingReviews,
   getReviewDetail,
   listMyNotifications,
