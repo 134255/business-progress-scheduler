@@ -108,6 +108,28 @@ test('template creation preserves business creator reviewer mode without fixed r
   assert.deepEqual(harness.audits[0].participantUserIds, ['account-1'])
 })
 
+test('template creation preserves reviewerless optional tail definition', async () => {
+  const harness = createTemplateHarness({ users: [
+    { _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }
+  ] })
+  const required = validDefinition().nodes[0]
+  const optionalTail = {
+    ...required,
+    name: '按需追加处理',
+    activationMode: 'optional_tail',
+    reviewerUserIds: []
+  }
+
+  const created = await harness.service.createTemplate({
+    actor: harness.admin,
+    input: validDefinition({ nodes: [required, optionalTail] })
+  })
+
+  assert.equal(created.nodes[0].activationMode, 'required')
+  assert.equal(created.nodes[1].activationMode, 'optional_tail')
+  assert.deepEqual(created.nodes[1].reviewerUserIds, [])
+})
+
 test('template service never executes reviewer relationship accessors before domain validation', async () => {
   let getterCalls = 0
   const harness = createTemplateHarness({ users: [

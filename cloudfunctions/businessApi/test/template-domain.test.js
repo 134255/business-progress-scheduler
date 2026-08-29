@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 
 const {
+  ACTIVATION_MODE,
   REVIEWER_ASSIGNMENT_MODE,
   normalizeTemplateNode,
   templateDefinitionDigest,
@@ -9,6 +10,8 @@ const {
   validateTemplateForEnable,
   assertTemplateEditable
 } = require('../lib/template-domain')
+
+const { classifyCompletedNodeTransition } = require('../lib/optional-tail-domain')
 
 function createNode(overrides = {}) {
   return {
@@ -45,6 +48,7 @@ test('规范化新版节点的处理人、审核人、审核模式和双 SLA，�
     name: '启动',
     description: '',
     workflowMode: 'review',
+    activationMode: 'required',
     processorAssignmentMode: 'fixed_accounts',
     processorUserIds: ['user-1'],
     reviewerAssignmentMode: 'fixed_accounts',
@@ -244,7 +248,7 @@ test('拒绝无效双 SLA、审核配置、凭证规则和重复稳定键', () =
   ] })), error => error.code === 'TEMPLATE_INVALID')
 })
 
-test('启用前要求连续唯一节点键、启用处理人和审核人、且角色严格分离', () => {
+test('启用前要求连续唯一节点键、启用处理人且角色严格分离', () => {
   const template = { status: 'draft' }
   const first = createNode({ nodeKey: 'node-first', sequence: 0, processorUserIds: ['account-1'], reviewerUserIds: ['account-3'] })
   const second = createNode({ nodeKey: 'node-second', sequence: 1, processorUserIds: ['account-2'], reviewerUserIds: ['account-4'] })
@@ -257,7 +261,7 @@ test('启用前要求连续唯一节点键、启用处理人和审核人、且�
   assert.throws(() => validateTemplateForEnable(template, [first], ['another-account', 'account-3']), error => error.code === 'PROCESSOR_INACTIVE')
   assert.throws(() => validateTemplateForEnable(template, [first], ['account-1']), error => error.code === 'REVIEWER_INACTIVE')
   assert.throws(() => validateTemplateForEnable(template, [{ ...first, reviewerUserIds: ['account-1'] }], ['account-1']), error => error.code === 'ROLE_OVERLAP')
-  assert.throws(() => validateTemplateForEnable(template, [{ ...first, reviewerUserIds: [] }], ['account-1']), error => error.code === 'TEMPLATE_INVALID')
+  assert.equal(validateTemplateForEnable(template, [{ ...first, reviewerUserIds: [] }], ['account-1']), true)
   assert.throws(() => validateTemplateForEnable(template, [{
     ...first,
     processorAssignmentMode: 'business_creator',
@@ -297,4 +301,96 @@ test('enabled templates are read-only until disabled and deleted templates are u
   assert.doesNotThrow(() => assertTemplateEditable({ status: 'disabled' }))
   assert.throws(() => assertTemplateEditable({ status: 'enabled' }), error => error.code === 'TEMPLATE_NOT_EDITABLE')
   assert.throws(() => assertTemplateEditable({ status: 'deleted' }), error => error.code === 'NOT_FOUND')
+})
+
+test('可选尾节点定义参与摘要且只能唯一位于模板末尾', () => {
+  const required = normalizeTemplateNode(createNode())
+  const optionalTail = normalizeTemplateNode(createNode({
+    activationMode: 'optional_tail',
+    reviewerUserIds: []
+  }))
+
+  assert.equal(ACTIVATION_MODE.REQUIRED, 'required')
+  assert.equal(ACTIVATION_MODE.OPTIONAL_TAIL, 'optional_tail')
+  assert.equal(required.activationMode, 'required')
+  assert.equal(optionalTail.activationMode, 'optional_tail')
+  assert.notEqual(templateDefinitionDigest([required]), templateDefinitionDigest([optionalTail]))
+
+  assert.equal(validateTemplateForEnable(
+    { status: 'draft' },
+    [optionalTail],
+    ['user-1']
+  ), true)
+
+  assert.throws(() => validateTemplateForEnable({ status: 'draft' }, [
+    { ...optionalTail, sequence: 0 },
+    { ...required, nodeKey: 'second', sequence: 1 }
+  ], ['user-1', 'reviewer-1']), error => error.code === 'TEMPLATE_INVALID')
+
+  assert.throws(() => validateTemplateForEnable({ status: 'draft' }, [
+    { ...optionalTail, sequence: 0 },
+    { ...optionalTail, nodeKey: 'second', sequence: 1 }
+  ], ['user-1']), error => error.code === 'TEMPLATE_INVALID')
+})
+
+test('activationMode 对未知值、访问器和继承属性失败关闭', () => {
+  assert.throws(
+    () => normalizeTemplateNode(createNode({ activationMode: 'sometimes' })),
+    error => error.code === 'TEMPLATE_INVALID'
+  )
+
+  let getterCalls = 0
+  const accessorNode = createNode()
+  Object.defineProperty(accessorNode, 'activationMode', {
+    enumerable: true,
+    get() {
+      getterCalls += 1
+      return 'optional_tail'
+    }
+  })
+  assert.throws(() => normalizeTemplateNode(accessorNode), error => error.code === 'TEMPLATE_INVALID')
+  assert.equal(getterCalls, 0)
+
+  const inheritedNode = Object.assign(Object.create({ activationMode: 'optional_tail' }), createNode())
+  assert.throws(() => normalizeTemplateNode(inheritedNode), error => error.code === 'TEMPLATE_INVALID')
+})
+
+test('空固定审核人合法但处理人仍必需且角色交叉继续失败', () => {
+  const reviewerless = createNode({ reviewerUserIds: [] })
+  assert.equal(validateTemplateForEnable(
+    { status: 'draft' },
+    [reviewerless],
+    ['user-1']
+  ), true)
+
+  assert.throws(() => validateTemplateForEnable(
+    { status: 'draft' },
+    [createNode({ processorUserIds: [], reviewerUserIds: [] })],
+    []
+  ), error => error.code === 'TEMPLATE_INVALID')
+
+  assert.throws(() => validateTemplateForEnable(
+    { status: 'draft' },
+    [createNode({ reviewerUserIds: ['user-1'] })],
+    ['user-1']
+  ), error => error.code === 'ROLE_OVERLAP')
+})
+
+test('已完成节点转移分类区分普通下一节点、可选决定和真实终态', () => {
+  const line = { nodeCount: 3 }
+  assert.equal(classifyCompletedNodeTransition({
+    line,
+    node: { sequence: 0 },
+    nextNode: { activationMode: 'required' }
+  }), 'next_node')
+  assert.equal(classifyCompletedNodeTransition({
+    line,
+    node: { sequence: 1 },
+    nextNode: { activationMode: 'optional_tail' }
+  }), 'await_optional_decision')
+  assert.equal(classifyCompletedNodeTransition({
+    line,
+    node: { sequence: 2 },
+    nextNode: null
+  }), 'complete_line')
 })

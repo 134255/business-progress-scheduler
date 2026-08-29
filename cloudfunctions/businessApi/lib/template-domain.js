@@ -2,6 +2,7 @@ const crypto = require('node:crypto')
 
 const { normalizeFieldDefinition } = require('./field-domain')
 const { WORKFLOW_MODE, normalizeReviewMode } = require('./review-domain')
+const { ACTIVATION_MODE, normalizeActivationMode } = require('./optional-tail-domain')
 const {
   INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE,
   fitsBusinessMemberArray,
@@ -147,6 +148,7 @@ function normalizeFields(fields) {
 }
 
 function normalizeTemplateNode(input) {
+  const activationMode = normalizeActivationMode(input)
   input = ownDataObject(input)
   if (hasOwn(input, 'assigneeUserIds') || hasOwn(input, 'slaWorkHours')) throw createError('TEMPLATE_INVALID')
   const processorAssignmentMode = normalizeProcessorAssignmentMode(input)
@@ -180,6 +182,7 @@ function normalizeTemplateNode(input) {
     name: requireText(input.name),
     description: typeof input.description === 'string' ? input.description.trim() : '',
     workflowMode: WORKFLOW_MODE,
+    activationMode,
     processorAssignmentMode,
     processorUserIds,
     reviewerAssignmentMode,
@@ -278,6 +281,15 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
   if (!fitsBusinessMemberArray(participants)) {
     throw createError('TEMPLATE_LIMIT_EXCEEDED', INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE)
   }
+  if (definition.workflowMode === WORKFLOW_MODE) {
+    const optionalTailIndexes = definition.nodes
+      .map((node, index) => node.activationMode === ACTIVATION_MODE.OPTIONAL_TAIL ? index : -1)
+      .filter(index => index >= 0)
+    if (optionalTailIndexes.length > 1 ||
+        (optionalTailIndexes.length === 1 && optionalTailIndexes[0] !== definition.nodes.length - 1)) {
+      throw createError('TEMPLATE_INVALID')
+    }
+  }
   for (const node of definition.nodes) {
     if (definition.workflowMode === 'legacy') {
       if (!node.assigneeUserIds.length) throw createError('TEMPLATE_INVALID')
@@ -287,9 +299,6 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
     if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR &&
         node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR) {
       throw createError('ROLE_OVERLAP')
-    }
-    if (node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.FIXED_ACCOUNTS && !node.reviewerUserIds.length) {
-      throw createError('TEMPLATE_INVALID')
     }
     if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS && !node.processorUserIds.length) {
       throw createError('TEMPLATE_INVALID')
@@ -304,6 +313,7 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
 }
 
 module.exports = {
+  ACTIVATION_MODE,
   DEFAULT_PROCESSING_SLA_WORK_HOURS,
   DEFAULT_REVIEW_SLA_WORK_HOURS,
   PROCESSOR_ASSIGNMENT_MODE,
