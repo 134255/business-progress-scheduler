@@ -176,9 +176,9 @@ function storedNode(overrides = {}) {
   }
 }
 
-function createNodeEditor({ users, node = null, readOnly = false, acceptNodeFromEditor = () => {} }) {
+function createNodeEditor({ users, node = null, readOnly = false, optionalTailExistsOutsideCurrentNode = false, acceptNodeFromEditor = () => {} }) {
   const previousPage = {
-    getNodeEditorContext: () => ({ readOnly, assigneeOptions: users, node }),
+    getNodeEditorContext: () => ({ readOnly, assigneeOptions: users, node, optionalTailExistsOutsideCurrentNode }),
     acceptNodeFromEditor
   }
   global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
@@ -414,7 +414,7 @@ test('node editor maps legacy assignees only when workflowMode is absent', () =>
   delete global.wx
 })
 
-test('node editor rejects overlapping roles and a missing reviewer before commit', async () => {
+test('node editor rejects overlapping roles while allowing a reviewerless node', async () => {
   const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
   let accepted = 0
   const page = createNodeEditor({
@@ -430,10 +430,89 @@ test('node editor rejects overlapping roles and a missing reviewer before commit
 
   page.setData({ reviewerUserIds: [] })
   await page.submit()
-  assert.equal(accepted, 0)
-  assert.match(page.data.errorMessage, /至少选择一名审核人/)
+  assert.equal(accepted, 1)
   delete global.getApp
   delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor configures one optional tail and reviewerless direct completion', async () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  let accepted
+  const page = createNodeEditor({
+    users: [processor],
+    acceptNodeFromEditor: (_index, node) => { accepted = node }
+  })
+
+  assert.equal(page.data.activationMode, 'required')
+  page.onOptionalTailChange({ detail: { value: true } })
+  page.setData({ name: '可选追加', processorUserIds: [processor._id], reviewerUserIds: [] })
+  await page.submit()
+
+  assert.equal(accepted.activationMode, 'optional_tail')
+  assert.deepEqual(accepted.reviewerUserIds, [])
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8')
+  assert.match(wxml, /可选追加节点/)
+  assert.match(wxml, /无需审核，处理人可直接完成/)
+
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('node editor blocks a second optional tail and keeps enabled definitions read-only', () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  const blocked = createNodeEditor({
+    users: [processor],
+    optionalTailExistsOutsideCurrentNode: true
+  })
+  blocked.onOptionalTailChange({ detail: { value: true } })
+  assert.equal(blocked.data.activationMode, 'required')
+  assert.match(blocked.data.errorMessage, /只能设置一个可选追加节点/)
+
+  const readOnly = createNodeEditor({
+    users: [processor],
+    readOnly: true,
+    node: storedNode({ activationMode: 'required' })
+  })
+  readOnly.onOptionalTailChange({ detail: { value: true } })
+  assert.equal(readOnly.data.activationMode, 'required')
+
+  delete global.getApp
+  delete global.getCurrentPages
+  delete global.wx
+})
+
+test('template editor fixes the optional tail at the final position and summarizes both new modes', async () => {
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { navigateTo: () => {}, reLaunch: () => {} }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {},
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  page.setData({
+    nodes: [
+      storedNode({ activationMode: 'required' }),
+      storedNode({ nodeKey: 'node-stable-2', sequence: 1, activationMode: 'required' }),
+      storedNode({ nodeKey: 'node-stable-3', sequence: 2, activationMode: 'optional_tail', workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: [] })
+    ]
+  })
+
+  page.moveNode({ currentTarget: { dataset: { index: 2, direction: -1 } } })
+  assert.deepEqual(page.data.nodes.map(node => node.nodeKey), ['node-stable-1', 'node-stable-2', 'node-stable-3'])
+  assert.match(page.data.errorMessage, /必须位于模板最后/)
+
+  page.setData({ errorMessage: '' })
+  page.moveNode({ currentTarget: { dataset: { index: 0, direction: 1 } } })
+  assert.deepEqual(page.data.nodes.map(node => node.nodeKey), ['node-stable-2', 'node-stable-1', 'node-stable-3'])
+
+  const context = page.getNodeEditorContext(0)
+  assert.equal(context.optionalTailExistsOutsideCurrentNode, true)
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-edit/index.wxml'), 'utf8')
+  assert.match(wxml, /可选追加节点/)
+  assert.match(wxml, /无需审核/)
+
+  delete global.getApp
   delete global.wx
 })
 
@@ -697,7 +776,7 @@ test('enabled template definitions are fully read-only in page behavior and mark
   assert.equal(page.data.readOnly, true)
   assert.equal(page.data.name, '启用模板')
   assert.deepEqual(page.data.nodes, original)
-  assert.deepEqual(navigations, [{ url: '/pages/admin-template-node-edit/index?index=0' }])
+  assert.deepEqual(navigations, [{ url: '/pages/admin-template-node-edit/index?index=0&optionalTailExistsOutsideCurrentNode=0' }])
   const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-edit/index.wxml'), 'utf8')
   assert.match(wxml, /disabled="{{readOnly[^}]*}}"/)
   assert.match(wxml, /wx:if="{{!readOnly}}"[\s\S]*保存/)

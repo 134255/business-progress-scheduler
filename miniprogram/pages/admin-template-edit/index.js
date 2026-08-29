@@ -52,6 +52,7 @@ function cleanNode(node, sequence) {
     name: node.name,
     description: node.description || '',
     workflowMode: 'review',
+    activationMode: !isLegacyNode && node.activationMode === 'optional_tail' ? 'optional_tail' : 'required',
     processorAssignmentMode: !isLegacyNode && node.processorAssignmentMode === 'business_creator'
       ? 'business_creator'
       : 'fixed_accounts',
@@ -169,7 +170,9 @@ Page({
     return {
       readOnly: this.data.readOnly,
       assigneeOptions: clone(this.data.assigneeOptions),
-      node: node ? clone(node) : null
+      node: node ? clone(node) : null,
+      optionalTailExistsOutsideCurrentNode: this.data.nodes.some((item, itemIndex) =>
+        itemIndex !== index && item.activationMode === 'optional_tail')
     }
   },
 
@@ -177,15 +180,31 @@ Page({
     if (!this.requireSuperAdmin()) return
     const raw = event && event.currentTarget && event.currentTarget.dataset.index
     const index = raw === undefined ? -1 : Number(raw)
-    wx.navigateTo({ url: `/pages/admin-template-node-edit/index?index=${Number.isInteger(index) ? index : -1}` })
+    const safeIndex = Number.isInteger(index) ? index : -1
+    const optionalTailExistsOutsideCurrentNode = this.data.nodes.some((node, nodeIndex) =>
+      nodeIndex !== safeIndex && node.activationMode === 'optional_tail')
+    wx.navigateTo({
+      url: `/pages/admin-template-node-edit/index?index=${safeIndex}&optionalTailExistsOutsideCurrentNode=${optionalTailExistsOutsideCurrentNode ? '1' : '0'}`
+    })
   },
 
   acceptNodeFromEditor(index, node) {
     if (!this.requireSuperAdmin() || this.data.readOnly || !node) return
     const nodes = this.data.nodes.slice()
+    if (node.activationMode === 'optional_tail' && nodes.some((item, itemIndex) =>
+      itemIndex !== index && item.activationMode === 'optional_tail')) {
+      this.setData({ errorMessage: '每个模板只能设置一个可选追加节点' })
+      return
+    }
     if (Number.isInteger(index) && index >= 0 && index < nodes.length) nodes[index] = clone(node)
     else nodes.push(clone(node))
-    this.setData({ nodes: withNodeUiKeys(orderedNodes(nodes)), errorMessage: '' })
+    const ordered = orderedNodes(nodes)
+    const optionalIndex = ordered.findIndex(item => item.activationMode === 'optional_tail')
+    if (optionalIndex >= 0 && optionalIndex !== ordered.length - 1) {
+      const [optionalTail] = ordered.splice(optionalIndex, 1)
+      ordered.push(optionalTail)
+    }
+    this.setData({ nodes: withNodeUiKeys(orderedNodes(ordered)), errorMessage: '' })
   },
 
   removeNode(event) {
@@ -204,6 +223,10 @@ Page({
     const target = index + direction
     if (!Number.isInteger(index) || ![-1, 1].includes(direction) || target < 0 || target >= this.data.nodes.length) return
     const nodes = this.data.nodes.slice()
+    if (nodes[index].activationMode === 'optional_tail' || nodes[target].activationMode === 'optional_tail') {
+      this.setData({ errorMessage: '可选追加节点必须位于模板最后' })
+      return
+    }
     ;[nodes[index], nodes[target]] = [nodes[target], nodes[index]]
     this.setData({ nodes: orderedNodes(nodes) })
   },

@@ -11,6 +11,15 @@
       <label class="field-label" for="node-description">节点说明</label>
       <textarea id="node-description" class="textarea" value="{{description}}" maxlength="500" disabled="{{readOnly}}" bindinput="onDescriptionInput" />
     </view>
+    <view class="field">
+      <text class="field-label">节点启用方式</text>
+      <label class="assignment-mode-row">
+        <switch checked="{{activationMode === 'optional_tail'}}" disabled="{{readOnly || optionalTailExistsOutsideCurrentNode}}" bindchange="onOptionalTailChange" />
+        可选追加节点
+      </label>
+      <text class="muted" wx:if="{{activationMode === 'optional_tail'}}">只能位于模板最后；前序节点完成后，由本节点候选处理人决定启用或跳过。</text>
+      <text class="muted" wx:elif="{{optionalTailExistsOutsideCurrentNode}}">本模板已经设置了一个可选追加节点。</text>
+    </view>
     <view class="field sla-grid">
       <view>
         <label class="field-label" for="node-processing-sla">处理 SLA 工时</label>
@@ -52,10 +61,11 @@
           <checkbox checked="{{item.reviewerSelected}}" disabled="{{readOnly}}" />{{item.displayName || item.username}}（@{{item.username}}）
         </label>
       </view>
-      <radio-group class="review-mode" bindchange="onReviewModeChange">
+      <radio-group wx:if="{{reviewerUserIds.length}}" class="review-mode" bindchange="onReviewModeChange">
         <label><radio value="any" checked="{{reviewMode === 'any'}}" disabled="{{readOnly}}" />或签（任一审核人通过）</label>
         <label><radio value="all" checked="{{reviewMode === 'all'}}" disabled="{{readOnly}}" />会签（全部审核人通过）</label>
       </radio-group>
+      <text wx:else class="muted">无需审核，处理人可直接完成</text>
     </view>
     <view class="field" wx:else>
       <text class="field-label">审核人</text>

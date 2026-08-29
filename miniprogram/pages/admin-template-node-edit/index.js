@@ -28,6 +28,7 @@ function newField() {
 function newNode() {
   return {
     _uiKey: nextUiKey('node'), sequence: 0, name: '', description: '', workflowMode: 'review',
+    activationMode: 'required',
     processorAssignmentMode: 'fixed_accounts',
     processorUserIds: [], reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: [], reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8,
     requiresEvidence: false, allowedEvidenceTypes: [], fields: []
@@ -46,6 +47,8 @@ Page({
     processorUserIds: [],
     reviewerAssignmentMode: 'fixed_accounts',
     reviewerUserIds: [],
+    activationMode: 'required',
+    optionalTailExistsOutsideCurrentNode: false,
     reviewMode: 'any',
     processingSlaWorkHours: 22,
     reviewSlaWorkHours: 8,
@@ -101,6 +104,10 @@ Page({
       processorUserIds,
       reviewerAssignmentMode,
       reviewerUserIds,
+      activationMode: !isLegacyNode && node.activationMode === 'optional_tail' ? 'optional_tail' : 'required',
+      optionalTailExistsOutsideCurrentNode: Boolean(
+        context.optionalTailExistsOutsideCurrentNode || options.optionalTailExistsOutsideCurrentNode === '1'
+      ),
       reviewMode: !isLegacyNode && node.reviewMode === 'all' ? 'all' : 'any',
       processingSlaWorkHours: !isLegacyNode && node.processingSlaWorkHours !== undefined ? node.processingSlaWorkHours : 22,
       reviewSlaWorkHours: !isLegacyNode && node.reviewSlaWorkHours !== undefined ? node.reviewSlaWorkHours : 8,
@@ -211,6 +218,18 @@ Page({
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     const reviewMode = event && event.detail && event.detail.value
     if (reviewMode === 'any' || reviewMode === 'all') this.setData({ reviewMode })
+  },
+  onOptionalTailChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
+    const wantsOptionalTail = Boolean(event && event.detail && event.detail.value)
+    if (wantsOptionalTail && this.data.optionalTailExistsOutsideCurrentNode) {
+      this.setData({ errorMessage: '每个模板只能设置一个可选追加节点' })
+      return
+    }
+    this.setData({
+      activationMode: wantsOptionalTail ? 'optional_tail' : 'required',
+      errorMessage: ''
+    })
   },
   onRequiresEvidenceChange(event) {
     if (this.requireSuperAdmin() && !this.data.readOnly) {
@@ -326,6 +345,7 @@ Page({
       name: this.data.name.trim(),
       description: this.data.description.trim(),
       workflowMode: 'review',
+      activationMode: this.data.activationMode,
       processorAssignmentMode: this.data.processorAssignmentMode,
       processorUserIds: this.data.processorUserIds.slice(),
       reviewerAssignmentMode: this.data.reviewerAssignmentMode,
@@ -353,10 +373,6 @@ Page({
     }
     if (node.processorAssignmentMode === 'fixed_accounts' && !node.processorUserIds.length) {
       this.setData({ errorMessage: '请至少选择一名处理人' })
-      return
-    }
-    if (node.reviewerAssignmentMode === 'fixed_accounts' && !node.reviewerUserIds.length) {
-      this.setData({ errorMessage: '请至少选择一名审核人' })
       return
     }
     if (node.processorAssignmentMode === 'business_creator' && node.reviewerAssignmentMode === 'business_creator') {
