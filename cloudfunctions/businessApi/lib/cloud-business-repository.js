@@ -18,6 +18,7 @@ const {
   REVIEWER_ASSIGNMENT_MODE,
   templateDefinitionDigest
 } = require('./template-domain')
+const { ACTIVATION_MODE, normalizeActivationMode } = require('./optional-tail-domain')
 const {
   INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE,
   fitsBusinessMemberArray,
@@ -406,6 +407,16 @@ function createCloudBusinessRepository({
   }
 
   function publicLineProjection(line) {
+    const optionalTailState = ownDataValue(line, 'optionalTailState')
+    const optionalTailNodeId = ownDataValue(line, 'optionalTailNodeId')
+    if (optionalTailState.present && (!optionalTailState.valid ||
+        !['none', 'pending', 'activated', 'skipped', 'completed'].includes(optionalTailState.value))) {
+      throw createError('FORBIDDEN')
+    }
+    if (optionalTailNodeId.present && (!optionalTailNodeId.valid ||
+        typeof optionalTailNodeId.value !== 'string' || !optionalTailNodeId.value)) {
+      throw createError('FORBIDDEN')
+    }
     return {
       _id: line._id,
       code: line.code || '',
@@ -419,6 +430,8 @@ function createCloudBusinessRepository({
       nodeCount: Number(line.nodeCount || 0),
       currentNodeId: line.currentNodeId || '',
       currentNodeName: line.currentNodeName || '',
+      ...(optionalTailState.present ? { optionalTailState: optionalTailState.value } : {}),
+      ...(optionalTailNodeId.present ? { optionalTailNodeId: optionalTailNodeId.value } : {}),
       updatedAt: clone(line.updatedAt || null)
     }
   }
@@ -570,8 +583,14 @@ function createCloudBusinessRepository({
       version: node.version
     }
     if (node.workflowMode === 'review') {
+      let activationMode
+      try {
+        activationMode = normalizeActivationMode(node)
+      } catch (_) {
+        throw createError('FORBIDDEN')
+      }
       const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
-      const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+      const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: false })
       if (!processors || !reviewers || processors.some(id => reviewers.includes(id))) {
         throw createError('FORBIDDEN')
       }
@@ -590,6 +609,10 @@ function createCloudBusinessRepository({
       return {
         ...base,
         workflowMode: 'review',
+        isOptionalTail: activationMode === ACTIVATION_MODE.OPTIONAL_TAIL,
+        requiresReview: reviewers.length > 0,
+        canDecideOptionalTail: activationMode === ACTIVATION_MODE.OPTIONAL_TAIL &&
+          node.status === 'awaiting_decision' && processors.includes(actor._id),
         processorDisplayNames: persistedDisplayNames(node, 'processorDisplayNames', processors.length, '历史处理人'),
         reviewerDisplayNames: persistedDisplayNames(node, 'reviewerDisplayNames', reviewers.length, '历史审核人'),
         reviewMode: node.reviewMode,
@@ -1546,52 +1569,58 @@ function createCloudBusinessRepository({
 
   function preparedSnapshot(lineId, code, sourceNodes, firstProcessingDue, displayNames) {
     const initialSearch = advanceSearchVersion({})
-    return sourceNodes.slice().sort(compareNodes).map((source, index) => ({
-      id: nodeId(lineId, index),
-      data: {
-        businessLineId: lineId,
-        nodeCode: formatNodeCode(code, index + 1),
-        sourceTemplateNodeKey: source.nodeKey,
-        sequence: index,
-        name: source.name,
-        description: source.description || '',
-        ...(source.workflowMode === 'review'
-          ? {
-              workflowMode: 'review',
-              processorAssignmentMode: source.processorAssignmentMode,
-              processorUserIds: clone(source.processorUserIds),
-              reviewerAssignmentMode: source.reviewerAssignmentMode,
-              reviewerUserIds: clone(source.reviewerUserIds),
-              processorDisplayNames: source.processorUserIds.map(id => displayNames.get(id) || '历史账号'),
-              reviewerDisplayNames: source.reviewerUserIds.map(id => displayNames.get(id) || '历史账号'),
-              reviewMode: source.reviewMode,
-              processingSlaWorkHours: source.processingSlaWorkHours,
-              reviewSlaWorkHours: source.reviewSlaWorkHours,
-              processingRoundNumber: 1,
-              reviewRoundNumber: 0,
-              processingElapsedWorkMinutes: 0,
-              processingOverdueWorkMinutes: 0,
-              processingDueStatus: 'not_started',
-              processingDueAt: null,
-              reviewDueStatus: 'not_started',
-              reviewDueAt: null,
-              ...(index === 0 ? clone(firstProcessingDue) : {})
-            }
-          : {
-              assigneeUserIds: clone(source.assigneeUserIds),
-              assigneeNames: source.assigneeUserIds.map(id => displayNames.get(id) || '历史账号'),
-              slaWorkHours: source.slaWorkHours
-            }),
-        requiresEvidence: source.requiresEvidence,
-        allowedEvidenceTypes: clone(source.allowedEvidenceTypes),
-        fieldDefinitions: clone(source.fields),
-        status: index === 0 ? 'ready' : 'waiting',
-        version: 1,
-        ...initialSearch,
-        createdAt: db.serverDate(),
-        updatedAt: db.serverDate()
+    return sourceNodes.slice().sort(compareNodes).map((source, index) => {
+      const activationMode = normalizeActivationMode(source)
+      return {
+        id: nodeId(lineId, index),
+        data: {
+          businessLineId: lineId,
+          nodeCode: formatNodeCode(code, index + 1),
+          sourceTemplateNodeKey: source.nodeKey,
+          sequence: index,
+          name: source.name,
+          description: source.description || '',
+          activationMode,
+          ...(source.workflowMode === 'review'
+            ? {
+                workflowMode: 'review',
+                processorAssignmentMode: source.processorAssignmentMode,
+                processorUserIds: clone(source.processorUserIds),
+                reviewerAssignmentMode: source.reviewerAssignmentMode,
+                reviewerUserIds: clone(source.reviewerUserIds),
+                processorDisplayNames: source.processorUserIds.map(id => displayNames.get(id) || '历史账号'),
+                reviewerDisplayNames: source.reviewerUserIds.map(id => displayNames.get(id) || '历史账号'),
+                reviewMode: source.reviewMode,
+                processingSlaWorkHours: source.processingSlaWorkHours,
+                reviewSlaWorkHours: source.reviewSlaWorkHours,
+                processingRoundNumber: 1,
+                reviewRoundNumber: 0,
+                processingElapsedWorkMinutes: 0,
+                processingOverdueWorkMinutes: 0,
+                processingDueStatus: 'not_started',
+                processingDueAt: null,
+                reviewDueStatus: 'not_started',
+                reviewDueAt: null,
+                ...(index === 0 ? clone(firstProcessingDue) : {})
+              }
+            : {
+                assigneeUserIds: clone(source.assigneeUserIds),
+                assigneeNames: source.assigneeUserIds.map(id => displayNames.get(id) || '历史账号'),
+                slaWorkHours: source.slaWorkHours
+              }),
+          requiresEvidence: source.requiresEvidence,
+          allowedEvidenceTypes: clone(source.allowedEvidenceTypes),
+          fieldDefinitions: clone(source.fields),
+          status: activationMode === ACTIVATION_MODE.OPTIONAL_TAIL
+            ? 'awaiting_decision'
+            : index === 0 ? 'ready' : 'waiting',
+          version: 1,
+          ...initialSearch,
+          createdAt: db.serverDate(),
+          updatedAt: db.serverDate()
+        }
       }
-    }))
+    })
   }
 
   function calendarWarningId(lineId) {
@@ -1838,6 +1867,7 @@ function createCloudBusinessRepository({
           const templateName = typeof template.name === 'string' ? template.name.trim() : ''
           if (!templateName) throw createError('TEMPLATE_NOT_ENABLED')
           prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue, displayNames)
+          const optionalTail = prepared.find(node => node.data.activationMode === ACTIVATION_MODE.OPTIONAL_TAIL)
           await transaction.collection(COLLECTIONS.counters).doc(counterId).set({
             data: { sequence: attemptedSequence, dateKey: dayKey, updatedAt: db.serverDate() }
           })
@@ -1857,6 +1887,8 @@ function createCloudBusinessRepository({
             currentNodeId: prepared[0].id,
             currentNodeName: prepared[0].data.name,
             nodeCount: prepared.length,
+            optionalTailState: optionalTail ? 'pending' : 'none',
+            ...(optionalTail ? { optionalTailNodeId: optionalTail.id } : {}),
             progress: 0,
             createdBy: actor._id,
             creationRequestHash: identity.requestHash,

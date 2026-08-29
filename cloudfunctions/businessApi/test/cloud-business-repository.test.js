@@ -121,6 +121,8 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(line.searchSourceVersion, 1)
   assert.equal(line.searchGeneratedVersion, 0)
   assert.equal(line.searchIndexStatus, 'pending')
+  assert.equal(line.optionalTailState, 'none')
+  assert.equal(Object.hasOwn(line, 'optionalTailNodeId'), false)
   assert.deepEqual(nodes.map(node => node.nodeCode), [
     'BL-20260807-0001-N001', 'BL-20260807-0001-N002'
   ])
@@ -132,6 +134,7 @@ test('creation allocates a generated code and publishes a complete immutable tem
     actorId: 'user-1', businessLineId: result.id, sourceVersion: 1
   })
   assert.equal(nodes[0].workflowMode, 'review')
+  assert.equal(nodes[0].activationMode, 'required')
   assert.equal(nodes[0].processorAssignmentMode, 'fixed_accounts')
   assert.deepEqual(nodes[0].processorUserIds, ['user-2'])
   assert.equal(nodes[0].reviewerAssignmentMode, 'fixed_accounts')
@@ -171,6 +174,63 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(fake.documents('sequence_counters')[0].sequence, 1)
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.deepEqual(fake.transactionQueries, [])
+})
+
+test('creation freezes an optional tail decision snapshot without starting its processing clock', async () => {
+  const nodes = [
+    sourceNode(),
+    sourceNode({
+      _id: 'template-node-2', nodeKey: 'node-b', sequence: 1, name: '可选回访',
+      activationMode: 'optional_tail', processorUserIds: ['user-4'], reviewerUserIds: []
+    })
+  ]
+  const { fake, repository } = createRepositoryHarness(seedDefinition({ nodes }))
+
+  await repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  })
+
+  const [line] = fake.documents('business_lines')
+  const stored = fake.documents('business_nodes').sort((left, right) => left.sequence - right.sequence)
+  assert.equal(line.optionalTailNodeId, stored[1]._id)
+  assert.equal(line.optionalTailState, 'pending')
+  assert.equal(stored[0].activationMode, 'required')
+  assert.equal(stored[1].activationMode, 'optional_tail')
+  assert.equal(stored[1].status, 'awaiting_decision')
+  assert.equal(stored[1].processingDueStatus, 'not_started')
+  assert.equal(stored[1].processingDueAt, null)
+  assert.equal(Object.hasOwn(stored[1], 'processingStartedAt'), false)
+  assert.deepEqual(stored[1].reviewerUserIds, [])
+
+  nodes[1].activationMode = 'required'
+  assert.equal(fake.documents('business_nodes')[1].activationMode, 'optional_tail')
+})
+
+test('business detail exposes optional-tail decision and reviewerless flags only to candidate processors', async () => {
+  const nodes = [
+    sourceNode(),
+    sourceNode({
+      _id: 'template-node-2', nodeKey: 'node-b', sequence: 1, name: '可选回访',
+      activationMode: 'optional_tail', processorUserIds: ['user-4'], reviewerUserIds: []
+    })
+  ]
+  const { repository } = createRepositoryHarness(seedDefinition({ nodes }))
+  const created = await repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  })
+
+  const candidate = await repository.getBusinessLine({ actor: { _id: 'user-4' }, lineId: created.id })
+  assert.equal(candidate.line.optionalTailState, 'pending')
+  assert.equal(candidate.line.optionalTailNodeId, `${created.id}-node-002`)
+  assert.equal(candidate.nodes[0].isOptionalTail, false)
+  assert.equal(candidate.nodes[0].requiresReview, true)
+  assert.equal(candidate.nodes[0].canDecideOptionalTail, false)
+  assert.equal(candidate.nodes[1].isOptionalTail, true)
+  assert.equal(candidate.nodes[1].requiresReview, false)
+  assert.equal(candidate.nodes[1].canDecideOptionalTail, true)
+
+  const manager = await repository.getBusinessLine({ actor: { _id: 'user-1' }, lineId: created.id })
+  assert.equal(manager.nodes[1].canDecideOptionalTail, false)
 })
 
 test('creation derives the immutable line name from the trusted template and allocated code', async () => {
@@ -1021,7 +1081,8 @@ test('新版业务详情只返回审核流程安全投影与负责人显示名',
   assert.deepEqual(result.nodes[0], {
     _id: 'node-review', nodeCode: 'BL-20260811-0001-N001', sequence: 0,
     name: '资料收集', description: '', status: 'pending_review', version: 5,
-    workflowMode: 'review', processorDisplayNames: ['创建时处理人'], reviewerDisplayNames: ['创建时审核人'],
+    workflowMode: 'review', isOptionalTail: false, requiresReview: true, canDecideOptionalTail: false,
+    processorDisplayNames: ['创建时处理人'], reviewerDisplayNames: ['创建时审核人'],
     reviewMode: 'any', processingRoundNumber: 2, reviewRoundNumber: 1,
     processingDueStatus: 'calculated', processingDueAt: new Date('2026-08-11T08:00:00.000Z'),
     processingOverdueWorkMinutes: 30, reviewDueStatus: 'calculated',
