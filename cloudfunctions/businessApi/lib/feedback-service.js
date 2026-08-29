@@ -4,11 +4,12 @@ const { validateFieldValues } = require('./field-domain')
 const { validateFeedbackTotalSize } = require('./evidence-policy')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { synchronizeSearchResult } = require('./search-version')
+const { ownExactAccountIds } = require('./account-relationship-schema')
 
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const REQUEST_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const FEEDBACK_STATUSES = new Set(['in_progress', 'blocked', 'completed'])
-const PROGRESS_ACTIONS = new Set(['save_progress', 'mark_blocked'])
+const PROGRESS_ACTIONS = new Set(['save_progress', 'mark_blocked', 'complete_node'])
 const INPUT_KEYS = new Set([
   'businessLineId', 'nodeId', 'expectedNodeVersion', 'status',
   'fieldValues', 'comment', 'evidenceIds', 'requestKey'
@@ -113,7 +114,11 @@ function normalizeProgressInput(input) {
     nodeId: requireId(input.nodeId),
     expectedNodeVersion: input.expectedNodeVersion,
     action: input.action,
-    status: input.action === 'mark_blocked' ? 'blocked' : 'in_progress',
+    status: input.action === 'mark_blocked'
+      ? 'blocked'
+      : input.action === 'complete_node'
+        ? 'completed'
+        : 'in_progress',
     fieldValues: input.fieldValues,
     comment,
     evidenceIds,
@@ -196,6 +201,9 @@ function createFeedbackService({ repository, businessSearchClient = null }) {
       evidenceIds: normalized.evidenceIds
     })
     if (!submission.node || submission.node.workflowMode !== 'review') throw createError('VALIDATION_ERROR')
+    const reviewers = ownExactAccountIds(submission.node, 'reviewerUserIds', { nonEmpty: false })
+    if (!reviewers) throw createError('FORBIDDEN')
+    if (normalized.action === 'complete_node' && reviewers.length) throw createError('NODE_REVIEW_REQUIRED')
     let fieldSnapshots
     let evidenceTotalBytes
     try {
@@ -204,6 +212,9 @@ function createFeedbackService({ repository, businessSearchClient = null }) {
       evidenceTotalBytes = validateFeedbackTotalSize(evidences.map(evidence => evidence.size))
     } catch (error) {
       markApplicationError(error)
+    }
+    if (normalized.action === 'complete_node' && submission.node.requiresEvidence && !normalized.evidenceIds.length) {
+      throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
     return synchronizeSearchResult(await repository.commitFeedback({
       actor,
@@ -214,12 +225,27 @@ function createFeedbackService({ repository, businessSearchClient = null }) {
     }), businessSearchClient)
   }
 
+  async function assertNodeRequiresReview({ actor, businessLineId, nodeId }) {
+    requireActiveActor(actor)
+    const submission = await repository.getSubmissionContext({
+      actor,
+      businessLineId: requireId(businessLineId),
+      nodeId: requireId(nodeId),
+      evidenceIds: []
+    })
+    if (!submission.node || submission.node.workflowMode !== 'review') throw createError('VALIDATION_ERROR')
+    const reviewers = ownExactAccountIds(submission.node, 'reviewerUserIds', { nonEmpty: false })
+    if (!reviewers) throw createError('FORBIDDEN')
+    if (!reviewers.length) throw createError('NODE_REVIEW_NOT_REQUIRED')
+    return { requiresReview: true }
+  }
+
   async function getNodeHistory({ actor, businessLineId, nodeId }) {
     requireActiveActor(actor)
     return repository.getNodeHistory({ actor, businessLineId: requireId(businessLineId), nodeId: requireId(nodeId) })
   }
 
-  return { submitFeedback, saveNodeProgress, getNodeHistory }
+  return { submitFeedback, saveNodeProgress, assertNodeRequiresReview, getNodeHistory }
 }
 
 module.exports = { createFeedbackService, createRequestFingerprint }

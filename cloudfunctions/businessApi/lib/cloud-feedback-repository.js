@@ -9,10 +9,11 @@ const {
   ownDataValue
 } = require('./account-relationship-schema')
 const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
+const { classifyCompletedNodeTransition } = require('./optional-tail-domain')
 
 const COLLECTIONS = Object.freeze({
   users: 'users', lines: 'business_lines', nodes: 'business_nodes',
-  feedback: 'node_feedback', evidences: 'evidences', audit: 'audit_logs'
+  feedback: 'node_feedback', evidences: 'evidences', audit: 'audit_logs', notifications: 'notifications'
 })
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_LINE_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
@@ -63,7 +64,7 @@ function accountSchema(line, node) {
     const processorField = ownDataValue(node, 'processorUserIds')
     const reviewerField = ownDataValue(node, 'reviewerUserIds')
     const processors = processorField.valid && exactAccountIds(processorField.value, { nonEmpty: true })
-    const reviewers = reviewerField.valid && exactAccountIds(reviewerField.value, { nonEmpty: true })
+    const reviewers = reviewerField.valid && exactAccountIds(reviewerField.value, { nonEmpty: false })
     return Boolean(processors && reviewers && !processors.some(id => reviewers.includes(id)))
   }
   const assigneeField = ownDataValue(node, 'assigneeUserIds')
@@ -131,6 +132,12 @@ function publicResult(feedback) {
     lineStatus: feedback.lineStatus
   }
   if (safeInteger(feedback.nodeVersion, { minimum: 1 })) result.nodeVersion = feedback.nodeVersion
+  if (typeof feedback.nextNodeId === 'string' && DOCUMENT_ID.test(feedback.nextNodeId)) {
+    result.nextNodeId = feedback.nextNodeId
+  }
+  if (['none', 'pending', 'activated', 'skipped', 'completed'].includes(feedback.optionalTailState)) {
+    result.optionalTailState = feedback.optionalTailState
+  }
   return result
 }
 
@@ -250,9 +257,13 @@ function createCloudFeedbackRepository({
     if (!line || line.status !== 'active' || !isCurrentNode(line, node) ||
         !ACTIVE_NODE_STATUSES.has(node.status)) throw createError('NODE_NOT_ACTIVE')
     if (!input || !Number.isSafeInteger(input.expectedNodeVersion) || input.expectedNodeVersion < 1 ||
-        !['save_progress', 'mark_blocked'].includes(input.action) ||
+        !['save_progress', 'mark_blocked', 'complete_node'].includes(input.action) ||
         !safeInteger(node.processingRoundNumber, { minimum: 1 })) {
       throw createError('VERSION_CONFLICT')
+    }
+    const reviewers = exactAccountIds(node.reviewerUserIds, { nonEmpty: false })
+    if (!reviewers || input.action === 'complete_node' && reviewers.length) {
+      throw createError(input.action === 'complete_node' ? 'NODE_REVIEW_REQUIRED' : 'VERSION_CONFLICT')
     }
     if (!reservation) {
       if (node.version !== input.expectedNodeVersion) throw createError('VERSION_CONFLICT')
@@ -277,6 +288,14 @@ function createCloudFeedbackRepository({
     }
     if (!accountSchema(line, node) || !isAccountMember(line, actor._id) ||
         !processorIds(node).includes(actor._id)) throw createError('FORBIDDEN')
+    if (reservation.action === 'complete_node' && reservation.status === 'completed') {
+      const reviewers = exactAccountIds(node.reviewerUserIds, { nonEmpty: false })
+      if (!reviewers || reviewers.length || node.status !== 'completed' ||
+          reservation.expectedNodeVersion !== value.input.expectedNodeVersion ||
+          node.latestFeedbackId !== reservation._id || node.latestFeedbackRevision !== reservation.revision ||
+          node.version !== value.input.expectedNodeVersion + 1) throw createError('VERSION_CONFLICT')
+      return
+    }
     assertReviewProcessingState(line, node, value && value.input, reservation)
   }
 
@@ -443,9 +462,13 @@ function createCloudFeedbackRepository({
       }
       assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
       if (current.node.workflowMode === 'review' &&
-          (!['save_progress', 'mark_blocked'].includes(value.input.action) ||
+          (!['save_progress', 'mark_blocked', 'complete_node'].includes(value.input.action) ||
             !safeInteger(current.node.processingRoundNumber, { minimum: 1 }))) {
         throw createError('VALIDATION_ERROR')
+      }
+      if (current.node.workflowMode === 'review' && value.input.action === 'complete_node') {
+        const reviewers = exactAccountIds(current.node.reviewerUserIds, { nonEmpty: false })
+        if (!reviewers || reviewers.length) throw createError('NODE_REVIEW_REQUIRED')
       }
       if (value.input.status === 'completed' && current.node.requiresEvidence && !value.input.evidenceIds.length) {
         throw createError('EVIDENCE_NOT_ATTACHABLE')
@@ -463,6 +486,32 @@ function createCloudFeedbackRepository({
       const claimExpiresAt = new Date(at.getTime() + CLAIM_LIFETIME_MS)
       const currentRevision = current.node.latestFeedbackRevision === undefined ? 0 : current.node.latestFeedbackRevision
       const plannedRevision = increment(currentRevision)
+      let completionTransition = null
+      let plannedNextNodeId = null
+      let plannedOptionalTailState = current.line.optionalTailState || 'none'
+      if (value.input.status === 'completed') {
+        plannedNextNodeId = Number(current.node.sequence) + 1 < Number(current.line.nodeCount)
+          ? nextNodeId(current.line._id, current.node.sequence)
+          : null
+        const nextNode = plannedNextNodeId
+          ? await readDocument(transaction, COLLECTIONS.nodes, plannedNextNodeId)
+          : null
+        completionTransition = classifyCompletedNodeTransition({
+          line: current.line, node: current.node, nextNode
+        })
+        if (completionTransition === 'next_node' &&
+            (!nextNode || nextNode.businessLineId !== current.line._id || nextNode.status !== 'waiting')) {
+          throw createError('NODE_NOT_ACTIVE')
+        }
+        if (completionTransition === 'await_optional_decision' &&
+            (!nextNode || nextNode.businessLineId !== current.line._id ||
+              nextNode._id !== current.line.optionalTailNodeId || nextNode.status !== 'awaiting_decision' ||
+              !accountSchema(current.line, nextNode))) throw createError('NODE_NOT_ACTIVE')
+        if (completionTransition === 'await_optional_decision') plannedOptionalTailState = 'pending'
+        if (completionTransition === 'complete_line' && current.node.activationMode === 'optional_tail') {
+          plannedOptionalTailState = 'completed'
+        }
+      }
       const reservation = {
         businessLineId: current.line._id,
         nodeId: current.node._id,
@@ -492,7 +541,10 @@ function createCloudFeedbackRepository({
         claimedStateDigest: hash(JSON.stringify([0, 0, hash(JSON.stringify([]))])),
         expectedNodeVersion: value.input.expectedNodeVersion,
         plannedRevision,
-        freezesLine: value.input.status === 'completed' && Number(current.node.sequence) + 1 >= Number(current.line.nodeCount),
+        freezesLine: completionTransition === 'complete_line',
+        completionTransition,
+        nextNodeId: plannedNextNodeId,
+        optionalTailState: plannedOptionalTailState,
         transitionAt: at,
         claimExpiresAt,
         recoveryCount: existing && existing.recoveryCount !== undefined ? existing.recoveryCount : 0,
@@ -651,6 +703,13 @@ function createCloudFeedbackRepository({
       const revision = reservation.plannedRevision
       const latestRevision = current.node.latestFeedbackRevision === undefined ? 0 : current.node.latestFeedbackRevision
       if (!safeInteger(revision, { minimum: 1 }) || revision !== increment(latestRevision)) throw createError('VERSION_CONFLICT')
+      const completionTransition = reservation.completionTransition ||
+        (reservation.freezesLine === true ? 'complete_line' :
+          reservation.freezesLine === false && value.input.status === 'completed' ? 'next_node' : null)
+      if (value.input.status === 'completed' &&
+          !['complete_line', 'next_node', 'await_optional_decision'].includes(completionTransition)) {
+        throw createError('VERSION_CONFLICT')
+      }
       const nodeVersion = increment(current.node.version)
       const nextLineSearch = advanceSearchVersion(current.line)
       const nextNodeSearch = advanceSearchVersion(current.node)
@@ -667,9 +726,13 @@ function createCloudFeedbackRepository({
         ...nextNodeSearch
       }
       if (current.node.workflowMode === 'review') {
-        if (!['save_progress', 'mark_blocked'].includes(value.input.action) ||
+        if (!['save_progress', 'mark_blocked', 'complete_node'].includes(value.input.action) ||
             !safeInteger(current.node.processingRoundNumber, { minimum: 1 }) ||
             reservation.processingRoundNumber !== current.node.processingRoundNumber) {
+          throw createError('VERSION_CONFLICT')
+        }
+        const reviewers = exactAccountIds(current.node.reviewerUserIds, { nonEmpty: false })
+        if (!reviewers || value.input.action === 'complete_node' && reviewers.length) {
           throw createError('VERSION_CONFLICT')
         }
         nodeChanges.blockedReason = value.input.action === 'mark_blocked' ? value.input.comment : ''
@@ -683,11 +746,12 @@ function createCloudFeedbackRepository({
       await transaction.collection(COLLECTIONS.nodes).doc(current.node._id).update({ data: nodeChanges })
 
       let lineStatus = 'active'
-      if (value.input.status === 'completed' && reservation.freezesLine) {
+      if (value.input.status === 'completed' && completionTransition === 'complete_line') {
         lineStatus = 'completed'
         const purgeDueAt = new Date(new Date(reservation.transitionAt).getTime() + RETENTION_MS)
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
           status: 'completed', progress: 100, version: increment(current.line.version),
+          optionalTailState: reservation.optionalTailState,
           completedAt: reservation.transitionAt, frozenAt: reservation.transitionAt,
           retentionStartedAt: reservation.transitionAt, purgeDueAt,
           analyticsSnapshotStatus: 'pending',
@@ -696,8 +760,8 @@ function createCloudFeedbackRepository({
           ...nextLineSearch,
           updatedAt: db.serverDate()
         } })
-      } else if (value.input.status === 'completed') {
-        const nextId = nextNodeId(current.line._id, current.node.sequence)
+      } else if (value.input.status === 'completed' && completionTransition === 'next_node') {
+        const nextId = reservation.nextNodeId
         const next = await readDocument(transaction, COLLECTIONS.nodes, nextId)
         if (!next || next.businessLineId !== current.line._id || Number(next.sequence) !== Number(current.node.sequence) + 1 ||
             next.status !== 'waiting') throw createError('NODE_NOT_ACTIVE')
@@ -713,6 +777,32 @@ function createCloudFeedbackRepository({
           currentNodeId: nextId, currentNodeIndex: next.sequence, currentNodeName: next.name,
           progress, version: increment(current.line.version), ...nextLineSearch, updatedAt: db.serverDate()
         } })
+      } else if (value.input.status === 'completed' &&
+          completionTransition === 'await_optional_decision') {
+        const nextId = reservation.nextNodeId
+        const next = await readDocument(transaction, COLLECTIONS.nodes, nextId)
+        if (!next || next.businessLineId !== current.line._id || next._id !== current.line.optionalTailNodeId ||
+            next.status !== 'awaiting_decision' || next.activationMode !== 'optional_tail' ||
+            !accountSchema(current.line, next)) throw createError('NODE_NOT_ACTIVE')
+        const nextProcessors = exactAccountIds(next.processorUserIds, { nonEmpty: true })
+        await transaction.collection(COLLECTIONS.nodes).doc(nextId).update({ data: {
+          decisionStartedAt: reservation.transitionAt,
+          nextDecisionReminderWorkHour: 1,
+          version: increment(next.version),
+          updatedAt: db.serverDate()
+        } })
+        const progress = Math.floor(((Number(current.node.sequence) + 1) / Number(current.line.nodeCount)) * 100)
+        await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
+          currentNodeId: nextId, currentNodeIndex: next.sequence, currentNodeName: next.name,
+          optionalTailState: 'pending', progress, version: increment(current.line.version),
+          ...nextLineSearch, updatedAt: db.serverDate()
+        } })
+        const notificationId = `optional-tail-decision-started-${hash(`${current.line._id}\0${nextId}`).slice(0, 40)}`
+        await transaction.collection(COLLECTIONS.notifications).doc(notificationId).set({ data: {
+          type: 'optional_tail_decision_started', recipientUserIds: clone(nextProcessors),
+          businessLineId: current.line._id, nodeId: nextId, status: 'unread',
+          createdAt: db.serverDate()
+        } })
       } else {
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
           version: increment(current.line.version), ...nextLineSearch, updatedAt: db.serverDate()
@@ -720,17 +810,35 @@ function createCloudFeedbackRepository({
       }
       await transaction.collection(COLLECTIONS.feedback).doc(id.feedbackId).update({ data: {
         publishState: 'published', revision, lineStatus, submittedAt: reservation.transitionAt,
+        ...(value.input.action === 'complete_node'
+          ? {
+              nextNodeId: reservation.nextNodeId || db.command.remove(),
+              optionalTailState: reservation.optionalTailState
+            }
+          : {
+              nextNodeId: db.command.remove(),
+              optionalTailState: db.command.remove()
+            }),
         nodeVersion,
         claimExpiresAt: db.command.remove(), updatedAt: db.serverDate()
       } })
       await transaction.collection(COLLECTIONS.audit).doc(`${id.feedbackId}-submitted`).set({ data: {
-        actorId: current.actor._id, action: 'SUBMIT_NODE_FEEDBACK', targetType: 'business_node',
-        targetId: current.node._id, feedbackId: id.feedbackId, revision,
+        actorId: current.actor._id,
+        action: value.input.action === 'complete_node'
+          ? 'COMPLETE_NODE_WITHOUT_REVIEW'
+          : 'SUBMIT_NODE_FEEDBACK',
+        targetType: 'business_node', targetId: current.node._id,
+        feedbackId: id.feedbackId, revision,
         resultStatus: value.input.status, evidenceCount: reservation.evidenceCount,
         createdAt: db.serverDate()
       } })
       return withSearchEnvelope(
-        { feedbackId: id.feedbackId, revision, nodeStatus: value.input.status, lineStatus, nodeVersion },
+        {
+          feedbackId: id.feedbackId, revision, nodeStatus: value.input.status, lineStatus, nodeVersion,
+          ...(value.input.action === 'complete_node'
+            ? { nextNodeId: reservation.nextNodeId, optionalTailState: reservation.optionalTailState }
+            : {})
+        },
         current.actor._id,
         current.line._id,
         nextLineSearch.searchSourceVersion

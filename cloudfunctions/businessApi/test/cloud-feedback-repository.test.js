@@ -13,6 +13,28 @@ function stateSnapshot(fake) {
   return Object.fromEntries(STATE_COLLECTIONS.map(name => [name, fake.documents(name)]))
 }
 
+function directCompletion(overrides = {}) {
+  return submission({
+    ...overrides,
+    input: {
+      action: 'complete_node', status: 'completed',
+      ...(overrides.input || {})
+    }
+  })
+}
+
+function reviewerlessNode(node, overrides = {}) {
+  return {
+    ...node,
+    workflowMode: 'review',
+    processorUserIds: ['account-a', 'account-b'],
+    reviewerUserIds: [],
+    processingRoundNumber: 1,
+    activationMode: 'required',
+    ...overrides
+  }
+}
+
 test('completion claims more than one transaction of tiny evidence without a count cap', async () => {
   const evidenceIds = Array.from({ length: 105 }, (_, index) => `evidence-${105 - index}`)
   const { fake, repository } = createFeedbackHarness({ evidenceCount: 105 })
@@ -84,6 +106,89 @@ test('last-node completion freezes the line and records one authoritative 60-day
     assert.equal(evidence.retentionStartedAt, null)
     assert.equal(evidence.purgeDueAt, null)
   }
+})
+
+test('无审核人节点直接完成后激活下一个必经节点且不创建审核记录', async () => {
+  const data = seed({ evidenceCount: 0 })
+  data.notifications = []
+  data.node_review_rounds = []
+  data.node_review_votes = []
+  data.business_nodes[0] = reviewerlessNode(data.business_nodes[0])
+  data.business_nodes[1] = reviewerlessNode(data.business_nodes[1], {
+    processorUserIds: ['account-a'], status: 'waiting'
+  })
+  const { fake, repository } = createFeedbackHarness({ seed: data })
+
+  const result = await repository.commitFeedback(directCompletion())
+
+  assert.equal(result.nodeStatus, 'completed')
+  assert.equal(result.lineStatus, 'active')
+  assert.equal(result.nextNodeId, 'line-1-node-002')
+  assert.equal(result.optionalTailState, 'none')
+  assert.equal(fake.documents('business_nodes')[1].status, 'ready')
+  assert.equal(fake.documents('node_review_rounds').length, 0)
+  assert.equal(fake.documents('node_review_votes').length, 0)
+  assert.equal(fake.documents('audit_logs')[0].action, 'COMPLETE_NODE_WITHOUT_REVIEW')
+})
+
+test('最后必经节点直接完成后进入追加节点待决定而不提前冻结售后', async () => {
+  const data = seed({ evidenceCount: 0 })
+  data.notifications = []
+  Object.assign(data.business_lines[0], {
+    optionalTailNodeId: 'line-1-node-002', optionalTailState: 'none'
+  })
+  data.business_nodes[0] = reviewerlessNode(data.business_nodes[0])
+  data.business_nodes[1] = reviewerlessNode(data.business_nodes[1], {
+    activationMode: 'optional_tail', status: 'awaiting_decision'
+  })
+  const { fake, repository } = createFeedbackHarness({ seed: data })
+
+  const result = await repository.commitFeedback(directCompletion())
+
+  assert.equal(result.lineStatus, 'active')
+  assert.equal(result.nextNodeId, 'line-1-node-002')
+  assert.equal(result.optionalTailState, 'pending')
+  const line = fake.documents('business_lines')[0]
+  const optional = fake.documents('business_nodes')[1]
+  assert.equal(line.status, 'active')
+  assert.equal(line.optionalTailState, 'pending')
+  assert.equal(line.currentNodeId, optional._id)
+  assert.equal(Object.hasOwn(line, 'retentionStartedAt'), false)
+  assert.equal(optional.status, 'awaiting_decision')
+  assert.deepEqual(optional.decisionStartedAt, NOW)
+  assert.equal(optional.nextDecisionReminderWorkHour, 1)
+  assert.equal(Object.hasOwn(optional, 'processingStartedAt'), false)
+  assert.equal(fake.documents('notifications').filter(item =>
+    item.type === 'optional_tail_decision_started').length, 1)
+
+  const retry = await repository.commitFeedback(directCompletion())
+  assert.deepEqual(retry, result)
+  assert.equal(fake.documents('notifications').filter(item =>
+    item.type === 'optional_tail_decision_started').length, 1)
+})
+
+test('已开启的无审核追加节点直接完成后才真正冻结售后', async () => {
+  const data = seed({ evidenceCount: 0 })
+  data.business_lines[0] = {
+    ...data.business_lines[0], currentNodeId: 'line-1-node-002', currentNodeIndex: 1,
+    currentNodeName: '交付', optionalTailNodeId: 'line-1-node-002', optionalTailState: 'activated'
+  }
+  data.business_nodes = [reviewerlessNode(data.business_nodes[1], {
+    _id: 'line-1-node-002', sequence: 1, status: 'ready', version: 4,
+    activationMode: 'optional_tail'
+  })]
+  const { fake, repository } = createFeedbackHarness({ seed: data })
+
+  const result = await repository.commitFeedback(directCompletion({ input: {
+    nodeId: 'line-1-node-002', expectedNodeVersion: 4, requestKey: 'direct-tail-terminal'
+  } }))
+
+  assert.equal(result.lineStatus, 'completed')
+  assert.equal(result.optionalTailState, 'completed')
+  const line = fake.documents('business_lines')[0]
+  assert.equal(line.status, 'completed')
+  assert.equal(line.optionalTailState, 'completed')
+  assert.deepEqual(line.retentionStartedAt, NOW)
 })
 
 test('被驳回节点重新提交后恢复下一节点但不刷新其原激活时间和到期时间', async () => {

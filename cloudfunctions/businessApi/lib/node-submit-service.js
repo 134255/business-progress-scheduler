@@ -51,12 +51,20 @@ function createNodeSubmitService({ feedbackService, reviewService }) {
   if (!feedbackService || typeof feedbackService.saveNodeProgress !== 'function') {
     throw new TypeError('feedbackService.saveNodeProgress is required')
   }
+  if (typeof feedbackService.assertNodeRequiresReview !== 'function') {
+    throw new TypeError('feedbackService.assertNodeRequiresReview is required')
+  }
   if (!reviewService || typeof reviewService.submitNodeForReview !== 'function') {
     throw new TypeError('reviewService.submitNodeForReview is required')
   }
 
   async function saveAndSubmitNodeForReview({ actor, input }) {
     const normalized = normalizeInput(input)
+    await feedbackService.assertNodeRequiresReview({
+      actor,
+      businessLineId: normalized.businessLineId,
+      nodeId: normalized.nodeId
+    })
     const progress = await feedbackService.saveNodeProgress({
       actor,
       input: {

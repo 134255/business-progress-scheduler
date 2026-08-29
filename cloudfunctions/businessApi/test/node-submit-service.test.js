@@ -23,6 +23,10 @@ test('保存并提交审核使用保存后的节点版本且只返回合并后�
   const calls = []
   const service = createNodeSubmitService({
     feedbackService: {
+      async assertNodeRequiresReview(value) {
+        calls.push(['preflight', value])
+        return { requiresReview: true }
+      },
       async saveNodeProgress(value) {
         calls.push(['progress', value])
         return { feedbackId: 'feedback-1', revision: 2, nodeVersion: 5, nodeStatus: 'in_progress' }
@@ -48,6 +52,7 @@ test('保存并提交审核使用保存后的节点版本且只返回合并后�
     nodeStatus: 'pending_review'
   })
   assert.deepEqual(calls, [
+    ['preflight', { actor: ACTOR, businessLineId: 'line-1', nodeId: 'node-1' }],
     ['progress', { actor: ACTOR, input: {
       businessLineId: 'line-1', nodeId: 'node-1', expectedNodeVersion: 4,
       action: 'save_progress', fieldValues: [{ fieldKey: 'summary', value: '资料已齐' }],
@@ -63,6 +68,7 @@ test('保存并提交审核使用保存后的节点版本且只返回合并后�
 test('任一步检索待同步都会保留权威成功并上浮待补索引状态', async () => {
   const service = createNodeSubmitService({
     feedbackService: {
+      async assertNodeRequiresReview() { return { requiresReview: true } },
       async saveNodeProgress() {
         return { feedbackId: 'feedback-1', nodeVersion: 5, searchIndexStatus: 'pending' }
       }
@@ -83,7 +89,10 @@ test('任一步检索待同步都会保留权威成功并上浮待补索引状�
 test('严格拒绝缺失、额外、访问器和非法版本输入且不触发子写入', async () => {
   let writes = 0
   const service = createNodeSubmitService({
-    feedbackService: { async saveNodeProgress() { writes += 1 } },
+    feedbackService: {
+      async assertNodeRequiresReview() { writes += 1 },
+      async saveNodeProgress() { writes += 1 }
+    },
     reviewService: { async submitNodeForReview() { writes += 1 } }
   })
   const invalid = [
@@ -107,6 +116,7 @@ test('保存结果缺少递增节点版本时失败关闭且不得开始审核',
   let reviews = 0
   const service = createNodeSubmitService({
     feedbackService: {
+      async assertNodeRequiresReview() { return { requiresReview: true } },
       async saveNodeProgress() { return { feedbackId: 'feedback-1', nodeVersion: 4 } }
     },
     reviewService: {
@@ -119,4 +129,27 @@ test('保存结果缺少递增节点版本时失败关闭且不得开始审核',
     error => error && error.code === 'VERSION_CONFLICT'
   )
   assert.equal(reviews, 0)
+})
+
+test('无审核人节点在保存草稿前即拒绝组合提交', async () => {
+  let progressWrites = 0
+  let reviewWrites = 0
+  const service = createNodeSubmitService({
+    feedbackService: {
+      async assertNodeRequiresReview() {
+        const error = new Error('NODE_REVIEW_NOT_REQUIRED')
+        error.code = 'NODE_REVIEW_NOT_REQUIRED'
+        throw error
+      },
+      async saveNodeProgress() { progressWrites += 1 }
+    },
+    reviewService: { async submitNodeForReview() { reviewWrites += 1 } }
+  })
+
+  await assert.rejects(
+    service.saveAndSubmitNodeForReview({ actor: ACTOR, input: input() }),
+    error => error.code === 'NODE_REVIEW_NOT_REQUIRED'
+  )
+  assert.equal(progressWrites, 0)
+  assert.equal(reviewWrites, 0)
 })

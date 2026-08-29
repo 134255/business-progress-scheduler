@@ -69,7 +69,17 @@ test('发布处理进度后同步检索索引并仅返回公开结果', async ()
   const envelope = { actorId: 'account-1', businessLineId: 'line-1', sourceVersion: 2 }
   const indexed = []
   const value = harness({
-    context: { ...context(), node: { ...context().node, workflowMode: 'review', requiresEvidence: false } },
+    context: {
+      ...context(),
+      node: {
+        ...context().node,
+        workflowMode: 'review',
+        requiresEvidence: false,
+        processorUserIds: ['account-1'],
+        reviewerUserIds: ['reviewer-1'],
+        processingRoundNumber: 1
+      }
+    },
     repository: { async commitFeedback() { return { publicResult, searchEnvelope: envelope } } },
     businessSearchClient: { async ensureIndexed(item) { indexed.push(item) } }
   })
@@ -240,6 +250,70 @@ test('新版节点处理人只能保存进度或标记受阻，不能直接完�
   assert.equal(result.nodeStatus, 'in_progress')
   assert.equal(calls.at(-1)[1].input.action, 'save_progress')
   assert.equal(calls.at(-1)[1].input.status, 'in_progress')
+})
+
+test('无审核人新版节点可直接完成并仍执行字段与凭证校验', async () => {
+  const directContext = context({
+    node: {
+      ...context().node,
+      workflowMode: 'review',
+      processorUserIds: ['account-1'],
+      reviewerUserIds: [],
+      processingRoundNumber: 1
+    }
+  })
+  const value = harness({
+    context: directContext,
+    repository: {
+      async commitFeedback(inputValue) {
+        value.calls.push(['commit', structuredClone(inputValue)])
+        return {
+          feedbackId: 'feedback-direct', revision: 1, nodeStatus: 'completed',
+          lineStatus: 'active', nextNodeId: 'node-2', optionalTailState: 'none'
+        }
+      }
+    }
+  })
+  const { status: ignoredStatus, ...progressBase } = input()
+  const result = await value.service.saveNodeProgress({
+    actor: value.actor,
+    input: { ...progressBase, action: 'complete_node' }
+  })
+  assert.deepEqual(result, {
+    feedbackId: 'feedback-direct', revision: 1, nodeStatus: 'completed',
+    lineStatus: 'active', nextNodeId: 'node-2', optionalTailState: 'none'
+  })
+  assert.equal(value.calls.at(-1)[1].input.action, 'complete_node')
+  assert.equal(value.calls.at(-1)[1].input.status, 'completed')
+
+  const reviewed = harness({ context: {
+    ...directContext,
+    node: { ...directContext.node, reviewerUserIds: ['reviewer-1'] }
+  } })
+  await assert.rejects(reviewed.service.saveNodeProgress({
+    actor: reviewed.actor,
+    input: { ...progressBase, action: 'complete_node' }
+  }), error => error.code === 'NODE_REVIEW_REQUIRED')
+
+  const missingEvidence = harness({ context: { ...directContext, evidences: [] } })
+  await assert.rejects(missingEvidence.service.saveNodeProgress({
+    actor: missingEvidence.actor,
+    input: { ...progressBase, action: 'complete_node', evidenceIds: [] }
+  }), error => error.code === 'EVIDENCE_NOT_ATTACHABLE')
+})
+
+test('组合提交预检会在任何写入前拒绝无审核人节点', async () => {
+  const directContext = context({
+    node: {
+      ...context().node,
+      workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: []
+    }
+  })
+  const { actor, calls, service } = harness({ context: directContext })
+  await assert.rejects(service.assertNodeRequiresReview({
+    actor, businessLineId: 'line-1', nodeId: 'node-1'
+  }), error => error.code === 'NODE_REVIEW_NOT_REQUIRED')
+  assert.equal(calls.some(call => call[0] === 'commit'), false)
 })
 
 test('标记受阻原因必填且发布不可变处理版本', async () => {
