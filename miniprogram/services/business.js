@@ -150,6 +150,10 @@ function beginEvidenceUpload(input) {
   return callProtected('beginEvidenceUpload', input, '凭证上传授权失败，请重试')
 }
 
+function refreshEvidenceUploadAuthorization(input) {
+  return callProtected('refreshEvidenceUploadAuthorization', input, '凭证上传授权续期失败，请重试')
+}
+
 function finalizeEvidenceUpload(input) {
   return callProtected('finalizeEvidenceUpload', input, '凭证上传确认失败，请重试')
 }
@@ -242,6 +246,7 @@ module.exports = {
   getNodeWorkspace,
   registerEvidenceUpload,
   beginEvidenceUpload,
+  refreshEvidenceUploadAuthorization,
   finalizeEvidenceUpload,
   getEvidenceAccess,
   submitFeedback,

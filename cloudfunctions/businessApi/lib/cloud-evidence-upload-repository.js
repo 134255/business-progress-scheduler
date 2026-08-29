@@ -193,6 +193,46 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
     }
   }
 
+  async function refreshUploadAuthorization({
+    actor,
+    evidenceId,
+    uploadSessionTokenHash,
+    expectedNodeVersion,
+    uploadSessionExpiresAt
+  }) {
+    if (!actor || typeof actor._id !== 'string' || !DOCUMENT_ID.test(actor._id) ||
+        !DOCUMENT_ID.test(evidenceId) || !TOKEN_HASH.test(uploadSessionTokenHash) ||
+        !Number.isSafeInteger(expectedNodeVersion) || expectedNodeVersion < 1 ||
+        !safeDate(uploadSessionExpiresAt)) throw createError('EVIDENCE_NOT_ATTACHABLE')
+    return db.runTransaction(async transaction => {
+      const evidence = await readDocument(transaction, COLLECTIONS.evidences, evidenceId)
+      if (!evidence || evidence.uploadedBy !== actor._id ||
+          evidence.uploadSessionTokenHash !== uploadSessionTokenHash) throw createError('FORBIDDEN')
+      if (evidence.nodeVersionAtUpload !== expectedNodeVersion) throw createError('VERSION_CONFLICT')
+      if (evidence.storageStatus !== 'uploading') throw createError('EVIDENCE_NOT_ATTACHABLE')
+      const objectMatch = typeof evidence.objectKey === 'string' ? OBJECT_KEY.exec(evidence.objectKey) : null
+      if (!objectMatch || objectMatch[1] !== evidence.businessLineId || objectMatch[2] !== evidence.nodeId ||
+          objectMatch[3] !== evidenceId || objectMatch[4] !== evidence.extension) {
+        throw createError('EVIDENCE_NOT_ATTACHABLE')
+      }
+      const at = clock()
+      const orphanExpiresAt = safeDate(evidence.orphanExpiresAt)
+      if (!safeDate(at)) throw new TypeError('clock must return a Date')
+      if (!orphanExpiresAt || orphanExpiresAt <= at || uploadSessionExpiresAt <= at ||
+          uploadSessionExpiresAt >= orphanExpiresAt) throw createError('EVIDENCE_UPLOAD_EXPIRED')
+      const authorized = await authorize(
+        transaction, actor._id, evidence.businessLineId, evidence.nodeId, expectedNodeVersion
+      )
+      if (authorized.processingRoundNumber !== evidence.processingRoundNumber ||
+          !authorized.allowedTypes.includes(evidence.extension)) throw createError('VERSION_CONFLICT')
+      await transaction.collection(COLLECTIONS.evidences).doc(evidenceId).update({ data: {
+        uploadSessionExpiresAt,
+        updatedAt: at
+      } })
+      return { evidenceId, objectKey: evidence.objectKey }
+    })
+  }
+
   async function preflightFinalize(actor, evidenceId, tokenHash, expectedNodeVersion) {
     return db.runTransaction(async transaction => {
       const evidence = await readDocument(transaction, COLLECTIONS.evidences, evidenceId)
@@ -314,7 +354,7 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
     })
   }
 
-  return { reserveUpload, finalizeUpload }
+  return { reserveUpload, refreshUploadAuthorization, finalizeUpload }
 }
 
 function cosCall(client, method, params) {

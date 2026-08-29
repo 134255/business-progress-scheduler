@@ -783,6 +783,10 @@ test('scoped evidence upload routes use the trusted actor and an exact safe payl
       calls.push(['begin', input])
       return { evidenceId: 'evidence-1', uploadSessionToken: 'opaque' }
     },
+    async refreshEvidenceUploadAuthorization(input) {
+      calls.push(['refresh', input])
+      return { evidenceId: 'evidence-1', uploadSessionToken: 'opaque' }
+    },
     async finalizeEvidenceUpload(input) {
       calls.push(['finalize', input])
       return { evidenceId: 'evidence-1', storageStatus: 'available' }
@@ -798,6 +802,7 @@ test('scoped evidence upload routes use the trusted actor and an exact safe payl
     actorId: 'forged'
   }
   assert.equal((await harness.api.main({ action: 'beginEvidenceUpload', payload: beginPayload })).ok, true)
+  assert.equal((await harness.api.main({ action: 'refreshEvidenceUploadAuthorization', payload: finalizePayload })).ok, true)
   assert.equal((await harness.api.main({ action: 'finalizeEvidenceUpload', payload: finalizePayload })).ok, true)
   const actor = {
     _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
@@ -806,6 +811,9 @@ test('scoped evidence upload routes use the trusted actor and an exact safe payl
     ['begin', { actor, input: {
       businessLineId: 'business-1', nodeId: 'node-1', expectedNodeVersion: 4,
       fileName: 'proof.mov', declaredSize: 123
+    } }],
+    ['refresh', { actor, input: {
+      evidenceId: 'evidence-1', uploadSessionToken: 'opaque', expectedNodeVersion: 4
     } }],
     ['finalize', { actor, input: {
       evidenceId: 'evidence-1', uploadSessionToken: 'opaque', expectedNodeVersion: 4

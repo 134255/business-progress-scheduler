@@ -117,6 +117,35 @@ function createEvidenceUploadService({
   }
   if (typeof onCredentialError !== 'function') throw new TypeError('onCredentialError must be a function')
 
+  async function issueAuthorization(objectKey, uploadSessionExpiresAt) {
+    let issued
+    try {
+      issued = exactTemporaryCredentials(await credentialProvider.issue({
+        objectKey,
+        expiresAt: uploadSessionExpiresAt
+      }))
+    } catch (error) {
+      const diagnostic = safeCredentialDiagnostic(error)
+      try {
+        onCredentialError(diagnostic)
+      } catch (diagnosticError) {
+        // Diagnostics must never alter the fail-closed upload authorization path.
+      }
+      const unavailable = createError('EVIDENCE_UPLOAD_UNAVAILABLE')
+      const publicDiagnostic = { stage: 'credential_issue' }
+      if (diagnostic.code) publicDiagnostic.code = diagnostic.code
+      if (diagnostic.statusCode) publicDiagnostic.statusCode = diagnostic.statusCode
+      unavailable.diagnostic = publicDiagnostic
+      throw unavailable
+    }
+    if (!issued) {
+      const unavailable = createError('EVIDENCE_UPLOAD_UNAVAILABLE')
+      unavailable.diagnostic = { stage: 'credential_shape' }
+      throw unavailable
+    }
+    return issued
+  }
+
   async function beginEvidenceUpload({ actor, input }) {
     if (!validActor(actor) || !input || typeof input !== 'object' || Array.isArray(input)) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
@@ -160,34 +189,43 @@ function createEvidenceUploadService({
       if (error && typeof error === 'object') error.diagnostic = { stage: 'reserve_upload' }
       throw error
     }
-    let issued
-    try {
-      issued = exactTemporaryCredentials(await credentialProvider.issue({ objectKey, expiresAt: uploadSessionExpiresAt }))
-    } catch (error) {
-      const diagnostic = safeCredentialDiagnostic(error)
-      try {
-        onCredentialError(diagnostic)
-      } catch (diagnosticError) {
-        // Diagnostics must never alter the fail-closed upload authorization path.
-      }
-      const unavailable = createError('EVIDENCE_UPLOAD_UNAVAILABLE')
-      const publicDiagnostic = { stage: 'credential_issue' }
-      if (diagnostic.code) publicDiagnostic.code = diagnostic.code
-      if (diagnostic.statusCode) publicDiagnostic.statusCode = diagnostic.statusCode
-      if (Object.keys(publicDiagnostic).length) unavailable.diagnostic = publicDiagnostic
-      throw unavailable
-    }
-    if (!issued) {
-      const unavailable = createError('EVIDENCE_UPLOAD_UNAVAILABLE')
-      unavailable.diagnostic = { stage: 'credential_shape' }
-      throw unavailable
-    }
+    const issued = await issueAuthorization(objectKey, uploadSessionExpiresAt)
     return {
       evidenceId,
       uploadSessionToken,
       bucket,
       region,
       objectKey,
+      credentials: issued.credentials,
+      startTime: issued.startTime,
+      expiredTime: issued.expiredTime,
+      expiresAt: uploadSessionExpiresAt
+    }
+  }
+
+  async function refreshEvidenceUploadAuthorization({ actor, input }) {
+    if (!validActor(actor) || !input || typeof input !== 'object' || Array.isArray(input) ||
+        typeof input.uploadSessionToken !== 'string' || !SESSION_TOKEN.test(input.uploadSessionToken) ||
+        !Number.isSafeInteger(input.expectedNodeVersion) || input.expectedNodeVersion < 1) {
+      throw createError('EVIDENCE_NOT_ATTACHABLE')
+    }
+    const timestamp = clock()
+    if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) throw new TypeError('clock must return a Date')
+    const uploadSessionExpiresAt = new Date(timestamp.getTime() + SESSION_LIFETIME_MS)
+    const evidenceId = documentId(input.evidenceId)
+    const refreshed = await repository.refreshUploadAuthorization({
+      actor,
+      evidenceId,
+      uploadSessionTokenHash: sha256(input.uploadSessionToken),
+      expectedNodeVersion: input.expectedNodeVersion,
+      uploadSessionExpiresAt
+    })
+    const issued = await issueAuthorization(refreshed.objectKey, uploadSessionExpiresAt)
+    return {
+      evidenceId,
+      bucket,
+      region,
+      objectKey: refreshed.objectKey,
       credentials: issued.credentials,
       startTime: issued.startTime,
       expiredTime: issued.expiredTime,
@@ -209,7 +247,7 @@ function createEvidenceUploadService({
     })
   }
 
-  return { beginEvidenceUpload, finalizeEvidenceUpload }
+  return { beginEvidenceUpload, refreshEvidenceUploadAuthorization, finalizeEvidenceUpload }
 }
 
 module.exports = {

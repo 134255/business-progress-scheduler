@@ -671,12 +671,18 @@ Page({
   createEvidenceUploader() {
     return createEvidenceUploader({
       beginUpload: input => businessService.beginEvidenceUpload(input),
+      refreshUpload: input => businessService.refreshEvidenceUploadAuthorization(input),
       finalizeUpload: input => businessService.finalizeEvidenceUpload(input),
       cosFactory: options => {
         if (typeof globalThis === 'object' && typeof globalThis.window === 'undefined') globalThis.window = globalThis
         const COS = require('../../vendor/cos-wx-sdk-v5')
         return new COS({
-          getAuthorization: (request, callback) => callback(options.getAuthorization())
+          getAuthorization: (request, callback) => {
+            Promise.resolve(options.getAuthorization()).then(callback).catch(error => {
+              options.onAuthorizationError(error)
+              callback({})
+            })
+          }
         })
       }
     })

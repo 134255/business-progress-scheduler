@@ -153,6 +153,28 @@ test('finalization is idempotent for the same actor, token, node version and evi
   assert.equal(calls.filter(call => call[0] === 'headObject').length, 1)
 })
 
+test('authorization refresh reauthorizes and extends one uploading reservation without changing its key', async () => {
+  const { fake, repository } = harness()
+  await reserve(repository, { uploadSessionExpiresAt: new Date('2026-08-28T01:59:59.000Z') })
+  const nextExpiry = new Date('2026-08-28T02:15:00.000Z')
+  const result = await repository.refreshUploadAuthorization({
+    actor: { _id: 'account-1', status: 'active' },
+    evidenceId: EVIDENCE_ID,
+    uploadSessionTokenHash: TOKEN_HASH,
+    expectedNodeVersion: 4,
+    uploadSessionExpiresAt: nextExpiry
+  })
+
+  assert.deepEqual(result, {
+    evidenceId: EVIDENCE_ID,
+    objectKey: `evidence-uploads/business-1/node-1/${EVIDENCE_ID}.heic`
+  })
+  const stored = fake.documents('evidences')[0]
+  assert.equal(stored.uploadSessionExpiresAt.toISOString(), nextExpiry.toISOString())
+  assert.equal(stored.objectKey, result.objectKey)
+  assert.equal(stored.storageStatus, 'uploading')
+})
+
 test('finalization rejects expired sessions, stale nodes, token replay and authoritative size mismatches before publish', async () => {
   const cases = [
     { reservation: { uploadSessionExpiresAt: new Date('2026-08-28T01:59:59.000Z') }, input: {}, code: 'EVIDENCE_UPLOAD_EXPIRED' },

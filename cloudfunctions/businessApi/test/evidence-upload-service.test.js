@@ -25,6 +25,13 @@ function harness(overrides = {}) {
         size: 100,
         storageStatus: 'available'
       }
+    },
+    async refreshUploadAuthorization(value) {
+      calls.push(['refreshUploadAuthorization', value])
+      return {
+        evidenceId: value.evidenceId,
+        objectKey: `evidence-uploads/business-1/node-1/${value.evidenceId}.heic`
+      }
     }
   }
   const credentialProvider = overrides.credentialProvider || {
@@ -130,6 +137,45 @@ test('finalize hashes the opaque token and delegates only normalized replay-boun
       expectedNodeVersion: 4
     }
   ]])
+})
+
+test('begin accepts exactly 120 MiB but rejects the next byte', async () => {
+  const exact = harness()
+  const accepted = await exact.service.beginEvidenceUpload({
+    actor: actor(), input: beginInput({ declaredSize: 120 * 1024 * 1024 })
+  })
+  assert.equal(accepted.evidenceId.startsWith('evidence-'), true)
+
+  const over = harness()
+  await assert.rejects(over.service.beginEvidenceUpload({
+    actor: actor(), input: beginInput({ declaredSize: 120 * 1024 * 1024 + 1 })
+  }), assertCode('FILE_TOO_LARGE'))
+  assert.deepEqual(over.calls, [])
+})
+
+test('refresh extends the same exact upload reservation and returns newly scoped temporary credentials', async () => {
+  const { calls, service } = harness()
+  const result = await service.refreshEvidenceUploadAuthorization({
+    actor: actor(),
+    input: {
+      evidenceId: 'evidence-1',
+      uploadSessionToken: 'a'.repeat(43),
+      expectedNodeVersion: 4
+    }
+  })
+
+  assert.equal(result.evidenceId, 'evidence-1')
+  assert.equal(result.objectKey, 'evidence-uploads/business-1/node-1/evidence-1.heic')
+  assert.equal(result.expiresAt.toISOString(), '2026-08-28T02:15:00.000Z')
+  assert.deepEqual(calls[0], ['refreshUploadAuthorization', {
+    actor: actor(),
+    evidenceId: 'evidence-1',
+    uploadSessionTokenHash: `sha256:${'a'.repeat(43)}`,
+    expectedNodeVersion: 4,
+    uploadSessionExpiresAt: new Date('2026-08-28T02:15:00.000Z')
+  }])
+  assert.equal(calls[1][0], 'issue')
+  assert.equal(calls[1][1].objectKey, result.objectKey)
 })
 
 test('finalize rejects malformed tokens and replay coordinates before repository work', async () => {

@@ -335,6 +335,13 @@ function createEvidenceUploadRoutes(evidenceUploadService) {
         'businessLineId', 'nodeId', 'expectedNodeVersion', 'fileName', 'declaredSize'
       ]))
     }),
+    refreshEvidenceUploadAuthorization: ({ actor, payload }) =>
+      evidenceUploadService.refreshEvidenceUploadAuthorization({
+        actor,
+        input: selectProtectedPayload(payload, new Set([
+          'evidenceId', 'uploadSessionToken', 'expectedNodeVersion'
+        ]))
+      }),
     finalizeEvidenceUpload: ({ actor, payload }) => evidenceUploadService.finalizeEvidenceUpload({
       actor,
       input: selectProtectedPayload(payload, new Set([
@@ -961,6 +968,8 @@ function createDefaultBusinessApi() {
   }
   const evidenceUploadService = {
     beginEvidenceUpload: input => initializedEvidenceUploadService().beginEvidenceUpload(input),
+    refreshEvidenceUploadAuthorization: input =>
+      initializedEvidenceUploadService().refreshEvidenceUploadAuthorization(input),
     finalizeEvidenceUpload: input => initializedEvidenceUploadService().finalizeEvidenceUpload(input)
   }
   const feedbackService = createFeedbackService({
