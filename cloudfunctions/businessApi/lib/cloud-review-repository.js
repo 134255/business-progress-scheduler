@@ -7,6 +7,7 @@ const { deterministicVoteId } = require('./review-domain')
 const { fitsIndexedAccountArray } = require('./index-key-budget')
 const { isNotificationId } = require('./notification-id')
 const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
+const { classifyCompletedNodeTransition } = require('./optional-tail-domain')
 
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_LINE_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
@@ -21,6 +22,7 @@ const NOTIFICATION_TYPES = new Set([
   'node_review_rejected',
   'business_completed',
   'node_processing_started',
+  'optional_tail_decision_started',
   'processing_reminder',
   'work_calendar_missing',
   'evidence_retention'
@@ -152,13 +154,14 @@ function sameIds(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
-function voteResult(round, nodeStatus, lineStatus, nextNodeId = null) {
+function voteResult(round, nodeStatus, lineStatus, nextNodeId = null, optionalTailState) {
   return {
     reviewRoundId: round._id,
     status: round.status,
     nodeStatus,
     lineStatus,
-    nextNodeId
+    nextNodeId,
+    ...(optionalTailState === undefined ? {} : { optionalTailState })
   }
 }
 
@@ -531,7 +534,12 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       Number(reviewPending && round.reviewTimingCarryoverStatus === 'resolved')
     const exactFinalVersion = round.version === baseRoundVersion + resolvedCount &&
       node.version === baseNodeVersion + resolvedCount
+    const resultTransition = round.resultTransition ||
+      (round.status === 'rejected'
+        ? 'rework'
+        : round.resultLineStatus === 'completed' ? 'complete_line' : 'next_node')
     if (!['approved', 'rejected'].includes(round.status) ||
+        !['rework', 'next_node', 'await_optional_decision', 'complete_line'].includes(resultTransition) ||
         input.reviewRoundId !== round._id || !processingStateValid || !reviewStateValid ||
         typeof round.resultProcessingCarryoverPending !== 'boolean' ||
         typeof round.resultReviewCarryoverPending !== 'boolean' || !exactFinalVersion ||
@@ -545,18 +553,33 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         !['completed', 'in_progress'].includes(round.resultNodeStatus) ||
         !['active', 'completed'].includes(round.resultLineStatus) ||
         round.status === 'rejected' && (round.resultNodeStatus !== 'in_progress' ||
+          resultTransition !== 'rework' ||
           round.resultLineStatus !== 'active' || round.resultNextNodeId !== null ||
           line.status !== 'active' || !isCurrentNode(line, node) || node.status !== 'in_progress' ||
           node.processingRoundNumber !== round.processingRoundNumber + 1) ||
         round.status === 'approved' && (round.resultNodeStatus !== 'completed' ||
+          resultTransition === 'rework' ||
           node.status !== 'completed' || round.resultLineStatus === 'completed' &&
-          (line.status !== 'completed' || round.resultNextNodeId !== null) ||
+          (resultTransition !== 'complete_line' || line.status !== 'completed' ||
+            round.resultNextNodeId !== null) ||
           round.resultLineStatus === 'active' &&
-          (line.status !== 'active' || typeof round.resultNextNodeId !== 'string' ||
-            line.currentNodeId !== round.resultNextNodeId || line.currentNodeIndex !== node.sequence + 1))) {
+          (!['next_node', 'await_optional_decision'].includes(resultTransition) ||
+            line.status !== 'active' || typeof round.resultNextNodeId !== 'string' ||
+            line.currentNodeId !== round.resultNextNodeId || line.currentNodeIndex !== node.sequence + 1) ||
+          resultTransition === 'await_optional_decision' &&
+          (round.resultOptionalTailState !== 'pending' || line.optionalTailState !== 'pending' ||
+            line.optionalTailNodeId !== round.resultNextNodeId) ||
+          round.resultOptionalTailState === 'completed' &&
+          (resultTransition !== 'complete_line' || line.optionalTailState !== 'completed' ||
+            line.optionalTailNodeId !== node._id))) {
       throw createError('VERSION_CONFLICT')
     }
-    return voteResult(round, round.resultNodeStatus, round.resultLineStatus, round.resultNextNodeId)
+    return voteResult(
+      round, round.resultNodeStatus, round.resultLineStatus, round.resultNextNodeId,
+      ['pending', 'completed'].includes(round.resultOptionalTailState)
+        ? round.resultOptionalTailState
+        : undefined
+    )
   }
 
   function validateVoteInput(value, requireContext = false) {
@@ -585,7 +608,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
 
   function validateDueTiming(timing, transition, expectedMinutes) {
     if (!timing || !validDate(timing.transitionAt)) throw createError('VERSION_CONFLICT')
-    if (transition === 'complete_line') return
+    if (['complete_line', 'await_optional_decision'].includes(transition)) return
     if (!safeInteger(expectedMinutes) ||
         !['calculated', 'pending_calendar'].includes(timing.processingDueStatus)) {
       throw createError('VERSION_CONFLICT')
@@ -1107,23 +1130,29 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       const nextId = instanceNodeId(line._id, node.sequence + 1)
       const next = await readDocument(transaction, 'business_nodes', nextId)
       const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
-      const nextReviewers = ownExactAccountIds(next, 'reviewerUserIds', { nonEmpty: true })
+      const nextReviewers = ownExactAccountIds(next, 'reviewerUserIds', { nonEmpty: false })
       const minutes = next && next.processingSlaWorkHours * 60
       if (!next || next.businessLineId !== line._id || next.sequence !== node.sequence + 1 ||
-          next.status !== 'waiting' || next.workflowMode !== 'review' ||
+          !['waiting', 'awaiting_decision'].includes(next.status) || next.workflowMode !== 'review' ||
           !nextProcessors || !nextReviewers || nextProcessors.some(id => nextReviewers.includes(id)) ||
           !safeInteger(next.version, 1) || !safeInteger(minutes, 1)) {
         throw createError('VERSION_CONFLICT')
       }
+      const transition = classifyCompletedNodeTransition({ line, node, nextNode: next })
+      if (transition === 'await_optional_decision' &&
+          (next.status !== 'awaiting_decision' || next._id !== line.optionalTailNodeId)) {
+        throw createError('VERSION_CONFLICT')
+      }
+      if (transition === 'next_node' && next.status !== 'waiting') throw createError('VERSION_CONFLICT')
       return {
         businessLineId: line._id,
         nodeId: node._id,
         nodeVersion: node.version,
         roundVersion: round.version,
-        transition: 'next_node',
+        transition,
         nextNodeId: next._id,
         nextNodeVersion: next.version,
-        processingWorkMinutes: minutes,
+        processingWorkMinutes: transition === 'await_optional_decision' ? null : minutes,
         ...reviewContext
       }
     })
@@ -1135,7 +1164,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     if (typeof context.businessLineId !== 'string' || !DOCUMENT_ID.test(context.businessLineId) ||
         typeof context.nodeId !== 'string' || !DOCUMENT_ID.test(context.nodeId) ||
         !safeInteger(context.nodeVersion, 1) || !safeInteger(context.roundVersion, 1) ||
-        !['rework', 'next_node', 'complete_line', 'finalized_retry'].includes(context.transition)) {
+        !['rework', 'next_node', 'await_optional_decision', 'complete_line', 'finalized_retry']
+          .includes(context.transition)) {
       throw createError('VALIDATION_ERROR')
     }
     return db.runTransaction(async transaction => {
@@ -1188,14 +1218,21 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         const nextId = instanceNodeId(line._id, node.sequence + 1)
         next = await readDocument(transaction, 'business_nodes', nextId)
         const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
-        const nextReviewers = ownExactAccountIds(next, 'reviewerUserIds', { nonEmpty: true })
+        const nextReviewers = ownExactAccountIds(next, 'reviewerUserIds', { nonEmpty: false })
         expectedMinutes = next && next.processingSlaWorkHours * 60
         if (!next || next._id !== context.nextNodeId || next.businessLineId !== line._id ||
-            next.sequence !== node.sequence + 1 || next.status !== 'waiting' ||
+            next.sequence !== node.sequence + 1 || !['waiting', 'awaiting_decision'].includes(next.status) ||
             next.workflowMode !== 'review' || !nextProcessors || !nextReviewers ||
             nextProcessors.some(id => nextReviewers.includes(id)) ||
             !safeInteger(next.version, 1) || next.version !== context.nextNodeVersion ||
             !safeInteger(expectedMinutes, 1)) throw createError('VERSION_CONFLICT')
+        expectedTransition = classifyCompletedNodeTransition({ line, node, nextNode: next })
+        if (expectedTransition === 'await_optional_decision' &&
+            (next.status !== 'awaiting_decision' || next._id !== line.optionalTailNodeId)) {
+          throw createError('VERSION_CONFLICT')
+        }
+        if (expectedTransition === 'next_node' && next.status !== 'waiting') throw createError('VERSION_CONFLICT')
+        if (expectedTransition === 'await_optional_decision') expectedMinutes = null
       }
       if (context.transition !== expectedTransition ||
           context.processingWorkMinutes !== expectedMinutes ||
@@ -1294,9 +1331,18 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         resultLineStatus: finalStatus === 'approved' && expectedTransition === 'complete_line'
           ? 'completed'
           : 'active',
-        resultNextNodeId: finalStatus === 'approved' && expectedTransition === 'next_node'
+        resultNextNodeId: finalStatus === 'approved' &&
+          ['next_node', 'await_optional_decision'].includes(expectedTransition)
           ? next._id
           : null,
+        resultOptionalTailState: finalStatus === 'approved'
+          ? expectedTransition === 'await_optional_decision'
+            ? 'pending'
+            : expectedTransition === 'complete_line' && node.activationMode === 'optional_tail'
+              ? 'completed'
+              : null
+          : null,
+        resultTransition: expectedTransition,
         resultLockedNodeVersion: round.lockedNodeVersion,
         resultNodeVersion: increment(node.version),
         resultRoundVersion: increment(round.version),
@@ -1378,6 +1424,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           await transaction.collection('business_lines').doc(line._id).update({ data: {
             status: lineStatus,
             progress: 100,
+            ...(node.activationMode === 'optional_tail' ? { optionalTailState: 'completed' } : {}),
             completedAt: at,
             frozenAt: at,
             retentionStartedAt: at,
@@ -1391,7 +1438,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           } })
           recipients = [...new Set([...processors, ...reviewers])].sort()
           notificationType = 'business_completed'
-        } else {
+        } else if (expectedTransition === 'next_node') {
           nextNodeId = next._id
           const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
           await transaction.collection('business_nodes').doc(next._id).update({ data: {
@@ -1420,21 +1467,45 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           } })
           recipients = nextProcessors
           notificationType = 'node_processing_started'
+        } else {
+          nextNodeId = next._id
+          const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
+          await transaction.collection('business_nodes').doc(next._id).update({ data: {
+            decisionStartedAt: at,
+            nextDecisionReminderWorkHour: 1,
+            version: increment(next.version),
+            updatedAt: db.serverDate()
+          } })
+          const progress = Math.floor(((node.sequence + 1) / line.nodeCount) * 100)
+          await transaction.collection('business_lines').doc(line._id).update({ data: {
+            currentNodeId: next._id,
+            currentNodeIndex: next.sequence,
+            currentNodeName: next.name,
+            optionalTailState: 'pending',
+            progress,
+            version: increment(line.version),
+            ...nextLineSearch,
+            updatedAt: db.serverDate()
+          } })
+          recipients = nextProcessors
+          notificationType = 'optional_tail_decision_started'
         }
       }
 
-      const notificationId = `review-result-${hash(`${round._id}\0${finalStatus}`).slice(0, 40)}`
+      const notificationId = expectedTransition === 'await_optional_decision'
+        ? `optional-tail-decision-started-${hash(`${line._id}\0${next._id}`).slice(0, 40)}`
+        : `review-result-${hash(`${round._id}\0${finalStatus}`).slice(0, 40)}`
       if (!fitsIndexedAccountArray(recipients)) throw createError('VERSION_CONFLICT')
       await transaction.collection('notifications').doc(notificationId).set({ data: {
         type: notificationType,
         recipientUserIds: clone(recipients),
         businessLineId: line._id,
-        nodeId: node._id,
-        reviewRoundId: round._id,
+        nodeId: expectedTransition === 'await_optional_decision' ? next._id : node._id,
+        ...(expectedTransition === 'await_optional_decision' ? {} : { reviewRoundId: round._id }),
         status: 'unread',
         createdAt: db.serverDate()
       } })
-      const processingCalendarMissing = expectedTransition !== 'complete_line' &&
+      const processingCalendarMissing = ['rework', 'next_node'].includes(expectedTransition) &&
         value.timing.processingDueStatus === 'pending_calendar'
       const reviewCalendarMissing = value.timing.reviewTimingStatus === 'pending_calendar'
       if (processingCalendarMissing || reviewCalendarMissing) {
@@ -1450,7 +1521,14 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         }
       }
       return withSearchEnvelope(
-        voteResult({ ...round, status: finalStatus }, nodeStatus, lineStatus, nextNodeId),
+        voteResult(
+          { ...round, status: finalStatus }, nodeStatus, lineStatus, nextNodeId,
+          expectedTransition === 'await_optional_decision'
+            ? 'pending'
+            : expectedTransition === 'complete_line' && node.activationMode === 'optional_tail'
+              ? 'completed'
+              : undefined
+        ),
         actor._id, line._id, nextLineSearch.searchSourceVersion
       )
     })

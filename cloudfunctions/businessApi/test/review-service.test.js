@@ -331,6 +331,46 @@ test('审核通过为下一节点计算处理截止且请求键只传递摘要',
   assert.equal(JSON.stringify(submitted).includes('vote-request-1'), false)
 })
 
+test('审核通过进入追加节点待决定时不计算处理截止', async () => {
+  let dueCalls = 0
+  const value = harness({
+    voteContext: {
+      transition: 'await_optional_decision',
+      processingWorkMinutes: null,
+      reviewStartedAt: new Date('2026-08-11T01:00:00.000Z'),
+      reviewTotalWorkMinutes: 480,
+      reviewBaseElapsedWorkMinutes: 0
+    },
+    workTimeService: {
+      async workingMinutesBetween() {
+        return { status: 'calculated', minutes: 120, calendarVersion: 'calendar-a' }
+      },
+      async tryAddWorkMinutes() {
+        dueCalls += 1
+        throw new Error('追加节点待决定时不应计算处理截止')
+      }
+    },
+    voteResult: {
+      reviewRoundId: 'review-feedback-current', status: 'approved',
+      nodeStatus: 'completed', lineStatus: 'active',
+      nextNodeId: 'line-1-node-002', optionalTailState: 'pending'
+    }
+  })
+
+  const result = await value.service.submitReviewVote({
+    actor: { _id: 'reviewer-1', status: 'active' },
+    input: {
+      reviewRoundId: 'review-feedback-current', expectedRoundVersion: 1,
+      decision: 'approve', comment: '', requestKey: 'vote-optional-tail'
+    }
+  })
+
+  assert.equal(result.optionalTailState, 'pending')
+  assert.equal(dueCalls, 0)
+  const submitted = value.calls.at(-1)[1]
+  assert.equal(Object.hasOwn(submitted.timing, 'processingDueStatus'), false)
+})
+
 test('真实秒级审核时长只结算完整分钟', async () => {
   const { calls, service } = harness({
     workTimeService: realWorkTimeService(),

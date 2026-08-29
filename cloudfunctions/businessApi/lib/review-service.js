@@ -371,7 +371,8 @@ function createReviewService({
     })
     const at = clock()
     if (!validDate(at) || !context ||
-        !['rework', 'next_node', 'complete_line', 'finalized_retry'].includes(context.transition)) {
+        !['rework', 'next_node', 'await_optional_decision', 'complete_line', 'finalized_retry']
+          .includes(context.transition)) {
       throw createError('VERSION_CONFLICT')
     }
     const timing = { transitionAt: new Date(at) }
@@ -389,7 +390,8 @@ function createReviewService({
         processingDueAt: null,
         processingCalendarVersion: null
       })
-    } else if (!['complete_line', 'finalized_retry'].includes(context.transition)) {
+    } else if (!['await_optional_decision', 'complete_line', 'finalized_retry']
+      .includes(context.transition)) {
       if (!Number.isSafeInteger(context.processingWorkMinutes) || context.processingWorkMinutes < 0) {
         throw createError('VERSION_CONFLICT')
       }

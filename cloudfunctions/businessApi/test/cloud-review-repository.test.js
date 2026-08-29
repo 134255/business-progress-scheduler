@@ -1719,6 +1719,78 @@ test('末节点通过完成业务并只在业务线上建立统一60天凭证保
   }), result)
 })
 
+test('最后必经节点审核通过后进入追加节点待决定且精确重试不重复通知', async () => {
+  const data = votingSeed({ mode: 'any' })
+  Object.assign(data.business_lines[0], {
+    optionalTailNodeId: 'line-1-node-002', optionalTailState: 'none'
+  })
+  Object.assign(data.business_nodes[1], {
+    status: 'awaiting_decision', activationMode: 'optional_tail',
+    reviewerUserIds: []
+  })
+  const { fake, repository } = harness({ seed: data })
+  const base = voteRequest('reviewer-1')
+  const context = await repository.prepareReviewVote({
+    actor: base.actor, input: base.input,
+    requestKeyHash: base.requestKeyHash, inputHash: base.inputHash
+  })
+  assert.equal(context.transition, 'await_optional_decision')
+  assert.equal(context.nextNodeId, 'line-1-node-002')
+  assert.equal(context.processingWorkMinutes, null)
+  const timing = { ...base.timing }
+  delete timing.processingDueStatus
+  delete timing.processingDueAt
+  delete timing.processingCalendarVersion
+
+  const result = await repository.submitReviewVote({ ...base, context, timing })
+
+  assert.equal(result.lineStatus, 'active')
+  assert.equal(result.nextNodeId, 'line-1-node-002')
+  assert.equal(result.optionalTailState, 'pending')
+  const line = fake.documents('business_lines')[0]
+  const optional = fake.documents('business_nodes').find(item => item._id === 'line-1-node-002')
+  assert.equal(line.optionalTailState, 'pending')
+  assert.equal(line.currentNodeId, optional._id)
+  assert.equal(Object.hasOwn(line, 'retentionStartedAt'), false)
+  assert.equal(optional.status, 'awaiting_decision')
+  assert.deepEqual(optional.decisionStartedAt, NOW)
+  assert.equal(optional.nextDecisionReminderWorkHour, 1)
+  assert.equal(Object.hasOwn(optional, 'processingStartedAt'), false)
+  assert.equal(fake.documents('notifications').filter(item =>
+    item.type === 'optional_tail_decision_started').length, 1)
+  const [started] = fake.documents('notifications').filter(item =>
+    item.type === 'optional_tail_decision_started')
+  assert.equal(started._id.startsWith('optional-tail-decision-started-'), true)
+  assert.equal(Object.hasOwn(started, 'reviewRoundId'), false)
+
+  const retryContext = await repository.prepareReviewVote({
+    actor: base.actor, input: base.input,
+    requestKeyHash: base.requestKeyHash, inputHash: base.inputHash
+  })
+  const retry = await repository.submitReviewVote({
+    ...base, context: retryContext, timing: { transitionAt: NOW }
+  })
+  assert.deepEqual(retry, result)
+  assert.equal(fake.documents('notifications').filter(item =>
+    item.type === 'optional_tail_decision_started').length, 1)
+})
+
+test('审核通过可激活无审核人的下一个必经节点', async () => {
+  const data = votingSeed({ mode: 'any' })
+  data.business_nodes[1].reviewerUserIds = []
+  const { fake, repository } = harness({ seed: data })
+  const base = voteRequest('reviewer-1')
+  const context = await repository.prepareReviewVote({
+    actor: base.actor, input: base.input,
+    requestKeyHash: base.requestKeyHash, inputHash: base.inputHash
+  })
+  assert.equal(context.transition, 'next_node')
+  const result = await repository.submitReviewVote({ ...base, context })
+  assert.equal(result.status, 'approved')
+  assert.equal(fake.documents('business_nodes').find(item =>
+    item._id === 'line-1-node-002').status, 'ready')
+})
+
 test('返工和下一节点激活在日历缺失时仍流转并安全告警', async () => {
   for (const item of [
     { mode: 'all', decision: 'reject', comment: '返工', transition: 'rework', expected: 'in_progress' },
