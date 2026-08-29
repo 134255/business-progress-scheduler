@@ -136,6 +136,8 @@
 | `business_nodes` | `assigneeIds` 升序、`status` 升序、`updatedAt` 降序 | 否 | 纯旧 OpenID 节点“待我处理”兼容扫描；无旧业务时可记录为不适用 |
 | `business_nodes` | `workflowMode` 升序、`processingDueStatus` 升序、`_id` 升序 | 否 | 审核节点处理提醒有界扫描 |
 | `business_nodes` | `processingTimingStatus` 升序、`_id` 升序 | 否 | 待审核节点的处理工作分钟待补算扫描 |
+| `business_nodes` | `decisionTimingStatus` 升序、`_id` 升序 | 否 | 可选追加节点决定工作分钟待补算扫描 |
+| `business_nodes` | `optionalTailState` 升序、`nextDecisionReminderWorkHour` 升序、`decisionStartedAt` 升序、`_id` 升序 | 否 | 可选追加节点待决定提醒有界扫描 |
 | `business_nodes` | `processingDueStatus` 升序、`_id` 升序 | 否 | 日历恢复后的处理截止时间补算扫描 |
 | `business_nodes` | `feedbackClaimExpiresAt` 升序、`_id` 升序 | 否 | 丢失反馈预约的过期节点锁扫描 |
 | `business_nodes` | `feedbackClaimId` 升序、`_id` 升序 | 否 | 按固定反馈预约编号恢复节点锁 |
@@ -199,6 +201,8 @@
 `evidenceRetention` 的 `system_settings/evidence-retention:*` 文档只保存 `schemaVersion`、独立乐观 `revision`、阶段、该阶段最后扫描的 `afterSortValue`、`afterId`、迁移审计标志和更新时间。所有范围阶段均按上表相应到期字段升序、再按 `_id` 升序做持久复合 keyset；固定状态阶段按状态字段升序、再按 `_id` 升序。CloudBase 单查询不能表达元组 OR，因此续页先有界查询“排序值相同且 `_id` 更大”，余量再有界查询“排序值更大”，两段返回的原始记录合计仍不超过 40，不使用 `skip` 或全量读取。每条路径单次原始扫描与处理量均不超过 40；页尾按阶段轮转并最终回绕，进程在返回候选后崩溃只会使候选再次出现，由预约、租约和确定性通知编号保持幂等。部署旧版 `{phase, afterId}` 游标时，函数会在小事务中自动审计迁移：严格校验旧字段后保留原 phase、重置到该 phase 起点，保存旧 `afterId` 的不可逆摘要而不推断排序值或保存原值；并发迁移只会成功一次。禁止操作员人工伪造、修改、删除或覆盖游标。损坏旧游标，以及新版 `schemaVersion`、`revision`、阶段、`afterSortValue` 或 `afterId` 缺失、类型错误、溢出或不可严格反序列化时均失败关闭。上述复合索引的真实 CloudBase 选择仍未验证。
 
 `calendarSync` 会自动创建或更新固定文档 `system_settings/calendar-review-processing-cursor`，其中只保存 `kind`、`cursorId`、`version` 和更新时间，不含业务正文或账号信息。部署前不要手工伪造该文档；若已有同编号但结构不符的文档，函数会失败关闭，应先停止触发器并按审计流程核查，不能直接删除或覆盖。该游标沿用上表的 `business_nodes(processingTimingStatus ASC, _id ASC)` 索引，不需要新增游标集合索引。
+
+可选追加节点决定与无审核节点直接完成分别使用固定文档 `system_settings/calendar-optional-tail-decision-cursor` 和 `system_settings/calendar-direct-processing-completion-cursor`。两者都只保存种类、游标编号、版本和更新时间，不含处理说明、字段、凭证或账号；不得手工伪造、删除或覆盖。前者依赖 `business_nodes(decisionTimingStatus ASC, _id ASC)`，后者复用 `business_nodes(processingTimingStatus ASC, _id ASC)`。索引未创建并生效前，不得部署相应 `calendarSync` 版本或启用其正式触发器。
 
 `calendarSync` 还会自动创建或更新 `system_settings/calendar-review-carryover-cursor`，用于有界、可回绕地扫描审核轮次的处理时长补算。该文档仅保存 `kind`、`cursorId`、`version` 和更新时间，同样不得手工伪造、删除或覆盖。该扫描依赖上表的 `node_review_rounds(processingCarryoverStatus ASC, _id ASC)` 组合索引；索引未在目标环境创建且生效前，不得启用 `calendarSync` 定时触发器。
 
