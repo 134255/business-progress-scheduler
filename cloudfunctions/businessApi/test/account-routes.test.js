@@ -1013,7 +1013,13 @@ test('旧节点可继续经真实反馈服务完成，新版审核节点拒绝�
       async getSubmissionContext({ nodeId }) {
         return {
           node: nodeId === 'review-node'
-            ? { _id: nodeId, workflowMode: 'review', fieldDefinitions: [], requiresEvidence: false }
+            ? {
+                _id: nodeId,
+                workflowMode: 'review',
+                reviewerUserIds: ['reviewer-1'],
+                fieldDefinitions: [],
+                requiresEvidence: false
+              }
             : { _id: nodeId, fieldDefinitions: [], requiresEvidence: false },
           evidences: []
         }
