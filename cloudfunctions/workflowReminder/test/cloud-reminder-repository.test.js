@@ -6,7 +6,8 @@ const crypto = require('node:crypto')
 const { createFakeCloudDatabase } = require('../../businessApi/test/helpers/fake-cloud-database')
 const {
   createCloudReminderRepository,
-  reviewNotificationId
+  reviewNotificationId,
+  optionalTailDecisionNotificationId
 } = require('../lib/cloud-reminder-repository')
 
 const START = new Date('2026-08-11T01:00:00.000Z')
@@ -376,4 +377,60 @@ test('旧记录已有累计耗时时以当前累计小时原子初始化游标',
     nodeId: 'node-1', processingRoundNumber: 1, accumulatedWorkHour: 3
   }), { created: true })
   assert.equal(fake.documents('business_nodes')[0].nextProcessingReminderWorkHour, 4)
+})
+
+function decisionSeed() {
+  const data = seed()
+  Object.assign(data.business_lines[0], {
+    optionalTailNodeId: 'node-1', optionalTailState: 'pending'
+  })
+  Object.assign(data.business_nodes[0], {
+    status: 'awaiting_decision', activationMode: 'optional_tail', version: 4,
+    reviewerUserIds: [], decisionStartedAt: START, nextDecisionReminderWorkHour: 1
+  })
+  delete data.business_nodes[0].processingDueAt
+  delete data.business_nodes[0].processingStartedAt
+  delete data.business_nodes[0].nextProcessingReminderWorkHour
+  return data
+}
+
+test('可选尾节点决定候选分页并用确定性编号向全部活动候选处理人提醒', async () => {
+  const { fake, repository } = harness(decisionSeed())
+  const candidates = await repository.listDueOptionalTailDecisions({ limit: 40 })
+  assert.deepEqual(candidates, {
+    items: [{
+      nodeId: 'node-1', nodeVersion: 4, decisionStartedAt: START,
+      decisionElapsedWorkMinutes: 0, nextReminderWorkHour: 1
+    }],
+    lastScannedRawId: 'node-1'
+  })
+
+  const input = { nodeId: 'node-1', expectedVersion: 4, accumulatedWorkHour: 1 }
+  assert.deepEqual(await repository.createOptionalTailDecisionReminder(input), { created: true })
+  assert.deepEqual(await repository.createOptionalTailDecisionReminder(input), { created: false })
+  const notification = fake.documents('notifications')[0]
+  assert.equal(notification._id, optionalTailDecisionNotificationId('node-1', 1))
+  assert.equal(notification.type, 'optional_tail_decision_reminder')
+  assert.deepEqual(notification.recipientUserIds, ['processor-a', 'processor-b'])
+  assert.equal(notification.reviewRoundId, null)
+  assert.equal(fake.documents('business_nodes')[0].nextDecisionReminderWorkHour, 2)
+})
+
+test('可选尾节点决定提醒在状态、版本、成员或账号变化时失败关闭', async () => {
+  const cases = [
+    data => { data.business_lines[0].optionalTailState = 'skipped' },
+    data => { data.business_nodes[0].status = 'ready' },
+    data => { data.business_nodes[0].activationMode = 'required' },
+    data => { data.business_nodes[0].version = 5 },
+    data => { data.users[0].status = 'disabled' },
+    data => { data.business_lines[0].memberUserIds = ['processor-a'] }
+  ]
+  for (const mutate of cases) {
+    const data = decisionSeed(); mutate(data)
+    const { fake, repository } = harness(data)
+    assert.deepEqual(await repository.createOptionalTailDecisionReminder({
+      nodeId: 'node-1', expectedVersion: 4, accumulatedWorkHour: 1
+    }), { created: false })
+    assert.equal(fake.documents('notifications').length, 0)
+  }
 })

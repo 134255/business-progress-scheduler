@@ -56,7 +56,8 @@ test('待我处理页面分页去重、展示截止时间并仅导航服务端�
       return {
         items: [
           { nodeId: 'node-1', businessLineId: 'line-1', businessName: '重复项' },
-          { nodeId: 'node-2', businessLineId: 'line-2', businessName: '业务二', nodeName: '复核', status: 'blocked' }
+          { nodeId: 'node-2', businessLineId: 'line-2', businessName: '业务二', nodeName: '复核', status: 'blocked', actionKind: 'process_node' },
+          { nodeId: 'node-3', businessLineId: 'line-3', businessName: '业务三', nodeName: '追加回访', status: 'awaiting_decision', actionKind: 'optional_tail_decision' }
         ],
         cursor: 'cursor-2', hasMore: false
       }
@@ -66,12 +67,17 @@ test('待我处理页面分页去重、展示截止时间并仅导航服务端�
   await page.onShow()
   await page.loadMore()
   page.openItem({ currentTarget: { dataset: { lineId: 'line-2', nodeId: 'node-2' } } })
+  page.openItem({ currentTarget: { dataset: { lineId: 'line-3', nodeId: 'node-3' } } })
   page.openItem({ currentTarget: { dataset: { lineId: 'forged', nodeId: 'forged' } } })
 
   assert.deepEqual(calls, [{ cursor: '', pageSize: 20 }, { cursor: 'cursor-1', pageSize: 20 }])
-  assert.deepEqual(page.data.items.map(item => item.nodeId), ['node-1', 'node-2'])
+  assert.deepEqual(page.data.items.map(item => item.nodeId), ['node-1', 'node-2', 'node-3'])
+  assert.equal(page.data.items[2].actionText, '决定是否开启追加节点 →')
   assert.match(page.data.items[0].dueText, /处理截止/)
-  assert.deepEqual(navigations, [{ url: '/pages/node-feedback/index?lineId=line-2&nodeId=node-2' }])
+  assert.deepEqual(navigations, [
+    { url: '/pages/node-feedback/index?lineId=line-2&nodeId=node-2' },
+    { url: '/pages/business-detail/index?id=line-3' }
+  ])
   const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/pending-processing/index.wxml'), 'utf8')
   assert.match(wxml, /待我处理/)
   assert.match(wxml, /加载更多/)

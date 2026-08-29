@@ -8,7 +8,7 @@ test('客户端、匿名调用、伪造事件和伪造微信上下文均不能�
   for (const context of [{ OPENID: 'client-openid', TRIGGER_SRC: 'timer' }, { TRIGGER_SRC: 'timer' }, {}]) {
     const calls = []
     const handler = createWorkflowReminderHandler({
-      service: { async runReminderCycle(input) { calls.push(input); return { processingCreated: 1, reviewCreated: 1 } } },
+      service: { async runReminderCycle(input) { calls.push(input); return { processingCreated: 1, reviewCreated: 1, decisionCreated: 1 } } },
       getContext: () => context,
       getTriggerSource: () => ''
     })
@@ -23,7 +23,7 @@ test('合法可信 Timer 只使用服务端时钟和固定批量并返回脱敏�
     service: {
       async runReminderCycle(input) {
         calls.push(input)
-        return { processingCreated: 2, reviewCreated: 3, cursorId: 'secret', candidateIds: ['secret'] }
+        return { processingCreated: 2, reviewCreated: 3, decisionCreated: 4, cursorId: 'secret', candidateIds: ['secret'] }
       }
     },
     getContext: () => ({}),
@@ -31,7 +31,7 @@ test('合法可信 Timer 只使用服务端时钟和固定批量并返回脱敏�
     clock: () => now
   })
   assert.deepEqual(await handler({ Type: 'forged', now: '2039-01-01T00:00:00Z', batchSize: 999 }), {
-    processingCreated: 2, reviewCreated: 3
+    processingCreated: 2, reviewCreated: 3, decisionCreated: 4
   })
   assert.deepEqual(calls, [{ now, batchSize: 40 }])
 })

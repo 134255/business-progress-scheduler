@@ -51,7 +51,7 @@ const RETENTION_MS = 60 * 24 * 60 * 60 * 1000
 const AMENDMENT_EVIDENCE_CHUNK_SIZE = 40
 const AMENDMENT_CLAIM_LIFETIME_MS = 15 * 60 * 1000
 const DASHBOARD_SCAN_LIMIT = 2000
-const PENDING_PROCESSING_STATUSES = Object.freeze(['ready', 'in_progress', 'blocked'])
+const PENDING_PROCESSING_STATUSES = Object.freeze(['ready', 'in_progress', 'blocked', 'awaiting_decision'])
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -798,6 +798,7 @@ function createCloudBusinessRepository({
   }
 
   function timestampValue(value) {
+    if (value === null || value === undefined || value === '') return null
     if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getTime()
     const parsed = new Date(value).getTime()
     return Number.isFinite(parsed) ? parsed : null
@@ -854,7 +855,8 @@ function createCloudBusinessRepository({
       const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
       const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
       const processors = ownExactAccountIds(node, 'processorUserIds', { nonEmpty: true })
-      const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+      const decisionPending = node.status === 'awaiting_decision' && node.activationMode === ACTIVATION_MODE.OPTIONAL_TAIL
+      const reviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: !decisionPending })
       return Boolean(managers && members && processors && reviewers &&
         (managers.includes(actor._id) || members.includes(actor._id)) &&
         processors.includes(actor._id) && !processors.some(id => reviewers.includes(id)))
@@ -896,6 +898,9 @@ function createCloudBusinessRepository({
       if (!currentActor || currentActor.status !== 'active' || !line || !node ||
           line.status !== 'active' || line.currentNodeId !== node._id ||
           node.businessLineId !== line._id || !PENDING_PROCESSING_STATUSES.includes(node.status) ||
+          (node.status === 'awaiting_decision' &&
+            (node.activationMode !== ACTIVATION_MODE.OPTIONAL_TAIL ||
+             line.optionalTailNodeId !== node._id || line.optionalTailState !== 'pending')) ||
           !safePendingRelationships(
             line, node, { ...currentActor, openid: actor.openid }, legacyBindingValid
           )) return null
@@ -908,6 +913,7 @@ function createCloudBusinessRepository({
         nodeCode: node.nodeCode || '',
         nodeName: node.name || '',
         status: node.status,
+        actionKind: node.status === 'awaiting_decision' ? 'optional_tail_decision' : 'process_node',
         processingRoundNumber: Number(node.processingRoundNumber || 0),
         processingDueAt: clone(node.processingDueAt || null),
         processingOverdueWorkMinutes: Number(node.processingOverdueWorkMinutes || 0),

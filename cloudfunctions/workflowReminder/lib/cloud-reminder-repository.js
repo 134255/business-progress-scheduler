@@ -10,6 +10,7 @@ const ACTIVE_LINE_STATUSES = new Set(['active'])
 const ACTIVE_PROCESSING_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const PROCESSING_CURSOR_ID = 'workflow-reminder-processing-cursor'
 const REVIEW_CURSOR_ID = 'workflow-reminder-review-cursor'
+const DECISION_CURSOR_ID = 'workflow-reminder-optional-tail-decision-cursor'
 
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
@@ -73,6 +74,10 @@ function processingNotificationId(nodeCode, accumulatedWorkHour) {
 
 function reviewNotificationId(reviewRoundId, reviewerUserId, accumulatedWorkHour) {
   return `review-reminder-${digest([reviewRoundId, reviewerUserId, String(accumulatedWorkHour)])}`
+}
+
+function optionalTailDecisionNotificationId(nodeId, accumulatedWorkHour) {
+  return `optional-tail-decision-reminder-${digest([nodeId, String(accumulatedWorkHour)])}`
 }
 
 function voteId(reviewRoundId, reviewerUserId) {
@@ -197,6 +202,37 @@ function createCloudReminderRepository({ db } = {}) {
       })
     }
     return { items: result, lastScannedRawId }
+  }
+
+  async function listDueOptionalTailDecisions({ limit } = {}) {
+    validateLimit(limit)
+    const cursor = validateCursor(
+      await readDocument(db, 'system_settings', DECISION_CURSOR_ID),
+      DECISION_CURSOR_ID, 'workflow_reminder_optional_tail_decision')
+    const where = {
+      status: 'awaiting_decision', activationMode: 'optional_tail',
+      ...(cursor ? { _id: db.command.gt(cursor) } : {})
+    }
+    let raw = await readCandidates(db.collection('business_nodes')
+      .where(where).orderBy('_id', 'asc'), limit)
+    if (!raw.length && cursor) {
+      raw = await readCandidates(db.collection('business_nodes')
+        .where({ status: 'awaiting_decision', activationMode: 'optional_tail' })
+        .orderBy('_id', 'asc'), limit)
+    }
+    return {
+      items: raw.filter(node => typeof node._id === 'string' && DOCUMENT_ID.test(node._id) &&
+        Number.isSafeInteger(node.version) && node.version >= 1 && validDate(node.decisionStartedAt) &&
+        safeHour(node.nextDecisionReminderWorkHour) !== null)
+        .map(node => ({
+          nodeId: node._id,
+          nodeVersion: node.version,
+          decisionStartedAt: node.decisionStartedAt,
+          decisionElapsedWorkMinutes: safeMinutes(node.decisionElapsedWorkMinutes) || 0,
+          nextReminderWorkHour: node.nextDecisionReminderWorkHour
+        })),
+      lastScannedRawId: raw.length ? raw.at(-1)._id : null
+    }
   }
 
   async function createProcessingReminder(value = {}) {
@@ -349,15 +385,77 @@ function createCloudReminderRepository({ db } = {}) {
     })
   }
 
+  async function createOptionalTailDecisionReminder(value = {}) {
+    const hour = safeHour(value.accumulatedWorkHour)
+    if (typeof value.nodeId !== 'string' || !DOCUMENT_ID.test(value.nodeId) ||
+        !Number.isSafeInteger(value.expectedVersion) || value.expectedVersion < 1 || hour === null) {
+      throw new TypeError('optional tail decision reminder input is invalid')
+    }
+    const notificationId = optionalTailDecisionNotificationId(value.nodeId, hour)
+    return db.runTransaction(async transaction => {
+      const node = await readDocument(transaction, 'business_nodes', value.nodeId)
+      const line = node && await readDocument(transaction, 'business_lines', node.businessLineId)
+      if (!node || !line || line.status !== 'active' || line.currentNodeId !== node._id ||
+          line.optionalTailNodeId !== node._id || line.optionalTailState !== 'pending' ||
+          node.status !== 'awaiting_decision' || node.activationMode !== 'optional_tail' ||
+          node.version !== value.expectedVersion || !validDate(node.decisionStartedAt)) {
+        return { created: false }
+      }
+      const processors = ownExactIds(node, 'processorUserIds', { nonEmpty: true })
+      const reviewers = ownExactIds(node, 'reviewerUserIds')
+      const lineMembers = ownExactIds(line, 'memberUserIds', { nonEmpty: true })
+      const lineManagers = ownExactIds(line, 'managerUserIds', { nonEmpty: true })
+      if (!processors || !reviewers || reviewers.length || !fitsIndexedAccountArray(processors) ||
+          !lineMembers || !lineManagers || processors.some(id => !lineMembers.includes(id))) {
+        return { created: false }
+      }
+      for (const processorId of processors) {
+        const account = await readDocument(transaction, 'users', processorId)
+        if (!account || account.status !== 'active') return { created: false }
+      }
+      const storedNextHour = safeHour(node.nextDecisionReminderWorkHour)
+      if (storedNextHour === null || storedNextHour !== hour) return { created: false }
+      const existing = await readDocument(transaction, 'notifications', notificationId)
+      if (existing) {
+        const recipients = ownExactIds(existing, 'recipientUserIds', { nonEmpty: true })
+        if (existing.type !== 'optional_tail_decision_reminder' || !recipients ||
+            recipients.length !== processors.length ||
+            processors.some((id, index) => id !== recipients[index]) ||
+            existing.businessLineId !== line._id || existing.nodeId !== node._id ||
+            existing.reviewRoundId !== null || existing.accumulatedWorkHour !== hour ||
+            existing.status !== 'pending') return { created: false }
+      } else {
+        await transaction.collection('notifications').doc(notificationId).set({ data: {
+          type: 'optional_tail_decision_reminder',
+          recipientUserIds: processors,
+          businessLineId: line._id,
+          nodeId: node._id,
+          reviewRoundId: null,
+          accumulatedWorkHour: hour,
+          status: 'pending',
+          createdAt: db.serverDate()
+        } })
+      }
+      await transaction.collection('business_nodes').doc(node._id).update({ data: {
+        nextDecisionReminderWorkHour: hour + 1,
+        updatedAt: db.serverDate()
+      } })
+      return { created: !existing }
+    })
+  }
+
   async function advanceReminderCursor(value = {}) {
-    if (value.kind === 'processing' || value.kind === 'review') {
+    if (value.kind === 'processing' || value.kind === 'review' || value.kind === 'decision') {
       if (typeof value.cursorId !== 'string' || !DOCUMENT_ID.test(value.cursorId)) {
         throw new TypeError('cursorId is invalid')
       }
       const processing = value.kind === 'processing'
-      const id = processing ? PROCESSING_CURSOR_ID : REVIEW_CURSOR_ID
+      const decision = value.kind === 'decision'
+      const id = processing ? PROCESSING_CURSOR_ID : decision ? DECISION_CURSOR_ID : REVIEW_CURSOR_ID
       await db.collection('system_settings').doc(id).set({ data: {
-        kind: processing ? 'workflow_reminder_processing' : 'workflow_reminder_review',
+        kind: processing
+          ? 'workflow_reminder_processing'
+          : decision ? 'workflow_reminder_optional_tail_decision' : 'workflow_reminder_review',
         cursorId: value.cursorId,
         updatedAt: db.serverDate()
       } })
@@ -386,8 +484,10 @@ function createCloudReminderRepository({ db } = {}) {
     getDayRule,
     listDueProcessingReminders,
     listDueReviewReminders,
+    listDueOptionalTailDecisions,
     createProcessingReminder,
     createReviewReminder,
+    createOptionalTailDecisionReminder,
     advanceReminderCursor
   }
 }
@@ -395,5 +495,6 @@ function createCloudReminderRepository({ db } = {}) {
 module.exports = {
   createCloudReminderRepository,
   processingNotificationId,
-  reviewNotificationId
+  reviewNotificationId,
+  optionalTailDecisionNotificationId
 }

@@ -409,6 +409,12 @@ test('待我处理查询只返回当前业务节点，并按处理截止时间�
         _id: 'line-done', code: 'BL-DONE', name: '已完成业务', status: 'completed',
         currentNodeId: 'node-done', managerUserIds: ['user-1'], memberUserIds: ['user-1'],
         updatedAt: new Date('2026-08-17T04:00:00Z')
+      },
+      {
+        _id: 'line-decision', code: 'BL-DECISION', name: '待决定业务', status: 'active',
+        currentNodeId: 'node-decision', optionalTailNodeId: 'node-decision', optionalTailState: 'pending',
+        managerUserIds: ['user-1'], memberUserIds: ['user-1'],
+        updatedAt: new Date('2026-08-17T05:00:00Z')
       }
     ],
     business_nodes: [
@@ -433,6 +439,13 @@ test('待我处理查询只返回当前业务节点，并按处理截止时间�
         _id: 'node-done', businessLineId: 'line-done', name: '完成节点', status: 'ready',
         workflowMode: 'review', processorUserIds: ['user-1'], reviewerUserIds: ['user-2'],
         processingRoundNumber: 1, processingDueAt: null, updatedAt: new Date('2026-08-17T04:00:00Z')
+      },
+      {
+        _id: 'node-decision', businessLineId: 'line-decision', name: '可选追加节点',
+        status: 'awaiting_decision', activationMode: 'optional_tail', workflowMode: 'review',
+        processorUserIds: ['user-1'], reviewerUserIds: [], processingRoundNumber: 0,
+        decisionStartedAt: new Date('2026-08-17T04:30:00Z'), nextDecisionReminderWorkHour: 1,
+        updatedAt: new Date('2026-08-17T05:00:00Z')
       }
     ]
   })
@@ -441,10 +454,12 @@ test('待我处理查询只返回当前业务节点，并按处理截止时间�
     actor: { _id: 'user-1', status: 'active' }, query: { pageSize: 10 }
   })
 
-  assert.deepEqual(result.items.map(item => item.nodeId), ['node-early', 'node-late'])
+  assert.deepEqual(result.items.map(item => item.nodeId), ['node-early', 'node-late', 'node-decision'])
   assert.equal(result.items[0].processingRoundNumber, 2)
+  assert.equal(result.items[0].actionKind, 'process_node')
+  assert.equal(result.items[2].actionKind, 'optional_tail_decision')
   assert.equal(result.hasMore, false)
-  assert.equal(result.total, 2)
+  assert.equal(result.total, 3)
 })
 
 test('旧节点待处理查询在事务内重验当前 OpenID 绑定', async () => {

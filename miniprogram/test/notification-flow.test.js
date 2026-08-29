@@ -94,14 +94,19 @@ test('处理、审核和凭证保留提醒采用实际生产编号与类型且�
     listMyNotifications: async () => ({ items: [
       { notificationId: processingId, type: 'processing_reminder', read: false },
       { notificationId: reviewId, type: 'review_reminder', read: false },
-      { notificationId: retentionId, type: 'evidence_retention', read: false }
+      { notificationId: retentionId, type: 'evidence_retention', read: false },
+      { notificationId: 'optional-started', type: 'optional_tail_decision_started', read: false },
+      { notificationId: 'optional-reminder', type: 'optional_tail_decision_reminder', read: false }
     ], hasMore: false })
   })
 
   await page.onShow()
 
   assert.deepEqual(page.data.items.map(item => item.notificationId), [
-    processingId, reviewId, retentionId
+    processingId, reviewId, retentionId, 'optional-started', 'optional-reminder'
+  ])
+  assert.deepEqual(page.data.items.slice(-2).map(item => item.title), [
+    '追加节点等待你决定', '追加节点尚未决定'
   ])
 })
 

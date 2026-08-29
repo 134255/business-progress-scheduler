@@ -40,6 +40,9 @@ function createWorkflowReminderHandler({
           : 0,
         reviewCreated: Number.isSafeInteger(result && result.reviewCreated)
           ? result.reviewCreated
+          : 0,
+        decisionCreated: Number.isSafeInteger(result && result.decisionCreated)
+          ? result.decisionCreated
           : 0
       }
     } catch (error) {

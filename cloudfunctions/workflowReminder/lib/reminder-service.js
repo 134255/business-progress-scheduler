@@ -24,7 +24,8 @@ function safeNextHour(value, baseMinutes) {
 function createReminderService({ reminderRepository, workTimeService } = {}) {
   const methods = [
     'listDueProcessingReminders', 'listDueReviewReminders', 'createProcessingReminder',
-    'createReviewReminder', 'advanceReminderCursor'
+    'createReviewReminder', 'listDueOptionalTailDecisions',
+    'createOptionalTailDecisionReminder', 'advanceReminderCursor'
   ]
   if (!reminderRepository || methods.some(name => typeof reminderRepository[name] !== 'function')) {
     throw new TypeError('reminderRepository is invalid')
@@ -54,15 +55,15 @@ function createReminderService({ reminderRepository, workTimeService } = {}) {
     }
     const instant = await workTimeService.isWorkingInstant(now)
     if (!instant || instant.status !== 'calculated' || instant.isWorking !== true) {
-      return { processingCreated: 0, reviewCreated: 0 }
+      return { processingCreated: 0, reviewCreated: 0, decisionCreated: 0 }
     }
 
-    const processingLimit = Math.ceil(batchSize / 2)
+    const processingLimit = Math.ceil(batchSize / 3)
     const processing = await reminderRepository.listDueProcessingReminders({ limit: processingLimit })
     if (!Array.isArray(processing) || processing.length > processingLimit) {
       throw new TypeError('processing candidates are invalid')
     }
-    const reviewLimit = batchSize - processing.length
+    const reviewLimit = Math.ceil((batchSize - processing.length) / 2)
     const reviewPage = reviewLimit
       ? await reminderRepository.listDueReviewReminders({ limit: reviewLimit })
       : { items: [], lastScannedRawId: null }
@@ -73,6 +74,17 @@ function createReminderService({ reminderRepository, workTimeService } = {}) {
       throw new TypeError('review candidates are invalid')
     }
     const review = reviewPage.items
+    const decisionLimit = batchSize - processing.length - review.length
+    const decisionPage = decisionLimit
+      ? await reminderRepository.listDueOptionalTailDecisions({ limit: decisionLimit })
+      : { items: [], lastScannedRawId: null }
+    if (!decisionPage || !Array.isArray(decisionPage.items) || decisionPage.items.length > decisionLimit ||
+        decisionPage.lastScannedRawId !== null &&
+        (typeof decisionPage.lastScannedRawId !== 'string' ||
+         !/^[A-Za-z0-9_-]{1,128}$/.test(decisionPage.lastScannedRawId))) {
+      throw new TypeError('optional tail decision candidates are invalid')
+    }
+    const decisions = decisionPage.items
 
     let processingCreated = 0
     for (const candidate of processing) {
@@ -124,7 +136,27 @@ function createReminderService({ reminderRepository, workTimeService } = {}) {
         kind: 'review', cursorId: reviewPage.lastScannedRawId
       })
     }
-    return { processingCreated, reviewCreated }
+
+    let decisionCreated = 0
+    for (const candidate of decisions) {
+      const accumulatedWorkHour = await accumulatedHour(
+        candidate, 'decisionStartedAt', 'decisionElapsedWorkMinutes',
+        'nextReminderWorkHour', now)
+      if (accumulatedWorkHour !== null) {
+        const result = await reminderRepository.createOptionalTailDecisionReminder({
+          nodeId: candidate.nodeId,
+          expectedVersion: candidate.nodeVersion,
+          accumulatedWorkHour
+        })
+        if (result && result.created === true) decisionCreated += 1
+      }
+    }
+    if (decisionPage.lastScannedRawId !== null) {
+      await reminderRepository.advanceReminderCursor({
+        kind: 'decision', cursorId: decisionPage.lastScannedRawId
+      })
+    }
+    return { processingCreated, reviewCreated, decisionCreated }
   }
 
   return { runReminderCycle }

@@ -23,6 +23,7 @@ const NOTIFICATION_TYPES = new Set([
   'business_completed',
   'node_processing_started',
   'optional_tail_decision_started',
+  'optional_tail_decision_reminder',
   'processing_reminder',
   'work_calendar_missing',
   'evidence_retention'

@@ -7,6 +7,8 @@ const TYPE_LABELS = Object.freeze({
   business_completed: '售后线已完成',
   node_processing_started: '有新的节点等待处理',
   processing_reminder: '节点处理尚未完成',
+  optional_tail_decision_started: '追加节点等待你决定',
+  optional_tail_decision_reminder: '追加节点尚未决定',
   work_calendar_missing: '工作日历需要管理员处理',
   evidence_retention: '凭证保留期即将结束'
 })

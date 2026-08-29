@@ -6,6 +6,7 @@ function activeUserId() {
 }
 
 function dueText(item) {
+  if (item.actionKind === 'optional_tail_decision') return '等待决定是否开启追加节点'
   if (!item.processingDueAt) return '处理截止待计算'
   const date = new Date(item.processingDueAt)
   if (Number.isNaN(date.getTime())) return '处理截止待计算'
@@ -14,6 +15,9 @@ function dueText(item) {
 }
 
 function present(item) {
+  const actionKind = item.actionKind === 'optional_tail_decision'
+    ? 'optional_tail_decision'
+    : 'process_node'
   return {
     nodeId: item.nodeId,
     businessLineId: item.businessLineId,
@@ -22,6 +26,10 @@ function present(item) {
     nodeCode: item.nodeCode || '',
     nodeName: item.nodeName || '未命名节点',
     status: item.status,
+    actionKind,
+    actionText: actionKind === 'optional_tail_decision'
+      ? '决定是否开启追加节点 →'
+      : '继续处理 →',
     processingRoundNumber: Number(item.processingRoundNumber || 0),
     dueText: dueText(item)
   }
@@ -102,8 +110,10 @@ Page({
     const lineId = String(event.currentTarget.dataset.lineId || '')
     const nodeId = String(event.currentTarget.dataset.nodeId || '')
     if (!this.data.items.some(item => item.businessLineId === lineId && item.nodeId === nodeId)) return
-    wx.navigateTo({
-      url: `/pages/node-feedback/index?lineId=${encodeURIComponent(lineId)}&nodeId=${encodeURIComponent(nodeId)}`
-    })
+    const item = this.data.items.find(current =>
+      current.businessLineId === lineId && current.nodeId === nodeId)
+    wx.navigateTo({ url: item.actionKind === 'optional_tail_decision'
+      ? `/pages/business-detail/index?id=${encodeURIComponent(lineId)}`
+      : `/pages/node-feedback/index?lineId=${encodeURIComponent(lineId)}&nodeId=${encodeURIComponent(nodeId)}` })
   }
 })

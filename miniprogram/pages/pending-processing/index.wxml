@@ -7,7 +7,7 @@
     <text class="block">{{item.nodeName}} · 第 {{item.processingRoundNumber}} 轮处理</text>
     <text class="muted block">{{item.nodeCode}}</text>
     <text class="due block">{{item.dueText}}</text>
-    <text class="action block">继续处理 →</text>
+    <text class="action block">{{item.actionText}}</text>
   </view>
   <view wx:if="{{!loading && !errorMessage && !items.length}}" class="empty">暂无待我处理事项</view>
   <view wx:if="{{loading}}" class="empty">正在加载待处理事项…</view>
