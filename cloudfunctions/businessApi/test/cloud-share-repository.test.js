@@ -112,7 +112,7 @@ test('已启用的无审核人追加节点使用最终完成反馈生成分享�
   data.node_feedback = [{
     _id: 'feedback-direct', businessLineId: 'line-1', nodeId: 'node-1',
     action: 'complete_node', status: 'completed', publishState: 'published', revision: 2,
-    processingRoundNumber: 1, processingComment: '追加完成',
+    processingRoundNumber: 1, comment: '追加完成',
     fieldValues: { summary: '追加固定结果' }, evidenceCount: 1, claimedCount: 1
   }]
   Object.assign(data.evidences[0], {
@@ -134,6 +134,14 @@ test('已启用的无审核人追加节点使用最终完成反馈生成分享�
   assert.equal(share.processingComment, '追加完成')
   assert.deepEqual(share.fieldValues, { summary: '追加固定结果' })
   assert.deepEqual(fake.documents('public_node_share_chunks')[0].evidences.map(item => item.evidenceId), ['evidence-0'])
+  const publicSnapshot = await repository.getPublicSnapshot({
+    token: Buffer.alloc(32, 15).toString('base64url'), cursor: '', pageSize: 40
+  })
+  assert.equal(publicSnapshot.processingComment, '追加完成')
+  assert.equal(JSON.stringify(publicSnapshot).includes('feedback-direct'), false)
+  assert.equal(JSON.stringify(publicSnapshot).includes('evidence-0'), false)
+  assert.equal(JSON.stringify(publicSnapshot).includes('cloud://'), false)
+  assert.equal(JSON.stringify(publicSnapshot).includes('processor'), false)
 })
 
 test('未启用的追加节点不能生成分享快照', async () => {

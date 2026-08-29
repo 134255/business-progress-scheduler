@@ -226,12 +226,16 @@ function createCloudOptionalTailRepository({ db }) {
       const nodeSearch = advanceSearchVersion(node)
       const result = publicResult(value.input, lineVersion, nodeVersion)
       const decisionFields = {
+        decision: value.input.decision,
         decisionAt,
         decisionActorId: account._id,
         decisionComment: value.input.comment,
         decisionTimingStatus: value.timing.decisionTimingStatus,
         decisionWorkMinutes: value.timing.decisionWorkMinutes,
         decisionCalendarVersion: value.timing.decisionCalendarVersion,
+        decisionAnalyticsSnapshotStatus: 'pending',
+        decisionAnalyticsSourceVersion: 1,
+        decisionReminderStatus: db.command.remove(),
         nextDecisionReminderWorkHour: db.command.remove(),
         lastDecisionReminderWorkHour: db.command.remove()
       }

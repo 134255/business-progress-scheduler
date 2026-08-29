@@ -34,9 +34,11 @@ function createOperationsAnalyticsHandler({
     try {
       const result = await service.runCycle({ now, batchSize: 40 })
       return {
+        decisionExamined: safeCount(result && result.decisionExamined),
         nodeExamined: safeCount(result && result.nodeExamined),
         businessExamined: safeCount(result && result.businessExamined),
         refreshExamined: safeCount(result && result.refreshExamined),
+        decisionGenerated: safeCount(result && result.decisionGenerated),
         nodeGenerated: safeCount(result && result.nodeGenerated),
         businessGenerated: safeCount(result && result.businessGenerated),
         refreshed: safeCount(result && result.refreshed),

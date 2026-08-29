@@ -17,6 +17,7 @@ const COLLECTIONS = Object.freeze({
   documents: 'business_search_documents'
 })
 const MAX_NODES = 24
+const FEEDBACK_RELATION_PAGE_SIZE = 100
 const MAX_QUERY_CANDIDATES = 100
 const MAX_GENERATION_ENTRIES = 5000
 const MAX_CYCLE_BATCH = 40
@@ -423,6 +424,44 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     return names
   }
 
+  async function loadFeedbackEvidenceNames(feedback, lineId, nodeId) {
+    if (!exactSafeInteger(feedback.evidenceCount) ||
+        !exactSafeInteger(feedback.claimedCount) ||
+        feedback.claimedCount !== feedback.evidenceCount) throw sourceError()
+    const ordered = []
+    let cursor = ''
+    while (true) {
+      const criteria = { feedbackId: feedback._id }
+      if (cursor) criteria._id = db.command.gt(cursor)
+      const response = await db.collection(COLLECTIONS.evidences)
+        .where(criteria).orderBy('_id', 'asc').limit(FEEDBACK_RELATION_PAGE_SIZE).get()
+      const page = response && response.data
+      if (!Array.isArray(page)) throw sourceError()
+      for (const evidence of page) {
+        const order = ownDataValue(evidence, 'feedbackEvidenceOrder')
+        if (!exactString(evidence && evidence._id, { maximum: 128 }) ||
+            evidence.businessLineId !== lineId || evidence.nodeId !== nodeId ||
+            evidence.feedbackId !== feedback._id || evidence.feedbackRevision !== feedback.revision ||
+            evidence.processingRoundNumber !== feedback.processingRoundNumber ||
+            evidence.attachmentState !== 'attached' || evidence.storageStatus !== 'available' ||
+            (evidence.purgedAt !== null && evidence.purgedAt !== undefined) ||
+            !exactString(evidence.fileId, { maximum: 2048 }) || !evidence.fileId.startsWith('cloud://') ||
+            !exactString(evidence.fileName, { maximum: 500 }) || !order.valid ||
+            !exactSafeInteger(order.value) || order.value === Number.MAX_SAFE_INTEGER) throw sourceError()
+        ordered.push({ id: evidence._id, order: order.value, fileName: evidence.fileName })
+      }
+      if (page.length < FEEDBACK_RELATION_PAGE_SIZE) break
+      const nextCursor = page.at(-1)._id
+      if (!exactString(nextCursor, { maximum: 128 }) || nextCursor === cursor) throw sourceError()
+      cursor = nextCursor
+    }
+    ordered.sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    if (ordered.length !== feedback.evidenceCount || ordered.some((item, index) => item.order !== index)) {
+      throw sourceError()
+    }
+    return ordered.map(item => item.fileName)
+  }
+
   async function snapshotFromFeedback(node, lineId, { completed = false } = {}) {
     const feedback = await readDocument(db, COLLECTIONS.feedback, node.latestFeedbackId)
     if (!feedback || feedback.businessLineId !== lineId || feedback.nodeId !== node._id ||
@@ -430,11 +469,17 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
         feedback.revision !== node.latestFeedbackRevision || feedback.publishState !== 'published' ||
         !(completed ? feedback.action === 'complete_node'
           : ['save_progress', 'mark_blocked'].includes(feedback.action))) throw sourceError()
+    const comment = completed ? ownDataValue(feedback, 'comment') : null
+    if (completed && (!comment.valid || !exactString(comment.value, { allowEmpty: true, maximum: 1000 }))) {
+      throw sourceError()
+    }
     return {
       fieldValues: safeFieldValues(feedback.fieldValues || []),
-      processingComment: safeText(feedback.processingComment || ''),
+      processingComment: completed ? comment.value : safeText(feedback.processingComment || ''),
       reviewComments: [],
-      evidenceFileNames: await loadEvidenceNames(feedback.evidenceIds || [], lineId, node._id)
+      evidenceFileNames: completed
+        ? await loadFeedbackEvidenceNames(feedback, lineId, node._id)
+        : await loadEvidenceNames(feedback.evidenceIds || [], lineId, node._id)
     }
   }
 

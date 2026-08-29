@@ -286,7 +286,8 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
       .map((node, index) => node.activationMode === ACTIVATION_MODE.OPTIONAL_TAIL ? index : -1)
       .filter(index => index >= 0)
     if (optionalTailIndexes.length > 1 ||
-        (optionalTailIndexes.length === 1 && optionalTailIndexes[0] !== definition.nodes.length - 1)) {
+        (optionalTailIndexes.length === 1 &&
+          (optionalTailIndexes[0] === 0 || optionalTailIndexes[0] !== definition.nodes.length - 1))) {
       throw createError('TEMPLATE_INVALID')
     }
   }

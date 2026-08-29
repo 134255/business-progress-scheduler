@@ -10,6 +10,10 @@ const CURSORS = Object.freeze({
     id: 'operations-analytics-node-cursor', kind: 'operations_analytics_node',
     collection: 'business_nodes', criteria: { analyticsSnapshotStatus: 'pending' }
   },
+  decision: {
+    id: 'operations-analytics-decision-cursor', kind: 'operations_analytics_decision',
+    collection: 'business_nodes', criteria: { decisionAnalyticsSnapshotStatus: 'pending' }
+  },
   business: {
     id: 'operations-analytics-business-cursor', kind: 'operations_analytics_business',
     collection: 'business_lines', criteria: { analyticsSnapshotStatus: 'pending' }
@@ -156,6 +160,17 @@ function createCloudAnalyticsRepository({ db } = {}) {
     }
   }
 
+  async function readDecisionSource({ sourceId } = {}) {
+    if (typeof sourceId !== 'string' || !DOCUMENT_ID.test(sourceId)) throw new TypeError('sourceId is invalid')
+    const node = await readDocument(db, 'business_nodes', sourceId)
+    if (!node || typeof node.businessLineId !== 'string' || !DOCUMENT_ID.test(node.businessLineId)) {
+      throw new TypeError('decision source is invalid')
+    }
+    const line = await readDocument(db, 'business_lines', node.businessLineId)
+    if (!line) throw new TypeError('decision source is invalid')
+    return { node, line }
+  }
+
   async function readBusinessSource({ sourceId } = {}) {
     if (typeof sourceId !== 'string' || !DOCUMENT_ID.test(sourceId)) throw new TypeError('sourceId is invalid')
     const line = await readDocument(db, 'business_lines', sourceId)
@@ -173,8 +188,21 @@ function createCloudAnalyticsRepository({ db } = {}) {
   }
 
   function sourceSpec(fact) {
-    if (fact.sourceType === 'node') return { collection: 'business_nodes', id: fact.sourceId }
-    if (fact.sourceType === 'business') return { collection: 'business_lines', id: fact.sourceId }
+    if (fact.sourceType === 'node') return {
+      collection: 'business_nodes', id: fact.sourceId, statusKey: 'analyticsSnapshotStatus',
+      versionKey: 'analyticsSourceVersion', generatedVersionKey: 'analyticsGeneratedVersion',
+      generatedAtKey: 'analyticsGeneratedAt'
+    }
+    if (fact.sourceType === 'optional_tail_decision') return {
+      collection: 'business_nodes', id: fact.sourceId, statusKey: 'decisionAnalyticsSnapshotStatus',
+      versionKey: 'decisionAnalyticsSourceVersion', generatedVersionKey: 'decisionAnalyticsGeneratedVersion',
+      generatedAtKey: 'decisionAnalyticsGeneratedAt'
+    }
+    if (fact.sourceType === 'business') return {
+      collection: 'business_lines', id: fact.sourceId, statusKey: 'analyticsSnapshotStatus',
+      versionKey: 'analyticsSourceVersion', generatedVersionKey: 'analyticsGeneratedVersion',
+      generatedAtKey: 'analyticsGeneratedAt'
+    }
     throw new TypeError('fact source is invalid')
   }
 
@@ -218,11 +246,11 @@ function createCloudAnalyticsRepository({ db } = {}) {
     const { _id: factDocumentId, ...factData } = fact
     return db.runTransaction(async transaction => {
       const source = await readDocument(transaction, spec.collection, spec.id)
-      const sourcePending = source && source.analyticsSnapshotStatus === 'pending' &&
-        source.analyticsSourceVersion === fact.sourceVersion
-      const sourceGenerated = source && source.analyticsSnapshotStatus === 'generated' &&
-        source.analyticsSourceVersion === fact.sourceVersion &&
-        source.analyticsGeneratedVersion === fact.sourceVersion
+      const sourcePending = source && source[spec.statusKey] === 'pending' &&
+        source[spec.versionKey] === fact.sourceVersion
+      const sourceGenerated = source && source[spec.statusKey] === 'generated' &&
+        source[spec.versionKey] === fact.sourceVersion &&
+        source[spec.generatedVersionKey] === fact.sourceVersion
       if (!sourcePending && !sourceGenerated) throw new TypeError('analytics source changed')
       const existingFact = await readDocument(transaction, 'operations_analytics_facts', factDocumentId)
       if (existingFact) {
@@ -300,13 +328,13 @@ function createCloudAnalyticsRepository({ db } = {}) {
     const spec = sourceSpec({ sourceType, sourceId })
     return db.runTransaction(async transaction => {
       const source = await readDocument(transaction, spec.collection, spec.id)
-      if (!source || source.analyticsSourceVersion !== sourceVersion) throw new TypeError('analytics source changed')
-      if (source.analyticsSnapshotStatus === 'generated') return { generated: false }
-      if (source.analyticsSnapshotStatus !== 'pending') throw new TypeError('analytics source changed')
+      if (!source || source[spec.versionKey] !== sourceVersion) throw new TypeError('analytics source changed')
+      if (source[spec.statusKey] === 'generated') return { generated: false }
+      if (source[spec.statusKey] !== 'pending') throw new TypeError('analytics source changed')
       await transaction.collection(spec.collection).doc(spec.id).update({ data: {
-        analyticsSnapshotStatus: 'generated',
-        analyticsGeneratedVersion: sourceVersion,
-        analyticsGeneratedAt: db.serverDate(),
+        [spec.statusKey]: 'generated',
+        [spec.generatedVersionKey]: sourceVersion,
+        [spec.generatedAtKey]: db.serverDate(),
         updatedAt: db.serverDate()
       } })
       return { generated: true }
@@ -315,9 +343,11 @@ function createCloudAnalyticsRepository({ db } = {}) {
 
   return {
     claimNodeCandidates: ({ limit } = {}) => claim('node', limit),
+    claimDecisionCandidates: ({ limit } = {}) => claim('decision', limit),
     claimBusinessCandidates: ({ limit } = {}) => claim('business', limit),
     claimPendingFactCandidates: ({ limit } = {}) => claim('refresh', limit),
     readNodeSource,
+    readDecisionSource,
     readBusinessSource,
     applyFact,
     markSourceGenerated

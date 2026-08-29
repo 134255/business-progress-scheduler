@@ -257,8 +257,13 @@ function createCloudShareRepository({ db, cloud, clock = () => new Date() }) {
       ? await getRequired(transaction.collection('node_review_rounds').doc(roundId))
       : await getRequired(transaction.collection('node_feedback').doc(node.latestFeedbackId || ''))
     if (!reviewed) {
+      const comment = ownDataValue(source, 'comment')
+      if (!comment.valid || typeof comment.value !== 'string' || comment.value.length > 1000) {
+        throw createError('FORBIDDEN')
+      }
       source = {
         ...source,
+        processingComment: comment.value,
         processorDisplayNames: displayNames(node, 'processorDisplayNames'),
         reviewerDisplayNames: []
       }

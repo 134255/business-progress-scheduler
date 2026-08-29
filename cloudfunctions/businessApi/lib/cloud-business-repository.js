@@ -67,6 +67,10 @@ function clone(value) {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]))
 }
 
+function validDate(value) {
+  return value instanceof Date && !Number.isNaN(value.getTime())
+}
+
 function withSearchEnvelope(publicResult, actorId, lineOrVersion) {
   const state = typeof lineOrVersion === 'number'
     ? { searchSourceVersion: lineOrVersion }
@@ -568,7 +572,7 @@ function createCloudBusinessRepository({
     return { requiresEvidence, allowedEvidenceTypes }
   }
 
-  function publicNodeProjection(node, actor, canManage, accountSchema, displayNames) {
+  function publicNodeProjection(node, actor, canManage, accountSchema, displayNames, line) {
     const evidencePolicy = safeEvidencePolicy(node)
     const fieldDefinitions = safeFieldDefinitions(
       Object.prototype.hasOwnProperty.call(node, 'fieldDefinitions') ? node.fieldDefinitions : []
@@ -642,7 +646,8 @@ function createCloudBusinessRepository({
         isOptionalTail: activationMode === ACTIVATION_MODE.OPTIONAL_TAIL,
         requiresReview: reviewers.length > 0,
         canDecideOptionalTail: activationMode === ACTIVATION_MODE.OPTIONAL_TAIL &&
-          node.status === 'awaiting_decision' && processors.includes(actor._id),
+          node.status === 'awaiting_decision' && line.optionalTailState === 'pending' &&
+          line.currentNodeId === node._id && validDate(node.decisionStartedAt) && processors.includes(actor._id),
         processorDisplayNames,
         reviewerDisplayNames,
         reviewMode: node.reviewMode,
@@ -1154,7 +1159,7 @@ function createCloudBusinessRepository({
       : Boolean(currentActor.openid) && membershipArray(line.managerIds).includes(currentActor.openid)
     const displayNames = await createDisplayNameCache(nodes, currentActor, accountSchema)
     const projectedNodes = nodes.map(node =>
-      publicNodeProjection(node, currentActor, canManage, accountSchema, displayNames))
+      publicNodeProjection(node, currentActor, canManage, accountSchema, displayNames, line))
     const canEditNodes = !accountSchema && canManage && Number(line.progress || 0) === 0 &&
       nodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
     await db.runTransaction(async transaction => {
@@ -1924,7 +1929,7 @@ function createCloudBusinessRepository({
             currentNodeId: prepared[0].id,
             currentNodeName: prepared[0].data.name,
             nodeCount: prepared.length,
-            optionalTailState: optionalTail ? 'pending' : 'none',
+            optionalTailState: 'none',
             ...(optionalTail ? { optionalTailNodeId: optionalTail.id } : {}),
             progress: 0,
             createdBy: actor._id,

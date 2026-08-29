@@ -188,6 +188,13 @@ test('权威快照按节点状态只选择当前处理、活动审核、最终�
 
 test('无审核人追加节点只索引最终完成反馈，未启用节点不产生检索内容', async () => {
   const direct = authoritativeSeed()
+  const directEvidences = Array.from({ length: 101 }, (_, index) => ({
+    _id: `evidence-direct-${String(100 - index).padStart(3, '0')}`,
+    businessLineId: 'line-1', nodeId: 'node-4', feedbackId: 'feedback-direct',
+    feedbackRevision: 1, processingRoundNumber: 1, attachmentState: 'attached',
+    feedbackEvidenceOrder: index, storageStatus: 'available', purgedAt: null,
+    fileId: `cloud://secret/direct-${index}`, fileName: `追加凭证-${index}.pdf`
+  }))
   Object.assign(direct.business_nodes[3], {
     status: 'completed', activationMode: 'optional_tail', workflowMode: 'review',
     reviewerUserIds: [], lastReviewRoundId: null, latestFeedbackId: 'feedback-direct',
@@ -196,13 +203,23 @@ test('无审核人追加节点只索引最终完成反馈，未启用节点不�
   direct.node_feedback.push({
     _id: 'feedback-direct', businessLineId: 'line-1', nodeId: 'node-4',
     processingRoundNumber: 1, revision: 1, publishState: 'published', action: 'complete_node',
-    fieldValues: fieldValues('追加最终'), processingComment: '追加完成说明', evidenceIds: []
+    fieldValues: fieldValues('追加最终'), comment: '追加完成说明', evidenceCount: 101, claimedCount: 101
   })
-  const completed = await harness(direct).repository.loadAuthoritativeSnapshot({
+  direct.evidences.push(...directEvidences)
+  const completedHarness = harness(direct)
+  const completed = await completedHarness.repository.loadAuthoritativeSnapshot({
     businessLineId: 'line-1', sourceVersion: 3
   })
   assert.equal(completed.nodes[3].processingComment, '追加完成说明')
   assert.equal(completed.nodes[3].fieldValues[0].value, '追加最终故障')
+  assert.equal(completed.nodes[3].evidenceFileNames.length, 101)
+  assert.equal(completed.nodes[3].evidenceFileNames[0], '追加凭证-0.pdf')
+  assert.equal(completed.nodes[3].evidenceFileNames[100], '追加凭证-100.pdf')
+  const relationQueries = completedHarness.fake.queryCalls.filter(call =>
+    call.collection === 'evidences' && call.criteria && call.criteria.feedbackId === 'feedback-direct')
+  assert.equal(relationQueries.length, 2)
+  assert.equal(relationQueries.every(call => call.limit === 100 && call.offset === 0), true)
+  assert.equal(relationQueries[1].criteria._id.__operator, 'gt')
 
   const skipped = authoritativeSeed()
   Object.assign(skipped.business_nodes[3], {

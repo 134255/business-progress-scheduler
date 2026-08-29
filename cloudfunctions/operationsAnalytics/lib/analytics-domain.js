@@ -255,20 +255,44 @@ function ownStringArray(source, key) {
   return value
 }
 
-function optionalTailFacts(base, node) {
-  if (ownValue(node, 'activationMode') !== 'optional_tail' ||
-      !['completed', 'skipped'].includes(ownValue(node, 'status'))) return []
-  const activated = node.status === 'completed'
-  return [
-    timingFact(base, {
+function materializeOptionalTailDecisionSource(source) {
+  if (!source || typeof source !== 'object' || !source.line || !source.node ||
+      source.node.businessLineId !== source.line._id ||
+      ownValue(source.node, 'activationMode') !== 'optional_tail' ||
+      ownValue(source.node, 'decisionAnalyticsSnapshotStatus') !== 'pending' ||
+      !Number.isSafeInteger(ownValue(source.node, 'decisionAnalyticsSourceVersion')) ||
+      ownValue(source.node, 'decisionAnalyticsSourceVersion') < 1 ||
+      !['activate', 'skip'].includes(ownValue(source.node, 'decision')) ||
+      !(ownValue(source.node, 'decisionStartedAt') instanceof Date) ||
+      Number.isNaN(ownValue(source.node, 'decisionStartedAt').getTime()) ||
+      !(ownValue(source.node, 'decisionAt') instanceof Date) ||
+      Number.isNaN(ownValue(source.node, 'decisionAt').getTime()) ||
+      ownValue(source.node, 'decisionStartedAt').getTime() > ownValue(source.node, 'decisionAt').getTime()) {
+    throw validationError()
+  }
+  const base = factBase({
+    line: source.line,
+    node: source.node,
+    sourceType: 'optional_tail_decision',
+    sourceId: source.node._id,
+    sourceVersion: source.node.decisionAnalyticsSourceVersion,
+    day: shanghaiDay(source.node.decisionAt)
+  })
+  const facts = []
+  if (ownValue(source.node, 'decisionTimingStatus') === 'calculated') {
+    facts.push(timingFact(base, {
       factType: 'optional_tail_decision', metric: 'optional_tail_decision_duration',
-      timing: timingValue(node, 'decisionTimingStatus', 'decisionWorkMinutes')
-    }),
-    eventFact(base, {
-      factType: 'optional_tail_activation', metric: 'optional_tail_activation',
-      sampleValue: activated ? 1 : 0
-    })
-  ]
+      timing: timingValue(source.node, 'decisionTimingStatus', 'decisionWorkMinutes')
+    }))
+  } else if (ownValue(source.node, 'decisionTimingStatus') !== 'pending_calendar' ||
+      ownValue(source.node, 'decisionWorkMinutes') !== null) {
+    throw validationError()
+  }
+  facts.push(eventFact(base, {
+    factType: 'optional_tail_activation', metric: 'optional_tail_activation',
+    sampleValue: source.node.decision === 'activate' ? 1 : 0
+  }))
+  return facts
 }
 
 function materializeNodeSource(source) {
@@ -280,8 +304,7 @@ function materializeNodeSource(source) {
     line: source.line, node: source.node, sourceType: 'node', sourceId: source.node._id,
     sourceVersion: source.node.analyticsSourceVersion, day
   })
-  const optionalFacts = optionalTailFacts(base, source.node)
-  if (source.node.status === 'skipped') return optionalFacts
+  if (source.node.status === 'skipped') return []
   const reviewMinuteByRoundId = new Map()
   const processorNames = new Map()
   for (const round of source.rounds) {
@@ -315,7 +338,6 @@ function materializeNodeSource(source) {
     summary = summarizeNodeFacts({ rounds: source.rounds, votes: source.votes, reviewMinuteByRoundId })
   }
   const facts = [
-    ...optionalFacts,
     timingFact(base, { factType: 'node_completed', metric: 'node_processing', timing: summary.processing }),
     ...summary.processorContributions.map(item => timingFact(base, {
       factType: 'processor_contribution', metric: 'node_processing', dimensionRole: 'processor',
@@ -401,5 +423,6 @@ module.exports = {
   safeAverage,
   personFilterToken,
   materializeNodeSource,
+  materializeOptionalTailDecisionSource,
   materializeBusinessSource
 }

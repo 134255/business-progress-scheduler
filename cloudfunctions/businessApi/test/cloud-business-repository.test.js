@@ -193,7 +193,7 @@ test('creation freezes an optional tail decision snapshot without starting its p
   const [line] = fake.documents('business_lines')
   const stored = fake.documents('business_nodes').sort((left, right) => left.sequence - right.sequence)
   assert.equal(line.optionalTailNodeId, stored[1]._id)
-  assert.equal(line.optionalTailState, 'pending')
+  assert.equal(line.optionalTailState, 'none')
   assert.equal(stored[0].activationMode, 'required')
   assert.equal(stored[1].activationMode, 'optional_tail')
   assert.equal(stored[1].status, 'awaiting_decision')
@@ -220,14 +220,30 @@ test('business detail exposes optional-tail decision and reviewerless flags only
   })
 
   const candidate = await repository.getBusinessLine({ actor: { _id: 'user-4' }, lineId: created.id })
-  assert.equal(candidate.line.optionalTailState, 'pending')
+  assert.equal(candidate.line.optionalTailState, 'none')
   assert.equal(candidate.line.optionalTailNodeId, `${created.id}-node-002`)
   assert.equal(candidate.nodes[0].isOptionalTail, false)
   assert.equal(candidate.nodes[0].requiresReview, true)
   assert.equal(candidate.nodes[0].canDecideOptionalTail, false)
   assert.equal(candidate.nodes[1].isOptionalTail, true)
   assert.equal(candidate.nodes[1].requiresReview, false)
-  assert.equal(candidate.nodes[1].canDecideOptionalTail, true)
+  assert.equal(candidate.nodes[1].canDecideOptionalTail, false)
+
+  const storedLine = fake.documents('business_lines')[0]
+  fake.replace('business_lines', storedLine._id, {
+    ...storedLine,
+    currentNodeId: `${created.id}-node-002`,
+    currentNodeIndex: 1,
+    currentNodeName: '可选回访',
+    optionalTailState: 'pending'
+  })
+  const optionalPending = fake.documents('business_nodes').find(node => node._id === `${created.id}-node-002`)
+  fake.replace('business_nodes', optionalPending._id, {
+    ...optionalPending,
+    decisionStartedAt: new Date('2026-08-29T01:00:00.000Z')
+  })
+  const pending = await repository.getBusinessLine({ actor: { _id: 'user-4' }, lineId: created.id })
+  assert.equal(pending.nodes[1].canDecideOptionalTail, true)
 
   const storedOptional = fake.documents('business_nodes').find(node => node._id === `${created.id}-node-002`)
   fake.replace('business_nodes', storedOptional._id, {

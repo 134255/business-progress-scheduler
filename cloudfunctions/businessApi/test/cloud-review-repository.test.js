@@ -1754,6 +1754,7 @@ test('最后必经节点审核通过后进入追加节点待决定且精确重�
   assert.equal(Object.hasOwn(line, 'retentionStartedAt'), false)
   assert.equal(optional.status, 'awaiting_decision')
   assert.deepEqual(optional.decisionStartedAt, NOW)
+  assert.equal(optional.decisionReminderStatus, 'pending')
   assert.equal(optional.nextDecisionReminderWorkHour, 1)
   assert.equal(Object.hasOwn(optional, 'processingStartedAt'), false)
   assert.equal(fake.documents('notifications').filter(item =>

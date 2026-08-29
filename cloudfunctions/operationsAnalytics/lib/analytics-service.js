@@ -1,6 +1,10 @@
 'use strict'
 
-const { materializeNodeSource, materializeBusinessSource } = require('./analytics-domain')
+const {
+  materializeNodeSource,
+  materializeOptionalTailDecisionSource,
+  materializeBusinessSource
+} = require('./analytics-domain')
 
 const MAX_BATCH_SIZE = 40
 
@@ -12,15 +16,30 @@ function createAnalyticsService({
   analyticsRepository,
   workTimeService,
   nodeMaterializer,
+  decisionMaterializer,
   businessMaterializer
 } = {}) {
   if (!analyticsRepository ||
       typeof analyticsRepository.claimNodeCandidates !== 'function' ||
+      typeof analyticsRepository.claimDecisionCandidates !== 'function' ||
       typeof analyticsRepository.claimBusinessCandidates !== 'function' ||
       typeof analyticsRepository.claimPendingFactCandidates !== 'function' ||
       typeof analyticsRepository.readNodeSource !== 'function' ||
+      typeof analyticsRepository.readDecisionSource !== 'function' ||
       typeof analyticsRepository.readBusinessSource !== 'function') {
     throw new TypeError('analyticsRepository is required')
+  }
+
+  async function generateDecision(source, now) {
+    if (typeof decisionMaterializer === 'function') return decisionMaterializer({ source, now })
+    if (typeof analyticsRepository.applyFact !== 'function' ||
+        typeof analyticsRepository.markSourceGenerated !== 'function') return { generated: false }
+    const facts = materializeOptionalTailDecisionSource(source)
+    for (const fact of facts) await analyticsRepository.applyFact(fact)
+    return analyticsRepository.markSourceGenerated({
+      sourceType: 'optional_tail_decision', sourceId: source.node._id,
+      sourceVersion: source.node.decisionAnalyticsSourceVersion
+    })
   }
 
   async function generateNode(source, now) {
@@ -74,19 +93,32 @@ function createAnalyticsService({
       throw new TypeError('batchSize must be 40')
     }
     const nodeCandidates = await analyticsRepository.claimNodeCandidates({ limit: batchSize })
+    const decisionCandidates = await analyticsRepository.claimDecisionCandidates({ limit: batchSize })
     const businessCandidates = await analyticsRepository.claimBusinessCandidates({ limit: batchSize })
     const refreshCandidates = await analyticsRepository.claimPendingFactCandidates({ limit: batchSize })
-    if (!Array.isArray(nodeCandidates) || !Array.isArray(businessCandidates) || !Array.isArray(refreshCandidates)) {
+    if (!Array.isArray(nodeCandidates) || !Array.isArray(decisionCandidates) ||
+        !Array.isArray(businessCandidates) || !Array.isArray(refreshCandidates)) {
       throw new TypeError('candidate page is invalid')
     }
     const result = {
+      decisionExamined: decisionCandidates.length,
       nodeExamined: nodeCandidates.length,
       businessExamined: businessCandidates.length,
       refreshExamined: refreshCandidates.length,
+      decisionGenerated: 0,
       nodeGenerated: 0,
       businessGenerated: 0,
       refreshed: 0,
       failed: 0
+    }
+    for (const candidate of decisionCandidates) {
+      try {
+        const source = await analyticsRepository.readDecisionSource(candidate)
+        const applied = await generateDecision(source, now)
+        if (applied && applied.generated === true) result.decisionGenerated += 1
+      } catch (_) {
+        result.failed += 1
+      }
     }
     for (const candidate of nodeCandidates) {
       try {

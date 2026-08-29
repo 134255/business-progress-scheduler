@@ -1081,13 +1081,13 @@ test('可选尾节点决策以独立游标签发并按不可变版本原子回�
   const startAt = new Date('2026-08-11T01:00:00Z')
   const endAt = new Date('2026-08-11T02:07:00Z')
   const fake = createFakeCloudDatabase({
-    business_lines: [{ _id: 'line-1', status: 'completed', currentNodeId: 'node-2' }],
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-2' }],
     business_nodes: [{
-      _id: 'node-2', businessLineId: 'line-1', status: 'skipped', version: 4,
-      activationMode: 'optional_tail', decisionTimingStatus: 'pending_calendar',
+      _id: 'node-2', businessLineId: 'line-1', status: 'ready', version: 4,
+      activationMode: 'optional_tail', decision: 'activate', decisionTimingStatus: 'pending_calendar',
       decisionStartedAt: startAt, decisionAt: endAt, decisionWorkMinutes: null,
-      decisionCalendarVersion: null, analyticsSnapshotStatus: 'generated',
-      analyticsSourceVersion: 4, analyticsGeneratedVersion: 4
+      decisionCalendarVersion: null, decisionAnalyticsSnapshotStatus: 'generated',
+      decisionAnalyticsSourceVersion: 1, decisionAnalyticsGeneratedVersion: 1
     }]
   })
   const repository = createCloudCalendarRepository({ db: fake.db })
@@ -1097,6 +1097,7 @@ test('可选尾节点决策以独立游标签发并按不可变版本原子回�
   assert.ok(candidate)
   assert.equal(candidate.version, 4)
   assert.deepEqual([candidate.startAt, candidate.endAt], [startAt, endAt])
+  assert.equal(await repository.ensurePendingCalendarWarning({ candidate }), true)
   assert.equal(await repository.applyDueCalculation({
     candidate,
     calculation: { status: 'calculated', minutes: 67, calendarVersion: 'calendar-decision' },
@@ -1107,8 +1108,9 @@ test('可选尾节点决策以独立游标签发并按不可变版本原子回�
   assert.equal(node.decisionTimingStatus, 'calculated')
   assert.equal(node.decisionWorkMinutes, 67)
   assert.equal(node.decisionCalendarVersion, 'calendar-decision')
-  assert.equal(node.analyticsSnapshotStatus, 'pending')
-  assert.equal(node.analyticsSourceVersion, 5)
+  assert.equal(node.decisionAnalyticsSnapshotStatus, 'pending')
+  assert.equal(node.decisionAnalyticsSourceVersion, 1)
+  assert.equal(Object.hasOwn(node, 'analyticsSnapshotStatus'), false)
   assert.equal(node.version, 5)
 })
 
@@ -1118,10 +1120,11 @@ test('可选尾节点决策候选在版本变化后拒绝覆盖', async () => {
   const fake = createFakeCloudDatabase({
     business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-2' }],
     business_nodes: [{
-      _id: 'node-2', businessLineId: 'line-1', status: 'completed', version: 4,
-      activationMode: 'optional_tail', decisionTimingStatus: 'pending_calendar',
+      _id: 'node-2', businessLineId: 'line-1', status: 'in_progress', version: 4,
+      activationMode: 'optional_tail', decision: 'activate', decisionTimingStatus: 'pending_calendar',
       decisionStartedAt: startAt, decisionAt: endAt, decisionWorkMinutes: null,
-      decisionCalendarVersion: null
+      decisionCalendarVersion: null, decisionAnalyticsSnapshotStatus: 'pending',
+      decisionAnalyticsSourceVersion: 1
     }]
   })
   const repository = createCloudCalendarRepository({ db: fake.db })

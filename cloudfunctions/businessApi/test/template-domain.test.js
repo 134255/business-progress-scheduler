@@ -316,10 +316,16 @@ test('可选尾节点定义参与摘要且只能唯一位于模板末尾', () =>
   assert.equal(optionalTail.activationMode, 'optional_tail')
   assert.notEqual(templateDefinitionDigest([required]), templateDefinitionDigest([optionalTail]))
 
-  assert.equal(validateTemplateForEnable(
+  assert.throws(() => validateTemplateForEnable(
     { status: 'draft' },
     [optionalTail],
     ['user-1']
+  ), error => error.code === 'TEMPLATE_INVALID')
+
+  assert.equal(validateTemplateForEnable(
+    { status: 'draft' },
+    [required, { ...optionalTail, nodeKey: 'second', sequence: 1 }],
+    ['user-1', 'reviewer-1']
   ), true)
 
   assert.throws(() => validateTemplateForEnable({ status: 'draft' }, [

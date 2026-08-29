@@ -75,6 +75,46 @@ test('确定性事实重复应用不重复累计且生成后原子关闭来源',
   assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
 })
 
+test('追加节点决定使用独立来源游标且不等待节点终态', async () => {
+  const { repository } = harness({
+    business_lines: [{ _id: 'line-1' }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', status: 'in_progress', decision: 'activate',
+      decisionAnalyticsSnapshotStatus: 'pending', decisionAnalyticsSourceVersion: 1
+    }]
+  })
+  assert.deepEqual(await repository.claimDecisionCandidates({ limit: 40 }), [{ sourceId: 'node-1' }])
+  const source = await repository.readDecisionSource({ sourceId: 'node-1' })
+  assert.equal(source.node.status, 'in_progress')
+  assert.equal(source.node.decision, 'activate')
+})
+
+test('追加节点决定来源可独立关闭而不改变节点完成统计来源', async () => {
+  const { fake, repository } = harness({
+    business_lines: [{ _id: 'line-1' }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', decisionAnalyticsSnapshotStatus: 'pending',
+      decisionAnalyticsSourceVersion: 1
+    }],
+    operations_analytics_facts: [], operations_analytics_daily: []
+  })
+  const event = {
+    _id: 'analytics-fact-event', sourceType: 'optional_tail_decision', sourceId: 'node-1', sourceVersion: 1,
+    businessLineId: 'line-1', nodeId: 'node-1', day: '2026-08-29', templateId: 'template-1',
+    templateVersion: 1, stableNodeId: 'tail-1', nodeName: '追加回访', nodeSequence: 1,
+    factType: 'optional_tail_activation', metric: 'optional_tail_activation', dimensionRole: 'global',
+    dimensionUserId: '', dimensionFilterToken: '', dimensionDisplayName: '', sampleValue: 1
+  }
+  assert.deepEqual(await repository.applyFact(event), { applied: true })
+  assert.deepEqual(await repository.markSourceGenerated({
+    sourceType: 'optional_tail_decision', sourceId: 'node-1', sourceVersion: 1
+  }), { generated: true })
+  const [node] = fake.documents('business_nodes')
+  assert.equal(node.decisionAnalyticsSnapshotStatus, 'generated')
+  assert.equal(node.decisionAnalyticsGeneratedVersion, 1)
+  assert.equal(Object.hasOwn(node, 'analyticsSnapshotStatus'), false)
+})
+
 test('追加节点启用事件按样本值累计而不冒充工时事实', async () => {
   const { fake, repository } = harness({
     business_lines: [{ _id: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],

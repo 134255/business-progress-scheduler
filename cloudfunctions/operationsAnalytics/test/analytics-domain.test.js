@@ -10,6 +10,7 @@ const {
   aggregateRollups,
   safeAverage,
   materializeNodeSource,
+  materializeOptionalTailDecisionSource,
   materializeBusinessSource
 } = require('../lib/analytics-domain')
 
@@ -139,18 +140,15 @@ test('节点来源生成处理、审核、参与人和投票响应事实并按�
   assert.equal(facts.find(item => item.dimensionRole === 'global').dimensionFilterToken, '')
 })
 
-test('追加节点启用与跳过分别生成决定时长和启用事件且跳过不生成处理时长', () => {
-  const base = {
-    line: { _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 2 },
-    rounds: [], votes: [], feedback: null
-  }
-  const skipped = materializeNodeSource({
-    ...base,
-    node: {
+test('追加节点启用与跳过决定作为独立来源生成时长和启用事件', () => {
+  const base = { line: { _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 2 } }
+  const skipped = materializeOptionalTailDecisionSource({
+    ...base, node: {
       _id: 'node-skip', businessLineId: 'line-1', sourceTemplateNodeKey: 'tail-1', name: '追加回访', sequence: 2,
-      activationMode: 'optional_tail', status: 'skipped', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1,
-      analyticsCompletedAt: new Date('2026-08-29T02:00:00Z'), decisionTimingStatus: 'calculated',
-      decisionWorkMinutes: 5
+      activationMode: 'optional_tail', status: 'skipped', decision: 'skip',
+      decisionAnalyticsSnapshotStatus: 'pending', decisionAnalyticsSourceVersion: 1,
+      decisionStartedAt: new Date('2026-08-29T01:55:00Z'), decisionAt: new Date('2026-08-29T02:00:00Z'),
+      decisionTimingStatus: 'calculated', decisionWorkMinutes: 5
     }
   })
   assert.deepEqual(skipped.map(item => [item.metric, item.workMinutes, item.sampleValue]), [
@@ -158,44 +156,35 @@ test('追加节点启用与跳过分别生成决定时长和启用事件且跳�
     ['optional_tail_activation', undefined, 0]
   ])
 
-  const activated = materializeNodeSource({
-    ...base,
-    feedback: {
-      _id: 'feedback-1', action: 'complete_node', status: 'completed', publishState: 'published',
-      submittedBy: 'processor-a', revision: 1
-    },
-    node: {
-      _id: 'node-done', businessLineId: 'line-1', sourceTemplateNodeKey: 'tail-1', name: '追加回访', sequence: 2,
-      activationMode: 'optional_tail', workflowMode: 'review', status: 'completed', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1,
-      analyticsCompletedAt: new Date('2026-08-29T02:00:00Z'), decisionTimingStatus: 'calculated',
-      decisionWorkMinutes: 9, processingTimingStatus: 'calculated', processingElapsedWorkMinutes: 12,
-      processorUserIds: ['processor-a'], processorDisplayNames: ['处理人甲'], reviewerUserIds: [],
-      latestFeedbackId: 'feedback-1', latestFeedbackRevision: 1
+  const activated = materializeOptionalTailDecisionSource({
+    ...base, node: {
+      _id: 'node-active', businessLineId: 'line-1', sourceTemplateNodeKey: 'tail-1', name: '追加回访', sequence: 2,
+      activationMode: 'optional_tail', status: 'in_progress', decision: 'activate',
+      decisionAnalyticsSnapshotStatus: 'pending', decisionAnalyticsSourceVersion: 1,
+      decisionStartedAt: new Date('2026-08-29T01:51:00Z'), decisionAt: new Date('2026-08-29T02:00:00Z'),
+      decisionTimingStatus: 'calculated', decisionWorkMinutes: 9
     }
   })
   assert.deepEqual(activated.map(item => [item.metric, item.dimensionRole, item.workMinutes, item.sampleValue]), [
     ['optional_tail_decision_duration', 'global', 9, undefined],
-    ['optional_tail_activation', 'global', undefined, 1],
-    ['node_processing', 'global', 12, undefined],
-    ['node_processing', 'processor', 12, undefined],
-    ['node_review', 'global', 0, undefined]
+    ['optional_tail_activation', 'global', undefined, 1]
   ])
 })
 
-test('追加节点决定待日历补算不伪装为零', () => {
-  const facts = materializeNodeSource({
+test('追加节点待补算决定先生成启用事件但不生成分钟事实', () => {
+  const facts = materializeOptionalTailDecisionSource({
     line: { _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 1 },
     node: {
-      _id: 'node-skip', businessLineId: 'line-1', sourceTemplateNodeKey: 'tail-1', name: '追加回访', sequence: 1,
-      activationMode: 'optional_tail', status: 'skipped', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1,
-      analyticsCompletedAt: new Date('2026-08-29T02:00:00Z'),
+      _id: 'node-active', businessLineId: 'line-1', sourceTemplateNodeKey: 'tail-1', name: '追加回访', sequence: 1,
+      activationMode: 'optional_tail', status: 'ready', decision: 'activate',
+      decisionAnalyticsSnapshotStatus: 'pending', decisionAnalyticsSourceVersion: 1,
+      decisionStartedAt: new Date('2026-08-29T01:00:00Z'), decisionAt: new Date('2026-08-29T02:00:00Z'),
       decisionTimingStatus: 'pending_calendar', decisionWorkMinutes: null
-    },
-    rounds: [], votes: [], feedback: null
+    }
   })
-  assert.equal(facts[0].timingStatus, 'pending_calendar')
-  assert.equal(facts[0].workMinutes, null)
-  assert.equal(facts[1].sampleValue, 0)
+  assert.deepEqual(facts.map(item => [item.metric, item.sampleValue]), [
+    ['optional_tail_activation', 1]
+  ])
 })
 
 test('业务来源生成业务完成和每业务节点累计指标，日历缺失不伪装为零', async () => {

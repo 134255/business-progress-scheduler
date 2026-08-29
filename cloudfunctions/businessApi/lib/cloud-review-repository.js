@@ -1473,6 +1473,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
           await transaction.collection('business_nodes').doc(next._id).update({ data: {
             decisionStartedAt: at,
+            decisionReminderStatus: 'pending',
             nextDecisionReminderWorkHour: 1,
             version: increment(next.version),
             updatedAt: db.serverDate()

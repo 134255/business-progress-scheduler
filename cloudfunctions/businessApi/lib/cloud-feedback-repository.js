@@ -504,6 +504,7 @@ function createCloudFeedbackRepository({
       let completionTransition = null
       let plannedNextNodeId = null
       let plannedOptionalTailState = current.line.optionalTailState || 'none'
+      let nextProcessingWorkMinutes = null
       if (value.input.status === 'completed') {
         plannedNextNodeId = Number(current.node.sequence) + 1 < Number(current.line.nodeCount)
           ? nextNodeId(current.line._id, current.node.sequence)
@@ -525,6 +526,14 @@ function createCloudFeedbackRepository({
         if (completionTransition === 'await_optional_decision') plannedOptionalTailState = 'pending'
         if (completionTransition === 'complete_line' && current.node.activationMode === 'optional_tail') {
           plannedOptionalTailState = 'completed'
+        }
+        if (completionTransition === 'next_node' && nextNode.workflowMode === 'review' &&
+            !validDate(nextNode.processingStartedAt)) {
+          nextProcessingWorkMinutes = nextNode.processingSlaWorkHours * 60
+          if (!safeInteger(nextProcessingWorkMinutes, { minimum: 1 }) ||
+              nextNode.processingDueStatus !== 'not_started' || nextNode.processingDueAt !== null) {
+            throw createError('VERSION_CONFLICT')
+          }
         }
       }
       const reservation = {
@@ -561,6 +570,7 @@ function createCloudFeedbackRepository({
         nextNodeId: plannedNextNodeId,
         optionalTailState: plannedOptionalTailState,
         transitionAt: at,
+        ...(nextProcessingWorkMinutes === null ? {} : { nextProcessingWorkMinutes }),
         ...(current.node.workflowMode === 'review' && value.input.action === 'complete_node' &&
           validDate(current.node.processingStartedAt) &&
           safeInteger(current.node.processingElapsedWorkMinutes) &&
@@ -584,7 +594,8 @@ function createCloudFeedbackRepository({
         ...id, cursor: 0, transitionAt: at,
         directProcessingStartedAt: reservation.directProcessingStartedAt,
         directProcessingBaseElapsedWorkMinutes: reservation.directProcessingBaseElapsedWorkMinutes,
-        directProcessingTotalWorkMinutes: reservation.directProcessingTotalWorkMinutes
+        directProcessingTotalWorkMinutes: reservation.directProcessingTotalWorkMinutes,
+        nextProcessingWorkMinutes: reservation.nextProcessingWorkMinutes
       }
     })
   }
@@ -825,6 +836,21 @@ function createCloudFeedbackRepository({
         if (next.activatedAt === undefined || next.activatedAt === null) {
           nextChanges.activatedAt = reservation.transitionAt
         }
+        if (safeInteger(reservation.nextProcessingWorkMinutes, { minimum: 1 })) {
+          const timing = value.nextProcessingTiming
+          if (!timing || !['calculated', 'pending_calendar'].includes(timing.status)) {
+            throw createError('VERSION_CONFLICT')
+          }
+          nextChanges.processingStartedAt = reservation.transitionAt
+          nextChanges.processingDueStatus = timing.status
+          nextChanges.processingDueAt = timing.status === 'calculated' ? timing.dueAt : null
+          nextChanges.processingCalendarVersion = timing.status === 'calculated'
+            ? timing.calendarVersion
+            : null
+          nextChanges.calendarNotificationStatus = timing.status === 'calculated'
+            ? 'not_required'
+            : 'pending'
+        }
         await transaction.collection(COLLECTIONS.nodes).doc(nextId).update({ data: nextChanges })
         const progress = Math.floor(((Number(current.node.sequence) + 1) / Number(current.line.nodeCount)) * 100)
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
@@ -839,8 +865,14 @@ function createCloudFeedbackRepository({
             next.status !== 'awaiting_decision' || next.activationMode !== 'optional_tail' ||
             !accountSchema(current.line, next)) throw createError('NODE_NOT_ACTIVE')
         const nextProcessors = exactAccountIds(next.processorUserIds, { nonEmpty: true })
+        const activeNextProcessors = []
+        for (const processorId of nextProcessors) {
+          const processor = await readDocument(transaction, COLLECTIONS.users, processorId)
+          if (processor && processor.status === 'active') activeNextProcessors.push(processorId)
+        }
         await transaction.collection(COLLECTIONS.nodes).doc(nextId).update({ data: {
           decisionStartedAt: reservation.transitionAt,
+          decisionReminderStatus: 'pending',
           nextDecisionReminderWorkHour: 1,
           version: increment(next.version),
           updatedAt: db.serverDate()
@@ -851,12 +883,14 @@ function createCloudFeedbackRepository({
           optionalTailState: 'pending', progress, version: increment(current.line.version),
           ...nextLineSearch, updatedAt: db.serverDate()
         } })
-        const notificationId = `optional-tail-decision-started-${hash(`${current.line._id}\0${nextId}`).slice(0, 40)}`
-        await transaction.collection(COLLECTIONS.notifications).doc(notificationId).set({ data: {
-          type: 'optional_tail_decision_started', recipientUserIds: clone(nextProcessors),
-          businessLineId: current.line._id, nodeId: nextId, status: 'unread',
-          createdAt: db.serverDate()
-        } })
+        if (activeNextProcessors.length) {
+          const notificationId = `optional-tail-decision-started-${hash(`${current.line._id}\0${nextId}`).slice(0, 40)}`
+          await transaction.collection(COLLECTIONS.notifications).doc(notificationId).set({ data: {
+            type: 'optional_tail_decision_started', recipientUserIds: clone(activeNextProcessors),
+            businessLineId: current.line._id, nodeId: nextId, status: 'unread',
+            createdAt: db.serverDate()
+          } })
+        }
       } else {
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
           version: increment(current.line.version), ...nextLineSearch, updatedAt: db.serverDate()
@@ -1081,6 +1115,28 @@ function createCloudFeedbackRepository({
             }
           : { status: 'pending_calendar', minutes: null, calendarVersion: null }
         commitValue = { ...value, directProcessingTiming }
+      }
+      if (safeInteger(reservation.nextProcessingWorkMinutes, { minimum: 1 })) {
+        if (!workTimeService || typeof workTimeService.tryAddWorkMinutes !== 'function') {
+          throw createError('VERSION_CONFLICT')
+        }
+        const result = await workTimeService.tryAddWorkMinutes(
+          new Date(reservation.transitionAt), reservation.nextProcessingWorkMinutes
+        )
+        let nextProcessingTiming
+        if (result && result.status === 'calculated' && validDate(result.dueAt) &&
+            (result.calendarVersion === null ||
+              typeof result.calendarVersion === 'string' && result.calendarVersion)) {
+          nextProcessingTiming = {
+            status: 'calculated', dueAt: new Date(result.dueAt),
+            calendarVersion: result.calendarVersion || null
+          }
+        } else if (result && result.status === 'pending_calendar' && result.dueAt === null) {
+          nextProcessingTiming = { status: 'pending_calendar', dueAt: null, calendarVersion: null }
+        } else {
+          throw createError('VERSION_CONFLICT')
+        }
+        commitValue = { ...commitValue, nextProcessingTiming }
       }
       const maximumClaims = Math.ceil(value.input.evidenceIds.length / claimChunkSize) + 1
       for (let attempt = 0; ; attempt += 1) {

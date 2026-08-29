@@ -510,15 +510,19 @@ function createCloudCalendarRepository({
     for (const node of decisionRows) {
       if (result.length >= limit) break
       if (node.activationMode !== 'optional_tail' ||
-          !['completed', 'skipped'].includes(node.status) ||
+          !['activate', 'skip'].includes(node.decision) ||
           safeVersion(node.version) === null || typeof node.businessLineId !== 'string' ||
+          !['pending', 'generated'].includes(node.decisionAnalyticsSnapshotStatus) ||
+          !Number.isSafeInteger(node.decisionAnalyticsSourceVersion) ||
+          node.decisionAnalyticsSourceVersion < 1 ||
           !validDate(node.decisionStartedAt) || !validDate(node.decisionAt) ||
           node.decisionStartedAt.getTime() > node.decisionAt.getTime() ||
           node.decisionWorkMinutes !== null || node.decisionCalendarVersion !== null) continue
       result.push({
         kind: 'optional_tail_decision', id: node._id,
         businessLineId: node.businessLineId, nodeId: node._id,
-        status: node.status, version: node.version,
+        status: node.status, decision: node.decision, version: node.version,
+        decisionAnalyticsSourceVersion: node.decisionAnalyticsSourceVersion,
         startAt: node.decisionStartedAt, endAt: node.decisionAt
       })
     }
@@ -854,25 +858,24 @@ function createCloudCalendarRepository({
       }
       if (candidate.kind === 'optional_tail_decision') {
         const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
-        const analyticsSourceVersion = safeVersion(node && node.analyticsSourceVersion)
         if (!node || node.businessLineId !== line._id || node._id !== candidate.id ||
-            node.activationMode !== 'optional_tail' || !['completed', 'skipped'].includes(node.status) ||
-            node.status !== candidate.status || node.version !== candidate.version ||
+            node.activationMode !== 'optional_tail' || node.decision !== candidate.decision ||
+            node.version !== candidate.version ||
+            node.decisionAnalyticsSourceVersion !== candidate.decisionAnalyticsSourceVersion ||
+            !['pending', 'generated'].includes(node.decisionAnalyticsSnapshotStatus) ||
             node.decisionTimingStatus !== 'pending_calendar' || node.decisionWorkMinutes !== null ||
             node.decisionCalendarVersion !== null ||
             !sameDate(node.decisionStartedAt, candidate.startAt) ||
             !sameDate(node.decisionAt, candidate.endAt) ||
-            node.version === Number.MAX_SAFE_INTEGER || analyticsSourceVersion === Number.MAX_SAFE_INTEGER) {
+            node.version === Number.MAX_SAFE_INTEGER) {
           return false
         }
         const nextVersion = node.version + 1
-        const nextAnalyticsSourceVersion = (analyticsSourceVersion === null ? 0 : analyticsSourceVersion) + 1
         await transaction.collection('business_nodes').doc(node._id).update({ data: {
           decisionTimingStatus: 'calculated',
           decisionWorkMinutes: calculation.minutes,
           decisionCalendarVersion: calculation.calendarVersion,
-          analyticsSnapshotStatus: 'pending',
-          analyticsSourceVersion: nextAnalyticsSourceVersion,
+          decisionAnalyticsSnapshotStatus: 'pending',
           calendarRecalculatedAt: new Date(now),
           version: nextVersion,
           updatedAt: db.serverDate()
@@ -1234,8 +1237,9 @@ function createCloudCalendarRepository({
             !['approved', 'rejected'].includes(round.status)) return false
       } else if (candidate.kind === 'optional_tail_decision') {
         if (node.activationMode !== 'optional_tail' ||
-            !['completed', 'skipped'].includes(node.status) ||
-            node.status !== candidate.status || node.version !== candidate.version ||
+            node.decision !== candidate.decision || node.version !== candidate.version ||
+            node.decisionAnalyticsSourceVersion !== candidate.decisionAnalyticsSourceVersion ||
+            !['pending', 'generated'].includes(node.decisionAnalyticsSnapshotStatus) ||
             node.decisionTimingStatus !== 'pending_calendar' ||
             !sameDate(node.decisionStartedAt, candidate.startAt) ||
             !sameDate(node.decisionAt, candidate.endAt)) return false

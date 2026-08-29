@@ -119,7 +119,8 @@ test('无审核人节点直接完成后激活下一个必经节点且不创建�
     processingElapsedWorkMinutes: 0
   })
   data.business_nodes[1] = reviewerlessNode(data.business_nodes[1], {
-    processorUserIds: ['account-a'], status: 'waiting'
+    processorUserIds: ['account-a'], status: 'waiting', processingSlaWorkHours: 5,
+    processingDueStatus: 'not_started', processingDueAt: null
   })
   const { fake, repository } = createFeedbackHarness({
     seed: data,
@@ -128,6 +129,14 @@ test('无审核人节点直接完成后激活下一个必经节点且不创建�
         assert.deepEqual(startAt, new Date('2026-08-07T01:00:00.000Z'))
         assert.deepEqual(endAt, NOW)
         return { status: 'calculated', minutes: 120, calendarVersion: 'calendar-v1' }
+      },
+      async tryAddWorkMinutes(startAt, minutes) {
+        assert.deepEqual(startAt, NOW)
+        assert.equal(minutes, 300)
+        return {
+          status: 'calculated', dueAt: new Date('2026-08-07T08:00:00.000Z'),
+          calendarVersion: 'calendar-v2'
+        }
       }
     }
   })
@@ -138,7 +147,13 @@ test('无审核人节点直接完成后激活下一个必经节点且不创建�
   assert.equal(result.lineStatus, 'active')
   assert.equal(result.nextNodeId, 'line-1-node-002')
   assert.equal(result.optionalTailState, 'none')
-  assert.equal(fake.documents('business_nodes')[1].status, 'ready')
+  const activated = fake.documents('business_nodes')[1]
+  assert.equal(activated.status, 'ready')
+  assert.deepEqual(activated.processingStartedAt, NOW)
+  assert.equal(activated.processingDueStatus, 'calculated')
+  assert.deepEqual(activated.processingDueAt, new Date('2026-08-07T08:00:00.000Z'))
+  assert.equal(activated.processingCalendarVersion, 'calendar-v2')
+  assert.equal(activated.calendarNotificationStatus, 'not_required')
   assert.equal(fake.documents('node_review_rounds').length, 0)
   assert.equal(fake.documents('node_review_votes').length, 0)
   assert.equal(fake.documents('audit_logs')[0].action, 'COMPLETE_NODE_WITHOUT_REVIEW')
@@ -175,6 +190,7 @@ test('最后必经节点直接完成后进入追加节点待决定而不提前�
   assert.equal(Object.hasOwn(line, 'retentionStartedAt'), false)
   assert.equal(optional.status, 'awaiting_decision')
   assert.deepEqual(optional.decisionStartedAt, NOW)
+  assert.equal(optional.decisionReminderStatus, 'pending')
   assert.equal(optional.nextDecisionReminderWorkHour, 1)
   assert.equal(Object.hasOwn(optional, 'processingStartedAt'), false)
   assert.equal(fake.documents('notifications').filter(item =>

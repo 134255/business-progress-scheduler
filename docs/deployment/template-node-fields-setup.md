@@ -137,7 +137,7 @@
 | `business_nodes` | `workflowMode` 升序、`processingDueStatus` 升序、`_id` 升序 | 否 | 审核节点处理提醒有界扫描 |
 | `business_nodes` | `processingTimingStatus` 升序、`_id` 升序 | 否 | 待审核节点的处理工作分钟待补算扫描 |
 | `business_nodes` | `decisionTimingStatus` 升序、`_id` 升序 | 否 | 可选追加节点决定工作分钟待补算扫描 |
-| `business_nodes` | `optionalTailState` 升序、`nextDecisionReminderWorkHour` 升序、`decisionStartedAt` 升序、`_id` 升序 | 否 | 可选追加节点待决定提醒有界扫描 |
+| `business_nodes` | `status` 升序、`activationMode` 升序、`decisionReminderStatus` 升序、`_id` 升序 | 否 | 可选追加节点待决定提醒有界扫描 |
 | `business_nodes` | `processingDueStatus` 升序、`_id` 升序 | 否 | 日历恢复后的处理截止时间补算扫描 |
 | `business_nodes` | `feedbackClaimExpiresAt` 升序、`_id` 升序 | 否 | 丢失反馈预约的过期节点锁扫描 |
 | `business_nodes` | `feedbackClaimId` 升序、`_id` 升序 | 否 | 按固定反馈预约编号恢复节点锁 |
@@ -179,6 +179,7 @@
 | `public_node_shares` | `expiresAt` 升序、`_id` 升序 | 否 | 到期公开分享有界清理 |
 | `public_node_share_chunks` | `shareId` 升序、`_id` 升序 | 否 | 单个分享的凭证块有界清理 |
 | `business_nodes` | `analyticsSnapshotStatus` 升序、`_id` 升序 | 否 | 运营统计工作器的待生成节点候选游标 |
+| `business_nodes` | `decisionAnalyticsSnapshotStatus` 升序、`_id` 升序 | 否 | 可选追加节点决定统计的独立候选游标 |
 | `business_lines` | `analyticsSnapshotStatus` 升序、`_id` 升序 | 否 | 运营统计工作器的待生成业务候选游标 |
 | `operations_analytics_facts` | `businessLineId` 升序、`sourceType` 升序、`dimensionRole` 升序、`_id` 升序 | 否 | 业务事实汇总和来源重建 |
 | `operations_analytics_facts` | `templateId` 升序、`day` 升序、`_id` 升序 | 否 | 模板日期范围事实、筛选目录与权限下钻 |

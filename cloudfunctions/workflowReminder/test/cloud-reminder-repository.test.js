@@ -3,6 +3,8 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
 const { createFakeCloudDatabase } = require('../../businessApi/test/helpers/fake-cloud-database')
 const {
   createCloudReminderRepository,
@@ -61,9 +63,8 @@ test('处理提醒使用节点和工作小时确定性编号并只保存安全�
   assert.doesNotMatch(JSON.stringify(notes[0]), /openid|field|evidence|credential|request|summary/i)
 })
 
-test('处理提醒在事务内对停用账号、业务终态、节点轮次和混合账号关系失败关闭', async () => {
+test('处理提醒在事务内对业务终态、节点轮次和混合账号关系失败关闭', async () => {
   const cases = [
-    data => { data.users[0].status = 'disabled' },
     data => { data.business_lines[0].status = 'completed' },
     data => { data.business_nodes[0].processingRoundNumber = 2 },
     data => { data.business_lines[0].currentNodeId = 'node-other' },
@@ -386,7 +387,8 @@ function decisionSeed() {
   })
   Object.assign(data.business_nodes[0], {
     status: 'awaiting_decision', activationMode: 'optional_tail', version: 4,
-    reviewerUserIds: [], decisionStartedAt: START, nextDecisionReminderWorkHour: 1
+    reviewerUserIds: [], decisionStartedAt: START, decisionReminderStatus: 'pending',
+    nextDecisionReminderWorkHour: 1
   })
   delete data.business_nodes[0].processingDueAt
   delete data.business_nodes[0].processingStartedAt
@@ -416,13 +418,36 @@ test('可选尾节点决定候选分页并用确定性编号向全部活动候�
   assert.equal(fake.documents('business_nodes')[0].nextDecisionReminderWorkHour, 2)
 })
 
+test('带审核人的可选尾节点在待决定阶段仍向候选处理人发送小时提醒', async () => {
+  const data = decisionSeed()
+  data.business_nodes[0].reviewerUserIds = ['reviewer-a']
+  const { fake, repository } = harness(data)
+
+  assert.deepEqual(await repository.createOptionalTailDecisionReminder({
+    nodeId: 'node-1', expectedVersion: 4, accumulatedWorkHour: 1
+  }), { created: true })
+  assert.deepEqual(fake.documents('notifications')[0].recipientUserIds,
+    ['processor-a', 'processor-b'])
+})
+
+test('可选尾节点决定提醒只发送给当前活动候选处理人', async () => {
+  const data = decisionSeed()
+  data.users[0].status = 'disabled'
+  const { fake, repository } = harness(data)
+
+  assert.deepEqual(await repository.createOptionalTailDecisionReminder({
+    nodeId: 'node-1', expectedVersion: 4, accumulatedWorkHour: 1
+  }), { created: true })
+  assert.deepEqual(fake.documents('notifications')[0].recipientUserIds, ['processor-b'])
+  assert.equal(fake.documents('business_nodes')[0].nextDecisionReminderWorkHour, 2)
+})
+
 test('可选尾节点决定提醒在状态、版本、成员或账号变化时失败关闭', async () => {
   const cases = [
     data => { data.business_lines[0].optionalTailState = 'skipped' },
     data => { data.business_nodes[0].status = 'ready' },
     data => { data.business_nodes[0].activationMode = 'required' },
     data => { data.business_nodes[0].version = 5 },
-    data => { data.users[0].status = 'disabled' },
     data => { data.business_lines[0].memberUserIds = ['processor-a'] }
   ]
   for (const mutate of cases) {
@@ -433,4 +458,31 @@ test('可选尾节点决定提醒在状态、版本、成员或账号变化时�
     }), { created: false })
     assert.equal(fake.documents('notifications').length, 0)
   }
+})
+
+test('可选尾节点决定扫描查询与部署索引契约一致', async () => {
+  const { fake, repository } = harness(decisionSeed())
+  await repository.listDueOptionalTailDecisions({ limit: 40 })
+
+  const query = fake.queryCalls.find(call => call.collection === 'business_nodes' &&
+    call.criteria.status === 'awaiting_decision' && call.criteria.activationMode === 'optional_tail')
+  assert.equal(query.criteria.decisionReminderStatus, 'pending')
+  assert.deepEqual(query.order, [['_id', 'asc']])
+
+  const manual = fs.readFileSync(path.resolve(__dirname,
+    '../../../docs/deployment/template-node-fields-setup.md'), 'utf8')
+  assert.match(manual,
+    /`business_nodes` \| `status` 升序、`activationMode` 升序、`decisionReminderStatus` 升序、`_id` 升序 \| 否 \| 可选追加节点待决定提醒有界扫描/)
+})
+
+test('处理提醒只发送给当前活动候选处理人且不被其他停用候选人阻断', async () => {
+  const data = seed()
+  data.users[0].status = 'disabled'
+  const { fake, repository } = harness(data)
+
+  assert.deepEqual(await repository.createProcessingReminder({
+    nodeId: 'node-1', processingRoundNumber: 1, accumulatedWorkHour: 1
+  }), { created: true })
+  assert.deepEqual(fake.documents('notifications')[0].recipientUserIds, ['processor-b'])
+  assert.equal(fake.documents('business_nodes')[0].nextProcessingReminderWorkHour, 2)
 })
