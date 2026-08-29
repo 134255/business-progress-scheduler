@@ -73,6 +73,10 @@ test('普通活动用户可生成模板节点双柱图并按权限下钻业务�
           nodeProcessingPerBusiness: { averageMinutes: 60 },
           reviewPerBusiness: { averageMinutes: 20 }
         },
+        optionalTail: {
+          activationCount: 1, decisionCount: 2, activationRatePercent: 50,
+          averageDecisionMinutes: 7, pendingCount: 0, unrecordedCount: 0
+        },
         nodeSeries: [{ stableNodeId: 'stable-1', nodeName: '资料处理', sequence: 0,
           processing: { averageMinutes: 60, sampleCount: 2 }, review: { averageMinutes: 20, sampleCount: 2 } }],
         trendSeries: [{ bucket: '2026-08-17', processing: { averageMinutes: 60, sampleCount: 1 },
@@ -88,6 +92,8 @@ test('普通活动用户可生成模板节点双柱图并按权限下钻业务�
   })
   await page.onShow()
   assert.equal(page.data.summary.businessCompletionSampleLabel, '样本 2')
+  assert.equal(page.data.summary.optionalTailActivationLabel, '50%')
+  assert.equal(page.data.summary.optionalTailDecisionLabel, '7 分钟')
   assert.equal(page.data.nodeSeries[0].processingWidth, '100%')
   assert.equal(page.data.nodeSeries[0].reviewWidth, '33%')
   assert.equal(page.data.trendSeries[0].processingWidth, '100%')
@@ -100,6 +106,8 @@ test('普通活动用户可生成模板节点双柱图并按权限下钻业务�
   assert.match(wxml, /处理人/)
   assert.match(wxml, /中位数/)
   assert.match(wxml, /businessCompletionSampleLabel/)
+  assert.match(wxml, /追加节点启用率/)
+  assert.match(wxml, /平均决定工作时长/)
 })
 
 test('停用账号不能进入历史统计看板', () => {

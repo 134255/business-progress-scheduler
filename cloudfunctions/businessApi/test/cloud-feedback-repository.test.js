@@ -113,11 +113,24 @@ test('无审核人节点直接完成后激活下一个必经节点且不创建�
   data.notifications = []
   data.node_review_rounds = []
   data.node_review_votes = []
-  data.business_nodes[0] = reviewerlessNode(data.business_nodes[0])
+  data.business_nodes[0] = reviewerlessNode(data.business_nodes[0], {
+    processingStartedAt: new Date('2026-08-07T01:00:00.000Z'),
+    processingSlaWorkHours: 8,
+    processingElapsedWorkMinutes: 0
+  })
   data.business_nodes[1] = reviewerlessNode(data.business_nodes[1], {
     processorUserIds: ['account-a'], status: 'waiting'
   })
-  const { fake, repository } = createFeedbackHarness({ seed: data })
+  const { fake, repository } = createFeedbackHarness({
+    seed: data,
+    workTimeService: {
+      async workingMinutesBetween(startAt, endAt) {
+        assert.deepEqual(startAt, new Date('2026-08-07T01:00:00.000Z'))
+        assert.deepEqual(endAt, NOW)
+        return { status: 'calculated', minutes: 120, calendarVersion: 'calendar-v1' }
+      }
+    }
+  })
 
   const result = await repository.commitFeedback(directCompletion())
 
@@ -129,6 +142,12 @@ test('无审核人节点直接完成后激活下一个必经节点且不创建�
   assert.equal(fake.documents('node_review_rounds').length, 0)
   assert.equal(fake.documents('node_review_votes').length, 0)
   assert.equal(fake.documents('audit_logs')[0].action, 'COMPLETE_NODE_WITHOUT_REVIEW')
+  const completed = fake.documents('business_nodes')[0]
+  assert.equal(completed.processingTimingStatus, 'calculated')
+  assert.equal(completed.processingElapsedWorkMinutes, 120)
+  assert.equal(completed.processingRemainingWorkMinutes, 360)
+  assert.equal(completed.processingOverdueWorkMinutes, 0)
+  assert.equal(completed.processingCalendarVersion, 'calendar-v1')
 })
 
 test('最后必经节点直接完成后进入追加节点待决定而不提前冻结售后', async () => {

@@ -5,7 +5,8 @@ const crypto = require('node:crypto')
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,160}$/
 const FACT_TYPES = new Set([
   'business_completed', 'node_completed', 'processor_contribution',
-  'review_process', 'reviewer_process_contribution', 'review_response'
+  'review_process', 'reviewer_process_contribution', 'review_response',
+  'optional_tail_decision', 'optional_tail_activation'
 ])
 const TIMING_STATUSES = new Set(['calculated', 'pending_calendar', 'historical_unrecorded'])
 const GRAINS = new Set(['day', 'week', 'month'])
@@ -233,6 +234,43 @@ function timingFact(base, { factType, metric, dimensionRole = 'global', dimensio
   }
 }
 
+function eventFact(base, { factType, metric, sampleValue }) {
+  if (![0, 1].includes(sampleValue)) throw validationError()
+  return {
+    _id: factId(factType, [base.sourceId, metric, 'global']),
+    ...base,
+    factType,
+    metric,
+    dimensionRole: 'global',
+    dimensionUserId: '',
+    dimensionFilterToken: '',
+    dimensionDisplayName: '',
+    sampleValue
+  }
+}
+
+function ownStringArray(source, key) {
+  const value = ownValue(source, key)
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw validationError()
+  return value
+}
+
+function optionalTailFacts(base, node) {
+  if (ownValue(node, 'activationMode') !== 'optional_tail' ||
+      !['completed', 'skipped'].includes(ownValue(node, 'status'))) return []
+  const activated = node.status === 'completed'
+  return [
+    timingFact(base, {
+      factType: 'optional_tail_decision', metric: 'optional_tail_decision_duration',
+      timing: timingValue(node, 'decisionTimingStatus', 'decisionWorkMinutes')
+    }),
+    eventFact(base, {
+      factType: 'optional_tail_activation', metric: 'optional_tail_activation',
+      sampleValue: activated ? 1 : 0
+    })
+  ]
+}
+
 function materializeNodeSource(source) {
   if (!source || typeof source !== 'object' || !source.line || !source.node ||
       source.node.analyticsSnapshotStatus !== 'pending' ||
@@ -242,6 +280,8 @@ function materializeNodeSource(source) {
     line: source.line, node: source.node, sourceType: 'node', sourceId: source.node._id,
     sourceVersion: source.node.analyticsSourceVersion, day
   })
+  const optionalFacts = optionalTailFacts(base, source.node)
+  if (source.node.status === 'skipped') return optionalFacts
   const reviewMinuteByRoundId = new Map()
   const processorNames = new Map()
   for (const round of source.rounds) {
@@ -253,8 +293,29 @@ function materializeNodeSource(source) {
   }
   const reviewerNames = new Map()
   for (const vote of source.votes) reviewerNames.set(vote.reviewerUserId, safeText(vote.reviewerDisplayName))
-  const summary = summarizeNodeFacts({ rounds: source.rounds, votes: source.votes, reviewMinuteByRoundId })
+  let summary
+  if (source.rounds.length === 0 && source.node.workflowMode === 'review') {
+    const reviewers = ownStringArray(source.node, 'reviewerUserIds')
+    const processors = ownStringArray(source.node, 'processorUserIds')
+    const displays = ownStringArray(source.node, 'processorDisplayNames')
+    const feedback = source.feedback
+    if (reviewers.length || processors.length !== displays.length || !feedback ||
+        feedback._id !== source.node.latestFeedbackId || feedback.revision !== source.node.latestFeedbackRevision ||
+        feedback.action !== 'complete_node' || feedback.status !== 'completed' || feedback.publishState !== 'published' ||
+        !processors.includes(feedback.submittedBy)) throw validationError()
+    const processing = timingValue(source.node, 'processingTimingStatus', 'processingElapsedWorkMinutes')
+    summary = {
+      processing,
+      reviewProcess: { timingStatus: 'calculated', workMinutes: 0 },
+      processorContributions: [{ userId: feedback.submittedBy, ...processing }],
+      reviewerContributions: [], reviewResponses: []
+    }
+    processorNames.set(feedback.submittedBy, safeText(displays[processors.indexOf(feedback.submittedBy)]))
+  } else {
+    summary = summarizeNodeFacts({ rounds: source.rounds, votes: source.votes, reviewMinuteByRoundId })
+  }
   const facts = [
+    ...optionalFacts,
     timingFact(base, { factType: 'node_completed', metric: 'node_processing', timing: summary.processing }),
     ...summary.processorContributions.map(item => timingFact(base, {
       factType: 'processor_contribution', metric: 'node_processing', dimensionRole: 'processor',
@@ -291,14 +352,17 @@ async function materializeBusinessSource(source, workTimeService) {
         node.analyticsGeneratedVersion !== node.analyticsSourceVersion) throw validationError()
   }
   const line = source.line
+  const effectiveNodes = source.nodes.filter(node => node && node.status !== 'skipped')
+  if (!effectiveNodes.length) throw validationError()
   const nodeById = new Map()
-  for (const node of source.nodes) {
+  for (const node of effectiveNodes) {
     const nodeId = safeId(node._id)
     if (nodeById.has(nodeId) || node.businessLineId !== line._id) throw validationError()
     nodeById.set(nodeId, node)
   }
   const factKeys = new Set()
   for (const fact of source.nodeFacts) {
+    if (!['node_processing', 'node_review'].includes(ownValue(fact, 'metric'))) continue
     const node = nodeById.get(ownValue(fact, 'nodeId'))
     const metric = ownValue(fact, 'metric')
     const key = `${ownValue(fact, 'nodeId')}\0${metric}`
@@ -311,7 +375,7 @@ async function materializeBusinessSource(source, workTimeService) {
         ownValue(fact, 'stableNodeId') !== node.sourceTemplateNodeKey) throw validationError()
     factKeys.add(key)
   }
-  if (factKeys.size !== source.nodes.length * 2) throw validationError()
+  if (factKeys.size !== effectiveNodes.length * 2) throw validationError()
   const day = shanghaiDay(line.analyticsCompletedAt)
   const base = factBase({
     line, node: null, sourceType: 'business', sourceId: line._id,

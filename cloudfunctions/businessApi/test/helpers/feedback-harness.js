@@ -76,6 +76,7 @@ function createFeedbackHarness(overrides = {}) {
   const repository = createCloudFeedbackRepository({
     db: fake.db,
     clock: overrides.clock || (() => new Date(NOW)),
+    workTimeService: overrides.workTimeService,
     claimChunkSize: overrides.claimChunkSize || 40,
     wait: overrides.wait
   })
@@ -87,6 +88,7 @@ function createOptimisticFeedbackHarness(overrides = {}) {
   const repository = createCloudFeedbackRepository({
     db: fake.db,
     clock: () => new Date(NOW),
+    workTimeService: overrides.workTimeService,
     claimChunkSize: overrides.claimChunkSize || 40,
     wait: overrides.wait || (() => Promise.resolve())
   })

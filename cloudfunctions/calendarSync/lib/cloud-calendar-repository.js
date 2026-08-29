@@ -11,6 +11,8 @@ const REVIEW_PROCESSING_CURSOR_ID = 'calendar-review-processing-cursor'
 const REVIEW_CARRYOVER_CURSOR_ID = 'calendar-review-carryover-cursor'
 const REVIEW_TIMING_CARRYOVER_CURSOR_ID = 'calendar-review-timing-carryover-cursor'
 const REVIEW_RESPONSE_CURSOR_ID = 'calendar-review-vote-response-cursor'
+const OPTIONAL_TAIL_DECISION_CURSOR_ID = 'calendar-optional-tail-decision-cursor'
+const DIRECT_PROCESSING_COMPLETION_CURSOR_ID = 'calendar-direct-processing-completion-cursor'
 const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 function validDate(value) {
@@ -223,6 +225,28 @@ function validateReviewResponseCursor(document) {
   return { exists: true, cursorId: document.cursorId, version: document.version }
 }
 
+function validateOptionalTailDecisionCursor(document) {
+  if (!document) return { exists: false, cursorId: null, version: 0 }
+  if (document._id !== OPTIONAL_TAIL_DECISION_CURSOR_ID ||
+      document.kind !== 'optional_tail_decision' || safeVersion(document.version) === null ||
+      document.cursorId !== null &&
+      (typeof document.cursorId !== 'string' || !DOCUMENT_ID.test(document.cursorId))) {
+    throw new TypeError('optional tail decision cursor is invalid')
+  }
+  return { exists: true, cursorId: document.cursorId, version: document.version }
+}
+
+function validateDirectProcessingCompletionCursor(document) {
+  if (!document) return { exists: false, cursorId: null, version: 0 }
+  if (document._id !== DIRECT_PROCESSING_COMPLETION_CURSOR_ID ||
+      document.kind !== 'direct_processing_completion' || safeVersion(document.version) === null ||
+      document.cursorId !== null &&
+      (typeof document.cursorId !== 'string' || !DOCUMENT_ID.test(document.cursorId))) {
+    throw new TypeError('direct processing completion cursor is invalid')
+  }
+  return { exists: true, cursorId: document.cursorId, version: document.version }
+}
+
 async function readGenerationRecords(source, year, generationId, expectedLength) {
   const pageSize = 100
   const pages = Math.ceil((expectedLength + 1) / pageSize)
@@ -397,6 +421,108 @@ function createCloudCalendarRepository({
   async function listPendingDueCandidates({ limit } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 40) throw new TypeError('limit must be from 1 to 40')
     const result = []
+    const completionCursor = validateDirectProcessingCompletionCursor(
+      await readDocument(db, 'system_settings', DIRECT_PROCESSING_COMPLETION_CURSOR_ID)
+    )
+    const completionCriteria = { processingTimingStatus: 'pending_calendar', status: 'completed' }
+    if (completionCursor.cursorId !== null) completionCriteria._id = db.command.gt(completionCursor.cursorId)
+    const completionQuery = await db.collection('business_nodes')
+      .where(completionCriteria).orderBy('_id', 'asc').limit(limit).get()
+    const completionRows = Array.isArray(completionQuery && completionQuery.data)
+      ? completionQuery.data
+      : []
+    const completionNextCursorId = completionRows.length ? completionRows.at(-1)._id : null
+    const completionCursorClaimed = await db.runTransaction(async transaction => {
+      const current = validateDirectProcessingCompletionCursor(
+        await readDocument(transaction, 'system_settings', DIRECT_PROCESSING_COMPLETION_CURSOR_ID)
+      )
+      if (current.exists !== completionCursor.exists || current.cursorId !== completionCursor.cursorId ||
+          current.version !== completionCursor.version) return false
+      if (!completionRows.length && completionCursor.cursorId === null) return true
+      if (current.version === Number.MAX_SAFE_INTEGER) {
+        throw new TypeError('direct processing completion cursor is invalid')
+      }
+      const data = {
+        kind: 'direct_processing_completion', cursorId: completionNextCursorId,
+        version: current.version + 1, updatedAt: db.serverDate()
+      }
+      if (current.exists) {
+        await transaction.collection('system_settings').doc(DIRECT_PROCESSING_COMPLETION_CURSOR_ID)
+          .update({ data })
+      } else {
+        await transaction.collection('system_settings').doc(DIRECT_PROCESSING_COMPLETION_CURSOR_ID)
+          .set({ data })
+      }
+      return true
+    })
+    if (!completionCursorClaimed) return result
+    for (const node of completionRows) {
+      if (result.length >= limit) break
+      const base = safeNonNegativeInteger(node.processingElapsedWorkMinutes)
+      const total = safeNonNegativeInteger(node.processingSlaWorkHours * 60)
+      if (node.workflowMode !== 'review' || !Array.isArray(node.reviewerUserIds) ||
+          node.reviewerUserIds.length !== 0 || safeVersion(node.version) === null ||
+          typeof node.businessLineId !== 'string' || !validDate(node.processingStartedAt) ||
+          !validDate(node.completedAt) || node.processingStartedAt.getTime() > node.completedAt.getTime() ||
+          base === null || total === null || total < 1 || node.processingCalendarVersion !== null) continue
+      result.push({
+        kind: 'direct_processing_completion', id: node._id,
+        businessLineId: node.businessLineId, nodeId: node._id,
+        status: node.status, version: node.version,
+        startAt: node.processingStartedAt, endAt: node.completedAt,
+        baseElapsedWorkMinutes: base, totalWorkMinutes: total
+      })
+    }
+    if (result.length >= limit) return result
+    const decisionCursor = validateOptionalTailDecisionCursor(
+      await readDocument(db, 'system_settings', OPTIONAL_TAIL_DECISION_CURSOR_ID)
+    )
+    const decisionCriteria = { decisionTimingStatus: 'pending_calendar' }
+    if (decisionCursor.cursorId !== null) decisionCriteria._id = db.command.gt(decisionCursor.cursorId)
+    const decisionQuery = await db.collection('business_nodes')
+      .where(decisionCriteria).orderBy('_id', 'asc').limit(limit).get()
+    const decisionRows = Array.isArray(decisionQuery && decisionQuery.data) ? decisionQuery.data : []
+    const decisionNextCursorId = decisionRows.length ? decisionRows.at(-1)._id : null
+    const decisionCursorClaimed = await db.runTransaction(async transaction => {
+      const current = validateOptionalTailDecisionCursor(
+        await readDocument(transaction, 'system_settings', OPTIONAL_TAIL_DECISION_CURSOR_ID)
+      )
+      if (current.exists !== decisionCursor.exists || current.cursorId !== decisionCursor.cursorId ||
+          current.version !== decisionCursor.version) return false
+      if (!decisionRows.length && decisionCursor.cursorId === null) return true
+      if (current.version === Number.MAX_SAFE_INTEGER) {
+        throw new TypeError('optional tail decision cursor is invalid')
+      }
+      const data = {
+        kind: 'optional_tail_decision', cursorId: decisionNextCursorId,
+        version: current.version + 1, updatedAt: db.serverDate()
+      }
+      if (current.exists) {
+        await transaction.collection('system_settings').doc(OPTIONAL_TAIL_DECISION_CURSOR_ID)
+          .update({ data })
+      } else {
+        await transaction.collection('system_settings').doc(OPTIONAL_TAIL_DECISION_CURSOR_ID)
+          .set({ data })
+      }
+      return true
+    })
+    if (!decisionCursorClaimed) return result
+    for (const node of decisionRows) {
+      if (result.length >= limit) break
+      if (node.activationMode !== 'optional_tail' ||
+          !['completed', 'skipped'].includes(node.status) ||
+          safeVersion(node.version) === null || typeof node.businessLineId !== 'string' ||
+          !validDate(node.decisionStartedAt) || !validDate(node.decisionAt) ||
+          node.decisionStartedAt.getTime() > node.decisionAt.getTime() ||
+          node.decisionWorkMinutes !== null || node.decisionCalendarVersion !== null) continue
+      result.push({
+        kind: 'optional_tail_decision', id: node._id,
+        businessLineId: node.businessLineId, nodeId: node._id,
+        status: node.status, version: node.version,
+        startAt: node.decisionStartedAt, endAt: node.decisionAt
+      })
+    }
+    if (result.length >= limit) return result
     const responseCursor = validateReviewResponseCursor(
       await readDocument(db, 'system_settings', REVIEW_RESPONSE_CURSOR_ID)
     )
@@ -668,9 +794,13 @@ function createCloudCalendarRepository({
     const reviewTimingCarryoverCalculation = candidate &&
       candidate.kind === 'review_timing_carryover'
     const reviewResponseCalculation = candidate && candidate.kind === 'review_response'
+    const optionalTailDecisionCalculation = candidate && candidate.kind === 'optional_tail_decision'
+    const directProcessingCompletionCalculation = candidate &&
+      candidate.kind === 'direct_processing_completion'
     if (!candidate || !calculation || calculation.status !== 'calculated' ||
         (reviewProcessingCalculation || carryoverCalculation || reviewTimingCarryoverCalculation ||
-          reviewResponseCalculation
+          reviewResponseCalculation || optionalTailDecisionCalculation ||
+          directProcessingCompletionCalculation
           ? safeNonNegativeInteger(calculation.minutes) === null
           : !validDate(calculation.dueAt)) ||
         carryoverCalculation && validDate(candidate.resumeAt) &&
@@ -687,8 +817,68 @@ function createCloudCalendarRepository({
     return db.runTransaction(async transaction => {
       const line = await readDocument(transaction, 'business_lines', candidate.businessLineId)
       if (!line || !carryoverCalculation && !reviewTimingCarryoverCalculation &&
-          !reviewResponseCalculation &&
+          !reviewResponseCalculation && !optionalTailDecisionCalculation &&
+          !directProcessingCompletionCalculation &&
           line.status !== 'active') return false
+      if (candidate.kind === 'direct_processing_completion') {
+        const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
+        const analyticsSourceVersion = safeVersion(node && node.analyticsSourceVersion)
+        if (!node || node.businessLineId !== line._id || node._id !== candidate.id ||
+            node.workflowMode !== 'review' || !Array.isArray(node.reviewerUserIds) ||
+            node.reviewerUserIds.length !== 0 || node.status !== 'completed' ||
+            node.status !== candidate.status || node.version !== candidate.version ||
+            node.processingTimingStatus !== 'pending_calendar' ||
+            node.processingElapsedWorkMinutes !== candidate.baseElapsedWorkMinutes ||
+            node.processingSlaWorkHours * 60 !== candidate.totalWorkMinutes ||
+            node.processingCalendarVersion !== null ||
+            !sameDate(node.processingStartedAt, candidate.startAt) ||
+            !sameDate(node.completedAt, candidate.endAt) ||
+            node.version === Number.MAX_SAFE_INTEGER || analyticsSourceVersion === Number.MAX_SAFE_INTEGER) {
+          return false
+        }
+        const elapsed = candidate.baseElapsedWorkMinutes + calculation.minutes
+        if (!Number.isSafeInteger(elapsed)) return false
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          processingTimingStatus: 'calculated',
+          processingElapsedWorkMinutes: elapsed,
+          processingRemainingWorkMinutes: Math.max(0, candidate.totalWorkMinutes - elapsed),
+          processingOverdueWorkMinutes: Math.max(0, elapsed - candidate.totalWorkMinutes),
+          processingCalendarVersion: calculation.calendarVersion,
+          analyticsSnapshotStatus: 'pending',
+          analyticsSourceVersion: (analyticsSourceVersion === null ? 0 : analyticsSourceVersion) + 1,
+          calendarRecalculatedAt: new Date(now),
+          version: node.version + 1,
+          updatedAt: db.serverDate()
+        } })
+        return true
+      }
+      if (candidate.kind === 'optional_tail_decision') {
+        const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
+        const analyticsSourceVersion = safeVersion(node && node.analyticsSourceVersion)
+        if (!node || node.businessLineId !== line._id || node._id !== candidate.id ||
+            node.activationMode !== 'optional_tail' || !['completed', 'skipped'].includes(node.status) ||
+            node.status !== candidate.status || node.version !== candidate.version ||
+            node.decisionTimingStatus !== 'pending_calendar' || node.decisionWorkMinutes !== null ||
+            node.decisionCalendarVersion !== null ||
+            !sameDate(node.decisionStartedAt, candidate.startAt) ||
+            !sameDate(node.decisionAt, candidate.endAt) ||
+            node.version === Number.MAX_SAFE_INTEGER || analyticsSourceVersion === Number.MAX_SAFE_INTEGER) {
+          return false
+        }
+        const nextVersion = node.version + 1
+        const nextAnalyticsSourceVersion = (analyticsSourceVersion === null ? 0 : analyticsSourceVersion) + 1
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          decisionTimingStatus: 'calculated',
+          decisionWorkMinutes: calculation.minutes,
+          decisionCalendarVersion: calculation.calendarVersion,
+          analyticsSnapshotStatus: 'pending',
+          analyticsSourceVersion: nextAnalyticsSourceVersion,
+          calendarRecalculatedAt: new Date(now),
+          version: nextVersion,
+          updatedAt: db.serverDate()
+        } })
+        return true
+      }
       if (candidate.kind === 'review_response') {
         const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
         const round = await readDocument(transaction, 'node_review_rounds', candidate.reviewRoundId)
@@ -993,7 +1183,8 @@ function createCloudCalendarRepository({
 
   async function ensurePendingCalendarWarning({ candidate } = {}) {
     if (!candidate || !['processing', 'review_processing', 'review_processing_carryover',
-      'review_timing_carryover', 'review_response'].includes(candidate.kind) ||
+      'review_timing_carryover', 'review_response', 'optional_tail_decision',
+      'direct_processing_completion'].includes(candidate.kind) ||
         typeof candidate.id !== 'string' ||
         typeof candidate.businessLineId !== 'string' ||
         (candidate.kind === 'review_response'
@@ -1006,10 +1197,18 @@ function createCloudCalendarRepository({
       const nodeId = candidate.kind === 'processing' ? candidate.id : candidate.nodeId
       const node = await readDocument(transaction, 'business_nodes', nodeId)
       if (!line || !node || node.businessLineId !== line._id ||
-          !['review_processing_carryover', 'review_timing_carryover', 'review_response']
+          !['review_processing_carryover', 'review_timing_carryover', 'review_response',
+            'optional_tail_decision', 'direct_processing_completion']
             .includes(candidate.kind) &&
           (line.status !== 'active' || line.currentNodeId !== nodeId)) return false
-      if (candidate.kind === 'processing') {
+      if (candidate.kind === 'direct_processing_completion') {
+        if (node.workflowMode !== 'review' || !Array.isArray(node.reviewerUserIds) ||
+            node.reviewerUserIds.length !== 0 || node.status !== 'completed' ||
+            node.status !== candidate.status || node.version !== candidate.version ||
+            node.processingTimingStatus !== 'pending_calendar' ||
+            !sameDate(node.processingStartedAt, candidate.startAt) ||
+            !sameDate(node.completedAt, candidate.endAt)) return false
+      } else if (candidate.kind === 'processing') {
         if (node.status !== candidate.status || node.version !== candidate.version ||
             !PROCESSING_STATUSES.has(node.status) || node.processingDueStatus !== 'pending_calendar') return false
       } else if (candidate.kind === 'review_processing') {
@@ -1033,6 +1232,13 @@ function createCloudCalendarRepository({
             node.version !== candidate.nodeVersion || round.version !== candidate.version ||
             round.businessLineId !== line._id || round.nodeId !== node._id ||
             !['approved', 'rejected'].includes(round.status)) return false
+      } else if (candidate.kind === 'optional_tail_decision') {
+        if (node.activationMode !== 'optional_tail' ||
+            !['completed', 'skipped'].includes(node.status) ||
+            node.status !== candidate.status || node.version !== candidate.version ||
+            node.decisionTimingStatus !== 'pending_calendar' ||
+            !sameDate(node.decisionStartedAt, candidate.startAt) ||
+            !sameDate(node.decisionAt, candidate.endAt)) return false
       } else {
         const round = await readDocument(transaction, 'node_review_rounds', candidate.reviewRoundId)
         const vote = await readDocument(transaction, 'node_review_votes', candidate.id)

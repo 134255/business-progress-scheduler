@@ -227,3 +227,59 @@ test('驳回后的待补算旧处理段先修正剩余分钟再计算返工截�
   assert.equal(applied[0].calculation.minutes, 180)
   assert.deepEqual(applied[0].calculation.dueAt, new Date('2026-08-13T03:00:00Z'))
 })
+
+test('可选尾节点决策待补算使用不可变决策区间', async () => {
+  const candidate = {
+    kind: 'optional_tail_decision', id: 'node-2', businessLineId: 'line-1', nodeId: 'node-2',
+    startAt: new Date('2026-08-11T01:00:00Z'), endAt: new Date('2026-08-11T02:07:00Z')
+  }
+  const applied = []
+  const service = createCalendarSyncService({
+    holidayClient: { async fetchYear(year) { return { year, sourceVersion: `v${year}`, days: [] } } },
+    calendarRepository: {
+      async replaceYear() {}, async listPendingDueCandidates() { return [candidate] },
+      async applyDueCalculation(value) { applied.push(value); return true },
+      async ensurePendingCalendarWarning() { throw new Error('unexpected') }
+    },
+    workTimeService: {
+      async workingMinutesBetween(startAt, endAt) {
+        assert.deepEqual([startAt, endAt], [candidate.startAt, candidate.endAt])
+        return { status: 'calculated', minutes: 67, calendarVersion: 'calendar-decision' }
+      },
+      async tryAddWorkMinutes() { throw new Error('unexpected') }
+    }
+  })
+
+  const result = await service.run({ now: new Date('2026-08-11T03:00:00Z') })
+
+  assert.equal(result.recalculation.updated, 1)
+  assert.equal(applied[0].calculation.minutes, 67)
+})
+
+test('无审核直接完成的处理时长待补算使用完成区间', async () => {
+  const candidate = {
+    kind: 'direct_processing_completion', id: 'node-1', businessLineId: 'line-1', nodeId: 'node-1',
+    startAt: new Date('2026-08-11T01:00:00Z'), endAt: new Date('2026-08-11T04:00:00Z')
+  }
+  const applied = []
+  const service = createCalendarSyncService({
+    holidayClient: { async fetchYear(year) { return { year, sourceVersion: `v${year}`, days: [] } } },
+    calendarRepository: {
+      async replaceYear() {}, async listPendingDueCandidates() { return [candidate] },
+      async applyDueCalculation(value) { applied.push(value); return true },
+      async ensurePendingCalendarWarning() { throw new Error('unexpected') }
+    },
+    workTimeService: {
+      async workingMinutesBetween(startAt, endAt) {
+        assert.deepEqual([startAt, endAt], [candidate.startAt, candidate.endAt])
+        return { status: 'calculated', minutes: 180, calendarVersion: 'calendar-processing' }
+      },
+      async tryAddWorkMinutes() { throw new Error('unexpected') }
+    }
+  })
+
+  const result = await service.run({ now: new Date('2026-08-11T05:00:00Z') })
+
+  assert.equal(result.recalculation.updated, 1)
+  assert.equal(applied[0].calculation.minutes, 180)
+})

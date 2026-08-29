@@ -1076,3 +1076,100 @@ test('个人审核响应补算在关联版本变化时不覆盖并可写脱敏�
   }), false)
   assert.equal(fake.documents('node_review_votes')[0].reviewResponseTimingStatus, 'pending_calendar')
 })
+
+test('可选尾节点决策以独立游标签发并按不可变版本原子回写', async () => {
+  const startAt = new Date('2026-08-11T01:00:00Z')
+  const endAt = new Date('2026-08-11T02:07:00Z')
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'completed', currentNodeId: 'node-2' }],
+    business_nodes: [{
+      _id: 'node-2', businessLineId: 'line-1', status: 'skipped', version: 4,
+      activationMode: 'optional_tail', decisionTimingStatus: 'pending_calendar',
+      decisionStartedAt: startAt, decisionAt: endAt, decisionWorkMinutes: null,
+      decisionCalendarVersion: null, analyticsSnapshotStatus: 'generated',
+      analyticsSourceVersion: 4, analyticsGeneratedVersion: 4
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+
+  const candidate = (await repository.listPendingDueCandidates({ limit: 40 }))
+    .find(item => item.kind === 'optional_tail_decision')
+  assert.ok(candidate)
+  assert.equal(candidate.version, 4)
+  assert.deepEqual([candidate.startAt, candidate.endAt], [startAt, endAt])
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 67, calendarVersion: 'calendar-decision' },
+    now: new Date('2026-08-11T03:00:00Z')
+  }), true)
+
+  const [node] = fake.documents('business_nodes')
+  assert.equal(node.decisionTimingStatus, 'calculated')
+  assert.equal(node.decisionWorkMinutes, 67)
+  assert.equal(node.decisionCalendarVersion, 'calendar-decision')
+  assert.equal(node.analyticsSnapshotStatus, 'pending')
+  assert.equal(node.analyticsSourceVersion, 5)
+  assert.equal(node.version, 5)
+})
+
+test('可选尾节点决策候选在版本变化后拒绝覆盖', async () => {
+  const startAt = new Date('2026-08-11T01:00:00Z')
+  const endAt = new Date('2026-08-11T02:07:00Z')
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-2' }],
+    business_nodes: [{
+      _id: 'node-2', businessLineId: 'line-1', status: 'completed', version: 4,
+      activationMode: 'optional_tail', decisionTimingStatus: 'pending_calendar',
+      decisionStartedAt: startAt, decisionAt: endAt, decisionWorkMinutes: null,
+      decisionCalendarVersion: null
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const candidate = (await repository.listPendingDueCandidates({ limit: 40 }))
+    .find(item => item.kind === 'optional_tail_decision')
+  fake.replace('business_nodes', 'node-2', {
+    ...fake.documents('business_nodes')[0], version: 5
+  })
+
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 67, calendarVersion: 'calendar-decision' },
+    now: new Date('2026-08-11T03:00:00Z')
+  }), false)
+})
+
+test('无审核直接完成处理时长以独立游标补算并刷新统计来源', async () => {
+  const startAt = new Date('2026-08-11T01:00:00Z')
+  const endAt = new Date('2026-08-11T04:00:00Z')
+  const fake = createFakeCloudDatabase({
+    business_lines: [{ _id: 'line-1', status: 'active', currentNodeId: 'node-2' }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', status: 'completed', version: 4,
+      workflowMode: 'review', reviewerUserIds: [], processingTimingStatus: 'pending_calendar',
+      processingStartedAt: startAt, completedAt: endAt, processingElapsedWorkMinutes: 30,
+      processingRemainingWorkMinutes: 450, processingOverdueWorkMinutes: 0,
+      processingSlaWorkHours: 8, processingCalendarVersion: null,
+      analyticsSnapshotStatus: 'generated', analyticsSourceVersion: 4,
+      analyticsGeneratedVersion: 4
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const candidate = (await repository.listPendingDueCandidates({ limit: 40 }))
+    .find(item => item.kind === 'direct_processing_completion')
+  assert.ok(candidate)
+  assert.equal(candidate.baseElapsedWorkMinutes, 30)
+
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 180, calendarVersion: 'calendar-processing' },
+    now: new Date('2026-08-11T05:00:00Z')
+  }), true)
+  const [node] = fake.documents('business_nodes')
+  assert.equal(node.processingTimingStatus, 'calculated')
+  assert.equal(node.processingElapsedWorkMinutes, 210)
+  assert.equal(node.processingRemainingWorkMinutes, 270)
+  assert.equal(node.processingOverdueWorkMinutes, 0)
+  assert.equal(node.processingCalendarVersion, 'calendar-processing')
+  assert.equal(node.analyticsSnapshotStatus, 'pending')
+  assert.equal(node.analyticsSourceVersion, 5)
+})

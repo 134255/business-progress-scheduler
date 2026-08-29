@@ -75,6 +75,28 @@ test('确定性事实重复应用不重复累计且生成后原子关闭来源',
   assert.equal(fake.transactionRuns.every(run => run.operations <= 100), true)
 })
 
+test('追加节点启用事件按样本值累计而不冒充工时事实', async () => {
+  const { fake, repository } = harness({
+    business_lines: [{ _id: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],
+    business_nodes: [{ _id: 'node-1', businessLineId: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],
+    operations_analytics_facts: [], operations_analytics_daily: []
+  })
+  const event = {
+    _id: 'analytics-fact-event', sourceType: 'node', sourceId: 'node-1', sourceVersion: 1,
+    businessLineId: 'line-1', nodeId: 'node-1', day: '2026-08-29', templateId: 'template-1',
+    templateVersion: 1, stableNodeId: 'tail-1', nodeName: '追加回访', nodeSequence: 1,
+    factType: 'optional_tail_activation', metric: 'optional_tail_activation', dimensionRole: 'global',
+    dimensionUserId: '', dimensionFilterToken: '', dimensionDisplayName: '', sampleValue: 1
+  }
+  assert.deepEqual(await repository.applyFact(event), { applied: true })
+  assert.deepEqual(await repository.applyFact(event), { applied: false })
+  const rollup = fake.documents('operations_analytics_daily')[0]
+  assert.equal(rollup.sampleCount, 1)
+  assert.equal(rollup.totalMinutes, 1)
+  assert.equal(rollup.minimumMinutes, null)
+  assert.equal(rollup.maximumMinutes, null)
+})
+
 test('待补算和历史未记录只增加各自缺失计数', async () => {
   const { fake, repository } = harness({
     business_lines: [{ _id: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],

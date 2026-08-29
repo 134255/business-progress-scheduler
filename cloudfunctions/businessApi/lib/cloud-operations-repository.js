@@ -420,6 +420,38 @@ function createCloudOperationsRepository({ db }) {
     }
   }
 
+  function optionalTailSummary(rows) {
+    const decision = analyticsMetric(rows.filter(item => item.metric === 'optional_tail_decision_duration'))
+    const activationRows = rows.filter(item => item.metric === 'optional_tail_activation')
+    let decisionCount = 0
+    let activationCount = 0
+    if (activationRows.some(row => Object.hasOwn(row, 'sampleCount'))) {
+      for (const row of activationRows) {
+        if (!Number.isSafeInteger(row.sampleCount) || row.sampleCount < 0 ||
+            !Number.isSafeInteger(row.totalMinutes) || row.totalMinutes < 0 || row.totalMinutes > row.sampleCount ||
+            decisionCount > Number.MAX_SAFE_INTEGER - row.sampleCount ||
+            activationCount > Number.MAX_SAFE_INTEGER - row.totalMinutes) throw createError('VALIDATION_ERROR')
+        decisionCount += row.sampleCount
+        activationCount += row.totalMinutes
+      }
+    } else {
+      for (const row of activationRows) {
+        if (![0, 1].includes(row.sampleValue)) throw createError('VALIDATION_ERROR')
+        decisionCount += 1
+        activationCount += row.sampleValue
+      }
+    }
+    if (decision.sampleCount !== decisionCount) throw createError('VALIDATION_ERROR')
+    return {
+      activationCount,
+      decisionCount,
+      activationRatePercent: decisionCount ? Math.round(activationCount * 1000 / decisionCount) / 10 : null,
+      averageDecisionMinutes: decision.averageMinutes,
+      pendingCount: decision.pendingCount,
+      unrecordedCount: decision.unrecordedCount
+    }
+  }
+
   function analyticsBucket(day, grain) {
     if (grain === 'day') return day
     if (grain === 'month') return day.slice(0, 7)
@@ -588,6 +620,7 @@ function createCloudOperationsRepository({ db }) {
         nodeProcessingPerBusiness: analyticsMetric(facts.filter(item => item.metric === 'business_node_processing_total')),
         reviewPerBusiness: analyticsMetric(facts.filter(item => item.metric === 'business_review_total'))
       },
+      optionalTail: optionalTailSummary(facts),
       nodeSeries,
       trendSeries: [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([bucket, rows]) => ({
         bucket,

@@ -423,12 +423,13 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     return names
   }
 
-  async function snapshotFromFeedback(node, lineId) {
+  async function snapshotFromFeedback(node, lineId, { completed = false } = {}) {
     const feedback = await readDocument(db, COLLECTIONS.feedback, node.latestFeedbackId)
     if (!feedback || feedback.businessLineId !== lineId || feedback.nodeId !== node._id ||
         feedback.processingRoundNumber !== node.processingRoundNumber ||
         feedback.revision !== node.latestFeedbackRevision || feedback.publishState !== 'published' ||
-        !['save_progress', 'mark_blocked'].includes(feedback.action)) throw sourceError()
+        !(completed ? feedback.action === 'complete_node'
+          : ['save_progress', 'mark_blocked'].includes(feedback.action))) throw sourceError()
     return {
       fieldValues: safeFieldValues(feedback.fieldValues || []),
       processingComment: safeText(feedback.processingComment || ''),
@@ -475,9 +476,18 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
         throw sourceError()
       }
       let dynamic = { fieldValues: [], processingComment: '', reviewComments: [], evidenceFileNames: [] }
+      if (node.activationMode === 'optional_tail' && ['awaiting_decision', 'skipped'].includes(node.status)) continue
       if (node.status === 'in_progress') dynamic = await snapshotFromFeedback(node, businessLineId)
       else if (node.status === 'pending_review') dynamic = await snapshotFromRound(node, businessLineId, false)
-      else if (node.status === 'completed') dynamic = await snapshotFromRound(node, businessLineId, true)
+      else if (node.status === 'completed') {
+        if (typeof node.lastReviewRoundId === 'string' && node.lastReviewRoundId) {
+          dynamic = await snapshotFromRound(node, businessLineId, true)
+        } else {
+          const reviewers = exactStringArray(node.reviewerUserIds || [], { maximum: 100 })
+          if (!reviewers || reviewers.length) throw sourceError()
+          dynamic = await snapshotFromFeedback(node, businessLineId, { completed: true })
+        }
+      }
       else if (!['ready', 'waiting'].includes(node.status)) throw sourceError()
       projected.push({ nodeId: node._id, name: node.name, code: node.nodeCode, ...dynamic })
     }

@@ -4,6 +4,7 @@ const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
 
 const CHUNK_SIZE = 40
+const RELATION_PAGE_SIZE = 100
 const TEMP_URL_SECONDS = 300
 const CLOUD_FILE_ID = /^cloud:\/\/[A-Za-z0-9._:/-]{1,1000}$/
 const SAFE_KEY = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
@@ -39,26 +40,29 @@ function exactIds(value, key, { nonEmpty = true } = {}) {
   return result
 }
 
-function assertCreateAccess({ actor, line, node, round, businessLineId, nodeId }) {
+function assertCreateAccess({ actor, line, node, source, reviewed, businessLineId, nodeId }) {
   if (!actor || actor.status !== 'active' || line._id !== businessLineId || node._id !== nodeId ||
-      node.businessLineId !== businessLineId || round.businessLineId !== businessLineId || round.nodeId !== nodeId ||
+      node.businessLineId !== businessLineId || source.businessLineId !== businessLineId || source.nodeId !== nodeId ||
       !['active', 'in_progress', 'completed', 'closed', 'cancelled'].includes(line.status) ||
       node.status !== 'completed' || node.workflowMode !== 'review' ||
-      node.lastReviewRoundId !== round._id || round.status !== 'approved' || round.finalDecision !== 'approved') {
+      (reviewed
+        ? node.lastReviewRoundId !== source._id || source.status !== 'approved' || source.finalDecision !== 'approved'
+        : node.lastReviewRoundId != null || source.action !== 'complete_node' || source.status !== 'completed' ||
+          source.publishState !== 'published' || source._id !== node.latestFeedbackId ||
+          source.revision !== node.latestFeedbackRevision || source.processingRoundNumber !== node.processingRoundNumber)) {
     throw createError('FORBIDDEN')
   }
   const managers = exactIds(line, 'managerUserIds')
   const members = exactIds(line, 'memberUserIds')
   const processors = exactIds(node, 'processorUserIds')
-  const reviewers = exactIds(node, 'reviewerUserIds')
-  const roundReviewers = exactIds(round, 'reviewerUserIds')
+  const reviewers = exactIds(node, 'reviewerUserIds', { nonEmpty: reviewed })
+  const sourceReviewers = reviewed ? exactIds(source, 'reviewerUserIds') : []
+  if (!reviewed && reviewers.length) throw createError('FORBIDDEN')
   const canShare = managers.includes(actor._id) || processors.includes(actor._id) ||
-    reviewers.includes(actor._id) && roundReviewers.includes(actor._id)
+    reviewers.includes(actor._id) && sourceReviewers.includes(actor._id)
   if (!members.includes(actor._id) || !canShare) {
     throw createError('FORBIDDEN')
   }
-  const evidenceIds = exactIds(round, 'evidenceIds', { nonEmpty: false })
-  return evidenceIds
 }
 
 function safeText(value, maximum = 500) {
@@ -162,14 +166,14 @@ function displayNames(round, key) {
 }
 
 function headerSnapshot({
-  line, node, round, shareId, actorId, createdAt, expiresAt, evidenceCount, requestKeyHash, inputHash
+  line, node, source, reviewed, shareId, actorId, createdAt, expiresAt, evidenceCount, requestKeyHash, inputHash
 }) {
   const definitions = safeDefinitions(node.fieldDefinitions || [])
   return {
     publishState: 'reserved',
     businessLineId: line._id,
     nodeId: node._id,
-    reviewRoundId: round._id,
+    reviewRoundId: reviewed ? source._id : null,
     createdByUserId: actorId,
     requestKeyHash,
     inputHash,
@@ -182,14 +186,14 @@ function headerSnapshot({
     businessName: safeText(line.name, 200),
     nodeCode: safeText(node.nodeCode, 128),
     nodeName: safeText(node.name, 200),
-    completedAt: strictDate(node.completedAt || round.decidedAt),
-    processingRoundNumber: Number.isSafeInteger(round.processingRoundNumber) ? round.processingRoundNumber : 0,
-    reviewRoundNumber: Number.isSafeInteger(round.reviewRoundNumber) ? round.reviewRoundNumber : 0,
-    processingComment: safeText(round.processingComment, 2000),
+    completedAt: strictDate(node.completedAt || source.decidedAt || source.createdAt),
+    processingRoundNumber: Number.isSafeInteger(source.processingRoundNumber) ? source.processingRoundNumber : 0,
+    reviewRoundNumber: reviewed && Number.isSafeInteger(source.reviewRoundNumber) ? source.reviewRoundNumber : 0,
+    processingComment: safeText(source.processingComment, 2000),
     fieldDefinitions: definitions,
-    fieldValues: safeFieldValues(round.fieldValues || {}, definitions),
-    processorDisplayNames: displayNames(round, 'processorDisplayNames'),
-    reviewerDisplayNames: displayNames(round, 'reviewerDisplayNames')
+    fieldValues: safeFieldValues(source.fieldValues || {}, definitions),
+    processorDisplayNames: displayNames(source, 'processorDisplayNames'),
+    reviewerDisplayNames: displayNames(source, 'reviewerDisplayNames')
   }
 }
 
@@ -210,15 +214,64 @@ function createCloudShareRepository({ db, cloud, clock = () => new Date() }) {
   const shares = db.collection('public_node_shares')
   const chunks = db.collection('public_node_share_chunks')
 
-  async function readCreationState(transaction, actorId, businessLineId, nodeId) {
+  async function preloadDirectEvidence(businessLineId, nodeId) {
+    const node = await getRequired(nodes.doc(nodeId))
+    if (typeof node.lastReviewRoundId === 'string' && node.lastReviewRoundId) return null
+    const feedbackId = typeof node.latestFeedbackId === 'string' ? node.latestFeedbackId : ''
+    if (!feedbackId) throw createError('FORBIDDEN')
+    const ordered = []
+    let cursor = ''
+    while (true) {
+      const criteria = { feedbackId }
+      if (cursor) criteria._id = db.command.gt(cursor)
+      const page = await evidences.where(criteria).orderBy('_id', 'asc').limit(RELATION_PAGE_SIZE).get()
+      if (!page || !Array.isArray(page.data)) throw createError('FORBIDDEN')
+      for (const evidence of page.data) {
+        const order = ownDataValue(evidence, 'feedbackEvidenceOrder')
+        if (!evidence || evidence.businessLineId !== businessLineId || evidence.nodeId !== nodeId ||
+            evidence.feedbackId !== feedbackId || evidence.attachmentState !== 'attached' ||
+            !order.valid || !Number.isSafeInteger(order.value) || order.value < 0) throw createError('FORBIDDEN')
+        ordered.push({ id: evidence._id, order: order.value })
+      }
+      if (page.data.length < RELATION_PAGE_SIZE) break
+      const nextCursor = page.data.at(-1)._id
+      if (typeof nextCursor !== 'string' || !nextCursor || nextCursor === cursor) throw createError('FORBIDDEN')
+      cursor = nextCursor
+    }
+    ordered.sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    for (let index = 0; index < ordered.length; index += 1) {
+      if (ordered[index].order !== index || index > 0 && ordered[index - 1].id === ordered[index].id) {
+        throw createError('FORBIDDEN')
+      }
+    }
+    return { feedbackId, evidenceIds: ordered.map(item => item.id) }
+  }
+
+  async function readCreationState(transaction, actorId, businessLineId, nodeId, directEvidence) {
     const actor = await getRequired(transaction.collection('users').doc(actorId))
     const line = await getRequired(transaction.collection('business_lines').doc(businessLineId))
     const node = await getRequired(transaction.collection('business_nodes').doc(nodeId))
     const roundId = typeof node.lastReviewRoundId === 'string' ? node.lastReviewRoundId : ''
-    if (!roundId) throw createError('FORBIDDEN')
-    const round = await getRequired(transaction.collection('node_review_rounds').doc(roundId))
-    const evidenceIds = assertCreateAccess({ actor, line, node, round, businessLineId, nodeId })
-    return { actor, line, node, round, evidenceIds }
+    const reviewed = Boolean(roundId)
+    let source = reviewed
+      ? await getRequired(transaction.collection('node_review_rounds').doc(roundId))
+      : await getRequired(transaction.collection('node_feedback').doc(node.latestFeedbackId || ''))
+    if (!reviewed) {
+      source = {
+        ...source,
+        processorDisplayNames: displayNames(node, 'processorDisplayNames'),
+        reviewerDisplayNames: []
+      }
+    }
+    assertCreateAccess({ actor, line, node, source, reviewed, businessLineId, nodeId })
+    const evidenceIds = reviewed
+      ? exactIds(source, 'evidenceIds', { nonEmpty: false })
+      : directEvidence && directEvidence.feedbackId === source._id &&
+          Number.isSafeInteger(source.evidenceCount) && source.evidenceCount === directEvidence.evidenceIds.length &&
+          Number.isSafeInteger(source.claimedCount) && source.claimedCount === source.evidenceCount
+        ? directEvidence.evidenceIds.slice()
+        : (() => { throw createError('FORBIDDEN') })()
+    return { actor, line, node, source, reviewed, evidenceIds }
   }
 
   return {
@@ -229,8 +282,9 @@ function createCloudShareRepository({ db, cloud, clock = () => new Date() }) {
       strictDate(expiresAt)
       if (!SHA256.test(requestKeyHash) || !SHA256.test(inputHash)) throw createError('VALIDATION_ERROR')
       const shareId = shareIdForToken(token)
+      const directEvidence = await preloadDirectEvidence(businessLineId, nodeId)
       const reservation = await db.runTransaction(async transaction => {
-        const current = await readCreationState(transaction, actor._id, businessLineId, nodeId)
+        const current = await readCreationState(transaction, actor._id, businessLineId, nodeId, directEvidence)
         let existing = null
         try { existing = (await transaction.collection('public_node_shares').doc(shareId).get()).data } catch (_error) {}
         if (existing) {
@@ -262,20 +316,24 @@ function createCloudShareRepository({ db, cloud, clock = () => new Date() }) {
       for (let offset = reservation.claimedCount; offset < reservation.evidenceIds.length; offset += CHUNK_SIZE) {
         const ids = reservation.evidenceIds.slice(offset, offset + CHUNK_SIZE)
         await db.runTransaction(async transaction => {
-          const current = await readCreationState(transaction, actor._id, businessLineId, nodeId)
+          const current = await readCreationState(transaction, actor._id, businessLineId, nodeId, directEvidence)
           if (JSON.stringify(current.evidenceIds) !== JSON.stringify(reservation.evidenceIds)) throw createError('VERSION_CONFLICT')
           const header = await getRequired(transaction.collection('public_node_shares').doc(shareId))
           if (header.publishState !== 'reserved' || header.claimedCount !== offset ||
               strictDate(header.expiresAt).getTime() !== effectiveExpiresAt.getTime()) throw createError('VERSION_CONFLICT')
           const publicEvidences = []
-          for (const id of ids) {
+          for (let index = 0; index < ids.length; index += 1) {
+            const id = ids[index]
             const evidence = await getRequired(transaction.collection('evidences').doc(id))
             if (evidence.businessLineId !== businessLineId || evidence.nodeId !== nodeId ||
                 evidence.storageStatus !== 'available' || evidence.purgedAt != null ||
                 typeof evidence.fileId !== 'string' || !CLOUD_FILE_ID.test(evidence.fileId) ||
                 typeof evidence.fileName !== 'string' || !evidence.fileName || evidence.fileName.length > 255 ||
                 typeof evidence.category !== 'string' || !evidence.category || evidence.category.length > 32 ||
-                !Number.isSafeInteger(evidence.size) || evidence.size < 0) throw createError('FORBIDDEN')
+                !Number.isSafeInteger(evidence.size) || evidence.size < 0 ||
+                !current.reviewed && (evidence.feedbackId !== current.source._id ||
+                  evidence.attachmentState !== 'attached' ||
+                  evidence.feedbackEvidenceOrder !== offset + index)) throw createError('FORBIDDEN')
             publicEvidences.push({ evidenceId: id, fileName: evidence.fileName, category: evidence.category, size: evidence.size })
             await transaction.collection('evidences').doc(id).update({
               data: { publicShareHoldUntil: maxHold(evidence.publicShareHoldUntil, effectiveExpiresAt) }
@@ -290,7 +348,7 @@ function createCloudShareRepository({ db, cloud, clock = () => new Date() }) {
       }
 
       await db.runTransaction(async transaction => {
-        await readCreationState(transaction, actor._id, businessLineId, nodeId)
+        await readCreationState(transaction, actor._id, businessLineId, nodeId, directEvidence)
         const header = await getRequired(transaction.collection('public_node_shares').doc(shareId))
         if (header.publishState !== 'reserved' || header.claimedCount !== header.evidenceCount) {
           throw createError('VERSION_CONFLICT')

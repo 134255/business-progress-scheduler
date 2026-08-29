@@ -897,7 +897,9 @@ function createDefaultBusinessApi() {
     calendarRepository: createCloudWorkCalendarRepository({ db })
   })
   const evidenceRepository = createCloudEvidenceRepository({ db, cloud, clock: () => new Date() })
-  const feedbackRepository = createCloudFeedbackRepository({ db, clock: () => new Date() })
+  const feedbackRepository = createCloudFeedbackRepository({
+    db, clock: () => new Date(), workTimeService
+  })
   const reviewRepository = createCloudReviewRepository({ db, clock: () => new Date() })
   const clock = Date.now
   const authService = createAuthService({

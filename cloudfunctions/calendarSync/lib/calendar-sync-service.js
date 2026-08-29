@@ -79,7 +79,8 @@ function createCalendarSyncService({ holidayClient, calendarRepository, workTime
             calculation = elapsed
           }
         } else {
-          calculation = ['review_processing', 'review_timing_carryover', 'review_response']
+          calculation = ['review_processing', 'review_timing_carryover', 'review_response',
+            'optional_tail_decision', 'direct_processing_completion']
             .includes(candidate.kind)
             ? await workingMinutesBetween(candidate.startAt, candidate.endAt)
             : await tryAddWorkMinutes(candidate.startAt, candidate.minutes)

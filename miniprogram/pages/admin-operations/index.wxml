@@ -37,6 +37,8 @@
       <view class="card metric-card"><text class="metric-value">{{summary.businessCompletionLabel}}</text><text>平均售后完成工时</text><text class="sample-note">{{summary.businessCompletionSampleLabel}}</text></view>
       <view class="card metric-card"><text class="metric-value">{{summary.nodeProcessingLabel}}</text><text>每售后节点处理合计</text><text class="sample-note">{{summary.nodeProcessingSampleLabel}}</text></view>
       <view class="card metric-card"><text class="metric-value">{{summary.reviewLabel}}</text><text>每售后审核合计</text><text class="sample-note">{{summary.reviewSampleLabel}}</text></view>
+      <view class="card metric-card"><text class="metric-value">{{summary.optionalTailActivationLabel}}</text><text>追加节点启用率</text><text class="sample-note">{{summary.optionalTailActivationSampleLabel}}</text></view>
+      <view class="card metric-card"><text class="metric-value">{{summary.optionalTailDecisionLabel}}</text><text>平均决定工作时长</text><text class="sample-note">{{summary.optionalTailDecisionSampleLabel}}</text></view>
     </view>
 
     <view class="section-title">模板节点历史对比</view>

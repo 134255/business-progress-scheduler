@@ -108,6 +108,10 @@ function safeInteger(value, { minimum = 0, maximum = Number.MAX_SAFE_INTEGER } =
   return Number.isSafeInteger(value) && value >= minimum && value <= maximum
 }
 
+function validDate(value) {
+  return value instanceof Date && !Number.isNaN(value.getTime())
+}
+
 function increment(value) {
   if (!safeInteger(value) || value === Number.MAX_SAFE_INTEGER) throw createError('VERSION_CONFLICT')
   return value + 1
@@ -191,10 +195,15 @@ function feedbackProjection(feedback, evidences) {
 function createCloudFeedbackRepository({
   db,
   clock = () => new Date(),
+  workTimeService = null,
   claimChunkSize = DEFAULT_CHUNK_SIZE,
   wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 }) {
   if (!db) throw new TypeError('db is required')
+  if (workTimeService !== null &&
+      (!workTimeService || typeof workTimeService.workingMinutesBetween !== 'function')) {
+    throw new TypeError('workTimeService.workingMinutesBetween is required')
+  }
   if (!Number.isSafeInteger(claimChunkSize) || claimChunkSize < 1 || claimChunkSize > 40) {
     throw new TypeError('claimChunkSize must be between 1 and 40')
   }
@@ -446,7 +455,13 @@ function createCloudFeedbackRepository({
           })
           return { ...id, recoveryRequired, recoveryAt: at }
         }
-        return { ...id, cursor: existing.claimedCount }
+        return {
+          ...id, cursor: existing.claimedCount,
+          directProcessingStartedAt: existing.directProcessingStartedAt,
+          directProcessingBaseElapsedWorkMinutes: existing.directProcessingBaseElapsedWorkMinutes,
+          directProcessingTotalWorkMinutes: existing.directProcessingTotalWorkMinutes,
+          transitionAt: existing.transitionAt
+        }
       }
       if (existing && existing.publishState === 'aborting') {
         assertActiveAccountSubmission(current.actor, current.line, current.node, value.input)
@@ -546,6 +561,16 @@ function createCloudFeedbackRepository({
         nextNodeId: plannedNextNodeId,
         optionalTailState: plannedOptionalTailState,
         transitionAt: at,
+        ...(current.node.workflowMode === 'review' && value.input.action === 'complete_node' &&
+          validDate(current.node.processingStartedAt) &&
+          safeInteger(current.node.processingElapsedWorkMinutes) &&
+          safeInteger(current.node.processingSlaWorkHours * 60, { minimum: 1 })
+          ? {
+              directProcessingStartedAt: new Date(current.node.processingStartedAt),
+              directProcessingBaseElapsedWorkMinutes: current.node.processingElapsedWorkMinutes,
+              directProcessingTotalWorkMinutes: current.node.processingSlaWorkHours * 60
+            }
+          : {}),
         claimExpiresAt,
         recoveryCount: existing && existing.recoveryCount !== undefined ? existing.recoveryCount : 0,
         createdAt: existing ? existing.createdAt : db.serverDate(),
@@ -555,7 +580,12 @@ function createCloudFeedbackRepository({
       await transaction.collection(COLLECTIONS.nodes).doc(current.node._id).update({
         data: { feedbackClaimId: id.feedbackId, feedbackClaimHash: id.requestHash, feedbackClaimExpiresAt: claimExpiresAt }
       })
-      return { ...id, cursor: 0 }
+      return {
+        ...id, cursor: 0, transitionAt: at,
+        directProcessingStartedAt: reservation.directProcessingStartedAt,
+        directProcessingBaseElapsedWorkMinutes: reservation.directProcessingBaseElapsedWorkMinutes,
+        directProcessingTotalWorkMinutes: reservation.directProcessingTotalWorkMinutes
+      }
     })
   }
 
@@ -742,6 +772,30 @@ function createCloudFeedbackRepository({
         nodeChanges.analyticsSnapshotStatus = 'pending'
         nodeChanges.analyticsSourceVersion = nextAnalyticsSourceVersion(current.node)
         nodeChanges.analyticsCompletedAt = reservation.transitionAt
+      }
+      if (value.input.action === 'complete_node' && value.directProcessingTiming) {
+        const timing = value.directProcessingTiming
+        const base = reservation.directProcessingBaseElapsedWorkMinutes
+        const total = reservation.directProcessingTotalWorkMinutes
+        const segment = timing.status === 'calculated' ? timing.minutes : 0
+        if (!validDate(reservation.directProcessingStartedAt) ||
+            !validDate(reservation.transitionAt) ||
+            reservation.directProcessingStartedAt.getTime() > reservation.transitionAt.getTime() ||
+            !safeInteger(base) || !safeInteger(total, { minimum: 1 }) || !safeInteger(segment) ||
+            !['calculated', 'pending_calendar'].includes(timing.status) ||
+            timing.status === 'calculated' &&
+              (typeof timing.calendarVersion !== 'string' || !timing.calendarVersion)) {
+          throw createError('VERSION_CONFLICT')
+        }
+        const elapsed = base + segment
+        if (!Number.isSafeInteger(elapsed)) throw createError('VERSION_CONFLICT')
+        nodeChanges.processingTimingStatus = timing.status
+        nodeChanges.processingElapsedWorkMinutes = elapsed
+        nodeChanges.processingRemainingWorkMinutes = Math.max(0, total - elapsed)
+        nodeChanges.processingOverdueWorkMinutes = Math.max(0, elapsed - total)
+        nodeChanges.processingCalendarVersion = timing.status === 'calculated'
+          ? timing.calendarVersion
+          : null
       }
       await transaction.collection(COLLECTIONS.nodes).doc(current.node._id).update({ data: nodeChanges })
 
@@ -1012,14 +1066,30 @@ function createCloudFeedbackRepository({
         }
       }
       if (reservation.published) return reservation.published
+      let commitValue = value
+      if (value.input.action === 'complete_node' && validDate(reservation.directProcessingStartedAt) &&
+          validDate(reservation.transitionAt) && workTimeService) {
+        const result = await workTimeService.workingMinutesBetween(
+          new Date(reservation.directProcessingStartedAt), new Date(reservation.transitionAt)
+        )
+        const directProcessingTiming = result && result.status === 'calculated' &&
+          safeInteger(result.minutes) && typeof result.calendarVersion === 'string' &&
+          result.calendarVersion
+          ? {
+              status: 'calculated', minutes: result.minutes,
+              calendarVersion: result.calendarVersion
+            }
+          : { status: 'pending_calendar', minutes: null, calendarVersion: null }
+        commitValue = { ...value, directProcessingTiming }
+      }
       const maximumClaims = Math.ceil(value.input.evidenceIds.length / claimChunkSize) + 1
       for (let attempt = 0; ; attempt += 1) {
         if (attempt >= maximumClaims) throw createError('VERSION_CONFLICT')
-        const claimed = await claimEvidenceChunk(value, reservation)
+        const claimed = await claimEvidenceChunk(commitValue, reservation)
         if (claimed.published) return claimed.published
         if (claimed.done) break
       }
-      return await finalizeFeedback(value, reservation)
+      return await finalizeFeedback(commitValue, reservation)
     } catch (error) {
       if (reservation && !reservation.published) {
         try {

@@ -267,7 +267,17 @@ Page({
         nodeProcessingLabel: metricText(metrics.nodeProcessingPerBusiness),
         nodeProcessingSampleLabel: `样本 ${Number(metrics.nodeProcessingPerBusiness && metrics.nodeProcessingPerBusiness.sampleCount || 0)}`,
         reviewLabel: metricText(metrics.reviewPerBusiness),
-        reviewSampleLabel: `样本 ${Number(metrics.reviewPerBusiness && metrics.reviewPerBusiness.sampleCount || 0)}`
+        reviewSampleLabel: `样本 ${Number(metrics.reviewPerBusiness && metrics.reviewPerBusiness.sampleCount || 0)}`,
+        optionalTailActivationLabel: result.optionalTail && result.optionalTail.activationRatePercent !== null &&
+          result.optionalTail.activationRatePercent !== undefined
+          ? `${result.optionalTail.activationRatePercent}%`
+          : '暂无有效样本',
+        optionalTailActivationSampleLabel: `决定 ${Number(result.optionalTail && result.optionalTail.decisionCount || 0)} 次`,
+        optionalTailDecisionLabel: result.optionalTail && result.optionalTail.averageDecisionMinutes !== null &&
+          result.optionalTail.averageDecisionMinutes !== undefined
+          ? `${result.optionalTail.averageDecisionMinutes} 分钟`
+          : '暂无有效样本',
+        optionalTailDecisionSampleLabel: `有效样本 ${Number(result.optionalTail && result.optionalTail.decisionCount || 0)}`
       },
       nodeSeries: this.formatSeries(result),
       trendSeries: this.formatTrend(result),

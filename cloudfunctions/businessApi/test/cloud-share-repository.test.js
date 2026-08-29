@@ -98,6 +98,60 @@ test('进行中业务的已完成审核节点可立即生成分享快照', async
   assert.equal(fake.documents('public_node_shares')[0].publishState, 'published')
 })
 
+test('已启用的无审核人追加节点使用最终完成反馈生成分享快照', async () => {
+  const data = seed(1)
+  data.business_lines[0].status = 'completed'
+  data.business_lines[0].optionalTailState = 'completed'
+  Object.assign(data.business_nodes[0], {
+    activationMode: 'optional_tail', reviewerUserIds: [], reviewerDisplayNames: [],
+    processorDisplayNames: ['处理人'],
+    lastReviewRoundId: null, latestFeedbackId: 'feedback-direct', latestFeedbackRevision: 2,
+    processingRoundNumber: 1, reviewRoundNumber: 0
+  })
+  data.node_review_rounds = []
+  data.node_feedback = [{
+    _id: 'feedback-direct', businessLineId: 'line-1', nodeId: 'node-1',
+    action: 'complete_node', status: 'completed', publishState: 'published', revision: 2,
+    processingRoundNumber: 1, processingComment: '追加完成',
+    fieldValues: { summary: '追加固定结果' }, evidenceCount: 1, claimedCount: 1
+  }]
+  Object.assign(data.evidences[0], {
+    feedbackId: 'feedback-direct', attachmentState: 'attached', feedbackEvidenceOrder: 0
+  })
+  const { fake, repository } = harness(1, data)
+
+  await repository.createSnapshot({
+    actor: { _id: 'processor', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 15).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: '4'.repeat(64), inputHash: '5'.repeat(64)
+  })
+
+  const share = fake.documents('public_node_shares')[0]
+  assert.equal(share.publishState, 'published')
+  assert.equal(share.reviewRoundId, null)
+  assert.equal(share.evidenceCount, 1)
+  assert.equal(share.processingComment, '追加完成')
+  assert.deepEqual(share.fieldValues, { summary: '追加固定结果' })
+  assert.deepEqual(fake.documents('public_node_share_chunks')[0].evidences.map(item => item.evidenceId), ['evidence-0'])
+})
+
+test('未启用的追加节点不能生成分享快照', async () => {
+  const data = seed(0)
+  Object.assign(data.business_nodes[0], {
+    activationMode: 'optional_tail', status: 'skipped', reviewerUserIds: [],
+    reviewerDisplayNames: [], lastReviewRoundId: null
+  })
+  data.node_review_rounds = []
+  const { repository } = harness(0, data)
+  await assert.rejects(repository.createSnapshot({
+    actor: { _id: 'processor', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 16).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: '6'.repeat(64), inputHash: '7'.repeat(64)
+  }), error => error.code === 'FORBIDDEN')
+})
+
 test('节点与最终通过轮次中的审核人可生成分享快照', async () => {
   const data = seed(0)
   data.users.push({ _id: 'reviewer', status: 'active', role: 'user' })

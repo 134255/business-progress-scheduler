@@ -186,6 +186,34 @@ test('权威快照按节点状态只选择当前处理、活动审核、最终�
   assert.equal(JSON.stringify(snapshot).includes('cloud://'), false)
 })
 
+test('无审核人追加节点只索引最终完成反馈，未启用节点不产生检索内容', async () => {
+  const direct = authoritativeSeed()
+  Object.assign(direct.business_nodes[3], {
+    status: 'completed', activationMode: 'optional_tail', workflowMode: 'review',
+    reviewerUserIds: [], lastReviewRoundId: null, latestFeedbackId: 'feedback-direct',
+    latestFeedbackRevision: 1, processingRoundNumber: 1
+  })
+  direct.node_feedback.push({
+    _id: 'feedback-direct', businessLineId: 'line-1', nodeId: 'node-4',
+    processingRoundNumber: 1, revision: 1, publishState: 'published', action: 'complete_node',
+    fieldValues: fieldValues('追加最终'), processingComment: '追加完成说明', evidenceIds: []
+  })
+  const completed = await harness(direct).repository.loadAuthoritativeSnapshot({
+    businessLineId: 'line-1', sourceVersion: 3
+  })
+  assert.equal(completed.nodes[3].processingComment, '追加完成说明')
+  assert.equal(completed.nodes[3].fieldValues[0].value, '追加最终故障')
+
+  const skipped = authoritativeSeed()
+  Object.assign(skipped.business_nodes[3], {
+    status: 'skipped', activationMode: 'optional_tail', workflowMode: 'review'
+  })
+  const dormant = await harness(skipped).repository.loadAuthoritativeSnapshot({
+    businessLineId: 'line-1', sourceVersion: 3
+  })
+  assert.equal(dormant.nodes.some(node => node.nodeId === 'node-4'), false)
+})
+
 test('售后版本作为并发屏障允许未变节点版本落后并在发布时统一追平', async () => {
   const data = authoritativeSeed()
   data.business_nodes[1].searchSourceVersion = 2

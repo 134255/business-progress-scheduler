@@ -197,6 +197,34 @@ test('所有活动用户可读取全局历史统计且响应不泄漏账号标�
   assert.equal(JSON.stringify(summary).includes('businessLineId'), false)
 })
 
+test('追加节点汇总返回决定样本、启用数量、启用率和平均决定工时', async () => {
+  const { fake, repository } = harness()
+  fake.replace('operations_analytics_daily', 'daily-tail-decision', {
+    _id: 'daily-tail-decision', day: '2026-08-13', templateId: 'template-1', templateVersion: 2,
+    stableNodeId: 'tail-1', nodeName: '追加回访', nodeSequence: 1,
+    metric: 'optional_tail_decision_duration', dimensionRole: 'global', dimensionFilterToken: '',
+    sampleCount: 2, totalMinutes: 14, pendingCount: 0, unrecordedCount: 0
+  })
+  fake.replace('operations_analytics_daily', 'daily-tail-activation', {
+    _id: 'daily-tail-activation', day: '2026-08-13', templateId: 'template-1', templateVersion: 2,
+    stableNodeId: 'tail-1', nodeName: '追加回访', nodeSequence: 1,
+    metric: 'optional_tail_activation', dimensionRole: 'global', dimensionFilterToken: '',
+    sampleCount: 2, totalMinutes: 1, pendingCount: 0, unrecordedCount: 0
+  })
+  const summary = await repository.getAnalyticsSummary({
+    actor: { _id: 'user', role: 'user', status: 'active' },
+    range: {
+      startDate: '2026-08-01', endDate: '2026-08-19', grain: 'week', templateId: 'template-1',
+      templateVersion: null, status: '', businessLineId: '', stableNodeId: '', processorToken: '', reviewerToken: '',
+      metric: '', cursor: '', pageSize: 20
+    }
+  })
+  assert.deepEqual(summary.optionalTail, {
+    activationCount: 1, decisionCount: 2, activationRatePercent: 50,
+    averageDecisionMinutes: 7, pendingCount: 0, unrecordedCount: 0
+  })
+})
+
 test('普通用户筛选项在返回业务名称前逐项重新校验当前关系', async () => {
   const { fake, repository } = harness()
   fake.beforeNextTransaction(() => fake.replace('business_lines', 'line-1', {

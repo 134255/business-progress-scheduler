@@ -82,7 +82,7 @@ const FACT_HASH_FIELDS = [
   '_id', 'sourceType', 'sourceId', 'sourceVersion', 'businessLineId', 'nodeId', 'factType',
   'metric', 'day', 'templateId', 'templateVersion', 'stableNodeId', 'dimensionRole',
   'dimensionUserId', 'dimensionFilterToken', 'dimensionDisplayName', 'nodeName', 'nodeSequence',
-  'timingStatus', 'workMinutes'
+  'timingStatus', 'workMinutes', 'sampleValue'
 ]
 const FACT_IMMUTABLE_FIELDS = FACT_HASH_FIELDS.filter(key => !['timingStatus', 'workMinutes'].includes(key))
 
@@ -144,11 +144,15 @@ function createCloudAnalyticsRepository({ db } = {}) {
     if (!line) throw new TypeError('node source is invalid')
     const rounds = await readAllById(db, 'node_review_rounds', { businessLineId: line._id, nodeId: node._id })
     const votes = await readAllById(db, 'node_review_votes', { businessLineId: line._id, nodeId: node._id })
+    const feedback = node.latestFeedbackId
+      ? await readDocument(db, 'node_feedback', node.latestFeedbackId)
+      : null
     return {
       node,
       line,
       rounds,
-      votes
+      votes,
+      feedback
     }
   }
 
@@ -175,6 +179,10 @@ function createCloudAnalyticsRepository({ db } = {}) {
   }
 
   function deltaForFact(fact) {
+    if (fact.metric === 'optional_tail_activation' && [0, 1].includes(fact.sampleValue) &&
+        fact.timingStatus === undefined && fact.workMinutes === undefined) {
+      return { sampleCount: 1, totalMinutes: fact.sampleValue, pendingCount: 0, unrecordedCount: 0 }
+    }
     if (fact.timingStatus === 'calculated' && Number.isSafeInteger(fact.workMinutes) && fact.workMinutes >= 0) {
       return { sampleCount: 1, totalMinutes: fact.workMinutes, pendingCount: 0, unrecordedCount: 0 }
     }
@@ -257,10 +265,11 @@ function createCloudAnalyticsRepository({ db } = {}) {
           !Number.isSafeInteger(previousMaximum) || previousMaximum < previousMinimum)) {
         throw new TypeError('analytics rollup is invalid')
       }
-      const minimumMinutes = counterDelta.sampleCount
+      const isEvent = fact.metric === 'optional_tail_activation'
+      const minimumMinutes = isEvent ? null : counterDelta.sampleCount
         ? hasPreviousSamples ? Math.min(previousMinimum, fact.workMinutes) : fact.workMinutes
         : hasPreviousSamples ? previousMinimum : null
-      const maximumMinutes = counterDelta.sampleCount
+      const maximumMinutes = isEvent ? null : counterDelta.sampleCount
         ? hasPreviousSamples ? Math.max(previousMaximum, fact.workMinutes) : fact.workMinutes
         : hasPreviousSamples ? previousMaximum : null
       await transaction.collection('operations_analytics_facts').doc(factDocumentId).set({ data: {
