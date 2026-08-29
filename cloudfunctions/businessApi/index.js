@@ -53,6 +53,8 @@ const { createNodeTextParserClient } = require('./lib/node-text-parser-client')
 const { createDashboardWorkspaceService } = require('./lib/dashboard-workspace-service')
 const { createNodeWorkspaceService } = require('./lib/node-workspace-service')
 const { createNodeSubmitService } = require('./lib/node-submit-service')
+const { createOptionalTailService } = require('./lib/optional-tail-service')
+const { createCloudOptionalTailRepository } = require('./lib/cloud-optional-tail-repository')
 
 const COLLECTIONS = {
   users: 'users',
@@ -488,6 +490,19 @@ function createNodeTextRecognitionRoutes(recognitionService) {
   }
 }
 
+function createOptionalTailRoutes(optionalTailService) {
+  if (!optionalTailService) return null
+  return {
+    decideOptionalTailNode: ({ actor, payload }) => optionalTailService.decide({
+      actor,
+      input: selectProtectedPayload(payload, new Set([
+        'businessLineId', 'nodeId', 'expectedLineVersion', 'expectedNodeVersion',
+        'decision', 'comment', 'requestKey'
+      ]))
+    })
+  }
+}
+
 function createBusinessApi({
   repository,
   authService,
@@ -506,6 +521,7 @@ function createBusinessApi({
   dashboardWorkspaceService,
   nodeWorkspaceService,
   nodeSubmitService,
+  optionalTailService,
   businessSearchClient,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
@@ -520,6 +536,7 @@ function createBusinessApi({
     createDashboardWorkspaceRoutes(dashboardWorkspaceService),
     createNodeWorkspaceRoutes(nodeWorkspaceService),
     createNodeSubmitRoutes(nodeSubmitService),
+    createOptionalTailRoutes(optionalTailService),
     businessLifecycleService ? createBusinessLifecycleRoutes(businessLifecycleService) : null,
     evidenceService ? createEvidenceRoutes(evidenceService) : null,
     createEvidenceUploadRoutes(evidenceUploadService),
@@ -992,6 +1009,12 @@ function createDefaultBusinessApi() {
     feedbackService
   })
   const nodeSubmitService = createNodeSubmitService({ feedbackService, reviewService })
+  const optionalTailService = createOptionalTailService({
+    repository: createCloudOptionalTailRepository({ db }),
+    workTimeService,
+    businessSearchClient,
+    clock: () => new Date()
+  })
   const calendarAdminService = createCalendarAdminService({
     db,
     invokeCalendarSync: data => cloud.callFunction({ name: 'calendarSync', data }),
@@ -1031,6 +1054,7 @@ function createDefaultBusinessApi() {
     dashboardWorkspaceService,
     nodeWorkspaceService,
     nodeSubmitService,
+    optionalTailService,
     businessSearchClient,
     getContext: () => cloud.getWXContext(),
     clock,

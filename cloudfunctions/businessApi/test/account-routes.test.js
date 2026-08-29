@@ -92,6 +92,7 @@ function createRouteHarness({
   dashboardWorkspaceService,
   nodeWorkspaceService,
   nodeSubmitService,
+  optionalTailService,
   calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
@@ -151,6 +152,7 @@ function createRouteHarness({
     dashboardWorkspaceService,
     nodeWorkspaceService,
     nodeSubmitService,
+    optionalTailService,
     calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
@@ -233,6 +235,48 @@ test('审核与通知路由只传递解析后的当前账号和白名单输入',
     ['listMyNotifications', { actor, query: { page: 2, pageSize: 10 } }],
     ['markNotificationRead', { actor, notificationId: 'notification-1' }]
   ])
+})
+
+test('可选尾节点决策路由只传递当前活动账号与精确白名单输入', async () => {
+  const calls = []
+  const harness = createRouteHarness({
+    optionalTailService: {
+      async decide(input) {
+        calls.push(input)
+        return { decision: input.input.decision }
+      }
+    }
+  })
+  const payload = {
+    businessLineId: 'line-1',
+    nodeId: 'node-2',
+    expectedLineVersion: 7,
+    expectedNodeVersion: 3,
+    decision: 'activate',
+    comment: '',
+    requestKey: 'optional-tail-request-1',
+    actorId: 'forged',
+    openid: 'wx-forged'
+  }
+  const result = await harness.api.main({ action: 'decideOptionalTailNode', payload })
+  assert.deepEqual(result, { ok: true, data: { decision: 'activate' } })
+  assert.deepEqual(calls, [{
+    actor: { _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound' },
+    input: {
+      businessLineId: 'line-1',
+      nodeId: 'node-2',
+      expectedLineVersion: 7,
+      expectedNodeVersion: 3,
+      decision: 'activate',
+      comment: '',
+      requestKey: 'optional-tail-request-1'
+    }
+  }])
+
+  const invalid = await harness.api.main({
+    action: 'decideOptionalTailNode', payload: { ...payload, unexpected: true }
+  })
+  assert.equal(invalid.code, 'VALIDATION_ERROR')
 })
 
 test('节点文本识别路由只传递当前活动账号与白名单输入', async () => {
