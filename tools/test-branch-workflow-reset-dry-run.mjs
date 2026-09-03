@@ -62,6 +62,26 @@ function fixtureReader() {
     {
       _id: `evidence-${'0'.repeat(64)}`, businessLineId: 'line-purged', nodeId: 'node-purged',
       extension: 'pdf', storageStatus: 'purged', purgedAt: new Date('2026-08-01T00:00:00Z'), size: 700
+    },
+    {
+      _id: `evidence-${'7'.repeat(64)}`, businessLineId: 'line-amend', nodeId: null,
+      uploadPurpose: 'audit_amendment', extension: 'pdf', storageStatus: 'available', purgedAt: null,
+      size: 400, fileId: `${CLOUD_PREFIX}/amendment/line-amend/1788400000000-0-proof.pdf`
+    },
+    {
+      _id: `evidence-${'8'.repeat(64)}`, businessLineId: 'line-amend', nodeId: null,
+      uploadPurpose: 'audit_amendment', extension: 'mov', storageStatus: 'purge_pending', purgedAt: null,
+      size: 500, fileId: `${CLOUD_PREFIX}/amendment/line-amend/1788400000001-1-proof.mov`
+    },
+    {
+      _id: `evidence-${'9'.repeat(64)}`, businessLineId: 'line-amend', nodeId: null,
+      uploadPurpose: 'audit_amendment', extension: 'pdf', storageStatus: 'purged',
+      purgedAt: new Date('2026-08-02T00:00:00Z'), size: 600
+    },
+    {
+      _id: `evidence-${'1'.repeat(64)}`, businessLineId: 'line-amend', nodeId: null,
+      uploadPurpose: 'audit_amendment', extension: 'pdf', storageStatus: 'available', purgedAt: null,
+      size: 700, fileId: `${CLOUD_PREFIX}/amendment/other-line/1788400000002-0-proof.pdf`
     }
   ]
   data.system_settings = [
@@ -98,16 +118,22 @@ test('dry-run inventories every approved collection and only exact managed COS o
 
   assert.equal(result.destructive, false)
   assert.deepEqual(result.collections.map(item => item.name), expectedTargets())
-  assert.equal(result.collections.find(item => item.name === 'evidences').count, 7)
+  assert.equal(result.collections.find(item => item.name === 'evidences').count, 11)
   assert.deepEqual(result.scopedSystemSettings.ids, [SCOPED_SYSTEM_SETTING_IDS[0]])
   assert.equal(result.scopedSystemSettings.count, 1)
   assert.deepEqual(result.cosObjects.keys, [reader.validKeyA, reader.validKeyB])
   assert.equal(result.cosObjects.count, 2)
   assert.equal(result.cosObjects.totalDeclaredBytes, 300)
-  assert.equal(result.cosObjects.invalidEvidenceCount, 4)
+  assert.deepEqual(result.cloudFiles.fileIds, [
+    `${CLOUD_PREFIX}/amendment/line-amend/1788400000000-0-proof.pdf`,
+    `${CLOUD_PREFIX}/amendment/line-amend/1788400000001-1-proof.mov`
+  ])
+  assert.equal(result.cloudFiles.count, 2)
+  assert.equal(result.cloudFiles.totalDeclaredBytes, 900)
+  assert.equal(result.cosObjects.invalidEvidenceCount, 5)
   assert.equal(result.cosObjects.invalidEvidenceIds.length, 2)
   assert.equal(result.cosObjects.invalidEvidenceIdsTruncated, true)
-  assert.equal(result.cosObjects.alreadyPurgedEvidenceCount, 1)
+  assert.equal(result.cosObjects.alreadyPurgedEvidenceCount, 2)
 
   for (const preserved of PRESERVED_COLLECTIONS.filter(name => name !== 'system_settings')) {
     assert.equal(reader.calls.includes(preserved), false)

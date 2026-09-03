@@ -136,9 +136,12 @@ Page({
     const user = activeUser()
     const line = data.line || null
     const versionTwo = Boolean(line && line.flowSchemaVersion === 2)
-    const nodes = (data.nodes || []).filter(node => !versionTwo ||
-      ['active', 'completed', 'awaiting_manual_decision'].includes(node.routeState)).slice().sort((left, right) =>
-      Number(left.sequence) - Number(right.sequence)).map(node => node.workflowMode === 'review'
+    const visibleNodes = (data.nodes || []).filter(node => !versionTwo ||
+      ['active', 'completed', 'awaiting_manual_decision'].includes(node.routeState)).slice()
+    const orderedNodes = versionTwo
+      ? visibleNodes
+      : visibleNodes.sort((left, right) => Number(left.sequence) - Number(right.sequence))
+    const nodes = orderedNodes.map(node => node.workflowMode === 'review'
       ? (() => {
         const decisionParts = []
         if (node.decisionActorDisplayName) decisionParts.push(node.decisionActorDisplayName)

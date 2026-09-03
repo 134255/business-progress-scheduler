@@ -62,6 +62,7 @@ const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const EVIDENCE_ID = /^evidence-[a-f0-9]{64}$/
 const CLOUD_PREFIX = /^cloud:\/\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const OBJECT_KEY = /^evidence-uploads\/([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,128})\/(evidence-[a-f0-9]{64})\.([a-z0-9]+)$/
+const AMENDMENT_FILE_KEY = /^amendment\/([A-Za-z0-9_-]{1,128})\/[1-9][0-9]{9,15}-[0-9]{1,6}-([A-Za-z0-9._-]{1,255})$/
 const MANAGED_STORAGE_STATUSES = new Set(['uploading', 'available', 'purge_pending', 'purge_failed'])
 const MAX_OBJECT_OUTPUT = 100000
 
@@ -113,10 +114,15 @@ function classifyEvidence(evidence, cloudFilePrefix) {
   const extension = ownValue(evidence, 'extension')
   const storageStatus = ownValue(evidence, 'storageStatus')
   const purgedAt = ownValue(evidence, 'purgedAt')
+  const uploadPurpose = ownValue(evidence, 'uploadPurpose')
   const rawObjectKey = ownValue(evidence, 'objectKey')
   const fileId = ownValue(evidence, 'fileId')
+  const auditAmendment = uploadPurpose === 'audit_amendment'
+  const purposeAndNodeValid = auditAmendment
+    ? nodeId === null
+    : DOCUMENT_ID.test(nodeId || '') && (uploadPurpose === undefined || uploadPurpose === 'node_feedback')
   if (!EVIDENCE_ID.test(evidenceId || '') || !DOCUMENT_ID.test(businessLineId || '') ||
-      !DOCUMENT_ID.test(nodeId || '') || typeof extension !== 'string' || !/^[a-z0-9]+$/.test(extension)) {
+      !purposeAndNodeValid || typeof extension !== 'string' || !/^[a-z0-9]+$/.test(extension)) {
     return { kind: 'invalid' }
   }
   if (storageStatus === 'purged') {
@@ -127,6 +133,21 @@ function classifyEvidence(evidence, cloudFilePrefix) {
   }
   if (!MANAGED_STORAGE_STATUSES.has(storageStatus) || purgedAt !== null && purgedAt !== undefined) {
     return { kind: 'invalid' }
+  }
+  const size = storageStatus === 'uploading'
+    ? ownValue(evidence, 'declaredSize')
+    : ownValue(evidence, 'size')
+  if (!Number.isSafeInteger(size) || size < 1) return { kind: 'invalid' }
+  if (auditAmendment) {
+    if (rawObjectKey !== undefined || typeof fileId !== 'string' || !fileId.startsWith(`${cloudFilePrefix}/`)) {
+      return { kind: 'invalid' }
+    }
+    const fileKey = fileId.slice(cloudFilePrefix.length + 1)
+    const match = AMENDMENT_FILE_KEY.exec(fileKey)
+    if (!match || match[1] !== businessLineId || !match[2].endsWith(`.${extension}`)) {
+      return { kind: 'invalid' }
+    }
+    return { kind: 'cloudFile', evidenceId, fileId, size }
   }
   const objectKeyFromRecord = typeof rawObjectKey === 'string' ? rawObjectKey : null
   const objectKeyFromFileId = typeof fileId === 'string' && fileId.startsWith(`${cloudFilePrefix}/`)
@@ -142,10 +163,6 @@ function classifyEvidence(evidence, cloudFilePrefix) {
   if (!match || match[1] !== businessLineId || match[2] !== nodeId ||
       match[3] !== evidenceId || match[4] !== extension) return { kind: 'invalid' }
 
-  const size = storageStatus === 'uploading'
-    ? ownValue(evidence, 'declaredSize')
-    : ownValue(evidence, 'size')
-  if (!Number.isSafeInteger(size) || size < 1) return { kind: 'invalid' }
   return { kind: 'managed', evidenceId, objectKey, size }
 }
 
@@ -158,6 +175,7 @@ export async function buildResetInventory(options = {}) {
   const objectLimit = exactPositiveInteger(options.objectLimit, 100, MAX_OBJECT_OUTPUT)
   const collections = []
   const managedObjects = new Map()
+  const managedCloudFiles = new Map()
   let invalidEvidenceCount = 0
   let alreadyPurgedEvidenceCount = 0
   const invalidEvidenceIds = []
@@ -175,6 +193,10 @@ export async function buildResetInventory(options = {}) {
         const classified = classifyEvidence(row, cloudFilePrefix)
         if (classified.kind === 'purged') {
           alreadyPurgedEvidenceCount += 1
+          return
+        }
+        if (classified.kind === 'cloudFile') {
+          if (!managedCloudFiles.has(classified.fileId)) managedCloudFiles.set(classified.fileId, classified)
           return
         }
         if (classified.kind !== 'managed') {
@@ -201,7 +223,13 @@ export async function buildResetInventory(options = {}) {
   })
   scopedIds.sort()
   const objects = [...managedObjects.values()].sort((left, right) => left.objectKey.localeCompare(right.objectKey))
+  const cloudFiles = [...managedCloudFiles.values()].sort((left, right) => left.fileId.localeCompare(right.fileId))
   const totalDeclaredBytes = objects.reduce((total, item) => {
+    const next = total + item.size
+    if (!Number.isSafeInteger(next)) throw new Error('inventory byte count overflow')
+    return next
+  }, 0)
+  const cloudFileDeclaredBytes = cloudFiles.reduce((total, item) => {
     const next = total + item.size
     if (!Number.isSafeInteger(next)) throw new Error('inventory byte count overflow')
     return next
@@ -226,6 +254,12 @@ export async function buildResetInventory(options = {}) {
       invalidEvidenceCount,
       invalidEvidenceIds,
       invalidEvidenceIdsTruncated: invalidEvidenceCount > invalidEvidenceIds.length
+    },
+    cloudFiles: {
+      count: cloudFiles.length,
+      totalDeclaredBytes: cloudFileDeclaredBytes,
+      fileIds: cloudFiles.slice(0, objectLimit).map(item => item.fileId),
+      truncated: cloudFiles.length > objectLimit
     }
   }
 }

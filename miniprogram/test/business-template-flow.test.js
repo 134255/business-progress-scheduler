@@ -623,7 +623,7 @@ test('version 2 detail shows the actual path without an active percentage and te
       currentNodeId: 'node-manual', completedNodeCount: 1, traversedNodeCount: 2
     },
     nodes: [
-      { _id: 'node-complete', sequence: 0, name: '已完成', status: 'completed', workflowMode: 'review', routeState: 'completed', processorDisplayNames: ['甲'], reviewerDisplayNames: [] },
+      { _id: 'node-complete', sequence: 3, name: '已完成', status: 'completed', workflowMode: 'review', routeState: 'completed', processorDisplayNames: ['甲'], reviewerDisplayNames: [] },
       { _id: 'node-manual', sequence: 1, name: '人工决定', status: 'awaiting_decision', workflowMode: 'review', routeState: 'awaiting_manual_decision', processorDisplayNames: ['乙'], reviewerDisplayNames: [] },
       { _id: 'node-dormant', sequence: 2, name: '未走分支', status: 'waiting', workflowMode: 'review', routeState: 'dormant', processorDisplayNames: ['丙'], reviewerDisplayNames: [] },
       { _id: 'node-skipped', sequence: 3, name: '跳过分支', status: 'skipped', workflowMode: 'review', routeState: 'skipped', processorDisplayNames: ['丁'], reviewerDisplayNames: [] }
