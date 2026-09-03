@@ -255,11 +255,31 @@ test('node editor configures single-select and manual routes to node keys or end
   page.onRouteOptionTargetChange({ currentTarget: { dataset: { option: '简单' } }, detail: { value: 2 } })
   assert.equal(page.buildNodeForSave().next.optionTargets['简单'], 'finish')
   page.onNextModeChange({ detail: { value: 3 } })
-  page.onManualActivateTargetChange({ detail: { value: 1 } })
+  page.onManualActivateTargetChange({ detail: { value: 0 } })
   page.onManualSkipTargetChange({ detail: { value: 0 } })
   assert.deepEqual(page.buildNodeForSave().next, {
     mode: 'manual', activateTarget: 'detail', skipTarget: 'end'
   })
+  assert.deepEqual(page.data.nodeTargetOptions.map(item => item.nodeKey), ['detail', 'finish'])
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8')
+  assert.match(wxml, /range="\{\{nodeTargetOptions\}\}"[^>]*bindchange="onManualActivateTargetChange"/)
+})
+
+test('node editor rejects identical manual route outcomes before returning the node', async () => {
+  let accepted = 0
+  const page = createNodeEditor({
+    users: [{ _id: 'processor-1', displayName: '处理人', username: 'processor' }],
+    nodeOptions: [{ nodeKey: 'entry', name: '入口' }, { nodeKey: 'target', name: '目标' }],
+    node: storedNode({
+      nodeKey: 'entry', name: '入口', workflowMode: 'review', processorUserIds: ['processor-1'],
+      reviewerUserIds: [], next: { mode: 'manual', activateTarget: 'target', skipTarget: 'target' }
+    }),
+    acceptNodeFromEditor: () => { accepted += 1 }
+  })
+
+  await page.submit()
+  assert.equal(accepted, 0)
+  assert.equal(page.data.errorMessage, '开启目标与跳过目标不能相同')
 })
 
 test('node editor builds conditional child fields and protects referenced parents from deletion', () => {

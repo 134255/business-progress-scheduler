@@ -45,6 +45,7 @@ git diff --check f651fbe..HEAD
 | 集合 | 字段顺序 | 用途 |
 |---|---|---|
 | `business_nodes` | `manualDecisionProcessorUserIds ASC`, `status ASC`, `updatedAt DESC` | 活动账号“待我处理”中的人工路由决定 |
+| `business_nodes` | `status ASC`, `routeState ASC`, `decisionReminderStatus ASC`, `_id ASC` | 通用人工路由待决定提醒有界扫描 |
 
 索引必须显示已生效后再继续。若 CloudBase 对数组字段的索引类型或排序方向给出不同要求，停止并保存无敏感错误信息，不得改成全表无界扫描。
 
@@ -88,6 +89,7 @@ git diff --check f651fbe..HEAD
 - `BRANCH_RESET_ENV_ID`：目标 CloudBase 环境 ID；
 - `EVIDENCE_CLOUD_FILE_PREFIX`：精确的 `cloud://<environment>` 前缀，不带末尾斜杠；
 - `BRANCH_RESET_WX_SERVER_SDK_PATH`：可选，仅在默认 `businessApi/node_modules/wx-server-sdk` 不可用时指向可信 SDK。
+- `BRANCH_RESET_OBJECT_LIMIT`：可选，输出对象键上限，默认 100、最大 100000；若 `truncated=true`，按实际数量调高后重新运行，仍截断则停止。
 
 执行：
 
@@ -129,4 +131,3 @@ operations_analytics_daily, node_text_parse_requests
 - 待办、检索、分享、统计只出现新实际路径数据。
 
 代码异常但数据尚未重置时，回滚云函数和小程序到部署前版本。数据已经重置后，不允许只回滚代码；必须进入维护状态并按已验证备份执行完整数据恢复。任何恢复费用、权限变化或真实敏感数据处理仍需单独批准。
-

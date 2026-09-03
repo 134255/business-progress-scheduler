@@ -126,7 +126,7 @@ test('版本二运营汇总与导出排除休眠和跳过分支节点', async ()
   const { fake, repository } = harness()
   fake.replace('business_lines', 'line-1', {
     ...fake.documents('business_lines').find(item => item._id === 'line-1'),
-    flowSchemaVersion: 2, traversedNodeIds: ['node-1']
+    flowSchemaVersion: 2, traversedNodeIds: []
   })
   fake.replace('business_nodes', 'node-1', {
     ...fake.documents('business_nodes').find(item => item._id === 'node-1'), routeState: 'active'

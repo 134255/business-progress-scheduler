@@ -30,7 +30,8 @@ function fixtureReader() {
   data.evidences = [
     {
       _id: evidenceIdA, businessLineId: 'line-a', nodeId: 'node-a', extension: 'mp4',
-      storageStatus: 'uploading', purgedAt: null, declaredSize: 100, objectKey: validKeyA
+      storageStatus: 'uploading', purgedAt: null, declaredSize: 100, objectKey: validKeyA,
+      fileId: `${CLOUD_PREFIX}/${validKeyA}`
     },
     {
       _id: evidenceIdB, businessLineId: 'line-b', nodeId: 'node-b', extension: 'pdf',
@@ -51,6 +52,16 @@ function fixtureReader() {
       _id: `evidence-${'e'.repeat(64)}`, businessLineId: 'line-e', nodeId: 'node-e',
       extension: 'pdf', storageStatus: 'available', purgedAt: null, size: 500,
       fileId: `${CLOUD_PREFIX}/legacy/report.pdf`
+    },
+    {
+      _id: `evidence-${'f'.repeat(64)}`, businessLineId: 'line-f', nodeId: 'node-f',
+      extension: 'pdf', storageStatus: 'uploading', purgedAt: null, declaredSize: 600,
+      objectKey: `evidence-uploads/line-f/node-f/evidence-${'f'.repeat(64)}.pdf`,
+      fileId: `${CLOUD_PREFIX}/evidence-uploads/line-x/node-f/evidence-${'f'.repeat(64)}.pdf`
+    },
+    {
+      _id: `evidence-${'0'.repeat(64)}`, businessLineId: 'line-purged', nodeId: 'node-purged',
+      extension: 'pdf', storageStatus: 'purged', purgedAt: new Date('2026-08-01T00:00:00Z'), size: 700
     }
   ]
   data.system_settings = [
@@ -87,15 +98,16 @@ test('dry-run inventories every approved collection and only exact managed COS o
 
   assert.equal(result.destructive, false)
   assert.deepEqual(result.collections.map(item => item.name), expectedTargets())
-  assert.equal(result.collections.find(item => item.name === 'evidences').count, 5)
+  assert.equal(result.collections.find(item => item.name === 'evidences').count, 7)
   assert.deepEqual(result.scopedSystemSettings.ids, [SCOPED_SYSTEM_SETTING_IDS[0]])
   assert.equal(result.scopedSystemSettings.count, 1)
   assert.deepEqual(result.cosObjects.keys, [reader.validKeyA, reader.validKeyB])
   assert.equal(result.cosObjects.count, 2)
   assert.equal(result.cosObjects.totalDeclaredBytes, 300)
-  assert.equal(result.cosObjects.invalidEvidenceCount, 3)
+  assert.equal(result.cosObjects.invalidEvidenceCount, 4)
   assert.equal(result.cosObjects.invalidEvidenceIds.length, 2)
   assert.equal(result.cosObjects.invalidEvidenceIdsTruncated, true)
+  assert.equal(result.cosObjects.alreadyPurgedEvidenceCount, 1)
 
   for (const preserved of PRESERVED_COLLECTIONS.filter(name => name !== 'system_settings')) {
     assert.equal(reader.calls.includes(preserved), false)
@@ -113,6 +125,7 @@ test('dry-run implementation contains no database or COS mutation call', async (
   ]) {
     assert.equal(source.includes(forbidden), false, `unexpected mutation API: ${forbidden}`)
   }
+  assert.match(source, /process\.env\.BRANCH_RESET_OBJECT_LIMIT/)
 })
 
 test('dry-run rejects invalid configuration and never accepts a broad cloud prefix', async () => {
@@ -123,4 +136,5 @@ test('dry-run rejects invalid configuration and never accepts a broad cloud pref
       /invalid dry-run configuration/
     )
   }
+  await assert.doesNotReject(buildResetInventory({ listPage, cloudFilePrefix: CLOUD_PREFIX, objectLimit: 1001 }))
 })

@@ -497,11 +497,19 @@ test('可选尾节点决定扫描查询与部署索引契约一致', async () =>
     call.criteria.status === 'awaiting_decision' && call.criteria.activationMode === 'optional_tail')
   assert.equal(query.criteria.decisionReminderStatus, 'pending')
   assert.deepEqual(query.order, [['_id', 'asc']])
+  const routeQuery = fake.queryCalls.find(call => call.collection === 'business_nodes' &&
+    call.criteria.status === 'awaiting_decision' && call.criteria.routeState === 'awaiting_manual_decision')
+  assert.equal(routeQuery.criteria.decisionReminderStatus, 'pending')
+  assert.deepEqual(routeQuery.order, [['_id', 'asc']])
 
   const manual = fs.readFileSync(path.resolve(__dirname,
     '../../../docs/deployment/template-node-fields-setup.md'), 'utf8')
   assert.match(manual,
     /`business_nodes` \| `status` 升序、`activationMode` 升序、`decisionReminderStatus` 升序、`_id` 升序 \| 否 \| 可选追加节点待决定提醒有界扫描/)
+  const branchManual = fs.readFileSync(path.resolve(__dirname,
+    '../../../docs/deployment/branch-workflow-v2.md'), 'utf8')
+  assert.match(branchManual,
+    /`business_nodes` \| `status ASC`, `routeState ASC`, `decisionReminderStatus ASC`, `_id ASC` \| 通用人工路由待决定提醒有界扫描/)
 })
 
 test('处理提醒只发送给当前活动候选处理人且不被其他停用候选人阻断', async () => {

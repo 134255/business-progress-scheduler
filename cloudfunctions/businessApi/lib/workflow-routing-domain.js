@@ -82,7 +82,10 @@ function normalizeNext(node, fields) {
   if (mode === NEXT_MODE.END) return { mode }
   if (mode === NEXT_MODE.DEFAULT) return { mode, targetNodeKey: target(input.targetNodeKey) }
   if (mode === NEXT_MODE.MANUAL) {
-    return { mode, activateTarget: target(input.activateTarget), skipTarget: target(input.skipTarget) }
+    const activateTarget = target(input.activateTarget)
+    const skipTarget = target(input.skipTarget)
+    if (activateTarget === END_TARGET || activateTarget === skipTarget) throw createError('TEMPLATE_INVALID')
+    return { mode, activateTarget, skipTarget }
   }
 
   const fieldKey = text(input.fieldKey)
@@ -199,11 +202,13 @@ function normalizeSnapshotNext(node, fields) {
   }
   if (mode === NEXT_MODE.MANUAL && Reflect.ownKeys(input).length === 3 &&
       hasOwn(input, 'activateTargetNodeId') && hasOwn(input, 'skipTargetNodeId')) {
-    return {
+    const result = {
       mode,
-      activateTargetNodeId: snapshotTarget(input.activateTargetNodeId),
+      activateTargetNodeId: snapshotTarget(input.activateTargetNodeId, { allowEnd: false }),
       skipTargetNodeId: snapshotTarget(input.skipTargetNodeId)
     }
+    if (result.activateTargetNodeId === result.skipTargetNodeId) throw createError('BUSINESS_STATE_INVALID')
+    return result
   }
   if (mode !== NEXT_MODE.SINGLE_SELECT || Reflect.ownKeys(input).length !== 3 ||
       !hasOwn(input, 'fieldKey') || !hasOwn(input, 'optionTargets')) {

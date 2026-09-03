@@ -62,7 +62,8 @@ const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 const EVIDENCE_ID = /^evidence-[a-f0-9]{64}$/
 const CLOUD_PREFIX = /^cloud:\/\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const OBJECT_KEY = /^evidence-uploads\/([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,128})\/(evidence-[a-f0-9]{64})\.([a-z0-9]+)$/
-const MANAGED_STORAGE_STATUSES = new Set(['uploading', 'available', 'purge_failed'])
+const MANAGED_STORAGE_STATUSES = new Set(['uploading', 'available', 'purge_pending', 'purge_failed'])
+const MAX_OBJECT_OUTPUT = 100000
 
 function configurationError() {
   return new TypeError('invalid dry-run configuration')
@@ -105,32 +106,47 @@ async function scanCollection({ listPage, collection, pageSize, visit }) {
   }
 }
 
-function managedObject(evidence, cloudFilePrefix) {
+function classifyEvidence(evidence, cloudFilePrefix) {
   const evidenceId = ownValue(evidence, '_id')
   const businessLineId = ownValue(evidence, 'businessLineId')
   const nodeId = ownValue(evidence, 'nodeId')
   const extension = ownValue(evidence, 'extension')
   const storageStatus = ownValue(evidence, 'storageStatus')
   const purgedAt = ownValue(evidence, 'purgedAt')
-  if (!EVIDENCE_ID.test(evidenceId || '') || !DOCUMENT_ID.test(businessLineId || '') ||
-      !DOCUMENT_ID.test(nodeId || '') || typeof extension !== 'string' || !/^[a-z0-9]+$/.test(extension) ||
-      !MANAGED_STORAGE_STATUSES.has(storageStatus) || purgedAt !== null && purgedAt !== undefined) return null
-
   const rawObjectKey = ownValue(evidence, 'objectKey')
   const fileId = ownValue(evidence, 'fileId')
-  let objectKey = typeof rawObjectKey === 'string' ? rawObjectKey : ''
-  if (!objectKey && typeof fileId === 'string' && fileId.startsWith(`${cloudFilePrefix}/`)) {
-    objectKey = fileId.slice(cloudFilePrefix.length + 1)
+  if (!EVIDENCE_ID.test(evidenceId || '') || !DOCUMENT_ID.test(businessLineId || '') ||
+      !DOCUMENT_ID.test(nodeId || '') || typeof extension !== 'string' || !/^[a-z0-9]+$/.test(extension)) {
+    return { kind: 'invalid' }
   }
+  if (storageStatus === 'purged') {
+    return purgedAt instanceof Date && !Number.isNaN(purgedAt.getTime()) &&
+      rawObjectKey === undefined && fileId === undefined
+      ? { kind: 'purged' }
+      : { kind: 'invalid' }
+  }
+  if (!MANAGED_STORAGE_STATUSES.has(storageStatus) || purgedAt !== null && purgedAt !== undefined) {
+    return { kind: 'invalid' }
+  }
+  const objectKeyFromRecord = typeof rawObjectKey === 'string' ? rawObjectKey : null
+  const objectKeyFromFileId = typeof fileId === 'string' && fileId.startsWith(`${cloudFilePrefix}/`)
+    ? fileId.slice(cloudFilePrefix.length + 1)
+    : null
+  if (rawObjectKey !== undefined && objectKeyFromRecord === null ||
+      fileId !== undefined && objectKeyFromFileId === null ||
+      objectKeyFromRecord && objectKeyFromFileId && objectKeyFromRecord !== objectKeyFromFileId) {
+    return { kind: 'invalid' }
+  }
+  const objectKey = objectKeyFromRecord || objectKeyFromFileId || ''
   const match = OBJECT_KEY.exec(objectKey)
   if (!match || match[1] !== businessLineId || match[2] !== nodeId ||
-      match[3] !== evidenceId || match[4] !== extension) return null
+      match[3] !== evidenceId || match[4] !== extension) return { kind: 'invalid' }
 
   const size = storageStatus === 'uploading'
     ? ownValue(evidence, 'declaredSize')
     : ownValue(evidence, 'size')
-  if (!Number.isSafeInteger(size) || size < 1) return null
-  return { evidenceId, objectKey, size }
+  if (!Number.isSafeInteger(size) || size < 1) return { kind: 'invalid' }
+  return { kind: 'managed', evidenceId, objectKey, size }
 }
 
 export async function buildResetInventory(options = {}) {
@@ -139,10 +155,11 @@ export async function buildResetInventory(options = {}) {
       !CLOUD_PREFIX.test(cloudFilePrefix)) throw configurationError()
   const pageSize = exactPositiveInteger(options.pageSize, 100, 100)
   const sampleLimit = exactPositiveInteger(options.sampleLimit, 20, 100)
-  const objectLimit = exactPositiveInteger(options.objectLimit, 100, 1000)
+  const objectLimit = exactPositiveInteger(options.objectLimit, 100, MAX_OBJECT_OUTPUT)
   const collections = []
   const managedObjects = new Map()
   let invalidEvidenceCount = 0
+  let alreadyPurgedEvidenceCount = 0
   const invalidEvidenceIds = []
 
   for (const name of FULL_COLLECTION_TARGETS) {
@@ -155,13 +172,17 @@ export async function buildResetInventory(options = {}) {
         const id = ownValue(row, '_id')
         if (sampleIds.length < sampleLimit) sampleIds.push(id)
         if (name !== 'evidences') return
-        const managed = managedObject(row, cloudFilePrefix)
-        if (!managed) {
+        const classified = classifyEvidence(row, cloudFilePrefix)
+        if (classified.kind === 'purged') {
+          alreadyPurgedEvidenceCount += 1
+          return
+        }
+        if (classified.kind !== 'managed') {
           invalidEvidenceCount += 1
           if (invalidEvidenceIds.length < sampleLimit && typeof id === 'string') invalidEvidenceIds.push(id)
           return
         }
-        if (!managedObjects.has(managed.objectKey)) managedObjects.set(managed.objectKey, managed)
+        if (!managedObjects.has(classified.objectKey)) managedObjects.set(classified.objectKey, classified)
       }
     })
     collections.push({ name, count, sampleIds, truncated: count > sampleIds.length })
@@ -201,6 +222,7 @@ export async function buildResetInventory(options = {}) {
       totalDeclaredBytes,
       keys: objects.slice(0, objectLimit).map(item => item.objectKey),
       truncated: objects.length > objectLimit,
+      alreadyPurgedEvidenceCount,
       invalidEvidenceCount,
       invalidEvidenceIds,
       invalidEvidenceIdsTruncated: invalidEvidenceCount > invalidEvidenceIds.length
@@ -220,6 +242,10 @@ function createCloudReader(db) {
 async function runCli() {
   const envId = process.env.BRANCH_RESET_ENV_ID
   const cloudFilePrefix = process.env.EVIDENCE_CLOUD_FILE_PREFIX
+  const objectLimitText = process.env.BRANCH_RESET_OBJECT_LIMIT
+  const objectLimit = objectLimitText === undefined
+    ? undefined
+    : (/^[1-9][0-9]{0,5}$/.test(objectLimitText) ? Number(objectLimitText) : NaN)
   if (typeof envId !== 'string' || !DOCUMENT_ID.test(envId) ||
       typeof cloudFilePrefix !== 'string' || !CLOUD_PREFIX.test(cloudFilePrefix)) {
     throw configurationError()
@@ -232,7 +258,8 @@ async function runCli() {
   cloud.init({ env: envId })
   const inventory = await buildResetInventory({
     listPage: createCloudReader(cloud.database()),
-    cloudFilePrefix
+    cloudFilePrefix,
+    objectLimit
   })
   process.stdout.write(`${JSON.stringify(inventory, null, 2)}\n`)
 }

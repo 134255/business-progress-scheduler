@@ -464,6 +464,44 @@ test('新版审核节点根据审核人配置显示提交审核或直接完成�
   assert.doesNotMatch(wxml, /驳回上一节点/)
 })
 
+test('无审核节点完成后进入人工决定仍视为权威成功并刷新页面', async () => {
+  const toasts = []
+  let workspaceReads = 0
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {}, reLaunch: () => {},
+    showToast: options => toasts.push(options)
+  }
+  const page = loadPage('pages/node-feedback/index.js', {
+    getNodeWorkspace: async () => {
+      workspaceReads += 1
+      return {
+        line: { _id: 'line-1', status: 'active', version: 8 + workspaceReads },
+        node: reviewNode({
+          version: 3 + workspaceReads,
+          requiresReview: false,
+          reviewerDisplayNames: [],
+          status: workspaceReads === 1 ? 'in_progress' : 'awaiting_decision'
+        }),
+        canSubmit: workspaceReads === 1,
+        history: []
+      }
+    },
+    submitFeedback: async () => ({
+      feedbackId: 'feedback-1', nodeStatus: 'awaiting_decision', nodeVersion: 5, lineStatus: 'active',
+      routeTransition: { kind: 'await_manual_decision' }
+    })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '已完成' } })
+
+  assert.equal(await page.onPrimaryAction(), true)
+  assert.equal(workspaceReads, 2)
+  assert.equal(toasts.at(-1).title, '节点已完成')
+  assert.equal(page.data.canSubmit, false)
+  assert.equal(page.data.readOnly, true)
+})
+
 test('无审核人节点完成请求单飞且版本冲突刷新时保留本地草稿', async () => {
   const pending = deferred()
   const calls = []

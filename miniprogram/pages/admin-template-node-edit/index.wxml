@@ -115,7 +115,7 @@
       </view>
       <view wx:elif="{{nextMode === 'manual'}}">
         <text class="muted">节点完成后，开启目标节点的处理人可选择开启或跳过。</text>
-        <picker range="{{targetOptions}}" range-key="name" disabled="{{readOnly}}" bindchange="onManualActivateTargetChange">
+        <picker range="{{nodeTargetOptions}}" range-key="name" disabled="{{readOnly}}" bindchange="onManualActivateTargetChange">
           <view class="picker-value">开启后：{{manualActivateTarget || '请选择'}}</view>
         </picker>
         <picker range="{{targetOptions}}" range-key="name" disabled="{{readOnly}}" bindchange="onManualSkipTargetChange">

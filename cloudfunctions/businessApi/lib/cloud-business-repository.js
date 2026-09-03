@@ -1274,13 +1274,24 @@ function createCloudBusinessRepository({
       : Boolean(currentActor.openid) && membershipArray(line.managerIds).includes(currentActor.openid)
     const displayNames = await createDisplayNameCache(nodes, currentActor, accountSchema)
     const projectedLine = publicLineProjection(line)
-    const actualNodes = projectedLine.flowSchemaVersion === 2
-      ? nodes.filter(node => {
-          const route = publicNodeRouteProjection(node, line)
-          return isActualRouteState(route.routeState)
-        })
-      : nodes
     const allNodesById = new Map(nodes.map(node => [node._id, node]))
+    const actualNodes = projectedLine.flowSchemaVersion === 2
+      ? (() => {
+          const routeIds = projectedLine.traversedNodeIds.slice()
+          if (!routeIds.includes(projectedLine.currentNodeId)) routeIds.push(projectedLine.currentNodeId)
+          const ordered = routeIds.map(id => allNodesById.get(id))
+          if (ordered.some(node => !node) || ordered.some(node => {
+            const route = publicNodeRouteProjection(node, line)
+            return !isActualRouteState(route.routeState)
+          })) throw createError('FORBIDDEN')
+          const actualByState = nodes.filter(node => {
+            const route = publicNodeRouteProjection(node, line)
+            return isActualRouteState(route.routeState)
+          })
+          if (actualByState.length !== ordered.length) throw createError('FORBIDDEN')
+          return ordered
+        })()
+      : nodes
     const projectedNodes = actualNodes.map(node => {
       let canDecideNodeRoute = false
       let routeDecisionLabels = {}

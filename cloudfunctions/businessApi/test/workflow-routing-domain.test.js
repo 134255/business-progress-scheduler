@@ -83,6 +83,17 @@ test('rejects unknown targets, incomplete mappings, invalid routing fields and i
     flowSchemaVersion: 2, entryNodeKey: 'entry',
     nodes: [node('entry', { mode: 'end' }), node('orphan', { mode: 'end' })]
   }))
+  assertTemplateInvalid(() => normalizeWorkflowGraph({
+    flowSchemaVersion: 2, entryNodeKey: 'entry',
+    nodes: [node('entry', { mode: 'manual', activateTarget: 'end', skipTarget: 'end' })]
+  }))
+  assertTemplateInvalid(() => normalizeWorkflowGraph({
+    flowSchemaVersion: 2, entryNodeKey: 'entry',
+    nodes: [
+      node('entry', { mode: 'manual', activateTarget: 'target', skipTarget: 'target' }),
+      node('target', { mode: 'end' })
+    ]
+  }))
 })
 
 test('rejects self loops, longer cycles, duplicate keys and absent entry nodes', () => {

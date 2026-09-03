@@ -362,7 +362,7 @@ Page({
     this.setData({ routeOptionRows: rows })
   },
   onManualActivateTargetChange(event) {
-    const target = this.data.targetOptions[Number(event.detail.value)]
+    const target = this.data.nodeTargetOptions[Number(event.detail.value)]
     if (target && this.requireSuperAdmin() && !this.data.readOnly) this.setData({ manualActivateTarget: target.nodeKey })
   },
   onManualSkipTargetChange(event) {
@@ -638,6 +638,11 @@ Page({
       node.next.mode === 'single_select' && (!node.next.fieldKey || Object.values(node.next.optionTargets).some(value => !value)) ||
       node.next.mode === 'manual' && (!node.next.activateTarget || !node.next.skipTarget))) {
       this.setData({ errorMessage: '请完整配置本节点的后续规则' })
+      return
+    }
+    if (this.data.flowSchemaVersion === 2 && node.next.mode === 'manual' &&
+        node.next.activateTarget === node.next.skipTarget) {
+      this.setData({ errorMessage: '开启目标与跳过目标不能相同' })
       return
     }
     if (this.data.requiresEvidence && !this.data.allowedEvidenceTypes.length) {

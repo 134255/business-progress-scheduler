@@ -926,7 +926,10 @@ Page({
       const usedRequestKey = this.progressRequestKey
       const progressResult = await businessService.submitFeedback({ ...payload, action, requestKey: usedRequestKey })
       if (!this.writeStillCurrent(operation)) return false
-      if (action === 'complete_node' && (!progressResult || progressResult.nodeStatus !== 'completed' ||
+      const completedStatusAccepted = progressResult && (progressResult.nodeStatus === 'completed' ||
+        progressResult.nodeStatus === 'awaiting_decision' && progressResult.routeTransition &&
+          progressResult.routeTransition.kind === 'await_manual_decision')
+      if (action === 'complete_node' && (!completedStatusAccepted ||
           !Number.isSafeInteger(progressResult.nodeVersion) ||
           progressResult.nodeVersion <= payload.expectedNodeVersion)) {
         throw new Error('完成节点结果无效，请刷新后重试')

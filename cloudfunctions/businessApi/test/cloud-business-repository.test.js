@@ -301,7 +301,7 @@ test('version 2 detail exposes only the actual route and authorizes manual decis
     }],
     business_nodes: [{
       _id: 'node-entry', businessLineId: 'line-route', nodeKey: 'entry', nodeCode: 'N001',
-      sequence: 0, name: '入口', status: 'completed', routeState: 'completed', version: 2,
+      sequence: 3, name: '入口', status: 'completed', routeState: 'completed', version: 2,
       next: { mode: 'default', targetNodeId: 'node-source' }, workflowMode: 'review',
       processorUserIds: ['user-2'], reviewerUserIds: [], processorDisplayNames: ['用户二'],
       reviewerDisplayNames: [], reviewMode: 'any', processingRoundNumber: 1, reviewRoundNumber: 0,

@@ -176,8 +176,9 @@ function createCloudOperationsRepository({ db }) {
 
   function isActualRouteNode(line, node) {
     if (!line || line.flowSchemaVersion !== 2) return true
-    if (!Array.isArray(line.traversedNodeIds) || !line.traversedNodeIds.includes(node._id)) return false
-    return ['active', 'completed', 'awaiting_manual_decision'].includes(node.routeState)
+    if (!Array.isArray(line.traversedNodeIds)) return false
+    const belongsToActualPath = line.traversedNodeIds.includes(node._id) || line.currentNodeId === node._id
+    return belongsToActualPath && ['active', 'completed', 'awaiting_manual_decision'].includes(node.routeState)
   }
 
   async function dataset(actor, range) {
