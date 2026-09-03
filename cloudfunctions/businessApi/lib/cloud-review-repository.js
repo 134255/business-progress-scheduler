@@ -8,6 +8,7 @@ const { fitsIndexedAccountArray } = require('./index-key-budget')
 const { isNotificationId } = require('./notification-id')
 const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
 const { classifyCompletedNodeTransition } = require('./optional-tail-domain')
+const { resolveCompletedNodeTarget } = require('./workflow-routing-domain')
 
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const FROZEN_LINE_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
@@ -23,6 +24,7 @@ const NOTIFICATION_TYPES = new Set([
   'business_completed',
   'node_processing_started',
   'optional_tail_decision_started',
+  'node_route_decision_pending',
   'optional_tail_decision_reminder',
   'processing_reminder',
   'work_calendar_missing',
@@ -142,6 +144,55 @@ function isCurrentNode(line, node) {
     safeInteger(line.currentNodeIndex) && Number(node.sequence) === line.currentNodeIndex
 }
 
+function isVersionTwoLine(line) {
+  return Boolean(line && line.flowSchemaVersion === 2)
+}
+
+function exactTraversedNodeIds(line, nodeId) {
+  const field = ownDataValue(line, 'traversedNodeIds')
+  if (!field.valid || !Array.isArray(field.value) || field.value.length >= 48 ||
+      field.value.some(id => typeof id !== 'string' || !DOCUMENT_ID.test(id)) ||
+      new Set(field.value).size !== field.value.length || field.value.includes(nodeId)) {
+    throw createError('VERSION_CONFLICT')
+  }
+  return clone(field.value)
+}
+
+function incrementRouteDecisionVersion(value) {
+  if (!safeInteger(value) || value === Number.MAX_SAFE_INTEGER) throw createError('VERSION_CONFLICT')
+  return value + 1
+}
+
+function resolveVersionTwoCompletion(line, node, fieldValues) {
+  if (!isVersionTwoLine(line) || node.routeState !== 'active' ||
+      !safeInteger(line.routeDecisionVersion)) throw createError('VERSION_CONFLICT')
+  exactTraversedNodeIds(line, node._id)
+  let outcome
+  try {
+    outcome = resolveCompletedNodeTarget({ node, fieldValues })
+  } catch (error) {
+    throw createError('VERSION_CONFLICT')
+  }
+  if (outcome.kind === 'end') {
+    return { transition: 'complete_line', nextNodeId: null, routeTransition: { kind: 'complete_line' } }
+  }
+  if (outcome.kind === 'manual') {
+    return {
+      transition: 'await_manual_decision', nextNodeId: null,
+      routeTransition: { kind: 'await_manual_decision' }
+    }
+  }
+  return {
+    transition: 'next_node', nextNodeId: outcome.nodeId,
+    routeTransition: { kind: 'activate_node', targetNodeId: outcome.nodeId }
+  }
+}
+
+function validRouteTransition(value) {
+  return value && typeof value === 'object' &&
+    ['complete_line', 'activate_node', 'await_manual_decision'].includes(value.kind)
+}
+
 function publicResult(round) {
   return {
     reviewRoundId: round._id,
@@ -155,14 +206,15 @@ function sameIds(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
-function voteResult(round, nodeStatus, lineStatus, nextNodeId = null, optionalTailState) {
+function voteResult(round, nodeStatus, lineStatus, nextNodeId = null, optionalTailState, routeTransition) {
   return {
     reviewRoundId: round._id,
     status: round.status,
     nodeStatus,
     lineStatus,
     nextNodeId,
-    ...(optionalTailState === undefined ? {} : { optionalTailState })
+    ...(optionalTailState === undefined ? {} : { optionalTailState }),
+    ...(routeTransition === undefined ? {} : { routeTransition: clone(routeTransition) })
   }
 }
 
@@ -381,7 +433,9 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         !fitsIndexedAccountArray(processors) || !fitsIndexedAccountArray(reviewers) ||
         processors.some(id => reviewers.includes(id)) || !lineMember(line, actor._id) ||
         !processors.includes(actor._id)) throw createError('FORBIDDEN')
-    if (!isCurrentNode(line, node)) throw createError('NODE_NOT_ACTIVE')
+    if (!isCurrentNode(line, node) || isVersionTwoLine(line) && node.routeState !== 'active') {
+      throw createError('NODE_NOT_ACTIVE')
+    }
     if (!REVIEW_MODES.has(node.reviewMode) || !safeInteger(node.processingRoundNumber, 1)) {
       throw createError('VERSION_CONFLICT')
     }
@@ -412,7 +466,9 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     const relationships = assertVoteRelationships(actor, line, node, round)
     if (FROZEN_LINE_STATUSES.has(line.status)) throw createError('BUSINESS_FROZEN')
     if (line.status !== 'active') throw createError('NODE_NOT_ACTIVE')
-    if (!isCurrentNode(line, node)) throw createError('NODE_NOT_ACTIVE')
+    if (!isCurrentNode(line, node) || isVersionTwoLine(line) && node.routeState !== 'active') {
+      throw createError('NODE_NOT_ACTIVE')
+    }
     if (node.workflowMode !== 'review' || node.status !== 'pending_review' ||
         node.activeReviewRoundId !== round._id || round.status !== 'pending' ||
         !REVIEW_MODES.has(node.reviewMode) || round.reviewMode !== node.reviewMode ||
@@ -540,7 +596,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         ? 'rework'
         : round.resultLineStatus === 'completed' ? 'complete_line' : 'next_node')
     if (!['approved', 'rejected'].includes(round.status) ||
-        !['rework', 'next_node', 'await_optional_decision', 'complete_line'].includes(resultTransition) ||
+        !['rework', 'next_node', 'await_optional_decision', 'await_manual_decision', 'complete_line'].includes(resultTransition) ||
         input.reviewRoundId !== round._id || !processingStateValid || !reviewStateValid ||
         typeof round.resultProcessingCarryoverPending !== 'boolean' ||
         typeof round.resultReviewCarryoverPending !== 'boolean' || !exactFinalVersion ||
@@ -551,22 +607,29 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         round.resultReviewRoundNumber !== round.reviewRoundNumber ||
         node.workflowMode !== 'review' || node.activeReviewRoundId !== undefined &&
         node.activeReviewRoundId !== null ||
-        !['completed', 'in_progress'].includes(round.resultNodeStatus) ||
+        !['completed', 'in_progress', 'awaiting_decision'].includes(round.resultNodeStatus) ||
         !['active', 'completed'].includes(round.resultLineStatus) ||
         round.status === 'rejected' && (round.resultNodeStatus !== 'in_progress' ||
           resultTransition !== 'rework' ||
           round.resultLineStatus !== 'active' || round.resultNextNodeId !== null ||
           line.status !== 'active' || !isCurrentNode(line, node) || node.status !== 'in_progress' ||
           node.processingRoundNumber !== round.processingRoundNumber + 1) ||
-        round.status === 'approved' && (round.resultNodeStatus !== 'completed' ||
+        round.status === 'approved' && (
+          (resultTransition === 'await_manual_decision'
+            ? round.resultNodeStatus !== 'awaiting_decision' || node.status !== 'awaiting_decision'
+            : round.resultNodeStatus !== 'completed' || node.status !== 'completed') ||
           resultTransition === 'rework' ||
-          node.status !== 'completed' || round.resultLineStatus === 'completed' &&
+          round.resultLineStatus === 'completed' &&
           (resultTransition !== 'complete_line' || line.status !== 'completed' ||
             round.resultNextNodeId !== null) ||
           round.resultLineStatus === 'active' &&
-          (!['next_node', 'await_optional_decision'].includes(resultTransition) ||
-            line.status !== 'active' || typeof round.resultNextNodeId !== 'string' ||
-            line.currentNodeId !== round.resultNextNodeId || line.currentNodeIndex !== node.sequence + 1) ||
+          (resultTransition === 'await_manual_decision'
+            ? line.status !== 'active' || round.resultNextNodeId !== null ||
+              line.currentNodeId !== node._id || line.awaitingManualDecision !== true
+            : !['next_node', 'await_optional_decision'].includes(resultTransition) ||
+              line.status !== 'active' || typeof round.resultNextNodeId !== 'string' ||
+              line.currentNodeId !== round.resultNextNodeId ||
+              !isVersionTwoLine(line) && line.currentNodeIndex !== node.sequence + 1) ||
           resultTransition === 'await_optional_decision' &&
           (round.resultOptionalTailState !== 'pending' || line.optionalTailState !== 'pending' ||
             line.optionalTailNodeId !== round.resultNextNodeId) ||
@@ -579,7 +642,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       round, round.resultNodeStatus, round.resultLineStatus, round.resultNextNodeId,
       ['pending', 'completed'].includes(round.resultOptionalTailState)
         ? round.resultOptionalTailState
-        : undefined
+        : undefined,
+      validRouteTransition(round.resultRouteTransition) ? round.resultRouteTransition : undefined
     )
   }
 
@@ -609,7 +673,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
 
   function validateDueTiming(timing, transition, expectedMinutes) {
     if (!timing || !validDate(timing.transitionAt)) throw createError('VERSION_CONFLICT')
-    if (['complete_line', 'await_optional_decision'].includes(transition)) return
+    if (['complete_line', 'await_optional_decision', 'await_manual_decision'].includes(transition)) return
     if (!safeInteger(expectedMinutes) ||
         !['calculated', 'pending_calendar'].includes(timing.processingDueStatus)) {
       throw createError('VERSION_CONFLICT')
@@ -1117,6 +1181,43 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           ...reviewContext
         }
       }
+      if (isVersionTwoLine(line)) {
+        const plan = resolveVersionTwoCompletion(line, node, round.fieldValues)
+        if (plan.transition === 'complete_line' || plan.transition === 'await_manual_decision') {
+          return {
+            businessLineId: line._id,
+            nodeId: node._id,
+            nodeVersion: node.version,
+            roundVersion: round.version,
+            transition: plan.transition,
+            routeTransition: plan.routeTransition,
+            processingWorkMinutes: null,
+            ...reviewContext
+          }
+        }
+        const next = await readDocument(transaction, 'business_nodes', plan.nextNodeId)
+        const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
+        const nextReviewers = ownExactAccountIds(next, 'reviewerUserIds', { nonEmpty: false })
+        const minutes = next && next.processingSlaWorkHours * 60
+        if (!next || next.businessLineId !== line._id || next.routeState !== 'dormant' ||
+            next.status !== 'waiting' || next.workflowMode !== 'review' ||
+            !nextProcessors || !nextReviewers || nextProcessors.some(id => nextReviewers.includes(id)) ||
+            !safeInteger(next.version, 1) || !safeInteger(minutes, 1)) {
+          throw createError('VERSION_CONFLICT')
+        }
+        return {
+          businessLineId: line._id,
+          nodeId: node._id,
+          nodeVersion: node.version,
+          roundVersion: round.version,
+          transition: 'next_node',
+          routeTransition: plan.routeTransition,
+          nextNodeId: next._id,
+          nextNodeVersion: next.version,
+          processingWorkMinutes: minutes,
+          ...reviewContext
+        }
+      }
       if (node.sequence + 1 === line.nodeCount) {
         return {
           businessLineId: line._id,
@@ -1165,7 +1266,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     if (typeof context.businessLineId !== 'string' || !DOCUMENT_ID.test(context.businessLineId) ||
         typeof context.nodeId !== 'string' || !DOCUMENT_ID.test(context.nodeId) ||
         !safeInteger(context.nodeVersion, 1) || !safeInteger(context.roundVersion, 1) ||
-        !['rework', 'next_node', 'await_optional_decision', 'complete_line', 'finalized_retry']
+        !['rework', 'next_node', 'await_optional_decision', 'await_manual_decision', 'complete_line', 'finalized_retry']
           .includes(context.transition)) {
       throw createError('VALIDATION_ERROR')
     }
@@ -1209,9 +1310,25 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       let next = null
       let expectedTransition
       let expectedMinutes = null
+      let expectedRouteTransition
       if (value.input.decision === 'reject') {
         expectedTransition = 'rework'
         expectedMinutes = round.processingRemainingWorkMinutes
+      } else if (isVersionTwoLine(line)) {
+        const plan = resolveVersionTwoCompletion(line, node, round.fieldValues)
+        expectedTransition = plan.transition
+        expectedRouteTransition = plan.routeTransition
+        if (plan.transition === 'next_node') {
+          next = await readDocument(transaction, 'business_nodes', plan.nextNodeId)
+          const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
+          const nextReviewers = ownExactAccountIds(next, 'reviewerUserIds', { nonEmpty: false })
+          expectedMinutes = next && next.processingSlaWorkHours * 60
+          if (!next || next._id !== context.nextNodeId || next.businessLineId !== line._id ||
+              next.routeState !== 'dormant' || next.status !== 'waiting' || next.workflowMode !== 'review' ||
+              !nextProcessors || !nextReviewers || nextProcessors.some(id => nextReviewers.includes(id)) ||
+              !safeInteger(next.version, 1) || next.version !== context.nextNodeVersion ||
+              !safeInteger(expectedMinutes, 1)) throw createError('VERSION_CONFLICT')
+        }
       } else if (node.sequence + 1 === line.nodeCount) {
         expectedTransition = 'complete_line'
       } else {
@@ -1237,6 +1354,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       }
       if (context.transition !== expectedTransition ||
           context.processingWorkMinutes !== expectedMinutes ||
+          expectedRouteTransition && JSON.stringify(context.routeTransition) !== JSON.stringify(expectedRouteTransition) ||
           expectedTransition === 'rework' && (context.processingCarryoverPending === true) !==
           (round.processingTimingStatus === 'pending_calendar') ||
           expectedTransition === 'rework' && !safeInteger(expectedMinutes)) {
@@ -1320,6 +1438,9 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       }
 
       const reviewTiming = completedReviewTiming(round, value.timing, at)
+      const approvedNodeStatus = expectedTransition === 'await_manual_decision'
+        ? 'awaiting_decision'
+        : 'completed'
 
       await transaction.collection('node_review_rounds').doc(round._id).update({ data: {
         status: finalStatus,
@@ -1328,13 +1449,16 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         rejectionComment: finalStatus === 'rejected' ? value.input.comment : '',
         approvedVoteCount,
         voteCount,
-        resultNodeStatus: finalStatus === 'rejected' ? 'in_progress' : 'completed',
+        resultNodeStatus: finalStatus === 'rejected' ? 'in_progress' : approvedNodeStatus,
         resultLineStatus: finalStatus === 'approved' && expectedTransition === 'complete_line'
           ? 'completed'
           : 'active',
         resultNextNodeId: finalStatus === 'approved' &&
           ['next_node', 'await_optional_decision'].includes(expectedTransition)
           ? next._id
+          : null,
+        resultRouteTransition: finalStatus === 'approved' && expectedRouteTransition
+          ? clone(expectedRouteTransition)
           : null,
         resultOptionalTailState: finalStatus === 'approved'
           ? expectedTransition === 'await_optional_decision'
@@ -1364,6 +1488,14 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       let nextNodeId = null
       let recipients
       let notificationType
+      const versionTwo = isVersionTwoLine(line)
+      const versionTwoLineChanges = finalStatus === 'approved' && versionTwo
+        ? {
+            traversedNodeIds: [...exactTraversedNodeIds(line, node._id), node._id],
+            routeDecisionVersion: incrementRouteDecisionVersion(line.routeDecisionVersion),
+            awaitingManualDecision: expectedTransition === 'await_manual_decision'
+          }
+        : {}
       if (finalStatus === 'rejected') {
         nodeStatus = 'in_progress'
         await transaction.collection('business_nodes').doc(node._id).update({ data: {
@@ -1401,10 +1533,18 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
         recipients = processors
         notificationType = 'node_review_rejected'
       } else {
-        nodeStatus = 'completed'
+        nodeStatus = approvedNodeStatus
         await transaction.collection('business_nodes').doc(node._id).update({ data: {
           status: nodeStatus,
           completedAt: at,
+          ...(versionTwo
+            ? {
+                routeState: expectedTransition === 'await_manual_decision'
+                  ? 'awaiting_manual_decision'
+                  : 'completed'
+              }
+            : {}),
+          ...(expectedTransition === 'await_manual_decision' ? { decisionStartedAt: at } : {}),
           analyticsSnapshotStatus: 'pending',
           analyticsSourceVersion: nextAnalyticsSourceVersion(node),
           analyticsCompletedAt: at,
@@ -1434,6 +1574,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
             analyticsSourceVersion: nextAnalyticsSourceVersion(line),
             analyticsCompletedAt: at,
             version: increment(line.version),
+            ...versionTwoLineChanges,
             ...nextLineSearch,
             updatedAt: db.serverDate()
           } })
@@ -1444,6 +1585,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
           const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
           await transaction.collection('business_nodes').doc(next._id).update({ data: {
             status: 'ready',
+            ...(versionTwo ? { routeState: 'active' } : {}),
             processingStartedAt: at,
             processingDueStatus: value.timing.processingDueStatus,
             processingDueAt: value.timing.processingDueAt === null
@@ -1463,11 +1605,24 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
             currentNodeName: next.name,
             progress,
             version: increment(line.version),
+            ...versionTwoLineChanges,
             ...nextLineSearch,
             updatedAt: db.serverDate()
           } })
           recipients = nextProcessors
           notificationType = 'node_processing_started'
+        } else if (expectedTransition === 'await_manual_decision') {
+          await transaction.collection('business_lines').doc(line._id).update({ data: {
+            currentNodeId: node._id,
+            currentNodeIndex: node.sequence,
+            currentNodeName: node.name,
+            version: increment(line.version),
+            ...versionTwoLineChanges,
+            ...nextLineSearch,
+            updatedAt: db.serverDate()
+          } })
+          recipients = [...new Set([...processors, ...reviewers])].sort()
+          notificationType = 'node_route_decision_pending'
         } else {
           nextNodeId = next._id
           const nextProcessors = ownExactAccountIds(next, 'processorUserIds', { nonEmpty: true })
@@ -1529,7 +1684,8 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
             ? 'pending'
             : expectedTransition === 'complete_line' && node.activationMode === 'optional_tail'
               ? 'completed'
-              : undefined
+              : undefined,
+          finalStatus === 'approved' ? expectedRouteTransition : undefined
         ),
         actor._id, line._id, nextLineSearch.searchSourceVersion
       )

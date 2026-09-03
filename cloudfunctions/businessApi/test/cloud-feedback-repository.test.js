@@ -165,6 +165,107 @@ test('无审核人节点直接完成后激活下一个必经节点且不创建�
   assert.equal(completed.processingCalendarVersion, 'calendar-v1')
 })
 
+test('版本二无审核完成按最终字段快照激活非顺序分支', async () => {
+  const data = seed({ evidenceCount: 0 })
+  Object.assign(data.business_lines[0], {
+    flowSchemaVersion: 2,
+    entryNodeId: 'node-1',
+    traversedNodeIds: [],
+    routeDecisionVersion: 0,
+    nodeCount: 3
+  })
+  data.business_nodes[0] = reviewerlessNode(data.business_nodes[0], {
+    nodeKey: 'entry',
+    routeState: 'active',
+    fieldDefinitions: [{
+      fieldKey: 'route', sequence: 0, name: '处理方式', type: 'single_select', required: true,
+      constraints: { options: ['返修', '退款'] }
+    }],
+    next: {
+      mode: 'single_select', fieldKey: 'route',
+      optionTargets: { '返修': 'node-repair', '退款': 'line-1-node-002' }
+    }
+  })
+  data.business_nodes[1] = reviewerlessNode(data.business_nodes[1], {
+    nodeKey: 'refund', routeState: 'dormant', status: 'waiting',
+    processingSlaWorkHours: 2, processingDueStatus: 'not_started', processingDueAt: null
+  })
+  data.business_nodes.push(reviewerlessNode(data.business_nodes[1], {
+    _id: 'node-repair', nodeCode: 'BL-20260807-0001-N003', nodeKey: 'repair', sequence: 2,
+    name: '返修处理', routeState: 'dormant', status: 'waiting', version: 1,
+    processorUserIds: ['account-a'], processingSlaWorkHours: 3,
+    processingDueStatus: 'not_started', processingDueAt: null,
+    next: { mode: 'end' }
+  }))
+  const { fake, repository } = createFeedbackHarness({
+    seed: data,
+    workTimeService: {
+      async workingMinutesBetween() {
+        return { status: 'calculated', minutes: 1, calendarVersion: 'calendar-v2' }
+      },
+      async tryAddWorkMinutes(startAt, minutes) {
+        assert.deepEqual(startAt, NOW)
+        assert.equal(minutes, 180)
+        return {
+          status: 'calculated', dueAt: new Date('2026-08-07T06:00:00.000Z'),
+          calendarVersion: 'calendar-v2'
+        }
+      }
+    }
+  })
+
+  const result = await repository.commitFeedback(directCompletion({
+    fieldSnapshots: [{ fieldKey: 'route', name: '处理方式', type: 'single_select', value: '返修' }]
+  }))
+
+  assert.equal(result.nextNodeId, 'node-repair')
+  assert.deepEqual(result.routeTransition, { kind: 'activate_node', targetNodeId: 'node-repair' })
+  const line = fake.documents('business_lines')[0]
+  assert.equal(line.currentNodeId, 'node-repair')
+  assert.deepEqual(line.traversedNodeIds, ['node-1'])
+  assert.equal(line.routeDecisionVersion, 1)
+  const nodes = fake.documents('business_nodes')
+  assert.equal(nodes.find(node => node._id === 'node-1').routeState, 'completed')
+  assert.equal(nodes.find(node => node._id === 'node-repair').routeState, 'active')
+  assert.equal(nodes.find(node => node._id === 'line-1-node-002').routeState, 'dormant')
+  assert.equal(nodes.filter(node => node.routeState === 'active').length, 1)
+})
+
+test('版本二无审核人工分支完成后仅进入待决定且不启动候选节点时钟', async () => {
+  const data = seed({ evidenceCount: 0 })
+  Object.assign(data.business_lines[0], {
+    flowSchemaVersion: 2, entryNodeId: 'node-1', traversedNodeIds: [], routeDecisionVersion: 0
+  })
+  data.business_nodes[0] = reviewerlessNode(data.business_nodes[0], {
+    nodeKey: 'entry', routeState: 'active', fieldDefinitions: [],
+    next: {
+      mode: 'manual', activateTargetNodeId: 'line-1-node-002', skipTargetNodeId: 'end'
+    }
+  })
+  data.business_nodes[1] = reviewerlessNode(data.business_nodes[1], {
+    nodeKey: 'follow_up', routeState: 'dormant', status: 'waiting',
+    processingSlaWorkHours: 2, processingDueStatus: 'not_started', processingDueAt: null
+  })
+  const { fake, repository } = createFeedbackHarness({ seed: data })
+
+  const result = await repository.commitFeedback(directCompletion())
+
+  assert.equal(result.nodeStatus, 'awaiting_decision')
+  assert.equal(result.lineStatus, 'active')
+  assert.deepEqual(result.routeTransition, { kind: 'await_manual_decision' })
+  const line = fake.documents('business_lines')[0]
+  const current = fake.documents('business_nodes').find(node => node._id === 'node-1')
+  const candidate = fake.documents('business_nodes').find(node => node._id === 'line-1-node-002')
+  assert.equal(line.currentNodeId, 'node-1')
+  assert.equal(line.awaitingManualDecision, true)
+  assert.deepEqual(line.traversedNodeIds, ['node-1'])
+  assert.equal(current.status, 'awaiting_decision')
+  assert.equal(current.routeState, 'awaiting_manual_decision')
+  assert.equal(candidate.routeState, 'dormant')
+  assert.equal(Object.hasOwn(candidate, 'processingStartedAt'), false)
+  assert.deepEqual(await repository.commitFeedback(directCompletion()), result)
+})
+
 test('最后必经节点直接完成后进入追加节点待决定而不提前冻结售后', async () => {
   const data = seed({ evidenceCount: 0 })
   data.notifications = []

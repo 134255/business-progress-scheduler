@@ -146,6 +146,58 @@ test('field policy rejects missing required values, wrong types, and undeclared 
   }
 })
 
+test('条件字段提交拒绝隐藏字段注入、可见必填缺失和当前分支外选项', async () => {
+  const conditionalContext = context({
+    node: {
+      ...context().node,
+      requiresEvidence: false,
+      fieldDefinitions: [
+        {
+          fieldKey: 'kind', sequence: 0, name: '类型', type: 'single_select', required: true,
+          constraints: { options: ['换货', '维修'] }
+        },
+        {
+          fieldKey: 'reason', sequence: 1, name: '原因', type: 'single_select', required: true,
+          constraints: { options: ['破损', '尺寸', '主板', '屏幕'] },
+          condition: {
+            parentFieldKey: 'kind', visibleWhen: ['换货', '维修'],
+            optionsByParentValue: { '换货': ['破损', '尺寸'], '维修': ['主板', '屏幕'] }
+          }
+        },
+        {
+          fieldKey: 'exchange_note', sequence: 2, name: '换货说明', type: 'short_text', required: true,
+          constraints: { maxLength: 100 },
+          condition: { parentFieldKey: 'kind', visibleWhen: ['换货'] }
+        }
+      ]
+    },
+    evidences: []
+  })
+  const invalidValues = [
+    [
+      { fieldKey: 'kind', value: '维修' },
+      { fieldKey: 'reason', value: '主板' },
+      { fieldKey: 'exchange_note', value: '不应提交' }
+    ],
+    [
+      { fieldKey: 'kind', value: '换货' },
+      { fieldKey: 'reason', value: '破损' }
+    ],
+    [
+      { fieldKey: 'kind', value: '维修' },
+      { fieldKey: 'reason', value: '破损' }
+    ]
+  ]
+  for (const fieldValues of invalidValues) {
+    const { actor, calls, service } = harness({ context: conditionalContext })
+    await assert.rejects(
+      service.submitFeedback({ actor, input: input({ fieldValues, evidenceIds: [] }) }),
+      error => error.code === 'INVALID_FIELD_VALUE'
+    )
+    assert.equal(calls.some(call => call[0] === 'commit'), false)
+  }
+})
+
 test('completion requires registered evidence when the node snapshot requires it', async () => {
   const { actor, service } = harness({ context: { ...context(), evidences: [] } })
   await assert.rejects(

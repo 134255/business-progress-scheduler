@@ -10,6 +10,7 @@ const {
 } = require('./account-relationship-schema')
 const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
 const { classifyCompletedNodeTransition } = require('./optional-tail-domain')
+const { resolveCompletedNodeTarget } = require('./workflow-routing-domain')
 
 const COLLECTIONS = Object.freeze({
   users: 'users', lines: 'business_lines', nodes: 'business_nodes',
@@ -84,6 +85,54 @@ function isCurrentNode(line, node) {
   return Number.isSafeInteger(line.currentNodeIndex) && Number(node.sequence) === line.currentNodeIndex
 }
 
+function isVersionTwoLine(line) {
+  return Boolean(line && line.flowSchemaVersion === 2)
+}
+
+function incrementRouteDecisionVersion(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value === Number.MAX_SAFE_INTEGER) {
+    throw createError('VERSION_CONFLICT')
+  }
+  return value + 1
+}
+
+function exactTraversedNodeIds(line, currentNodeId) {
+  const field = ownDataValue(line, 'traversedNodeIds')
+  if (!field.valid || !Array.isArray(field.value) || field.value.length >= 48 ||
+      field.value.some(id => typeof id !== 'string' || !DOCUMENT_ID.test(id)) ||
+      new Set(field.value).size !== field.value.length || field.value.includes(currentNodeId)) {
+    throw createError('VERSION_CONFLICT')
+  }
+  return clone(field.value)
+}
+
+function resolveVersionTwoCompletion(line, node, fieldValues) {
+  if (!isVersionTwoLine(line) || node.routeState !== 'active' ||
+      !Number.isSafeInteger(line.routeDecisionVersion) || line.routeDecisionVersion < 0) {
+    throw createError('VERSION_CONFLICT')
+  }
+  exactTraversedNodeIds(line, node._id)
+  let outcome
+  try {
+    outcome = resolveCompletedNodeTarget({ node, fieldValues })
+  } catch (error) {
+    throw createError('VERSION_CONFLICT')
+  }
+  if (outcome.kind === 'end') {
+    return { completionTransition: 'complete_line', nextNodeId: null, routeTransition: { kind: 'complete_line' } }
+  }
+  if (outcome.kind === 'manual') {
+    return {
+      completionTransition: 'await_manual_decision', nextNodeId: null,
+      routeTransition: { kind: 'await_manual_decision' }
+    }
+  }
+  return {
+    completionTransition: 'next_node', nextNodeId: outcome.nodeId,
+    routeTransition: { kind: 'activate_node', targetNodeId: outcome.nodeId }
+  }
+}
+
 function processorIds(node) {
   const ids = node && node.workflowMode === 'review' ? node.processorUserIds : node && node.assigneeUserIds
   return exactAccountIds(ids, { nonEmpty: true }) || []
@@ -132,7 +181,7 @@ function publicResult(feedback) {
   const result = {
     feedbackId: feedback._id,
     revision: feedback.revision,
-    nodeStatus: feedback.status,
+    nodeStatus: typeof feedback.resultNodeStatus === 'string' ? feedback.resultNodeStatus : feedback.status,
     lineStatus: feedback.lineStatus
   }
   if (safeInteger(feedback.nodeVersion, { minimum: 1 })) result.nodeVersion = feedback.nodeVersion
@@ -141,6 +190,10 @@ function publicResult(feedback) {
   }
   if (['none', 'pending', 'activated', 'skipped', 'completed'].includes(feedback.optionalTailState)) {
     result.optionalTailState = feedback.optionalTailState
+  }
+  if (feedback.routeTransition && typeof feedback.routeTransition === 'object' &&
+      ['complete_line', 'activate_node', 'await_manual_decision'].includes(feedback.routeTransition.kind)) {
+    result.routeTransition = clone(feedback.routeTransition)
   }
   return result
 }
@@ -254,7 +307,8 @@ function createCloudFeedbackRepository({
         !processorIds(node).includes(actor._id)) {
       throw createError('FORBIDDEN')
     }
-    if (!isCurrentNode(line, node) || !ACTIVE_NODE_STATUSES.has(node.status)) {
+    if (!isCurrentNode(line, node) || isVersionTwoLine(line) && node.routeState !== 'active' ||
+        !ACTIVE_NODE_STATUSES.has(node.status)) {
       if (input.status === 'completed' && node.status === 'completed') throw createError('VERSION_CONFLICT')
       throw createError('NODE_NOT_ACTIVE')
     }
@@ -264,6 +318,7 @@ function createCloudFeedbackRepository({
   function assertReviewProcessingState(line, node, input, reservation = null) {
     if (!node || node.workflowMode !== 'review') return
     if (!line || line.status !== 'active' || !isCurrentNode(line, node) ||
+        isVersionTwoLine(line) && node.routeState !== 'active' ||
         !ACTIVE_NODE_STATUSES.has(node.status)) throw createError('NODE_NOT_ACTIVE')
     if (!input || !Number.isSafeInteger(input.expectedNodeVersion) || input.expectedNodeVersion < 1 ||
         !['save_progress', 'mark_blocked', 'complete_node'].includes(input.action) ||
@@ -299,7 +354,11 @@ function createCloudFeedbackRepository({
         !processorIds(node).includes(actor._id)) throw createError('FORBIDDEN')
     if (reservation.action === 'complete_node' && reservation.status === 'completed') {
       const reviewers = exactAccountIds(node.reviewerUserIds, { nonEmpty: false })
-      if (!reviewers || reviewers.length || node.status !== 'completed' ||
+      const expectedNodeStatus = reservation.routeTransition &&
+        reservation.routeTransition.kind === 'await_manual_decision'
+        ? 'awaiting_decision'
+        : 'completed'
+      if (!reviewers || reviewers.length || node.status !== expectedNodeStatus ||
           reservation.expectedNodeVersion !== value.input.expectedNodeVersion ||
           node.latestFeedbackId !== reservation._id || node.latestFeedbackRevision !== reservation.revision ||
           node.version !== value.input.expectedNodeVersion + 1) throw createError('VERSION_CONFLICT')
@@ -505,18 +564,30 @@ function createCloudFeedbackRepository({
       let plannedNextNodeId = null
       let plannedOptionalTailState = current.line.optionalTailState || 'none'
       let nextProcessingWorkMinutes = null
+      let routeTransition = null
       if (value.input.status === 'completed') {
-        plannedNextNodeId = Number(current.node.sequence) + 1 < Number(current.line.nodeCount)
-          ? nextNodeId(current.line._id, current.node.sequence)
-          : null
+        if (isVersionTwoLine(current.line)) {
+          const plan = resolveVersionTwoCompletion(current.line, current.node, value.fieldSnapshots)
+          completionTransition = plan.completionTransition
+          plannedNextNodeId = plan.nextNodeId
+          routeTransition = plan.routeTransition
+        } else {
+          plannedNextNodeId = Number(current.node.sequence) + 1 < Number(current.line.nodeCount)
+            ? nextNodeId(current.line._id, current.node.sequence)
+            : null
+        }
         const nextNode = plannedNextNodeId
           ? await readDocument(transaction, COLLECTIONS.nodes, plannedNextNodeId)
           : null
-        completionTransition = classifyCompletedNodeTransition({
-          line: current.line, node: current.node, nextNode
-        })
+        if (!isVersionTwoLine(current.line)) {
+          completionTransition = classifyCompletedNodeTransition({
+            line: current.line, node: current.node, nextNode
+          })
+        }
         if (completionTransition === 'next_node' &&
-            (!nextNode || nextNode.businessLineId !== current.line._id || nextNode.status !== 'waiting')) {
+            (!nextNode || nextNode.businessLineId !== current.line._id || nextNode.status !== 'waiting' ||
+              isVersionTwoLine(current.line) &&
+                (nextNode.routeState !== 'dormant' || !accountSchema(current.line, nextNode)))) {
           throw createError('NODE_NOT_ACTIVE')
         }
         if (completionTransition === 'await_optional_decision' &&
@@ -568,6 +639,7 @@ function createCloudFeedbackRepository({
         freezesLine: completionTransition === 'complete_line',
         completionTransition,
         nextNodeId: plannedNextNodeId,
+        ...(routeTransition ? { routeTransition } : {}),
         optionalTailState: plannedOptionalTailState,
         transitionAt: at,
         ...(nextProcessingWorkMinutes === null ? {} : { nextProcessingWorkMinutes }),
@@ -748,12 +820,27 @@ function createCloudFeedbackRepository({
         (reservation.freezesLine === true ? 'complete_line' :
           reservation.freezesLine === false && value.input.status === 'completed' ? 'next_node' : null)
       if (value.input.status === 'completed' &&
-          !['complete_line', 'next_node', 'await_optional_decision'].includes(completionTransition)) {
+          !['complete_line', 'next_node', 'await_optional_decision', 'await_manual_decision'].includes(completionTransition)) {
         throw createError('VERSION_CONFLICT')
+      }
+      const versionTwo = isVersionTwoLine(current.line)
+      if (value.input.status === 'completed' && versionTwo) {
+        const resolved = resolveVersionTwoCompletion(current.line, current.node, reservation.fieldValues)
+        if (resolved.completionTransition !== completionTransition || resolved.nextNodeId !== reservation.nextNodeId ||
+            JSON.stringify(resolved.routeTransition) !== JSON.stringify(reservation.routeTransition)) {
+          throw createError('VERSION_CONFLICT')
+        }
       }
       const nodeVersion = increment(current.node.version)
       const nextLineSearch = advanceSearchVersion(current.line)
       const nextNodeSearch = advanceSearchVersion(current.node)
+      const versionTwoLineChanges = value.input.status === 'completed' && versionTwo
+        ? {
+            traversedNodeIds: [...exactTraversedNodeIds(current.line, current.node._id), current.node._id],
+            routeDecisionVersion: incrementRouteDecisionVersion(current.line.routeDecisionVersion),
+            awaitingManualDecision: completionTransition === 'await_manual_decision'
+          }
+        : {}
       const nodeChanges = {
         status: value.input.status,
         version: nodeVersion,
@@ -783,6 +870,13 @@ function createCloudFeedbackRepository({
         nodeChanges.analyticsSnapshotStatus = 'pending'
         nodeChanges.analyticsSourceVersion = nextAnalyticsSourceVersion(current.node)
         nodeChanges.analyticsCompletedAt = reservation.transitionAt
+        if (versionTwo) nodeChanges.routeState = completionTransition === 'await_manual_decision'
+          ? 'awaiting_manual_decision'
+          : 'completed'
+        if (versionTwo && completionTransition === 'await_manual_decision') {
+          nodeChanges.status = 'awaiting_decision'
+          nodeChanges.decisionStartedAt = reservation.transitionAt
+        }
       }
       if (value.input.action === 'complete_node' && value.directProcessingTiming) {
         const timing = value.directProcessingTiming
@@ -822,16 +916,22 @@ function createCloudFeedbackRepository({
           analyticsSnapshotStatus: 'pending',
           analyticsSourceVersion: nextAnalyticsSourceVersion(current.line),
           analyticsCompletedAt: reservation.transitionAt,
+          ...versionTwoLineChanges,
           ...nextLineSearch,
           updatedAt: db.serverDate()
         } })
       } else if (value.input.status === 'completed' && completionTransition === 'next_node') {
         const nextId = reservation.nextNodeId
         const next = await readDocument(transaction, COLLECTIONS.nodes, nextId)
-        if (!next || next.businessLineId !== current.line._id || Number(next.sequence) !== Number(current.node.sequence) + 1 ||
-            next.status !== 'waiting') throw createError('NODE_NOT_ACTIVE')
+        if (!next || next.businessLineId !== current.line._id ||
+            !versionTwo && Number(next.sequence) !== Number(current.node.sequence) + 1 ||
+            next.status !== 'waiting' || versionTwo && next.routeState !== 'dormant') {
+          throw createError('NODE_NOT_ACTIVE')
+        }
         const nextChanges = {
-          status: 'ready', version: increment(next.version), updatedAt: db.serverDate()
+          status: 'ready',
+          ...(versionTwo ? { routeState: 'active' } : {}),
+          version: increment(next.version), updatedAt: db.serverDate()
         }
         if (next.activatedAt === undefined || next.activatedAt === null) {
           nextChanges.activatedAt = reservation.transitionAt
@@ -855,7 +955,18 @@ function createCloudFeedbackRepository({
         const progress = Math.floor(((Number(current.node.sequence) + 1) / Number(current.line.nodeCount)) * 100)
         await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
           currentNodeId: nextId, currentNodeIndex: next.sequence, currentNodeName: next.name,
-          progress, version: increment(current.line.version), ...nextLineSearch, updatedAt: db.serverDate()
+          progress, version: increment(current.line.version), ...versionTwoLineChanges,
+          ...nextLineSearch, updatedAt: db.serverDate()
+        } })
+      } else if (value.input.status === 'completed' && completionTransition === 'await_manual_decision') {
+        await transaction.collection(COLLECTIONS.lines).doc(current.line._id).update({ data: {
+          currentNodeId: current.node._id,
+          currentNodeIndex: current.node.sequence,
+          currentNodeName: current.node.name,
+          version: increment(current.line.version),
+          ...versionTwoLineChanges,
+          ...nextLineSearch,
+          updatedAt: db.serverDate()
         } })
       } else if (value.input.status === 'completed' &&
           completionTransition === 'await_optional_decision') {
@@ -898,14 +1009,19 @@ function createCloudFeedbackRepository({
       }
       await transaction.collection(COLLECTIONS.feedback).doc(id.feedbackId).update({ data: {
         publishState: 'published', revision, lineStatus, submittedAt: reservation.transitionAt,
+        resultNodeStatus: versionTwo && completionTransition === 'await_manual_decision'
+          ? 'awaiting_decision'
+          : value.input.status,
         ...(value.input.action === 'complete_node'
           ? {
               nextNodeId: reservation.nextNodeId || db.command.remove(),
-              optionalTailState: reservation.optionalTailState
+              optionalTailState: reservation.optionalTailState,
+              routeTransition: reservation.routeTransition || db.command.remove()
             }
           : {
               nextNodeId: db.command.remove(),
-              optionalTailState: db.command.remove()
+              optionalTailState: db.command.remove(),
+              routeTransition: db.command.remove()
             }),
         nodeVersion,
         claimExpiresAt: db.command.remove(), updatedAt: db.serverDate()
@@ -922,9 +1038,17 @@ function createCloudFeedbackRepository({
       } })
       return withSearchEnvelope(
         {
-          feedbackId: id.feedbackId, revision, nodeStatus: value.input.status, lineStatus, nodeVersion,
+          feedbackId: id.feedbackId, revision,
+          nodeStatus: versionTwo && completionTransition === 'await_manual_decision'
+            ? 'awaiting_decision'
+            : value.input.status,
+          lineStatus, nodeVersion,
           ...(value.input.action === 'complete_node'
-            ? { nextNodeId: reservation.nextNodeId, optionalTailState: reservation.optionalTailState }
+            ? {
+                ...(reservation.nextNodeId ? { nextNodeId: reservation.nextNodeId } : {}),
+                optionalTailState: reservation.optionalTailState,
+                ...(reservation.routeTransition ? { routeTransition: clone(reservation.routeTransition) } : {})
+              }
             : {})
         },
         current.actor._id,

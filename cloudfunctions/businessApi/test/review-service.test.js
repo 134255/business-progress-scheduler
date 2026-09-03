@@ -371,6 +371,46 @@ test('审核通过进入追加节点待决定时不计算处理截止', async ()
   assert.equal(Object.hasOwn(submitted.timing, 'processingDueStatus'), false)
 })
 
+test('审核通过进入通用人工分支待决定时不计算候选节点截止', async () => {
+  let dueCalls = 0
+  const value = harness({
+    voteContext: {
+      transition: 'await_manual_decision',
+      routeTransition: { kind: 'await_manual_decision' },
+      processingWorkMinutes: null,
+      reviewStartedAt: new Date('2026-08-11T01:00:00.000Z'),
+      reviewTotalWorkMinutes: 480,
+      reviewBaseElapsedWorkMinutes: 0
+    },
+    workTimeService: {
+      async workingMinutesBetween() {
+        return { status: 'calculated', minutes: 120, calendarVersion: 'calendar-a' }
+      },
+      async tryAddWorkMinutes() {
+        dueCalls += 1
+        throw new Error('人工分支待决定时不应计算候选节点截止')
+      }
+    },
+    voteResult: {
+      reviewRoundId: 'review-feedback-current', status: 'approved',
+      nodeStatus: 'awaiting_decision', lineStatus: 'active', nextNodeId: null,
+      routeTransition: { kind: 'await_manual_decision' }
+    }
+  })
+
+  const result = await value.service.submitReviewVote({
+    actor: { _id: 'reviewer-1', status: 'active' },
+    input: {
+      reviewRoundId: 'review-feedback-current', expectedRoundVersion: 1,
+      decision: 'approve', comment: '', requestKey: 'vote-manual-route'
+    }
+  })
+
+  assert.equal(result.nodeStatus, 'awaiting_decision')
+  assert.equal(dueCalls, 0)
+  assert.equal(Object.hasOwn(value.calls.at(-1)[1].timing, 'processingDueStatus'), false)
+})
+
 test('真实秒级审核时长只结算完整分钟', async () => {
   const { calls, service } = harness({
     workTimeService: realWorkTimeService(),

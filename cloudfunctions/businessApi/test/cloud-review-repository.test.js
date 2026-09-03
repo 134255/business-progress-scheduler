@@ -1344,6 +1344,123 @@ test('会签逐票通过、同票同输入幂等且改票冲突', async () => {
   assert.equal(fake.documents('business_nodes').find(node => node._id === 'node-1').status, 'completed')
 })
 
+test('版本二最终审核通过按已锁定字段快照激活非顺序分支', async () => {
+  const data = votingSeed({ mode: 'any' })
+  Object.assign(data.business_lines[0], {
+    flowSchemaVersion: 2,
+    entryNodeId: 'node-1',
+    traversedNodeIds: [],
+    routeDecisionVersion: 0,
+    nodeCount: 3
+  })
+  Object.assign(data.business_nodes[0], {
+    nodeKey: 'entry',
+    routeState: 'active',
+    fieldDefinitions: [{
+      fieldKey: 'route', sequence: 0, name: '处理方式', type: 'single_select', required: true,
+      constraints: { options: ['返修', '退款'] }
+    }],
+    next: {
+      mode: 'single_select', fieldKey: 'route',
+      optionTargets: { '返修': 'node-repair', '退款': 'line-1-node-002' }
+    }
+  })
+  Object.assign(data.business_nodes[1], {
+    nodeKey: 'refund', routeState: 'dormant', processingDueStatus: 'not_started', processingDueAt: null
+  })
+  data.business_nodes.push({
+    ...data.business_nodes[1],
+    _id: 'node-repair', nodeCode: 'BL-20260811-0001-N003', nodeKey: 'repair',
+    name: '返修处理', sequence: 2, routeState: 'dormant', version: 1,
+    next: { mode: 'end' }, processingDueStatus: 'not_started', processingDueAt: null
+  })
+  data.node_review_rounds[0].fieldValues = [
+    { fieldKey: 'route', name: '处理方式', type: 'single_select', value: '返修' }
+  ]
+  const { fake, repository } = harness({ seed: data })
+  const value = voteRequest('reviewer-1')
+  const context = await repository.prepareReviewVote({
+    actor: value.actor,
+    input: value.input,
+    requestKeyHash: value.requestKeyHash,
+    inputHash: value.inputHash
+  })
+
+  assert.equal(context.nextNodeId, 'node-repair')
+  const result = await repository.submitReviewVote({ ...value, context })
+
+  assert.equal(result.nextNodeId, 'node-repair')
+  assert.deepEqual(result.routeTransition, { kind: 'activate_node', targetNodeId: 'node-repair' })
+  const line = fake.documents('business_lines')[0]
+  const nodes = fake.documents('business_nodes')
+  assert.equal(line.currentNodeId, 'node-repair')
+  assert.deepEqual(line.traversedNodeIds, ['node-1'])
+  assert.equal(line.routeDecisionVersion, 1)
+  assert.equal(nodes.find(node => node._id === 'node-1').routeState, 'completed')
+  assert.equal(nodes.find(node => node._id === 'node-repair').routeState, 'active')
+  assert.equal(nodes.find(node => node._id === 'line-1-node-002').routeState, 'dormant')
+
+  const retryContext = await repository.prepareReviewVote({
+    actor: value.actor,
+    input: value.input,
+    requestKeyHash: value.requestKeyHash,
+    inputHash: value.inputHash
+  })
+  const retry = await repository.submitReviewVote({
+    ...value, context: retryContext, timing: { transitionAt: NOW }
+  })
+  assert.deepEqual(retry, result)
+  assert.equal(fake.documents('notifications').filter(item => item.type === 'node_processing_started').length, 1)
+})
+
+test('版本二最终审核通过人工分支后停在原节点等待决定', async () => {
+  const data = votingSeed({ mode: 'any' })
+  Object.assign(data.business_lines[0], {
+    flowSchemaVersion: 2, entryNodeId: 'node-1', traversedNodeIds: [], routeDecisionVersion: 0
+  })
+  Object.assign(data.business_nodes[0], {
+    nodeKey: 'entry', routeState: 'active', fieldDefinitions: [],
+    next: {
+      mode: 'manual', activateTargetNodeId: 'line-1-node-002', skipTargetNodeId: 'end'
+    }
+  })
+  Object.assign(data.business_nodes[1], {
+    nodeKey: 'follow_up', routeState: 'dormant', processingDueStatus: 'not_started', processingDueAt: null
+  })
+  const { fake, repository } = harness({ seed: data })
+  const value = voteRequest('reviewer-1')
+  const context = await repository.prepareReviewVote({
+    actor: value.actor, input: value.input,
+    requestKeyHash: value.requestKeyHash, inputHash: value.inputHash
+  })
+
+  assert.deepEqual(context.routeTransition, { kind: 'await_manual_decision' })
+  const result = await repository.submitReviewVote({ ...value, context })
+
+  assert.equal(result.status, 'approved')
+  assert.equal(result.nodeStatus, 'awaiting_decision')
+  assert.equal(result.nextNodeId, null)
+  assert.deepEqual(result.routeTransition, { kind: 'await_manual_decision' })
+  const line = fake.documents('business_lines')[0]
+  const source = fake.documents('business_nodes').find(node => node._id === 'node-1')
+  const candidate = fake.documents('business_nodes').find(node => node._id === 'line-1-node-002')
+  assert.equal(line.currentNodeId, 'node-1')
+  assert.equal(line.awaitingManualDecision, true)
+  assert.deepEqual(line.traversedNodeIds, ['node-1'])
+  assert.equal(source.status, 'awaiting_decision')
+  assert.equal(source.routeState, 'awaiting_manual_decision')
+  assert.equal(candidate.routeState, 'dormant')
+  assert.equal(Object.hasOwn(candidate, 'processingStartedAt'), false)
+
+  const retryContext = await repository.prepareReviewVote({
+    actor: value.actor, input: value.input,
+    requestKeyHash: value.requestKeyHash, inputHash: value.inputHash
+  })
+  assert.deepEqual(await repository.submitReviewVote({
+    ...value, context: retryContext, timing: { transitionAt: NOW }
+  }), result)
+})
+
 test('最终投票响应丢失后仍先重新授权再按同一摘要幂等返回', async () => {
   const { fake, repository } = harness({ seed: votingSeed({ mode: 'any' }) })
   const value = voteRequest('reviewer-1')
