@@ -5,6 +5,8 @@ const {
   ACTIVATION_MODE,
   REVIEWER_ASSIGNMENT_MODE,
   normalizeTemplateNode,
+  normalizeVersion2TemplateDefinition,
+  version2TemplateDefinitionDigest,
   templateDefinitionDigest,
   collectTemplateParticipantUserIds,
   validateTemplateForEnable,
@@ -172,6 +174,38 @@ test('模板定义摘要绑定规范化节点内容并忽略存储元数据', ()
   assert.notEqual(
     templateDefinitionDigest([original]),
     templateDefinitionDigest([{ ...original, reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: ['reviewer-1'] }])
+  )
+})
+
+test('流程版本二定义把入口、节点路由和条件字段纳入规范化摘要', () => {
+  const entry = createNode({
+    nodeKey: 'entry',
+    fields: [
+      { fieldKey: 'kind', sequence: 0, name: '类型', type: 'single_select', required: true, constraints: { options: ['简单', '复杂'] } },
+      { fieldKey: 'detail', sequence: 1, name: '详情', type: 'short_text', condition: { parentFieldKey: 'kind', visibleWhen: ['复杂'] } }
+    ],
+    next: { mode: 'single_select', fieldKey: 'kind', optionTargets: { 简单: 'end', 复杂: 'detail-node' } }
+  })
+  const detail = createNode({ nodeKey: 'detail-node', sequence: 1, next: { mode: 'end' } })
+  const input = { flowSchemaVersion: 2, entryNodeKey: 'entry', nodes: [entry, detail] }
+  const definition = normalizeVersion2TemplateDefinition(input)
+
+  assert.equal(definition.flowSchemaVersion, 2)
+  assert.equal(definition.entryNodeKey, 'entry')
+  assert.deepEqual(definition.nodes[0].fields[1].condition, {
+    parentFieldKey: 'kind', visibleWhen: ['复杂']
+  })
+  assert.deepEqual(definition.nodes[0].next.optionTargets, { 简单: 'end', 复杂: 'detail-node' })
+  assert.notEqual(
+    version2TemplateDefinitionDigest(input),
+    version2TemplateDefinitionDigest({
+      ...input,
+      nodes: [{ ...entry, next: { mode: 'single_select', fieldKey: 'kind', optionTargets: { 简单: 'detail-node', 复杂: 'detail-node' } } }, detail]
+    })
+  )
+  assert.throws(
+    () => version2TemplateDefinitionDigest({ ...input, entryNodeKey: 'detail-node' }),
+    error => error.code === 'TEMPLATE_INVALID'
   )
 })
 

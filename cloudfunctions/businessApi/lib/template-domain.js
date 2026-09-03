@@ -1,6 +1,11 @@
 const crypto = require('node:crypto')
 
 const { normalizeFieldDefinition } = require('./field-domain')
+const { normalizeConditionalFields } = require('./conditional-field-domain')
+const {
+  FLOW_SCHEMA_VERSION,
+  normalizeWorkflowGraph
+} = require('./workflow-routing-domain')
 const { WORKFLOW_MODE, normalizeReviewMode } = require('./review-domain')
 const { ACTIVATION_MODE, normalizeActivationMode } = require('./optional-tail-domain')
 const {
@@ -144,7 +149,11 @@ function normalizeFields(fields) {
     throw createError('TEMPLATE_INVALID')
   }
   if (new Set(normalized.map(field => field.fieldKey)).size !== normalized.length) throw createError('TEMPLATE_INVALID')
-  return normalized.map((field, sequence) => ({ ...field, sequence }))
+  try {
+    return normalizeConditionalFields(normalized.map((field, sequence) => ({ ...field, sequence })))
+  } catch (error) {
+    throw createError('TEMPLATE_INVALID')
+  }
 }
 
 function normalizeTemplateNode(input) {
@@ -258,6 +267,34 @@ function templateDefinitionDigest(nodes) {
     .digest('hex')
 }
 
+function normalizeVersion2TemplateDefinition(input) {
+  input = ownDataObject(input)
+  if (Reflect.ownKeys(input).some(key => !['flowSchemaVersion', 'entryNodeKey', 'nodes'].includes(key)) ||
+      input.flowSchemaVersion !== FLOW_SCHEMA_VERSION) throw createError('TEMPLATE_INVALID')
+  const sourceNodes = ownArrayValues(input.nodes)
+  const nodes = sourceNodes.map(source => {
+    const safeSource = ownDataObject(source)
+    if (!hasOwn(safeSource, 'next')) throw createError('TEMPLATE_INVALID')
+    return { ...normalizeTemplateNode(safeSource), next: safeSource.next }
+  })
+  try {
+    return normalizeWorkflowGraph({
+      flowSchemaVersion: input.flowSchemaVersion,
+      entryNodeKey: input.entryNodeKey,
+      nodes
+    })
+  } catch (error) {
+    throw createError('TEMPLATE_INVALID')
+  }
+}
+
+function version2TemplateDefinitionDigest(input) {
+  const definition = normalizeVersion2TemplateDefinition(input)
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(definition))
+    .digest('hex')
+}
+
 function preActivationModeTemplateDefinitionDigest(nodes) {
   const values = ownArrayValues(nodes)
   if (values.length === 0) return templateDefinitionDigest(values)
@@ -335,6 +372,8 @@ module.exports = {
   REVIEWER_ASSIGNMENT_MODE,
   ALLOWED_EVIDENCE_TYPES,
   normalizeTemplateNode,
+  normalizeVersion2TemplateDefinition,
+  version2TemplateDefinitionDigest,
   templateDefinitionDigest,
   preActivationModeTemplateDefinitionDigest,
   collectTemplateParticipantUserIds,
