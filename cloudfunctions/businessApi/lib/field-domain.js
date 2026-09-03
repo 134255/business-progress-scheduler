@@ -3,6 +3,11 @@ const FIELD_TYPES = Object.freeze([
   'date', 'single_select', 'multi_select'
 ])
 const MAX_REGEX_LENGTH = 256
+const {
+  normalizeConditionInput,
+  normalizeConditionalFields,
+  resolveConditionalFields
+} = require('./conditional-field-domain')
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -156,7 +161,8 @@ function normalizeFieldDefinition(input) {
     description: typeof input.description === 'string' ? input.description.trim() : '',
     type: input.type,
     required,
-    constraints: normalizeConstraints(input.type, hasOwn(input, 'constraints') ? input.constraints : {})
+    constraints: normalizeConstraints(input.type, hasOwn(input, 'constraints') ? input.constraints : {}),
+    ...(hasOwn(input, 'condition') ? { condition: normalizeConditionInput(input.condition) } : {})
   }
 }
 
@@ -236,7 +242,7 @@ function indexSubmittedValues(submitted) {
 
 function normalizeDefinitions(definitions) {
   if (!Array.isArray(definitions)) throw createError('INVALID_FIELD_VALUE')
-  const normalized = definitions.map(normalizeFieldDefinition)
+  const normalized = normalizeConditionalFields(definitions.map(normalizeFieldDefinition))
   if (new Set(normalized.map(definition => definition.fieldKey)).size !== normalized.length) throw createError('INVALID_FIELD_VALUE')
   return normalized
 }
@@ -250,9 +256,10 @@ function rejectUnknownKeys(definitions, valuesByKey) {
 
 function validateFieldValues(definitions, submitted) {
   const normalizedDefinitions = normalizeDefinitions(definitions)
-  const valuesByKey = indexSubmittedValues(submitted)
-  rejectUnknownKeys(normalizedDefinitions, valuesByKey)
-  return normalizedDefinitions.slice().sort(bySequence).map(definition => ({
+  const resolved = resolveConditionalFields(normalizedDefinitions, submitted)
+  const valuesByKey = resolved.valuesByKey
+  rejectUnknownKeys(resolved.visibleDefinitions, valuesByKey)
+  return resolved.visibleDefinitions.slice().sort(bySequence).map(definition => ({
     fieldKey: definition.fieldKey,
     name: definition.name,
     type: definition.type,
