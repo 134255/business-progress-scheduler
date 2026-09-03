@@ -106,7 +106,8 @@ test('application registers template pages and exposes administrator navigation 
   assert.deepEqual(appConfig.pages.filter(item => item.startsWith('pages/admin-template')), [
     'pages/admin-templates/index',
     'pages/admin-template-edit/index',
-    'pages/admin-template-node-edit/index'
+    'pages/admin-template-node-edit/index',
+    'pages/admin-template-flow/index'
   ])
   assert.match(dashboardWxml, /profile\s*&&\s*profile\.role\s*===\s*'super_admin'[\s\S]*openAdminTemplates/)
 
@@ -176,9 +177,10 @@ function storedNode(overrides = {}) {
   }
 }
 
-function createNodeEditor({ users, node = null, readOnly = false, optionalTailExistsOutsideCurrentNode = false, acceptNodeFromEditor = () => {} }) {
+function createNodeEditor({ users, node = null, readOnly = false, optionalTailExistsOutsideCurrentNode = false,
+  nodeOptions = [], acceptNodeFromEditor = () => {} }) {
   const previousPage = {
-    getNodeEditorContext: () => ({ readOnly, assigneeOptions: users, node, optionalTailExistsOutsideCurrentNode }),
+    getNodeEditorContext: () => ({ readOnly, assigneeOptions: users, node, optionalTailExistsOutsideCurrentNode, nodeOptions }),
     acceptNodeFromEditor
   }
   global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
@@ -215,6 +217,136 @@ test('node editor saves separate processor reviewer mode and dual SLA fields', (
   assert.equal(Object.hasOwn(node, 'slaWorkHours'), false)
   delete global.getApp
   delete global.getCurrentPages
+  delete global.wx
+})
+
+test('version 2 node editor keeps fixed processors when the creator is included', () => {
+  const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
+  const page = createNodeEditor({
+    users: [processor],
+    node: storedNode({
+      workflowMode: 'review', processorUserIds: [processor._id], reviewerUserIds: [],
+      includeBusinessCreatorAsProcessor: true, next: { mode: 'end' }
+    })
+  })
+  page.onIncludeBusinessCreatorAsProcessorChange({ detail: { value: false } })
+  page.onIncludeBusinessCreatorAsProcessorChange({ detail: { value: true } })
+  const node = page.buildNodeForSave()
+  assert.equal(node.includeBusinessCreatorAsProcessor, true)
+  assert.deepEqual(node.processorUserIds, [processor._id])
+  assert.deepEqual(node.next, { mode: 'end' })
+})
+
+test('node editor configures single-select and manual routes to node keys or end', () => {
+  const page = createNodeEditor({
+    users: [{ _id: 'processor-1', displayName: '处理人', username: 'processor' }],
+    nodeOptions: [
+      { nodeKey: 'entry', name: '入口' }, { nodeKey: 'detail', name: '详情' }, { nodeKey: 'finish', name: '结束处理' }
+    ],
+    node: storedNode({
+      nodeKey: 'entry', workflowMode: 'review', processorUserIds: ['processor-1'], reviewerUserIds: [],
+      fields: [{ fieldKey: 'kind', sequence: 0, name: '类型', type: 'single_select', required: true,
+        constraints: { options: ['简单', '复杂'] } }],
+      next: { mode: 'single_select', fieldKey: 'kind', optionTargets: { 简单: 'end', 复杂: 'detail' } }
+    })
+  })
+  assert.equal(page.data.nextMode, 'single_select')
+  assert.deepEqual(page.data.routeOptionRows.map(item => [item.option, item.target]), [['简单', 'end'], ['复杂', 'detail']])
+  page.onRouteOptionTargetChange({ currentTarget: { dataset: { option: '简单' } }, detail: { value: 2 } })
+  assert.equal(page.buildNodeForSave().next.optionTargets['简单'], 'finish')
+  page.onNextModeChange({ detail: { value: 3 } })
+  page.onManualActivateTargetChange({ detail: { value: 1 } })
+  page.onManualSkipTargetChange({ detail: { value: 0 } })
+  assert.deepEqual(page.buildNodeForSave().next, {
+    mode: 'manual', activateTarget: 'detail', skipTarget: 'end'
+  })
+})
+
+test('node editor builds conditional child fields and protects referenced parents from deletion', () => {
+  const page = createNodeEditor({
+    users: [{ _id: 'processor-1', displayName: '处理人', username: 'processor' }],
+    node: storedNode({
+      workflowMode: 'review', processorUserIds: ['processor-1'], reviewerUserIds: [], next: { mode: 'end' },
+      fields: [
+        { fieldKey: 'kind', sequence: 0, name: '类型', type: 'single_select', required: true,
+          constraints: { options: ['退货', '换货'] } },
+        { fieldKey: 'reason', sequence: 1, name: '原因', type: 'single_select', required: true,
+          constraints: { options: ['质量', '尺寸', '其他'] },
+          condition: { parentFieldKey: 'kind', visibleWhen: ['退货'], optionsByParentValue: { 退货: ['质量', '其他'] } } }
+      ]
+    })
+  })
+  assert.equal(page.data.fields[1].conditionEnabled, true)
+  assert.equal(page.data.fields[1].condition.parentFieldKey, 'kind')
+  assert.deepEqual(page.buildNodeForSave().fields[1].condition, {
+    parentFieldKey: 'kind', visibleWhen: ['退货'], optionsByParentValue: { 退货: ['质量', '其他'] }
+  })
+  page.removeField({ currentTarget: { dataset: { index: 0 } } })
+  assert.equal(page.data.fields.length, 2)
+  assert.match(page.data.errorMessage, /依赖/)
+})
+
+test('version 2 template editor preserves graph metadata and opens authoritative flow preview', async () => {
+  let submitted
+  const navigations = []
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { setNavigationBarTitle: () => {}, navigateBack: () => {}, showToast: () => {},
+    navigateTo: options => navigations.push(options) }
+  const page = loadPage('pages/admin-template-edit/index.js', {
+    'services/templates.js': {
+      getTemplate: async () => ({
+        template: { _id: 't1', name: '分支模板', description: '', status: 'disabled', version: 2,
+          flowSchemaVersion: 2, entryNodeKey: 'entry' },
+        nodes: [
+          { ...storedNode(), nodeKey: 'entry', workflowMode: 'review', processorUserIds: ['account-1'],
+            reviewerUserIds: [], includeBusinessCreatorAsProcessor: false,
+            next: { mode: 'default', targetNodeKey: 'finish' } },
+          { ...storedNode(), nodeKey: 'finish', name: '结束', sequence: 1, workflowMode: 'review',
+            processorUserIds: ['account-1'], reviewerUserIds: [], includeBusinessCreatorAsProcessor: false,
+            next: { mode: 'end' } }
+        ]
+      }),
+      updateTemplate: async (id, version, definition) => { submitted = definition }
+    },
+    'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
+  })
+  await page.onLoad({ id: 't1' })
+  assert.equal(page.data.entryNodeKey, 'entry')
+  await page.submit()
+  assert.equal(submitted.flowSchemaVersion, 2)
+  assert.equal(submitted.entryNodeKey, 'entry')
+  assert.deepEqual(submitted.nodes[0].next, { mode: 'default', targetNodeKey: 'finish' })
+  page.openFlowPreview()
+  assert.deepEqual(navigations, [{ url: '/pages/admin-template-flow/index?id=t1' }])
+  delete global.getApp
+  delete global.wx
+})
+
+test('flow preview page loads only the authoritative template id and renders nested convergence rows', async () => {
+  const calls = []
+  global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
+  global.wx = { setNavigationBarTitle: () => {}, reLaunch: () => {} }
+  const page = loadPage('pages/admin-template-flow/index.js', {
+    'services/templates.js': { getTemplate: async id => {
+      calls.push(id)
+      return {
+        template: { _id: id, name: '嵌套流程', flowSchemaVersion: 2, entryNodeKey: 'entry' },
+        nodes: [
+          { nodeKey: 'entry', name: '入口', next: { mode: 'single_select', fieldKey: 'kind', optionTargets: { A: 'left', B: 'right' } } },
+          { nodeKey: 'left', name: '左路', next: { mode: 'default', targetNodeKey: 'merge' } },
+          { nodeKey: 'right', name: '右路', next: { mode: 'manual', activateTarget: 'merge', skipTarget: 'end' } },
+          { nodeKey: 'merge', name: '汇合', next: { mode: 'end' } }
+        ]
+      }
+    } }
+  })
+  await page.onLoad({ id: 't1' })
+  assert.deepEqual(calls, ['t1'])
+  assert.equal(page.data.rows.length, 4)
+  assert.equal(page.data.rows.find(item => item.nodeKey === 'entry').isEntry, true)
+  assert.match(page.data.rows.find(item => item.nodeKey === 'right').routeLabel, /开启.*汇合.*跳过.*结束/)
+  assert.equal(page.data.diagnostics.length, 0)
+  delete global.getApp
   delete global.wx
 })
 
@@ -491,6 +623,7 @@ test('template editor fixes the optional tail at the final position and summariz
     'services/admin-users.js': { listUsers: async () => ({ items: [], hasMore: false }) }
   })
   page.setData({
+    flowSchemaVersion: 1,
     nodes: [
       storedNode({ activationMode: 'required' }),
       storedNode({ nodeKey: 'node-stable-2', sequence: 1, activationMode: 'required' }),

@@ -18,3 +18,8 @@
 .actions { display: flex; flex-wrap: wrap; gap: 12rpx; margin-top: 12rpx; }
 .actions button { margin: 0; }
 .submit { margin-top: 28rpx; }
+.route-panel, .condition-panel { padding: 20rpx; background: #f0fdfa; border: 1rpx solid #99f6e4; border-radius: 14rpx; }
+.route-row { display: grid; grid-template-columns: minmax(120rpx, 1fr) 2fr; align-items: center; gap: 16rpx; }
+.route-target { margin: 8rpx 0; }
+.condition-panel { margin-top: 18rpx; }
+.conditional-option-row { margin-top: 12rpx; }

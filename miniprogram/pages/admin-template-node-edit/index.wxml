@@ -3,7 +3,7 @@
   <view wx:if="{{readOnly}}" class="readonly-banner">模板已启用，此节点只能查看。</view>
 
   <view class="card">
-    <view class="field">
+    <view class="field" wx:if="{{flowSchemaVersion !== 2}}">
       <label class="field-label" for="node-name">节点名称</label>
       <input id="node-name" class="input" value="{{name}}" maxlength="60" disabled="{{readOnly}}" bindinput="onNameInput" />
     </view>
@@ -30,11 +30,19 @@
         <input id="node-review-sla" class="input" type="digit" value="{{reviewSlaWorkHours}}" disabled="{{readOnly}}" bindinput="onReviewSlaInput" />
       </view>
     </view>
-    <view class="field">
+    <view class="field" wx:if="{{flowSchemaVersion === 2}}">
+      <text class="field-label">处理人来源</text>
+      <label class="assignment-mode-row">
+        <switch checked="{{includeBusinessCreatorAsProcessor}}" disabled="{{readOnly}}" bindchange="onIncludeBusinessCreatorAsProcessorChange" />
+        售后发起人作为该节点处理人
+      </label>
+      <text class="muted">勾选后，售后发起人会加入下方固定处理人；系统自动去重，不再强制唯一。</text>
+    </view>
+    <view class="field" wx:else>
       <text class="field-label">处理人来源</text>
       <label class="assignment-mode-row">
         <switch checked="{{processorAssignmentMode === 'business_creator'}}" disabled="{{readOnly}}" bindchange="onProcessorAssignmentModeChange" />
-        售后发起人作为本节点唯一处理人
+        售后发起人作为本节点唯一处理人（旧模板）
       </label>
       <text class="muted" wx:if="{{processorAssignmentMode === 'business_creator'}}">创建售后时将当前售后发起人固化为唯一处理人；其他节点不受影响。</text>
     </view>
@@ -81,6 +89,40 @@
         </label>
       </checkbox-group>
     </view>
+
+    <view class="field route-panel" wx:if="{{flowSchemaVersion === 2}}">
+      <text class="field-label">本节点完成后的去向</text>
+      <picker range="{{nextModeLabels}}" disabled="{{readOnly}}" bindchange="onNextModeChange">
+        <view class="picker-value">{{nextMode === 'end' ? '结束售后' : nextMode === 'default' ? '固定进入下一节点' : nextMode === 'single_select' ? '按本节点单选字段分支' : '完成后由处理人决定'}}</view>
+      </picker>
+      <view wx:if="{{nextMode === 'default'}}">
+        <text class="muted">固定目标</text>
+        <picker range="{{nodeTargetOptions}}" range-key="name" disabled="{{readOnly}}" bindchange="onDefaultTargetChange">
+          <view class="picker-value">{{defaultTarget || '请选择目标节点'}}</view>
+        </picker>
+      </view>
+      <view wx:elif="{{nextMode === 'single_select'}}">
+        <text class="muted">用于分流的单选字段必须必填、且不能是条件字段。</text>
+        <picker range="{{routingFieldOptions}}" range-key="name" disabled="{{readOnly}}" bindchange="onRoutingFieldChange">
+          <view class="picker-value">{{routingFieldKey || '请选择单选字段'}}</view>
+        </picker>
+        <view class="route-row" wx:for="{{routeOptionRows}}" wx:key="option">
+          <text>{{item.option}}</text>
+          <picker range="{{targetOptions}}" range-key="name" value="{{item.targetIndex}}" disabled="{{readOnly}}" data-option="{{item.option}}" bindchange="onRouteOptionTargetChange">
+            <view class="picker-value route-target">{{item.target}}</view>
+          </picker>
+        </view>
+      </view>
+      <view wx:elif="{{nextMode === 'manual'}}">
+        <text class="muted">节点完成后，开启目标节点的处理人可选择开启或跳过。</text>
+        <picker range="{{targetOptions}}" range-key="name" disabled="{{readOnly}}" bindchange="onManualActivateTargetChange">
+          <view class="picker-value">开启后：{{manualActivateTarget || '请选择'}}</view>
+        </picker>
+        <picker range="{{targetOptions}}" range-key="name" disabled="{{readOnly}}" bindchange="onManualSkipTargetChange">
+          <view class="picker-value">跳过后：{{manualSkipTarget || '请选择'}}</view>
+        </picker>
+      </view>
+    </view>
   </view>
 
   <view class="row-between section-head">
@@ -107,6 +149,30 @@
       <input class="input compact wide" type="number" value="{{item.constraints.decimalPlaces}}" placeholder="小数位数" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldDecimalPlacesInput" />
     </view>
     <input wx:elif="{{item.type === 'single_select' || item.type === 'multi_select'}}" class="input compact" value="{{item.optionText}}" placeholder="选项用逗号分隔" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldOptionsInput" />
+
+    <view class="condition-panel" wx:if="{{flowSchemaVersion === 2}}">
+      <label class="assignment-mode-row">
+        <switch checked="{{item.conditionEnabled}}" disabled="{{readOnly}}" data-index="{{index}}" bindchange="onFieldConditionChange" />
+        根据前序单选字段显示
+      </label>
+      <view wx:if="{{item.conditionEnabled}}">
+        <picker range="{{item.conditionParentOptions}}" range-key="name" value="{{item.conditionParentIndex}}" disabled="{{readOnly}}" data-index="{{index}}" bindchange="onFieldConditionParentChange">
+          <view class="picker-value">依赖：{{item.condition.parentFieldKey}}</view>
+        </picker>
+        <text class="muted">父字段选择以下值时显示：</text>
+        <checkbox-group class="evidence-options" data-index="{{index}}" bindchange="onFieldVisibleWhenChange">
+          <label wx:for="{{item.conditionParentValueRows}}" wx:key="value" wx:for-item="parentOption">
+            <checkbox value="{{parentOption.value}}" checked="{{parentOption.visible}}" disabled="{{readOnly}}" />{{parentOption.value}}
+          </label>
+        </checkbox-group>
+        <view wx:if="{{item.type === 'single_select'}}">
+          <view wx:for="{{item.conditionParentValueRows}}" wx:key="value" wx:for-item="parentOption" class="conditional-option-row">
+            <text wx:if="{{parentOption.visible}}" class="muted">{{parentOption.value}} 时可选：</text>
+            <input wx:if="{{parentOption.visible}}" class="input compact" value="{{parentOption.optionText}}" placeholder="从本字段选项中选择，用逗号分隔" disabled="{{readOnly}}" data-index="{{parentOption.fieldIndex}}" data-parent-value="{{parentOption.value}}" bindinput="onFieldConditionalOptionsInput" />
+          </view>
+        </view>
+      </view>
+    </view>
 
     <view wx:if="{{!readOnly}}" class="actions">
       <button wx:if="{{index > 0}}" size="mini" data-index="{{index}}" data-direction="-1" bindtap="moveField">上移</button>

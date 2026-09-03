@@ -1,0 +1,10 @@
+.error, .diagnostics { margin-bottom: 20rpx; padding: 18rpx; color: #be123c; background: #fff1f2; border-radius: 12rpx; }
+.flow-head { margin-bottom: 20rpx; }
+.diagnostics { display: flex; flex-direction: column; gap: 8rpx; }
+.flow-list { display: flex; flex-direction: column; gap: 16rpx; }
+.flow-row { display: grid; grid-template-columns: 58rpx 1fr; align-items: start; gap: 14rpx; }
+.flow-marker { display: flex; align-items: center; justify-content: center; width: 54rpx; height: 54rpx; color: #0f766e; background: #ccfbf1; border-radius: 50%; font-weight: 700; }
+.flow-card { margin: 0; padding: 22rpx; }
+.node-name { font-size: 30rpx; font-weight: 650; }
+.entry-badge { padding: 2rpx 12rpx; color: #0f766e; background: #ccfbf1; border-radius: 999rpx; font-size: 22rpx; }
+.route-label { display: block; margin-top: 12rpx; color: #475569; line-height: 1.6; }

@@ -7,6 +7,10 @@ const EVIDENCE_TYPE_OPTIONS = Object.freeze([
   ['jpg', 'JPG'], ['jpeg', 'JPEG'], ['png', 'PNG'], ['pdf', 'PDF'],
   ['mp4', 'MP4'], ['mov', 'MOV'], ['m4v', 'M4V']
 ])
+const NEXT_MODE_OPTIONS = Object.freeze([
+  ['end', '结束售后'], ['default', '固定进入下一节点'],
+  ['single_select', '按本节点单选字段分支'], ['manual', '完成后由处理人决定']
+])
 
 let uiKeySequence = 0
 function nextUiKey(prefix) {
@@ -19,17 +23,20 @@ function hasOwn(value, key) { return Object.prototype.hasOwnProperty.call(value,
 function uniqueTexts(value) {
   return [...new Set(String(value || '').split(/[,，\n]/).map(item => item.trim()).filter(Boolean))]
 }
-function newField() {
+function newField(versionTwo = false) {
   return {
     _uiKey: nextUiKey('field'), sequence: 0, name: '', description: '',
-    type: 'short_text', required: false, constraints: {}, optionText: ''
+    ...(versionTwo ? { fieldKey: nextUiKey('field-key') } : {}),
+    type: 'short_text', required: false, constraints: {}, optionText: '', conditionEnabled: false
   }
 }
-function newNode() {
+function newNode(versionTwo = false) {
   return {
-    _uiKey: nextUiKey('node'), sequence: 0, name: '', description: '', workflowMode: 'review',
+    _uiKey: nextUiKey('node'), ...(versionTwo ? { nodeKey: nextUiKey('node-key'), next: { mode: 'end' } } : {}),
+    sequence: 0, name: '', description: '', workflowMode: 'review',
     activationMode: 'required',
     processorAssignmentMode: 'fixed_accounts',
+    includeBusinessCreatorAsProcessor: false,
     processorUserIds: [], reviewerAssignmentMode: 'fixed_accounts', reviewerUserIds: [], reviewMode: 'any', processingSlaWorkHours: 22, reviewSlaWorkHours: 8,
     requiresEvidence: false, allowedEvidenceTypes: [], fields: []
   }
@@ -42,6 +49,8 @@ Page({
     readOnly: false,
     name: '',
     description: '',
+    flowSchemaVersion: 1,
+    includeBusinessCreatorAsProcessor: false,
     accountOptions: [],
     processorAssignmentMode: 'fixed_accounts',
     processorUserIds: [],
@@ -55,11 +64,75 @@ Page({
     requiresEvidence: false,
     allowedEvidenceTypes: [],
     fields: [],
+    nodeOptions: [],
+    targetOptions: [],
+    nodeTargetOptions: [],
+    nextMode: 'end',
+    nextModeLabels: NEXT_MODE_OPTIONS.map(item => item[1]),
+    defaultTarget: '',
+    routingFieldKey: '',
+    routingFieldOptions: [],
+    routeOptionRows: [],
+    manualActivateTarget: '',
+    manualSkipTarget: 'end',
     fieldTypeOptions: FIELD_TYPE_OPTIONS,
     fieldTypeLabels: FIELD_TYPE_OPTIONS.map(item => item[1]),
     evidenceTypeOptions: EVIDENCE_TYPE_OPTIONS.map(item => ({ value: item[0], label: item[1], selected: false })),
     errorMessage: '',
     submitting: false
+  },
+
+  decorateField(field, sequence, allFields) {
+    const condition = field.condition ? clone(field.condition) : null
+    const conditionParentOptions = (allFields || []).slice(0, sequence)
+      .filter(item => item.type === 'single_select' && item.fieldKey)
+      .map(item => ({ fieldKey: item.fieldKey, name: item.name || `字段 ${item.sequence + 1}` }))
+    const parent = condition && (allFields || []).find(item => item.fieldKey === condition.parentFieldKey)
+    const parentValues = parent && parent.constraints && Array.isArray(parent.constraints.options)
+      ? parent.constraints.options : []
+    const childOptions = field.constraints && Array.isArray(field.constraints.options) ? field.constraints.options : []
+    return {
+      ...field,
+      _uiKey: field._uiKey || field.fieldKey || nextUiKey('field'),
+      sequence,
+      optionText: field.optionText !== undefined
+        ? field.optionText
+        : field.constraints && Array.isArray(field.constraints.options) ? field.constraints.options.join(', ') : '',
+      conditionEnabled: Boolean(condition),
+      condition: condition || null,
+      conditionParentOptions,
+      conditionParentIndex: Math.max(0, conditionParentOptions.findIndex(item =>
+        condition && item.fieldKey === condition.parentFieldKey)),
+      conditionParentValueRows: parentValues.map(value => ({
+        fieldIndex: sequence,
+        value,
+        visible: Boolean(condition && condition.visibleWhen && condition.visibleWhen.includes(value)),
+        optionText: condition && condition.optionsByParentValue && condition.optionsByParentValue[value]
+          ? condition.optionsByParentValue[value].join(', ') : childOptions.join(', ')
+      }))
+    }
+  },
+
+  refreshFields(fields, extra = {}) {
+    const decorated = fields.map((field, sequence) => this.decorateField(field, sequence, fields))
+    const routingFieldOptions = decorated
+      .filter(field => field.type === 'single_select' && field.required && !field.condition)
+      .map(field => ({ fieldKey: field.fieldKey, name: field.name || `字段 ${field.sequence + 1}` }))
+    const routingFieldKey = routingFieldOptions.some(item => item.fieldKey === this.data.routingFieldKey)
+      ? this.data.routingFieldKey : (routingFieldOptions[0] && routingFieldOptions[0].fieldKey) || ''
+    const routeField = decorated.find(field => field.fieldKey === routingFieldKey)
+    const routeOptions = routeField && routeField.constraints && Array.isArray(routeField.constraints.options)
+      ? routeField.constraints.options : []
+    const previousTargets = new Map((this.data.routeOptionRows || []).map(item => [item.option, item.target]))
+    const routeOptionRows = routeOptions.map(option => {
+      const target = previousTargets.get(option) || 'end'
+      return {
+        option,
+        target,
+        targetIndex: Math.max(0, this.data.targetOptions.findIndex(item => item.nodeKey === target))
+      }
+    })
+    this.setData({ fields: decorated, routingFieldOptions, routingFieldKey, routeOptionRows, ...extra })
   },
 
   onLoad(options = {}) {
@@ -74,11 +147,12 @@ Page({
     const parsed = Number(options.index)
     const index = Number.isInteger(parsed) ? parsed : -1
     const context = this.ownerPage.getNodeEditorContext(index)
-    const node = context.node || newNode()
+    const versionTwo = context.flowSchemaVersion === 2 || Boolean(context.node && context.node.next)
+    const node = context.node || newNode(versionTwo)
     const isLegacyNode = !hasOwn(node, 'workflowMode')
     const processorUserIds = clone(isLegacyNode ? (node.assigneeUserIds || []) : (node.processorUserIds || []))
     const reviewerUserIds = clone(isLegacyNode ? [] : (node.reviewerUserIds || []))
-    const processorAssignmentMode = !isLegacyNode && node.processorAssignmentMode === 'business_creator'
+    const processorAssignmentMode = !versionTwo && !isLegacyNode && node.processorAssignmentMode === 'business_creator'
       ? 'business_creator'
       : 'fixed_accounts'
     const reviewerAssignmentMode = !isLegacyNode && node.reviewerAssignmentMode === 'business_creator'
@@ -87,10 +161,21 @@ Page({
     this.fixedProcessorUserIds = processorAssignmentMode === 'fixed_accounts' ? processorUserIds.slice() : []
     this.nodeKey = node.nodeKey
     this.uiKey = node._uiKey || node.nodeKey || nextUiKey('node')
+    const nodeOptions = clone(context.nodeOptions || [])
+    const targetOptions = [{ nodeKey: 'end', name: '结束售后' }, ...nodeOptions.filter(item => item.nodeKey !== node.nodeKey)]
+    const fields = clone(node.fields || []).map((field, sequence) => this.decorateField(field, sequence, node.fields || []))
+    const next = versionTwo && node.next ? clone(node.next) : { mode: 'end' }
+    const routingFieldOptions = fields.filter(field => field.type === 'single_select' && field.required && !field.condition)
+      .map(field => ({ fieldKey: field.fieldKey, name: field.name }))
+    const routingFieldKey = next.mode === 'single_select' ? next.fieldKey : (routingFieldOptions[0] && routingFieldOptions[0].fieldKey) || ''
+    const routeField = fields.find(field => field.fieldKey === routingFieldKey)
+    const routeOptions = routeField && routeField.constraints && Array.isArray(routeField.constraints.options)
+      ? routeField.constraints.options : []
     this.setData({
       index,
       editMode: Boolean(context.node),
       readOnly: Boolean(context.readOnly),
+      flowSchemaVersion: versionTwo ? 2 : 1,
       name: node.name || '',
       description: node.description || '',
       accountOptions: clone(context.assigneeOptions || []).map(item => ({
@@ -102,6 +187,8 @@ Page({
       })),
       processorAssignmentMode,
       processorUserIds,
+      includeBusinessCreatorAsProcessor: versionTwo && node.includeBusinessCreatorAsProcessor === true ||
+        (!versionTwo && processorAssignmentMode === 'business_creator'),
       reviewerAssignmentMode,
       reviewerUserIds,
       activationMode: !isLegacyNode && node.activationMode === 'optional_tail' ? 'optional_tail' : 'required',
@@ -116,13 +203,21 @@ Page({
       evidenceTypeOptions: EVIDENCE_TYPE_OPTIONS.map(item => ({
         value: item[0], label: item[1], selected: (node.allowedEvidenceTypes || []).includes(item[0])
       })),
-      fields: clone(node.fields || []).map((field, sequence) => ({
-        ...field,
-        _uiKey: field._uiKey || field.fieldKey || nextUiKey('field'),
-        sequence,
-        optionText: field.constraints && Array.isArray(field.constraints.options)
-          ? field.constraints.options.join(', ') : ''
-      }))
+      fields,
+      nodeOptions,
+      targetOptions,
+      nodeTargetOptions: targetOptions.filter(item => item.nodeKey !== 'end'),
+      nextMode: next.mode,
+      defaultTarget: next.targetNodeKey || (targetOptions.find(item => item.nodeKey !== 'end') || {}).nodeKey || '',
+      routingFieldKey,
+      routingFieldOptions,
+      routeOptionRows: routeOptions.map(option => ({
+        option, target: next.optionTargets && next.optionTargets[option] || 'end',
+        targetIndex: Math.max(0, targetOptions.findIndex(item => item.nodeKey ===
+          (next.optionTargets && next.optionTargets[option] || 'end')))
+      })),
+      manualActivateTarget: next.activateTarget || (targetOptions.find(item => item.nodeKey !== 'end') || {}).nodeKey || '',
+      manualSkipTarget: next.skipTarget || 'end'
     })
     wx.setNavigationBarTitle({ title: context.node ? (context.readOnly ? '查看节点' : '编辑节点') : '新增节点' })
   },
@@ -168,6 +263,15 @@ Page({
   },
   onProcessorToggle(event) { this.toggleAccountRole('processor', event) },
   onReviewerToggle(event) { this.toggleAccountRole('reviewer', event) },
+  onIncludeBusinessCreatorAsProcessorChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly || this.data.flowSchemaVersion !== 2) return
+    const include = Boolean(event && event.detail && event.detail.value)
+    if (include && this.data.reviewerAssignmentMode === 'business_creator') {
+      this.setData({ errorMessage: '售后发起人不能同时作为本节点处理人和审核人' })
+      return
+    }
+    this.setData({ includeBusinessCreatorAsProcessor: include, errorMessage: '' })
+  },
   onProcessorAssignmentModeChange(event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     const processorAssignmentMode = event && event.detail && event.detail.value
@@ -200,7 +304,8 @@ Page({
       ? 'business_creator'
       : 'fixed_accounts'
     if (reviewerAssignmentMode === this.data.reviewerAssignmentMode) return
-    if (reviewerAssignmentMode === 'business_creator' && this.data.processorAssignmentMode === 'business_creator') {
+    if (reviewerAssignmentMode === 'business_creator' &&
+        (this.data.processorAssignmentMode === 'business_creator' || this.data.includeBusinessCreatorAsProcessor)) {
       this.setData({ errorMessage: '售后发起人不能同时作为本节点处理人和审核人' })
       return
     }
@@ -231,6 +336,39 @@ Page({
       errorMessage: ''
     })
   },
+  onNextModeChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly || this.data.flowSchemaVersion !== 2) return
+    const item = NEXT_MODE_OPTIONS[Number(event.detail.value)]
+    if (item) this.setData({ nextMode: item[0], errorMessage: '' })
+  },
+  onDefaultTargetChange(event) {
+    const target = this.data.nodeTargetOptions[Number(event.detail.value)]
+    if (target && this.requireSuperAdmin() && !this.data.readOnly) this.setData({ defaultTarget: target.nodeKey })
+  },
+  onRoutingFieldChange(event) {
+    const selected = this.data.routingFieldOptions[Number(event.detail.value)]
+    if (!selected || !this.requireSuperAdmin() || this.data.readOnly) return
+    this.setData({ routingFieldKey: selected.fieldKey })
+    this.refreshFields(this.data.fields)
+  },
+  onRouteOptionTargetChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
+    const option = event.currentTarget.dataset.option
+    const target = this.data.targetOptions[Number(event.detail.value)]
+    if (!target) return
+    const rows = this.data.routeOptionRows.map(item => item.option === option
+      ? { ...item, target: target.nodeKey, targetIndex: Number(event.detail.value) }
+      : item)
+    this.setData({ routeOptionRows: rows })
+  },
+  onManualActivateTargetChange(event) {
+    const target = this.data.targetOptions[Number(event.detail.value)]
+    if (target && this.requireSuperAdmin() && !this.data.readOnly) this.setData({ manualActivateTarget: target.nodeKey })
+  },
+  onManualSkipTargetChange(event) {
+    const target = this.data.targetOptions[Number(event.detail.value)]
+    if (target && this.requireSuperAdmin() && !this.data.readOnly) this.setData({ manualSkipTarget: target.nodeKey })
+  },
   onRequiresEvidenceChange(event) {
     if (this.requireSuperAdmin() && !this.data.readOnly) {
       this.setData({ requiresEvidence: Boolean(event.detail.value) })
@@ -251,7 +389,7 @@ Page({
     if (!this.requireSuperAdmin() || this.data.readOnly || !this.data.fields[index]) return
     const fields = this.data.fields.slice()
     fields[index] = { ...fields[index], ...changes }
-    this.setData({ fields })
+    this.refreshFields(fields)
   },
   onFieldNameInput(event) { this.updateField(Number(event.currentTarget.dataset.index), { name: event.detail.value }) },
   onFieldDescriptionInput(event) { this.updateField(Number(event.currentTarget.dataset.index), { description: event.detail.value }) },
@@ -261,6 +399,67 @@ Page({
     if (!type) return
     const constraints = type === 'single_select' || type === 'multi_select' ? { options: [] } : {}
     this.updateField(Number(event.currentTarget.dataset.index), { type, constraints, optionText: '' })
+  },
+  onFieldConditionChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
+    const index = Number(event.currentTarget.dataset.index)
+    const field = this.data.fields[index]
+    if (!field) return
+    if (!event.detail.value) {
+      this.updateField(index, { condition: null, conditionEnabled: false })
+      return
+    }
+    const parent = field.conditionParentOptions[0]
+    if (!parent) {
+      this.setData({ errorMessage: '条件字段前必须先配置一个单选字段' })
+      return
+    }
+    this.setFieldParent(index, parent.fieldKey)
+  },
+  setFieldParent(index, parentFieldKey) {
+    const parent = this.data.fields.find(item => item.fieldKey === parentFieldKey)
+    const values = parent && parent.constraints && Array.isArray(parent.constraints.options)
+      ? parent.constraints.options.slice() : []
+    const field = this.data.fields[index]
+    const condition = { parentFieldKey, visibleWhen: values }
+    if (field && field.type === 'single_select') {
+      const options = field.constraints && Array.isArray(field.constraints.options) ? field.constraints.options.slice() : []
+      condition.optionsByParentValue = Object.fromEntries(values.map(value => [value, options.slice()]))
+    }
+    this.updateField(index, { condition, conditionEnabled: true })
+  },
+  onFieldConditionParentChange(event) {
+    const index = Number(event.currentTarget.dataset.index)
+    const field = this.data.fields[index]
+    const parent = field && field.conditionParentOptions[Number(event.detail.value)]
+    if (parent) this.setFieldParent(index, parent.fieldKey)
+  },
+  onFieldVisibleWhenChange(event) {
+    const index = Number(event.currentTarget.dataset.index)
+    const field = this.data.fields[index]
+    if (!field || !field.condition) return
+    const visibleWhen = event.detail.value.slice()
+    const condition = { ...field.condition, visibleWhen }
+    if (condition.optionsByParentValue) {
+      condition.optionsByParentValue = Object.fromEntries(visibleWhen.map(value => [
+        value, condition.optionsByParentValue[value] || (field.constraints.options || []).slice()
+      ]))
+    }
+    this.updateField(index, { condition })
+  },
+  onFieldConditionalOptionsInput(event) {
+    const index = Number(event.currentTarget.dataset.index)
+    const parentValue = event.currentTarget.dataset.parentValue
+    const field = this.data.fields[index]
+    if (!field || !field.condition || field.type !== 'single_select') return
+    const allowed = new Set(field.constraints.options || [])
+    const options = uniqueTexts(event.detail.value).filter(option => allowed.has(option))
+    this.updateField(index, {
+      condition: {
+        ...field.condition,
+        optionsByParentValue: { ...(field.condition.optionsByParentValue || {}), [parentValue]: options }
+      }
+    })
   },
   onFieldOptionsInput(event) {
     const index = Number(event.currentTarget.dataset.index)
@@ -287,15 +486,23 @@ Page({
 
   addField() {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
-    this.setData({ fields: this.data.fields.concat({ ...newField(), sequence: this.data.fields.length }) })
+    this.refreshFields(this.data.fields.concat({
+      ...newField(this.data.flowSchemaVersion === 2), sequence: this.data.fields.length
+    }))
   },
   removeField(event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     const index = Number(event.currentTarget.dataset.index)
     if (!Number.isInteger(index) || index < 0 || index >= this.data.fields.length) return
+    const key = this.data.fields[index].fieldKey
+    if (key && this.data.fields.some((field, fieldIndex) =>
+      fieldIndex !== index && field.condition && field.condition.parentFieldKey === key)) {
+      this.setData({ errorMessage: '该字段仍被后续条件字段依赖，请先解除依赖' })
+      return
+    }
     const fields = this.data.fields.slice()
     fields.splice(index, 1)
-    this.setData({ fields: fields.map((field, sequence) => ({ ...field, sequence })) })
+    this.refreshFields(fields.map((field, sequence) => ({ ...field, sequence })), { errorMessage: '' })
   },
   moveField(event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
@@ -305,7 +512,13 @@ Page({
     if (!Number.isInteger(index) || ![-1, 1].includes(direction) || target < 0 || target >= this.data.fields.length) return
     const fields = this.data.fields.slice()
     ;[fields[index], fields[target]] = [fields[target], fields[index]]
-    this.setData({ fields: fields.map((field, sequence) => ({ ...field, sequence })) })
+    const moved = fields.map((field, sequence) => ({ ...field, sequence }))
+    const positions = new Map(moved.map((field, position) => [field.fieldKey, position]))
+    if (moved.some((field, position) => field.condition && positions.get(field.condition.parentFieldKey) >= position)) {
+      this.setData({ errorMessage: '条件字段必须位于其依赖的单选字段之后' })
+      return
+    }
+    this.refreshFields(moved, { errorMessage: '' })
   },
 
   normalizedField(field, sequence) {
@@ -333,12 +546,35 @@ Page({
       normalized.constraints.options = uniqueTexts(constraints.options && constraints.options.join
         ? constraints.options.join(',') : constraints.options)
     }
+    if (field.condition) normalized.condition = clone(field.condition)
     return normalized
+  },
+
+  buildNext(fields) {
+    if (this.data.flowSchemaVersion !== 2) return null
+    if (this.data.nextMode === 'end') return { mode: 'end' }
+    if (this.data.nextMode === 'default') {
+      return { mode: 'default', targetNodeKey: this.data.defaultTarget }
+    }
+    if (this.data.nextMode === 'manual') {
+      return {
+        mode: 'manual', activateTarget: this.data.manualActivateTarget,
+        skipTarget: this.data.manualSkipTarget
+      }
+    }
+    const field = fields.find(item => item.fieldKey === this.data.routingFieldKey)
+    const options = field && field.constraints && Array.isArray(field.constraints.options)
+      ? field.constraints.options : []
+    const targets = new Map(this.data.routeOptionRows.map(item => [item.option, item.target]))
+    return {
+      mode: 'single_select', fieldKey: this.data.routingFieldKey,
+      optionTargets: Object.fromEntries(options.map(option => [option, targets.get(option) || 'end']))
+    }
   },
 
   buildNodeForSave() {
     const fields = this.data.fields.map((field, sequence) => this.normalizedField(field, sequence))
-    return {
+    const node = {
       _uiKey: this.uiKey,
       ...(this.nodeKey ? { nodeKey: this.nodeKey } : {}),
       sequence: this.data.index >= 0 ? this.data.index : 0,
@@ -357,6 +593,13 @@ Page({
       allowedEvidenceTypes: this.data.allowedEvidenceTypes.slice(),
       fields
     }
+    if (this.data.flowSchemaVersion === 2) {
+      node.includeBusinessCreatorAsProcessor = this.data.includeBusinessCreatorAsProcessor
+      node.next = this.buildNext(fields)
+      node.activationMode = 'required'
+      node.processorAssignmentMode = 'fixed_accounts'
+    }
+    return node
   },
 
   async submit() {
@@ -371,11 +614,13 @@ Page({
       this.setData({ errorMessage: '处理与审核 SLA 必须是可精确换算为整分钟的正数小时' })
       return
     }
-    if (node.processorAssignmentMode === 'fixed_accounts' && !node.processorUserIds.length) {
+    if (node.processorAssignmentMode === 'fixed_accounts' && !node.processorUserIds.length &&
+        !node.includeBusinessCreatorAsProcessor) {
       this.setData({ errorMessage: '请至少选择一名处理人' })
       return
     }
-    if (node.processorAssignmentMode === 'business_creator' && node.reviewerAssignmentMode === 'business_creator') {
+    if ((node.processorAssignmentMode === 'business_creator' || node.includeBusinessCreatorAsProcessor) &&
+        node.reviewerAssignmentMode === 'business_creator') {
       this.setData({ errorMessage: '售后发起人不能同时作为本节点处理人和审核人' })
       return
     }
@@ -386,6 +631,13 @@ Page({
     if (node.fields.some(field => !field.name ||
       ((field.type === 'single_select' || field.type === 'multi_select') && !field.constraints.options.length))) {
       this.setData({ errorMessage: '请完整填写字段名称和选项' })
+      return
+    }
+    if (this.data.flowSchemaVersion === 2 && (
+      node.next.mode === 'default' && !node.next.targetNodeKey ||
+      node.next.mode === 'single_select' && (!node.next.fieldKey || Object.values(node.next.optionTargets).some(value => !value)) ||
+      node.next.mode === 'manual' && (!node.next.activateTarget || !node.next.skipTarget))) {
+      this.setData({ errorMessage: '请完整配置本节点的后续规则' })
       return
     }
     if (this.data.requiresEvidence && !this.data.allowedEvidenceTypes.length) {

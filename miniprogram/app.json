@@ -12,6 +12,7 @@
     "pages/admin-templates/index",
     "pages/admin-template-edit/index",
     "pages/admin-template-node-edit/index",
+    "pages/admin-template-flow/index",
     "pages/business-list/index",
     "pages/business-detail/index",
     "pages/business-edit/index",

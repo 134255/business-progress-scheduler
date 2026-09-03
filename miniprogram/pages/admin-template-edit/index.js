@@ -40,12 +40,14 @@ function cleanField(field, sequence) {
     description: field.description || '',
     type: field.type,
     required: Boolean(field.required),
-    constraints: clone(field.constraints || {})
+    constraints: clone(field.constraints || {}),
+    ...(field.condition ? { condition: clone(field.condition) } : {})
   }
 }
 
 function cleanNode(node, sequence) {
   const isLegacyNode = !hasOwn(node, 'workflowMode')
+  const versionTwo = Boolean(node.next)
   return {
     ...(node.nodeKey ? { nodeKey: node.nodeKey } : {}),
     sequence,
@@ -53,7 +55,7 @@ function cleanNode(node, sequence) {
     description: node.description || '',
     workflowMode: 'review',
     activationMode: !isLegacyNode && node.activationMode === 'optional_tail' ? 'optional_tail' : 'required',
-    processorAssignmentMode: !isLegacyNode && node.processorAssignmentMode === 'business_creator'
+    processorAssignmentMode: versionTwo ? 'fixed_accounts' : !isLegacyNode && node.processorAssignmentMode === 'business_creator'
       ? 'business_creator'
       : 'fixed_accounts',
     processorUserIds: (isLegacyNode ? node.assigneeUserIds : node.processorUserIds || []).slice(),
@@ -61,6 +63,10 @@ function cleanNode(node, sequence) {
       ? 'business_creator'
       : 'fixed_accounts',
     reviewerUserIds: (isLegacyNode ? [] : node.reviewerUserIds || []).slice(),
+    ...(versionTwo ? {
+      includeBusinessCreatorAsProcessor: node.includeBusinessCreatorAsProcessor === true,
+      next: clone(node.next)
+    } : {}),
     reviewMode: !isLegacyNode && node.reviewMode === 'all' ? 'all' : 'any',
     processingSlaWorkHours: !isLegacyNode && node.processingSlaWorkHours !== undefined ? node.processingSlaWorkHours : 22,
     reviewSlaWorkHours: !isLegacyNode && node.reviewSlaWorkHours !== undefined ? node.reviewSlaWorkHours : 8,
@@ -90,6 +96,8 @@ Page({
     description: '',
     status: 'draft',
     version: 0,
+    flowSchemaVersion: 2,
+    entryNodeKey: '',
     nodes: [],
     assigneeOptions: [],
     readOnly: false,
@@ -151,6 +159,8 @@ Page({
       description: template.description || '',
       status: template.status,
       version: template.version,
+      flowSchemaVersion: template.flowSchemaVersion === 2 ? 2 : 1,
+      entryNodeKey: template.flowSchemaVersion === 2 ? template.entryNodeKey : '',
       nodes: withNodeUiKeys(orderedNodes(clone(definition.nodes || []))),
       readOnly
     })
@@ -171,6 +181,8 @@ Page({
       readOnly: this.data.readOnly,
       assigneeOptions: clone(this.data.assigneeOptions),
       node: node ? clone(node) : null,
+      flowSchemaVersion: this.data.flowSchemaVersion,
+      nodeOptions: this.data.nodes.map(item => ({ nodeKey: item.nodeKey || item._uiKey, name: item.name || '未命名节点' })),
       optionalTailExistsOutsideCurrentNode: this.data.nodes.some((item, itemIndex) =>
         itemIndex !== index && item.activationMode === 'optional_tail')
     }
@@ -191,7 +203,9 @@ Page({
   acceptNodeFromEditor(index, node) {
     if (!this.requireSuperAdmin() || this.data.readOnly || !node) return
     const nodes = this.data.nodes.slice()
-    if (node.activationMode === 'optional_tail' && nodes.some((item, itemIndex) =>
+    if (this.data.flowSchemaVersion === 2 && !node.nodeKey) node.nodeKey = node._uiKey || nextUiKey('node')
+    if (this.data.flowSchemaVersion === 2 && !node.next) node.next = { mode: 'end' }
+    if (this.data.flowSchemaVersion !== 2 && node.activationMode === 'optional_tail' && nodes.some((item, itemIndex) =>
       itemIndex !== index && item.activationMode === 'optional_tail')) {
       this.setData({ errorMessage: '每个模板只能设置一个可选追加节点' })
       return
@@ -199,21 +213,39 @@ Page({
     if (Number.isInteger(index) && index >= 0 && index < nodes.length) nodes[index] = clone(node)
     else nodes.push(clone(node))
     const ordered = orderedNodes(nodes)
-    const optionalIndex = ordered.findIndex(item => item.activationMode === 'optional_tail')
+    const optionalIndex = this.data.flowSchemaVersion === 2 ? -1 : ordered.findIndex(item => item.activationMode === 'optional_tail')
     if (optionalIndex >= 0 && optionalIndex !== ordered.length - 1) {
       const [optionalTail] = ordered.splice(optionalIndex, 1)
       ordered.push(optionalTail)
     }
-    this.setData({ nodes: withNodeUiKeys(orderedNodes(ordered)), errorMessage: '' })
+    const keyed = withNodeUiKeys(orderedNodes(ordered))
+    this.setData({
+      nodes: keyed,
+      entryNodeKey: this.data.entryNodeKey || (keyed[0] && (keyed[0].nodeKey || keyed[0]._uiKey)) || '',
+      errorMessage: ''
+    })
   },
 
   removeNode(event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     const index = Number(event.currentTarget.dataset.index)
     if (!Number.isInteger(index) || index < 0 || index >= this.data.nodes.length) return
+    const selected = this.data.nodes[index]
+    const key = selected.nodeKey || selected._uiKey
+    if (this.data.flowSchemaVersion === 2 && this.data.nodes.some((node, nodeIndex) =>
+      nodeIndex !== index && JSON.stringify(node.next || {}).includes(`\"${key}\"`))) {
+      this.setData({ errorMessage: '该节点仍被其他节点的后续规则引用，请先调整分支' })
+      return
+    }
     const nodes = this.data.nodes.slice()
     nodes.splice(index, 1)
-    this.setData({ nodes: orderedNodes(nodes) })
+    this.setData({
+      nodes: orderedNodes(nodes),
+      entryNodeKey: this.data.entryNodeKey === key
+        ? ((nodes[0] && (nodes[0].nodeKey || nodes[0]._uiKey)) || '')
+        : this.data.entryNodeKey,
+      errorMessage: ''
+    })
   },
 
   moveNode(event) {
@@ -223,7 +255,8 @@ Page({
     const target = index + direction
     if (!Number.isInteger(index) || ![-1, 1].includes(direction) || target < 0 || target >= this.data.nodes.length) return
     const nodes = this.data.nodes.slice()
-    if (nodes[index].activationMode === 'optional_tail' || nodes[target].activationMode === 'optional_tail') {
+    if (this.data.flowSchemaVersion !== 2 &&
+        (nodes[index].activationMode === 'optional_tail' || nodes[target].activationMode === 'optional_tail')) {
       this.setData({ errorMessage: '可选追加节点必须位于模板最后' })
       return
     }
@@ -232,11 +265,27 @@ Page({
   },
 
   definition() {
-    return {
+    const definition = {
       name: this.data.name.trim(),
       description: this.data.description.trim(),
       nodes: this.data.nodes.map(cleanNode)
     }
+    if (this.data.flowSchemaVersion === 2) {
+      definition.flowSchemaVersion = 2
+      definition.entryNodeKey = this.data.entryNodeKey
+    }
+    return definition
+  },
+
+  onEntryNodeChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly || this.data.flowSchemaVersion !== 2) return
+    const node = this.data.nodes[Number(event.detail.value)]
+    if (node) this.setData({ entryNodeKey: node.nodeKey || node._uiKey, errorMessage: '' })
+  },
+
+  openFlowPreview() {
+    if (!this.requireSuperAdmin() || !this.data.editMode || !this.data.templateId) return
+    wx.navigateTo({ url: `/pages/admin-template-flow/index?id=${encodeURIComponent(this.data.templateId)}` })
   },
 
   async submit() {

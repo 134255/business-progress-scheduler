@@ -9,3 +9,5 @@
 .actions button, .footer-actions button { margin: 0; }
 .footer-actions { margin-top: 28rpx; }
 .footer-actions .primary-button, .footer-actions .secondary-button { flex: 1; }
+.graph-settings { margin-bottom: 20rpx; }
+.entry-badge { display: inline-block; margin-left: 8rpx; padding: 2rpx 10rpx; color: #0f766e; background: #ccfbf1; border-radius: 999rpx; font-size: 22rpx; }
