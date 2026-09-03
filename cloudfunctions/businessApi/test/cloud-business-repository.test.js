@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 
 const { createCloudBusinessRepository } = require('../lib/cloud-business-repository')
-const { templateDefinitionDigest } = require('../lib/template-domain')
+const { templateDefinitionDigest, version2TemplateDefinitionDigest } = require('../lib/template-domain')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 const { createOptimisticBusinessDatabase } = require('./helpers/business-harness')
 
@@ -174,6 +174,204 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.equal(fake.documents('sequence_counters')[0].sequence, 1)
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.deepEqual(fake.transactionQueries, [])
+})
+
+test('version 2 creation freezes graph edges by snapshot id and activates only the declared entry node', async () => {
+  const nodes = [
+    sourceNode({
+      _id: 'template-node-finish', nodeKey: 'finish', sequence: 0, name: '收尾',
+      processorUserIds: ['user-4'], reviewerUserIds: [],
+      next: { mode: 'end' }
+    }),
+    sourceNode({
+      _id: 'template-node-entry', nodeKey: 'entry', sequence: 1, name: '入口',
+      processorUserIds: ['user-2'], includeBusinessCreatorAsProcessor: true,
+      reviewerUserIds: ['user-3'], processingSlaWorkHours: 6,
+      fields: [
+        {
+          fieldKey: 'category', sequence: 0, name: '类型', description: '',
+          type: 'single_select', required: true, constraints: { options: ['普通', '特殊'] }
+        },
+        {
+          fieldKey: 'details', sequence: 1, name: '特殊说明', description: '',
+          type: 'short_text', required: false, constraints: { maxLength: 100 },
+          condition: { parentFieldKey: 'category', visibleWhen: ['特殊'] }
+        }
+      ],
+      next: { mode: 'default', targetNodeKey: 'branch' }
+    }),
+    sourceNode({
+      _id: 'template-node-branch', nodeKey: 'branch', sequence: 2, name: '选择分支',
+      processorUserIds: ['user-2'], reviewerUserIds: ['user-3'],
+      fields: [{
+        fieldKey: 'decision', sequence: 0, name: '处理方式', description: '',
+        type: 'single_select', required: true, constraints: { options: ['人工决定', '收尾'] }
+      }],
+      next: {
+        mode: 'single_select', fieldKey: 'decision',
+        optionTargets: { '人工决定': 'manual', '收尾': 'finish' }
+      }
+    }),
+    sourceNode({
+      _id: 'template-node-manual', nodeKey: 'manual', sequence: 3, name: '人工决定',
+      processorUserIds: ['user-4'], reviewerUserIds: [],
+      next: { mode: 'manual', activateTarget: 'finish', skipTarget: 'end' }
+    })
+  ]
+  const graph = { flowSchemaVersion: 2, entryNodeKey: 'entry', nodes }
+  const digest = version2TemplateDefinitionDigest(graph)
+  const seed = seedDefinition({
+    nodes,
+    templates: undefined,
+    extra: {
+      templates: [{
+        _id: 'template-1', name: '分支模板', status: 'enabled', version: 7,
+        nodeCount: nodes.length, flowSchemaVersion: 2, entryNodeKey: 'entry',
+        definitionNodeIds: nodes.map(node => node._id), definitionDigest: digest
+      }]
+    }
+  })
+  const { fake, repository } = createRepositoryHarness(seed)
+  const storedDefinition = await definition(repository)
+
+  await repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: storedDefinition
+  })
+
+  const [line] = fake.documents('business_lines')
+  const snapshotNodes = fake.documents('business_nodes').sort((left, right) => left.sequence - right.sequence)
+  const byKey = new Map(snapshotNodes.map(node => [node.nodeKey, node]))
+  assert.equal(line.flowSchemaVersion, 2)
+  assert.equal(line.entryNodeId, byKey.get('entry')._id)
+  assert.equal(line.currentNodeId, byKey.get('entry')._id)
+  assert.deepEqual(line.traversedNodeIds, [])
+  assert.equal(line.routeDecisionVersion, 0)
+  assert.deepEqual(snapshotNodes.map(node => [node.nodeKey, node.routeState, node.status]), [
+    ['finish', 'dormant', 'waiting'],
+    ['entry', 'active', 'ready'],
+    ['branch', 'dormant', 'waiting'],
+    ['manual', 'dormant', 'waiting']
+  ])
+  assert.deepEqual(byKey.get('entry').next, {
+    mode: 'default', targetNodeId: byKey.get('branch')._id
+  })
+  assert.deepEqual(byKey.get('branch').next, {
+    mode: 'single_select', fieldKey: 'decision',
+    optionTargets: { '人工决定': byKey.get('manual')._id, '收尾': byKey.get('finish')._id }
+  })
+  assert.deepEqual(byKey.get('manual').next, {
+    mode: 'manual', activateTargetNodeId: byKey.get('finish')._id, skipTargetNodeId: 'end'
+  })
+  assert.deepEqual(byKey.get('finish').next, { mode: 'end' })
+  assert.deepEqual(byKey.get('entry').processorUserIds, ['user-2', 'user-1'])
+  assert.deepEqual(byKey.get('entry').processorDisplayNames, ['用户二', '用户一'])
+  assert.equal(byKey.get('entry').processingDueStatus, 'calculated')
+  assert.equal(byKey.get('finish').processingDueStatus, 'not_started')
+  assert.equal(byKey.get('branch').processingDueStatus, 'not_started')
+  assert.equal(Object.hasOwn(byKey.get('finish'), 'searchIndexStatus'), false)
+  assert.equal(Object.hasOwn(byKey.get('branch'), 'searchSourceVersion'), false)
+
+  const detail = await repository.getBusinessLine({
+    actor: { _id: 'user-1', status: 'active' }, lineId: line._id
+  })
+  assert.equal(detail.line.flowSchemaVersion, 2)
+  assert.equal(detail.line.entryNodeId, byKey.get('entry')._id)
+  assert.deepEqual(detail.line.traversedNodeIds, [])
+  assert.equal(detail.line.routeDecisionVersion, 0)
+  assert.deepEqual(detail.nodes.map(node => node.nodeKey), ['entry'])
+  assert.equal(detail.nodes[0].routeState, 'active')
+  assert.deepEqual(detail.nodes[0].fieldDefinitions[1].condition, {
+    parentFieldKey: 'category', visibleWhen: ['特殊']
+  })
+})
+
+test('version 2 creator processor merge deduplicates a creator already in fixed processors', async () => {
+  const nodes = [sourceNode({
+    processorUserIds: ['user-1', 'user-2'], includeBusinessCreatorAsProcessor: true,
+    reviewerUserIds: ['user-3'], next: { mode: 'end' }
+  })]
+  const graph = { flowSchemaVersion: 2, entryNodeKey: 'node-a', nodes }
+  const seed = seedDefinition({ nodes, extra: { templates: [{
+    _id: 'template-1', name: '去重模板', status: 'enabled', version: 1,
+    nodeCount: 1, flowSchemaVersion: 2, entryNodeKey: 'node-a',
+    definitionNodeIds: ['template-node-1'], definitionDigest: version2TemplateDefinitionDigest(graph)
+  }] } })
+  const { fake, repository } = createRepositoryHarness(seed)
+
+  await repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  })
+
+  const [snapshot] = fake.documents('business_nodes')
+  assert.deepEqual(snapshot.processorUserIds, ['user-1', 'user-2'])
+  assert.deepEqual(snapshot.processorDisplayNames, ['用户一', '用户二'])
+})
+
+test('version 2 creator processor merge rejects overlap with creator reviewer at reservation time', async () => {
+  const nodes = [sourceNode({
+    processorUserIds: ['user-2'], includeBusinessCreatorAsProcessor: true,
+    reviewerAssignmentMode: 'business_creator', reviewerUserIds: [], next: { mode: 'end' }
+  })]
+  const graph = { flowSchemaVersion: 2, entryNodeKey: 'node-a', nodes }
+  const seed = seedDefinition({ nodes, extra: { templates: [{
+    _id: 'template-1', name: '冲突模板', status: 'enabled', version: 1,
+    nodeCount: 1, flowSchemaVersion: 2, entryNodeKey: 'node-a',
+    definitionNodeIds: ['template-node-1'], definitionDigest: version2TemplateDefinitionDigest(graph)
+  }] } })
+  const { fake, repository } = createRepositoryHarness(seed)
+
+  await assert.rejects(repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  }), error => error.code === 'CREATOR_REVIEWER_CONFLICT')
+  assert.equal(fake.documents('business_lines').length, 0)
+  assert.equal(fake.documents('business_nodes').length, 0)
+})
+
+test('version 2 creation rejects an empty resolved processor set before writing a reservation', async () => {
+  const nodes = [sourceNode({
+    processorUserIds: [], reviewerUserIds: ['user-3'], next: { mode: 'end' }
+  })]
+  const graph = { flowSchemaVersion: 2, entryNodeKey: 'node-a', nodes }
+  const seed = seedDefinition({ nodes, extra: { templates: [{
+    _id: 'template-1', name: '空处理人模板', status: 'enabled', version: 1,
+    nodeCount: 1, flowSchemaVersion: 2, entryNodeKey: 'node-a',
+    definitionNodeIds: ['template-node-1'], definitionDigest: version2TemplateDefinitionDigest(graph)
+  }] } })
+  const { fake, repository } = createRepositoryHarness(seed)
+
+  await assert.rejects(repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: await definition(repository)
+  }), error => error.code === 'TEMPLATE_INVALID')
+  assert.equal(fake.documents('business_lines').length, 0)
+})
+
+test('version 2 reservation rejects a route edge changed after the trusted definition read', async () => {
+  const nodes = [
+    sourceNode({ next: { mode: 'default', targetNodeKey: 'node-b' } }),
+    sourceNode({
+      _id: 'template-node-2', nodeKey: 'node-b', sequence: 1,
+      processorUserIds: ['user-2'], reviewerUserIds: ['user-3'], next: { mode: 'end' }
+    })
+  ]
+  const graph = { flowSchemaVersion: 2, entryNodeKey: 'node-a', nodes }
+  const seed = seedDefinition({ nodes, extra: { templates: [{
+    _id: 'template-1', name: '防篡改模板', status: 'enabled', version: 1,
+    nodeCount: 2, flowSchemaVersion: 2, entryNodeKey: 'node-a',
+    definitionNodeIds: nodes.map(node => node._id), definitionDigest: version2TemplateDefinitionDigest(graph)
+  }] } })
+  const { fake, repository } = createRepositoryHarness(seed)
+  const trusted = await definition(repository)
+  fake.beforeNextTransaction(() => {
+    fake.replace('template_nodes', 'template-node-1', {
+      ...nodes[0], next: { mode: 'end' }
+    })
+  })
+
+  await assert.rejects(repository.createBusinessSnapshot({
+    actor: { _id: 'user-1' }, input: input(), definition: trusted
+  }), error => error.code === 'TEMPLATE_NOT_ENABLED')
+  assert.equal(fake.documents('business_lines').length, 0)
+  assert.equal(fake.documents('business_nodes').length, 0)
 })
 
 test('creation freezes an optional tail decision snapshot without starting its processing clock', async () => {

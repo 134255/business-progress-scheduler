@@ -208,12 +208,16 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
       await repository.getTemplateDefinition(normalized.templateId)
     )
     const snapshotInput = { actor, input: normalized, definition }
-    if (definition.nodes[0].workflowMode === 'review') {
+    const entryNode = definition.template && definition.template.flowSchemaVersion === 2
+      ? definition.nodes.find(node => node && node.nodeKey === definition.template.entryNodeKey)
+      : definition.nodes[0]
+    if (!entryNode) throw createError('TEMPLATE_INVALID')
+    if (entryNode.workflowMode === 'review') {
       const startedAt = clock()
       if (!(startedAt instanceof Date) || Number.isNaN(startedAt.getTime())) {
         throw new TypeError('clock must return a Date')
       }
-      const minutes = definition.nodes[0].processingSlaWorkHours * 60
+      const minutes = entryNode.processingSlaWorkHours * 60
       if (!Number.isSafeInteger(minutes) || minutes <= 0) throw createError('TEMPLATE_INVALID')
       snapshotInput.firstProcessingDue = firstProcessingDue(
         startedAt,

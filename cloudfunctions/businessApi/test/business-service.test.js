@@ -112,6 +112,29 @@ test('creation forwards a business creator reviewer policy unchanged for reposit
   assert.deepEqual(snapshotCall[1].definition.nodes[1].reviewerUserIds, [])
 })
 
+test('version 2 creation calculates the first deadline from the declared entry node', async () => {
+  const definition = businessTemplate({
+    template: { flowSchemaVersion: 2, entryNodeKey: 'node-b' },
+    nodes: [
+      {
+        ...businessTemplate().nodes[0],
+        next: { mode: 'end' }
+      },
+      {
+        ...businessTemplate().nodes[1],
+        processingSlaWorkHours: 12,
+        next: { mode: 'default', targetNodeKey: 'node-a' }
+      }
+    ]
+  })
+  const harness = createBusinessHarness({ definition })
+
+  await harness.service.createFromTemplate({ actor: harness.actor, input: validInput() })
+
+  assert.equal(harness.workTimeCalls.length, 1)
+  assert.equal(harness.workTimeCalls[0][1], 12 * 60)
+})
+
 test('an idempotent retry returns its reservation without requiring the template to remain enabled', async () => {
   const harness = createBusinessHarness({
     definition: null,

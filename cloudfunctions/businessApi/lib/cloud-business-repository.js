@@ -12,11 +12,14 @@ const {
   ownExactAccountIds
 } = require('./account-relationship-schema')
 const { normalizeFieldDefinition } = require('./field-domain')
+const { normalizeConditionalFields } = require('./conditional-field-domain')
 const {
   ALLOWED_EVIDENCE_TYPES,
   PROCESSOR_ASSIGNMENT_MODE,
   REVIEWER_ASSIGNMENT_MODE,
-  templateDefinitionDigest
+  templateDefinitionDigest,
+  normalizeVersion2TemplateDefinition,
+  version2TemplateDefinitionDigest
 } = require('./template-domain')
 const { ACTIVATION_MODE, normalizeActivationMode } = require('./optional-tail-domain')
 const {
@@ -139,6 +142,20 @@ function compareNodes(left, right) {
   return Number(left.sequence) - Number(right.sequence) || String(left._id).localeCompare(String(right._id))
 }
 
+function isVersion2Template(template) {
+  return Boolean(template && template.flowSchemaVersion === 2)
+}
+
+function versionedTemplateDigest(template, nodes) {
+  return isVersion2Template(template)
+    ? version2TemplateDefinitionDigest({
+        flowSchemaVersion: template.flowSchemaVersion,
+        entryNodeKey: template.entryNodeKey,
+        nodes
+      })
+    : templateDefinitionDigest(nodes)
+}
+
 function exactDefinitionNodeIds(value) {
   if (!Array.isArray(value) || value.length > MAX_TEMPLATE_NODES) return null
   const ids = []
@@ -221,13 +238,17 @@ function resolveSnapshotNodes(nodes, creatorUserId) {
     if (reviewerMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR && node.reviewerUserIds.length) {
       throw createError('TEMPLATE_INVALID')
     }
+    const processorUserIds = [...new Set([
+      ...(processorMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR ? [] : node.processorUserIds),
+      ...((processorMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR ||
+        node.includeBusinessCreatorAsProcessor === true) ? [creatorUserId] : [])
+    ])]
+    if (!processorUserIds.length) throw createError('TEMPLATE_INVALID')
     return {
       ...node,
       processorAssignmentMode: processorMode,
       reviewerAssignmentMode: reviewerMode,
-      processorUserIds: processorMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR
-        ? [creatorUserId]
-        : node.processorUserIds,
+      processorUserIds,
       reviewerUserIds: reviewerMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR
         ? [creatorUserId]
         : node.reviewerUserIds
@@ -279,7 +300,7 @@ function createCloudBusinessRepository({
     if (!template || template.status === 'deleted') return null
     const nodes = await readTemplateNodes(templateId)
     const hasDigest = Object.prototype.hasOwnProperty.call(template, 'definitionDigest')
-    const requiresDigest = nodes.some(node => node &&
+    const requiresDigest = isVersion2Template(template) || nodes.some(node => node &&
       node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR)
     const nodeIdsResult = ownDataValue(template, 'definitionNodeIds')
     const requiresNodeIds = requiresDigest
@@ -294,7 +315,7 @@ function createCloudBusinessRepository({
     let actualDigest = null
     if (hasDigest) {
       try {
-        actualDigest = templateDefinitionDigest(nodes)
+        actualDigest = versionedTemplateDigest(template, nodes)
       } catch (error) {
         throw createError('TEMPLATE_INVALID')
       }
@@ -315,7 +336,7 @@ function createCloudBusinessRepository({
       ? exactDefinitionNodeIds(definitionNodeIds.value)
       : null
     const currentHeaderIds = currentNodeIds.valid ? exactDefinitionNodeIds(currentNodeIds.value) : null
-    const requiresNodeIds = expectedNodes.some(node => node &&
+    const requiresNodeIds = isVersion2Template(definition.template) || expectedNodes.some(node => node &&
       node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR)
     const hasMatchingNodeIds = definitionNodeIds.present || currentNodeIds.present
       ? expectedNodeIds && expectedHeaderIds && currentHeaderIds &&
@@ -326,6 +347,8 @@ function createCloudBusinessRepository({
       : !requiresNodeIds
     if (!template || template.status !== 'enabled' || template.version !== definition.template.version ||
         template.nodeCount !== expectedNodes.length || !hasMatchingNodeIds ||
+        template.flowSchemaVersion !== definition.template.flowSchemaVersion ||
+        template.entryNodeKey !== definition.template.entryNodeKey ||
         (definition.template.definitionDigest !== undefined &&
           template.definitionDigest !== definition.template.definitionDigest)) {
       throw createError('TEMPLATE_NOT_ENABLED')
@@ -421,6 +444,29 @@ function createCloudBusinessRepository({
         typeof optionalTailNodeId.value !== 'string' || !optionalTailNodeId.value)) {
       throw createError('FORBIDDEN')
     }
+    const flowSchemaVersion = ownDataValue(line, 'flowSchemaVersion')
+    let route = {}
+    if (flowSchemaVersion.present) {
+      const entryNodeId = ownDataValue(line, 'entryNodeId')
+      const traversedNodeIds = ownDataValue(line, 'traversedNodeIds')
+      const routeDecisionVersion = ownDataValue(line, 'routeDecisionVersion')
+      if (!flowSchemaVersion.valid || flowSchemaVersion.value !== 2 ||
+          !entryNodeId.valid || typeof entryNodeId.value !== 'string' || !entryNodeId.value ||
+          !traversedNodeIds.valid || !Array.isArray(traversedNodeIds.value) ||
+          traversedNodeIds.value.length > MAX_TEMPLATE_NODES ||
+          !traversedNodeIds.value.every(id => typeof id === 'string' && id) ||
+          new Set(traversedNodeIds.value).size !== traversedNodeIds.value.length ||
+          !routeDecisionVersion.valid || !Number.isSafeInteger(routeDecisionVersion.value) ||
+          routeDecisionVersion.value < 0 || typeof line.currentNodeId !== 'string' || !line.currentNodeId) {
+        throw createError('FORBIDDEN')
+      }
+      route = {
+        flowSchemaVersion: 2,
+        entryNodeId: entryNodeId.value,
+        traversedNodeIds: clone(traversedNodeIds.value),
+        routeDecisionVersion: routeDecisionVersion.value
+      }
+    }
     return {
       _id: line._id,
       code: line.code || '',
@@ -434,6 +480,7 @@ function createCloudBusinessRepository({
       nodeCount: Number(line.nodeCount || 0),
       currentNodeId: line.currentNodeId || '',
       currentNodeName: line.currentNodeName || '',
+      ...route,
       ...(optionalTailState.present ? { optionalTailState: optionalTailState.value } : {}),
       ...(optionalTailNodeId.present ? { optionalTailNodeId: optionalTailNodeId.value } : {}),
       updatedAt: clone(line.updatedAt || null)
@@ -495,7 +542,7 @@ function createCloudBusinessRepository({
   function safeFieldDefinitions(value) {
     if (!Array.isArray(value)) throw createError('FORBIDDEN')
     const allowed = [
-      'fieldKey', 'sequence', 'name', 'description', 'type', 'required', 'constraints'
+      'fieldKey', 'sequence', 'name', 'description', 'type', 'required', 'constraints', 'condition'
     ]
     let definitions
     try {
@@ -507,7 +554,10 @@ function createCloudBusinessRepository({
           if (property.present && !property.valid) throw createError('FORBIDDEN')
           if (property.valid) input[key] = property.value
         }
-        return normalizeFieldDefinition(input)
+        const normalized = normalizeFieldDefinition(input)
+        return Object.prototype.hasOwnProperty.call(input, 'condition')
+          ? { ...normalized, condition: input.condition }
+          : normalized
       })
     } catch (error) {
       throw createError('FORBIDDEN')
@@ -515,7 +565,28 @@ function createCloudBusinessRepository({
     if (new Set(definitions.map(field => field.fieldKey)).size !== definitions.length) {
       throw createError('FORBIDDEN')
     }
-    return definitions.map(field => clone(field))
+    try {
+      return normalizeConditionalFields(definitions).map(field => clone(field))
+    } catch (error) {
+      throw createError('FORBIDDEN')
+    }
+  }
+
+  function publicNodeRouteProjection(node, line) {
+    const nodeKey = ownDataValue(node, 'nodeKey')
+    const next = ownDataValue(node, 'next')
+    const routeState = ownDataValue(node, 'routeState')
+    const flowSchemaVersion = ownDataValue(line, 'flowSchemaVersion')
+    if (!flowSchemaVersion.valid || flowSchemaVersion.value !== 2) {
+      if (nodeKey.present || next.present || routeState.present) throw createError('FORBIDDEN')
+      return {}
+    }
+    if (!nodeKey.valid || typeof nodeKey.value !== 'string' || !nodeKey.value ||
+        !next.valid || !next.value || typeof next.value !== 'object' || Array.isArray(next.value) ||
+        !routeState.valid || !['dormant', 'active', 'completed', 'skipped'].includes(routeState.value)) {
+      throw createError('FORBIDDEN')
+    }
+    return { nodeKey: nodeKey.value, routeState: routeState.value }
   }
 
   function evidencePolicyField(node, key) {
@@ -584,7 +655,8 @@ function createCloudBusinessRepository({
       name: node.name || '',
       description: node.description || '',
       status: node.status,
-      version: node.version
+      version: node.version,
+      ...publicNodeRouteProjection(node, line)
     }
     if (node.workflowMode === 'review') {
       let activationMode
@@ -1158,7 +1230,14 @@ function createCloudBusinessRepository({
       ? exactNewLineRelationships(line).managers.includes(currentActor._id)
       : Boolean(currentActor.openid) && membershipArray(line.managerIds).includes(currentActor.openid)
     const displayNames = await createDisplayNameCache(nodes, currentActor, accountSchema)
-    const projectedNodes = nodes.map(node =>
+    const projectedLine = publicLineProjection(line)
+    const actualNodes = projectedLine.flowSchemaVersion === 2
+      ? nodes.filter(node => {
+          const route = publicNodeRouteProjection(node, line)
+          return route.routeState === 'active' || route.routeState === 'completed'
+        })
+      : nodes
+    const projectedNodes = actualNodes.map(node =>
       publicNodeProjection(node, currentActor, canManage, accountSchema, displayNames, line))
     const canEditNodes = !accountSchema && canManage && Number(line.progress || 0) === 0 &&
       nodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
@@ -1185,7 +1264,7 @@ function createCloudBusinessRepository({
         }
       }
     })
-    return { line: publicLineProjection(line), nodes: projectedNodes, canManage, canEditNodes }
+    return { line: projectedLine, nodes: projectedNodes, canManage, canEditNodes }
   }
 
   async function updateBusinessMetadata({ actor, lineId, expectedVersion, metadata }) {
@@ -1609,16 +1688,45 @@ function createCloudBusinessRepository({
     return `${lineId}-node-${String(sequence + 1).padStart(3, '0')}`
   }
 
-  function preparedSnapshot(lineId, code, sourceNodes, firstProcessingDue, displayNames) {
+  function translatedSnapshotNext(next, nodeIdsByKey) {
+    if (!next || next.mode === 'end') return { mode: 'end' }
+    const translate = target => target === 'end' ? 'end' : nodeIdsByKey.get(target)
+    if (next.mode === 'default') {
+      return { mode: 'default', targetNodeId: translate(next.targetNodeKey) }
+    }
+    if (next.mode === 'single_select') {
+      return {
+        mode: 'single_select',
+        fieldKey: next.fieldKey,
+        optionTargets: Object.fromEntries(Object.entries(next.optionTargets)
+          .map(([option, target]) => [option, translate(target)]))
+      }
+    }
+    return {
+      mode: 'manual',
+      activateTargetNodeId: translate(next.activateTarget),
+      skipTargetNodeId: translate(next.skipTarget)
+    }
+  }
+
+  function preparedSnapshot(lineId, code, sourceNodes, firstProcessingDue, displayNames, route = null) {
     const initialSearch = advanceSearchVersion({})
-    return sourceNodes.slice().sort(compareNodes).map((source, index) => {
+    const ordered = sourceNodes.slice().sort(compareNodes)
+    const nodeIdsByKey = new Map(ordered.map((source, index) => [source.nodeKey, nodeId(lineId, index)]))
+    return ordered.map((source, index) => {
       const activationMode = normalizeActivationMode(source)
+      const isEntry = route ? source.nodeKey === route.entryNodeKey : index === 0
       return {
         id: nodeId(lineId, index),
         data: {
           businessLineId: lineId,
           nodeCode: formatNodeCode(code, index + 1),
           sourceTemplateNodeKey: source.nodeKey,
+          ...(route ? {
+            nodeKey: source.nodeKey,
+            next: translatedSnapshotNext(source.next, nodeIdsByKey),
+            routeState: isEntry ? 'active' : 'dormant'
+          } : {}),
           sequence: index,
           name: source.name,
           description: source.description || '',
@@ -1643,7 +1751,7 @@ function createCloudBusinessRepository({
                 processingDueAt: null,
                 reviewDueStatus: 'not_started',
                 reviewDueAt: null,
-                ...(index === 0 ? clone(firstProcessingDue) : {})
+                ...(isEntry ? clone(firstProcessingDue) : {})
               }
             : {
                 assigneeUserIds: clone(source.assigneeUserIds),
@@ -1653,11 +1761,11 @@ function createCloudBusinessRepository({
           requiresEvidence: source.requiresEvidence,
           allowedEvidenceTypes: clone(source.allowedEvidenceTypes),
           fieldDefinitions: clone(source.fields),
-          status: activationMode === ACTIVATION_MODE.OPTIONAL_TAIL
+          status: !route && activationMode === ACTIVATION_MODE.OPTIONAL_TAIL
             ? 'awaiting_decision'
-            : index === 0 ? 'ready' : 'waiting',
+            : isEntry ? 'ready' : 'waiting',
           version: 1,
-          ...initialSearch,
+          ...(!route || isEntry ? initialSearch : {}),
           createdAt: db.serverDate(),
           updatedAt: db.serverDate()
         }
@@ -1774,10 +1882,33 @@ function createCloudBusinessRepository({
     const existing = await findCreationResult({ actorId: actor._id, input })
     if (existing) return existing
 
-    const sourceNodes = resolveSnapshotNodes(clone(definition.nodes), actor._id).sort(compareNodes)
+    let route = null
+    if (isVersion2Template(definition.template)) {
+      try {
+        route = normalizeVersion2TemplateDefinition({
+          flowSchemaVersion: definition.template.flowSchemaVersion,
+          entryNodeKey: definition.template.entryNodeKey,
+          nodes: definition.nodes
+        })
+      } catch (error) {
+        throw createError('TEMPLATE_INVALID')
+      }
+    }
+    const snapshotSourceNodes = route
+      ? route.nodes.map(node => {
+          const stored = definition.nodes.find(candidate => candidate && candidate.nodeKey === node.nodeKey)
+          if (!stored) throw createError('TEMPLATE_INVALID')
+          return { ...node, _id: stored._id, templateId: stored.templateId }
+        })
+      : definition.nodes
+    const sourceNodes = resolveSnapshotNodes(clone(snapshotSourceNodes), actor._id).sort(compareNodes)
+    const entryNode = route
+      ? sourceNodes.find(node => node.nodeKey === route.entryNodeKey)
+      : sourceNodes[0]
+    if (!entryNode) throw createError('TEMPLATE_INVALID')
     let expectedTemplateDigest
     try {
-      expectedTemplateDigest = templateDefinitionDigest(definition.nodes)
+      expectedTemplateDigest = versionedTemplateDigest(definition.template, definition.nodes)
     } catch (error) {
       throw createError('TEMPLATE_INVALID')
     }
@@ -1793,9 +1924,9 @@ function createCloudBusinessRepository({
     const at = clock()
     if (!(at instanceof Date) || Number.isNaN(at.getTime())) throw new TypeError('clock must return a Date')
     let firstProcessingDue = suppliedFirstDue ? clone(suppliedFirstDue) : null
-    if (sourceNodes[0].workflowMode === 'review') {
+    if (entryNode.workflowMode === 'review') {
       if (!firstProcessingDue) {
-        const minutes = sourceNodes[0].processingSlaWorkHours * 60
+        const minutes = entryNode.processingSlaWorkHours * 60
         if (!Number.isSafeInteger(minutes) || minutes <= 0) throw createError('TEMPLATE_INVALID')
         const calculated = await dueTimeService.tryAddWorkMinutes(new Date(at), minutes)
         if (calculated && calculated.status === 'calculated' && calculated.dueAt instanceof Date &&
@@ -1865,7 +1996,7 @@ function createCloudBusinessRepository({
           }
           let currentTemplateDigest
           try {
-            currentTemplateDigest = templateDefinitionDigest(currentTemplateNodes.sort(compareNodes))
+            currentTemplateDigest = versionedTemplateDigest(template, currentTemplateNodes.sort(compareNodes))
           } catch (error) {
             throw createError('TEMPLATE_NOT_ENABLED')
           }
@@ -1908,7 +2039,11 @@ function createCloudBusinessRepository({
           const code = formatBusinessCode(at, attemptedSequence)
           const templateName = typeof template.name === 'string' ? template.name.trim() : ''
           if (!templateName) throw createError('TEMPLATE_NOT_ENABLED')
-          prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue, displayNames)
+          prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue, displayNames, route)
+          const entrySnapshot = route
+            ? prepared.find(node => node.data.nodeKey === route.entryNodeKey)
+            : prepared[0]
+          if (!entrySnapshot) throw createError('TEMPLATE_NOT_ENABLED')
           const optionalTail = prepared.find(node => node.data.activationMode === ACTIVATION_MODE.OPTIONAL_TAIL)
           await transaction.collection(COLLECTIONS.counters).doc(counterId).set({
             data: { sequence: attemptedSequence, dateKey: dayKey, updatedAt: db.serverDate() }
@@ -1925,10 +2060,16 @@ function createCloudBusinessRepository({
             status: 'creating',
             managerUserIds: [actor._id],
             memberUserIds,
-            currentNodeIndex: 0,
-            currentNodeId: prepared[0].id,
-            currentNodeName: prepared[0].data.name,
+            currentNodeIndex: entrySnapshot.data.sequence,
+            currentNodeId: entrySnapshot.id,
+            currentNodeName: entrySnapshot.data.name,
             nodeCount: prepared.length,
+            ...(route ? {
+              flowSchemaVersion: 2,
+              entryNodeId: entrySnapshot.id,
+              traversedNodeIds: [],
+              routeDecisionVersion: 0
+            } : {}),
             optionalTailState: 'none',
             ...(optionalTail ? { optionalTailNodeId: optionalTail.id } : {}),
             progress: 0,
