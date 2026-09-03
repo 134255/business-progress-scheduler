@@ -231,6 +231,37 @@ test('无审核人追加节点只索引最终完成反馈，未启用节点不�
   assert.equal(dormant.nodes.some(node => node.nodeId === 'node-4'), false)
 })
 
+test('流程版本二只索引实际路线并排除跳过与休眠节点', async () => {
+  const data = authoritativeSeed()
+  Object.assign(data.business_lines[0], {
+    flowSchemaVersion: 2,
+    entryNodeId: 'node-1',
+    traversedNodeIds: ['node-2'],
+    routeDecisionVersion: 2
+  })
+  Object.assign(data.business_nodes[0], { routeState: 'active', nodeKey: 'entry' })
+  Object.assign(data.business_nodes[1], { routeState: 'completed', nodeKey: 'approved' })
+  Object.assign(data.business_nodes[2], { routeState: 'skipped', nodeKey: 'skipped' })
+  Object.assign(data.business_nodes[3], { routeState: 'dormant', nodeKey: 'dormant' })
+  delete data.business_nodes[2].searchSourceVersion
+  delete data.business_nodes[3].searchSourceVersion
+
+  const value = harness(data)
+  const snapshot = await value.repository.loadAuthoritativeSnapshot({
+    businessLineId: 'line-1', sourceVersion: 3
+  })
+  assert.deepEqual(snapshot.nodes.map(node => node.nodeId), ['node-1', 'node-2'])
+  await value.repository.publishGeneration({
+    businessLineId: 'line-1', sourceVersion: 3, generationId: 'generation-route',
+    entries: indexedEntries(snapshot)
+  })
+  const nodes = Object.fromEntries(value.fake.documents('business_nodes').map(node => [node._id, node]))
+  assert.equal(nodes['node-1'].searchGeneratedVersion, 3)
+  assert.equal(nodes['node-2'].searchGeneratedVersion, 3)
+  assert.equal(nodes['node-3'].searchGeneratedVersion, 0)
+  assert.equal(nodes['node-4'].searchGeneratedVersion, 0)
+})
+
 test('售后版本作为并发屏障允许未变节点版本落后并在发布时统一追平', async () => {
   const data = authoritativeSeed()
   data.business_nodes[1].searchSourceVersion = 2

@@ -2,7 +2,7 @@
 
 const {
   materializeNodeSource,
-  materializeOptionalTailDecisionSource,
+  materializeDecisionSource,
   materializeBusinessSource
 } = require('./analytics-domain')
 
@@ -34,10 +34,12 @@ function createAnalyticsService({
     if (typeof decisionMaterializer === 'function') return decisionMaterializer({ source, now })
     if (typeof analyticsRepository.applyFact !== 'function' ||
         typeof analyticsRepository.markSourceGenerated !== 'function') return { generated: false }
-    const facts = materializeOptionalTailDecisionSource(source)
+    const facts = materializeDecisionSource(source)
     for (const fact of facts) await analyticsRepository.applyFact(fact)
+    if (!facts.length || !['optional_tail_decision', 'manual_route_decision'].includes(facts[0].sourceType) ||
+        facts.some(fact => fact.sourceType !== facts[0].sourceType)) throw new TypeError('decision facts are invalid')
     return analyticsRepository.markSourceGenerated({
-      sourceType: 'optional_tail_decision', sourceId: source.node._id,
+      sourceType: facts[0].sourceType, sourceId: source.node._id,
       sourceVersion: source.node.decisionAnalyticsSourceVersion
     })
   }

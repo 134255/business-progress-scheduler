@@ -193,7 +193,7 @@ function createCloudAnalyticsRepository({ db } = {}) {
       versionKey: 'analyticsSourceVersion', generatedVersionKey: 'analyticsGeneratedVersion',
       generatedAtKey: 'analyticsGeneratedAt'
     }
-    if (fact.sourceType === 'optional_tail_decision') return {
+    if (['optional_tail_decision', 'manual_route_decision'].includes(fact.sourceType)) return {
       collection: 'business_nodes', id: fact.sourceId, statusKey: 'decisionAnalyticsSnapshotStatus',
       versionKey: 'decisionAnalyticsSourceVersion', generatedVersionKey: 'decisionAnalyticsGeneratedVersion',
       generatedAtKey: 'decisionAnalyticsGeneratedAt'
@@ -207,7 +207,8 @@ function createCloudAnalyticsRepository({ db } = {}) {
   }
 
   function deltaForFact(fact) {
-    if (fact.metric === 'optional_tail_activation' && [0, 1].includes(fact.sampleValue) &&
+    if (['optional_tail_activation', 'manual_route_activation'].includes(fact.metric) &&
+        [0, 1].includes(fact.sampleValue) &&
         fact.timingStatus === undefined && fact.workMinutes === undefined) {
       return { sampleCount: 1, totalMinutes: fact.sampleValue, pendingCount: 0, unrecordedCount: 0 }
     }
@@ -293,7 +294,7 @@ function createCloudAnalyticsRepository({ db } = {}) {
           !Number.isSafeInteger(previousMaximum) || previousMaximum < previousMinimum)) {
         throw new TypeError('analytics rollup is invalid')
       }
-      const isEvent = fact.metric === 'optional_tail_activation'
+      const isEvent = ['optional_tail_activation', 'manual_route_activation'].includes(fact.metric)
       const minimumMinutes = isEvent ? null : counterDelta.sampleCount
         ? hasPreviousSamples ? Math.min(previousMinimum, fact.workMinutes) : fact.workMinutes
         : hasPreviousSamples ? previousMinimum : null

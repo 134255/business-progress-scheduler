@@ -876,6 +876,9 @@ function createCloudFeedbackRepository({
         if (versionTwo && completionTransition === 'await_manual_decision') {
           nodeChanges.status = 'awaiting_decision'
           nodeChanges.decisionStartedAt = reservation.transitionAt
+          nodeChanges.decisionElapsedWorkMinutes = 0
+          nodeChanges.decisionReminderStatus = 'pending'
+          nodeChanges.nextDecisionReminderWorkHour = 1
         }
       }
       if (value.input.action === 'complete_node' && value.directProcessingTiming) {

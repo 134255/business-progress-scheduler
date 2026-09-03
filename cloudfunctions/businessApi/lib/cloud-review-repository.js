@@ -1544,7 +1544,12 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
                   : 'completed'
               }
             : {}),
-          ...(expectedTransition === 'await_manual_decision' ? { decisionStartedAt: at } : {}),
+          ...(expectedTransition === 'await_manual_decision' ? {
+            decisionStartedAt: at,
+            decisionElapsedWorkMinutes: 0,
+            decisionReminderStatus: 'pending',
+            nextDecisionReminderWorkHour: 1
+          } : {}),
           analyticsSnapshotStatus: 'pending',
           analyticsSourceVersion: nextAnalyticsSourceVersion(node),
           analyticsCompletedAt: at,

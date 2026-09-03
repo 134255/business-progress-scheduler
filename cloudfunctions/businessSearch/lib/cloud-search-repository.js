@@ -16,7 +16,9 @@ const COLLECTIONS = Object.freeze({
   requests: 'business_search_requests',
   documents: 'business_search_documents'
 })
-const MAX_NODES = 24
+const MAX_NODES = 48
+const ROUTE_STATES = new Set(['active', 'completed', 'awaiting_manual_decision', 'skipped', 'dormant'])
+const ACTUAL_ROUTE_STATES = new Set(['active', 'completed', 'awaiting_manual_decision'])
 const FEEDBACK_RELATION_PAGE_SIZE = 100
 const MAX_QUERY_CANDIDATES = 100
 const MAX_GENERATION_ENTRIES = 5000
@@ -102,6 +104,15 @@ async function readDocument(store, collection, id) {
 
 function sourceError() {
   return createError('SEARCH_SOURCE_INVALID')
+}
+
+function includeRouteNode(line, node) {
+  if (!Object.prototype.hasOwnProperty.call(line, 'flowSchemaVersion')) return true
+  const version = ownDataValue(line, 'flowSchemaVersion')
+  const routeState = ownDataValue(node, 'routeState')
+  if (!version.valid || version.value !== 2 || !routeState.valid ||
+      !ROUTE_STATES.has(routeState.value)) throw sourceError()
+  return ACTUAL_ROUTE_STATES.has(routeState.value)
 }
 
 function cursorError() {
@@ -514,6 +525,7 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     }
     const projected = []
     for (const node of nodes) {
+      if (!includeRouteNode(line, node)) continue
       if (!safeSourceVersion(node, sourceVersion, { allowLagging: true }) ||
           node.businessLineId !== businessLineId ||
           !exactString(node._id, { maximum: 128 }) || !exactString(node.name, { maximum: 500 }) ||
@@ -599,8 +611,11 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       const currentNodes = []
       for (const nodeId of nodeIds) {
         const node = await readDocument(transaction, COLLECTIONS.nodes, nodeId)
-        if (!safeSourceVersion(node, sourceVersion, { allowLagging: true }) ||
-            node.businessLineId !== businessLineId) {
+        if (!node || node.businessLineId !== businessLineId) {
+          throw createError('VERSION_CONFLICT')
+        }
+        if (!includeRouteNode(line, node)) continue
+        if (!safeSourceVersion(node, sourceVersion, { allowLagging: true })) {
           throw createError('VERSION_CONFLICT')
         }
         currentNodes.push(node)

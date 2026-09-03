@@ -174,6 +174,12 @@ function createCloudOperationsRepository({ db }) {
     }
   }
 
+  function isActualRouteNode(line, node) {
+    if (!line || line.flowSchemaVersion !== 2) return true
+    if (!Array.isArray(line.traversedNodeIds) || !line.traversedNodeIds.includes(node._id)) return false
+    return ['active', 'completed', 'awaiting_manual_decision'].includes(node.routeState)
+  }
+
   async function dataset(actor, range) {
     await requireCurrentAdmin(actor)
     const scannedLines = await readAll(() => db.collection('business_lines')
@@ -182,11 +188,12 @@ function createCloudOperationsRepository({ db }) {
     if (scannedLines.length > MAX_ROWS) throw createError('VALIDATION_ERROR')
     const lines = range.status ? scannedLines.filter(line => line.status === range.status) : scannedLines
     const lineIds = new Set(lines.map(line => line._id))
+    const lineMap = new Map(lines.map(line => [line._id, line]))
     const nodes = []
     for (const line of lines) {
       const page = await readAll(() => db.collection('business_nodes')
         .where({ businessLineId: line._id }).orderBy('sequence', 'asc').orderBy('_id', 'asc'), 100)
-      nodes.push(...page)
+      nodes.push(...page.filter(node => isActualRouteNode(lineMap.get(node.businessLineId), node)))
     }
     const rounds = await readAll(() => db.collection('node_review_rounds')
       .where({ status: 'pending' }).orderBy('createdAt', 'desc').orderBy('_id', 'asc'))
@@ -421,8 +428,10 @@ function createCloudOperationsRepository({ db }) {
   }
 
   function optionalTailSummary(rows) {
-    const decision = analyticsMetric(rows.filter(item => item.metric === 'optional_tail_decision_duration'))
-    const activationRows = rows.filter(item => item.metric === 'optional_tail_activation')
+    const decision = analyticsMetric(rows.filter(item =>
+      ['optional_tail_decision_duration', 'manual_route_decision_duration'].includes(item.metric)))
+    const activationRows = rows.filter(item =>
+      ['optional_tail_activation', 'manual_route_activation'].includes(item.metric))
     let decisionCount = 0
     let activationCount = 0
     if (activationRows.some(row => Object.hasOwn(row, 'sampleCount'))) {

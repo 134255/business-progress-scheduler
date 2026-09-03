@@ -160,6 +160,23 @@ test('未启用的追加节点不能生成分享快照', async () => {
   }), error => error.code === 'FORBIDDEN')
 })
 
+test('流程版本二的跳过节点即使状态被篡改为完成也不能生成分享快照', async () => {
+  const data = seed(0)
+  Object.assign(data.business_lines[0], {
+    flowSchemaVersion: 2, entryNodeId: 'node-1', traversedNodeIds: [], routeDecisionVersion: 1
+  })
+  Object.assign(data.business_nodes[0], {
+    nodeKey: 'skipped', routeState: 'skipped', next: { mode: 'end' }
+  })
+  const { repository } = harness(0, data)
+  await assert.rejects(repository.createSnapshot({
+    actor: { _id: 'processor', status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 18).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: '8'.repeat(64), inputHash: '9'.repeat(64)
+  }), error => error.code === 'FORBIDDEN')
+})
+
 test('节点与最终通过轮次中的审核人可生成分享快照', async () => {
   const data = seed(0)
   data.users.push({ _id: 'reviewer', status: 'active', role: 'user' })

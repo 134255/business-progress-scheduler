@@ -430,6 +430,35 @@ test('带审核人的可选尾节点在待决定阶段仍向候选处理人发�
     ['processor-a', 'processor-b'])
 })
 
+test('通用人工分支提醒只发送给开启目标节点的活动处理人', async () => {
+  const data = seed()
+  Object.assign(data.business_lines[0], {
+    flowSchemaVersion: 2, awaitingManualDecision: true, currentNodeId: 'node-1'
+  })
+  Object.assign(data.business_nodes[0], {
+    status: 'awaiting_decision', routeState: 'awaiting_manual_decision', version: 4,
+    next: { mode: 'manual', activateTargetNodeId: 'node-target', skipTargetNodeId: 'end' },
+    decisionStartedAt: START, decisionElapsedWorkMinutes: 0,
+    decisionReminderStatus: 'pending', nextDecisionReminderWorkHour: 1
+  })
+  delete data.business_nodes[0].processingDueAt
+  delete data.business_nodes[0].processingStartedAt
+  data.business_nodes.push({
+    _id: 'node-target', businessLineId: 'line-1', status: 'waiting', routeState: 'dormant',
+    processorUserIds: ['processor-b'], reviewerUserIds: [], processingSlaWorkHours: 8,
+    processingDueStatus: 'not_started', processingDueAt: null, version: 1
+  })
+  const { fake, repository } = harness(data)
+  const candidates = await repository.listDueOptionalTailDecisions({ limit: 40 })
+  assert.deepEqual(candidates.items.map(item => item.nodeId), ['node-1'])
+  assert.deepEqual(await repository.createOptionalTailDecisionReminder({
+    nodeId: 'node-1', expectedVersion: 4, accumulatedWorkHour: 1
+  }), { created: true })
+  const notification = fake.documents('notifications')[0]
+  assert.equal(notification.type, 'node_route_decision_reminder')
+  assert.deepEqual(notification.recipientUserIds, ['processor-b'])
+})
+
 test('可选尾节点决定提醒只发送给当前活动候选处理人', async () => {
   const data = decisionSeed()
   data.users[0].status = 'disabled'

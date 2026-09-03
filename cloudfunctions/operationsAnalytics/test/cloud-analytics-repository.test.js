@@ -137,6 +137,30 @@ test('追加节点启用事件按样本值累计而不冒充工时事实', async
   assert.equal(rollup.maximumMinutes, null)
 })
 
+test('通用人工分支决定可应用事实并独立关闭决定来源', async () => {
+  const { fake, repository } = harness({
+    business_lines: [{ _id: 'line-1' }],
+    business_nodes: [{
+      _id: 'node-1', businessLineId: 'line-1', decisionAnalyticsSnapshotStatus: 'pending',
+      decisionAnalyticsSourceVersion: 2
+    }],
+    operations_analytics_facts: [], operations_analytics_daily: []
+  })
+  const event = {
+    _id: 'analytics-fact-manual-event', sourceType: 'manual_route_decision', sourceId: 'node-1', sourceVersion: 2,
+    businessLineId: 'line-1', nodeId: 'node-1', day: '2026-09-03', templateId: 'template-1',
+    templateVersion: 4, stableNodeId: 'branch-1', nodeName: '分流', nodeSequence: 1,
+    factType: 'manual_route_activation', metric: 'manual_route_activation', dimensionRole: 'global',
+    dimensionUserId: '', dimensionFilterToken: '', dimensionDisplayName: '', sampleValue: 0
+  }
+  assert.deepEqual(await repository.applyFact(event), { applied: true })
+  assert.deepEqual(await repository.markSourceGenerated({
+    sourceType: 'manual_route_decision', sourceId: 'node-1', sourceVersion: 2
+  }), { generated: true })
+  assert.equal(fake.documents('operations_analytics_daily')[0].totalMinutes, 0)
+  assert.equal(fake.documents('business_nodes')[0].decisionAnalyticsGeneratedVersion, 2)
+})
+
 test('待补算和历史未记录只增加各自缺失计数', async () => {
   const { fake, repository } = harness({
     business_lines: [{ _id: 'line-1', analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1 }],

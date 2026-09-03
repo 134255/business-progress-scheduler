@@ -278,11 +278,66 @@ test('version 2 creation freezes graph edges by snapshot id and activates only t
   assert.equal(detail.line.entryNodeId, byKey.get('entry')._id)
   assert.deepEqual(detail.line.traversedNodeIds, [])
   assert.equal(detail.line.routeDecisionVersion, 0)
+  assert.equal(detail.line.completedNodeCount, 0)
+  assert.equal(detail.line.traversedNodeCount, 0)
+  assert.equal(detail.line.awaitingManualDecision, false)
   assert.deepEqual(detail.nodes.map(node => node.nodeKey), ['entry'])
   assert.equal(detail.nodes[0].routeState, 'active')
   assert.deepEqual(detail.nodes[0].fieldDefinitions[1].condition, {
     parentFieldKey: 'category', visibleWhen: ['特殊']
   })
+})
+
+test('version 2 detail exposes only the actual route and authorizes manual decision from activate target', async () => {
+  const data = seedDefinition({ extra: {
+    business_lines: [{
+      _id: 'line-route', code: 'BL-ROUTE', name: '路由售后', status: 'active', version: 5,
+      flowSchemaVersion: 2, entryNodeId: 'node-source', currentNodeId: 'node-source',
+      currentNodeIndex: 0, currentNodeName: '人工判断', nodeCount: 4,
+      managerUserIds: ['user-1'], memberUserIds: ['user-1', 'user-2', 'user-3', 'user-4'],
+      traversedNodeIds: ['node-entry', 'node-source'], routeDecisionVersion: 2,
+      awaitingManualDecision: true
+    }],
+    business_nodes: [{
+      _id: 'node-entry', businessLineId: 'line-route', nodeKey: 'entry', nodeCode: 'N001',
+      sequence: 0, name: '入口', status: 'completed', routeState: 'completed', version: 2,
+      next: { mode: 'default', targetNodeId: 'node-source' }, workflowMode: 'review',
+      processorUserIds: ['user-2'], reviewerUserIds: [], processorDisplayNames: ['用户二'],
+      reviewerDisplayNames: [], reviewMode: 'any', processingRoundNumber: 1, reviewRoundNumber: 0,
+      requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+    }, {
+      _id: 'node-source', businessLineId: 'line-route', nodeKey: 'manual', nodeCode: 'N002',
+      sequence: 1, name: '人工判断', status: 'awaiting_decision', routeState: 'awaiting_manual_decision', version: 4,
+      next: { mode: 'manual', activateTargetNodeId: 'node-optional', skipTargetNodeId: 'node-after' },
+      workflowMode: 'review', processorUserIds: ['user-4'], reviewerUserIds: [],
+      processorDisplayNames: ['用户四'], reviewerDisplayNames: [], reviewMode: 'any',
+      processingRoundNumber: 1, reviewRoundNumber: 0, decisionStartedAt: new Date('2026-09-03T01:00:00Z'),
+      requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+    }, {
+      _id: 'node-optional', businessLineId: 'line-route', nodeKey: 'optional', nodeCode: 'N003',
+      sequence: 2, name: '可选节点', status: 'waiting', routeState: 'dormant', version: 1,
+      next: { mode: 'end' }, workflowMode: 'review', processorUserIds: ['user-2'], reviewerUserIds: [],
+      processorDisplayNames: ['用户二'], reviewerDisplayNames: [], reviewMode: 'any',
+      processingRoundNumber: 1, reviewRoundNumber: 0, processingSlaWorkHours: 8,
+      requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+    }, {
+      _id: 'node-after', businessLineId: 'line-route', nodeKey: 'after', nodeCode: 'N004',
+      sequence: 3, name: '跳过目标', status: 'waiting', routeState: 'dormant', version: 1,
+      next: { mode: 'end' }, workflowMode: 'review', processorUserIds: ['user-3'], reviewerUserIds: [],
+      processorDisplayNames: ['用户三'], reviewerDisplayNames: [], reviewMode: 'any',
+      processingRoundNumber: 1, reviewRoundNumber: 0, processingSlaWorkHours: 8,
+      requiresEvidence: false, allowedEvidenceTypes: [], fieldDefinitions: []
+    }]
+  } })
+  const { repository } = createRepositoryHarness(data)
+  const detail = await repository.getBusinessLine({
+    actor: { _id: 'user-2', status: 'active' }, lineId: 'line-route'
+  })
+  assert.deepEqual(detail.nodes.map(node => node._id), ['node-entry', 'node-source'])
+  assert.equal(detail.line.completedNodeCount, 1)
+  assert.equal(detail.line.traversedNodeCount, 2)
+  assert.equal(detail.line.awaitingManualDecision, true)
+  assert.equal(detail.nodes[1].canDecideNodeRoute, true)
 })
 
 test('version 2 creator processor merge deduplicates a creator already in fixed processors', async () => {

@@ -6,7 +6,8 @@ const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,160}$/
 const FACT_TYPES = new Set([
   'business_completed', 'node_completed', 'processor_contribution',
   'review_process', 'reviewer_process_contribution', 'review_response',
-  'optional_tail_decision', 'optional_tail_activation'
+  'optional_tail_decision', 'optional_tail_activation',
+  'manual_route_decision', 'manual_route_activation'
 ])
 const TIMING_STATUSES = new Set(['calculated', 'pending_calendar', 'historical_unrecorded'])
 const GRAINS = new Set(['day', 'week', 'month'])
@@ -255,10 +256,31 @@ function ownStringArray(source, key) {
   return value
 }
 
-function materializeOptionalTailDecisionSource(source) {
+function decisionKind(source) {
+  if (ownValue(source.node, 'activationMode') === 'optional_tail') {
+    return {
+      sourceType: 'optional_tail_decision',
+      durationFactType: 'optional_tail_decision', durationMetric: 'optional_tail_decision_duration',
+      eventFactType: 'optional_tail_activation', eventMetric: 'optional_tail_activation'
+    }
+  }
+  const traversedNodeIds = ownValue(source.line, 'traversedNodeIds')
+  const next = ownValue(source.node, 'next')
+  if (ownValue(source.line, 'flowSchemaVersion') === 2 &&
+      Array.isArray(traversedNodeIds) && traversedNodeIds.includes(source.node._id) &&
+      ownValue(source.node, 'routeState') === 'completed' && next && next.mode === 'manual') {
+    return {
+      sourceType: 'manual_route_decision',
+      durationFactType: 'manual_route_decision', durationMetric: 'manual_route_decision_duration',
+      eventFactType: 'manual_route_activation', eventMetric: 'manual_route_activation'
+    }
+  }
+  throw validationError()
+}
+
+function materializeDecisionSource(source) {
   if (!source || typeof source !== 'object' || !source.line || !source.node ||
       source.node.businessLineId !== source.line._id ||
-      ownValue(source.node, 'activationMode') !== 'optional_tail' ||
       ownValue(source.node, 'decisionAnalyticsSnapshotStatus') !== 'pending' ||
       !Number.isSafeInteger(ownValue(source.node, 'decisionAnalyticsSourceVersion')) ||
       ownValue(source.node, 'decisionAnalyticsSourceVersion') < 1 ||
@@ -270,10 +292,11 @@ function materializeOptionalTailDecisionSource(source) {
       ownValue(source.node, 'decisionStartedAt').getTime() > ownValue(source.node, 'decisionAt').getTime()) {
     throw validationError()
   }
+  const kind = decisionKind(source)
   const base = factBase({
     line: source.line,
     node: source.node,
-    sourceType: 'optional_tail_decision',
+    sourceType: kind.sourceType,
     sourceId: source.node._id,
     sourceVersion: source.node.decisionAnalyticsSourceVersion,
     day: shanghaiDay(source.node.decisionAt)
@@ -281,7 +304,7 @@ function materializeOptionalTailDecisionSource(source) {
   const facts = []
   if (ownValue(source.node, 'decisionTimingStatus') === 'calculated') {
     facts.push(timingFact(base, {
-      factType: 'optional_tail_decision', metric: 'optional_tail_decision_duration',
+      factType: kind.durationFactType, metric: kind.durationMetric,
       timing: timingValue(source.node, 'decisionTimingStatus', 'decisionWorkMinutes')
     }))
   } else if (ownValue(source.node, 'decisionTimingStatus') !== 'pending_calendar' ||
@@ -289,11 +312,13 @@ function materializeOptionalTailDecisionSource(source) {
     throw validationError()
   }
   facts.push(eventFact(base, {
-    factType: 'optional_tail_activation', metric: 'optional_tail_activation',
+    factType: kind.eventFactType, metric: kind.eventMetric,
     sampleValue: source.node.decision === 'activate' ? 1 : 0
   }))
   return facts
 }
+
+const materializeOptionalTailDecisionSource = materializeDecisionSource
 
 function materializeNodeSource(source) {
   if (!source || typeof source !== 'object' || !source.line || !source.node ||
@@ -368,14 +393,25 @@ async function materializeBusinessSource(source, workTimeService) {
       source.nodes.length === 0 || !Array.isArray(source.nodeFacts) ||
       source.line.analyticsSnapshotStatus !== 'pending' || !workTimeService ||
       typeof workTimeService.workingMinutesBetween !== 'function') throw validationError()
-  for (const node of source.nodes) {
+  const line = source.line
+  let effectiveNodes
+  if (ownValue(line, 'flowSchemaVersion') === 2) {
+    const traversedNodeIds = ownStringArray(line, 'traversedNodeIds')
+    if (!traversedNodeIds.length || new Set(traversedNodeIds).size !== traversedNodeIds.length) throw validationError()
+    const traversed = new Set(traversedNodeIds)
+    effectiveNodes = source.nodes.filter(node => node && node.routeState === 'completed' && traversed.has(node._id))
+    if (effectiveNodes.length !== traversed.size || effectiveNodes.some(node => node.status !== 'completed')) {
+      throw validationError()
+    }
+  } else {
+    effectiveNodes = source.nodes.filter(node => node && node.status !== 'skipped')
+  }
+  if (!effectiveNodes.length) throw validationError()
+  for (const node of effectiveNodes) {
     if (!node || node.analyticsSnapshotStatus !== 'generated' ||
         !Number.isSafeInteger(node.analyticsSourceVersion) ||
         node.analyticsGeneratedVersion !== node.analyticsSourceVersion) throw validationError()
   }
-  const line = source.line
-  const effectiveNodes = source.nodes.filter(node => node && node.status !== 'skipped')
-  if (!effectiveNodes.length) throw validationError()
   const nodeById = new Map()
   for (const node of effectiveNodes) {
     const nodeId = safeId(node._id)
@@ -423,6 +459,7 @@ module.exports = {
   safeAverage,
   personFilterToken,
   materializeNodeSource,
+  materializeDecisionSource,
   materializeOptionalTailDecisionSource,
   materializeBusinessSource
 }

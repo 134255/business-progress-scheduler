@@ -122,6 +122,34 @@ test('运营仓储统计权威状态并以稳定游标返回脱敏节点行', as
   assert.deepEqual(completedOnly.items.map(item => item.businessCode), ['BL-2'])
 })
 
+test('版本二运营汇总与导出排除休眠和跳过分支节点', async () => {
+  const { fake, repository } = harness()
+  fake.replace('business_lines', 'line-1', {
+    ...fake.documents('business_lines').find(item => item._id === 'line-1'),
+    flowSchemaVersion: 2, traversedNodeIds: ['node-1']
+  })
+  fake.replace('business_nodes', 'node-1', {
+    ...fake.documents('business_nodes').find(item => item._id === 'node-1'), routeState: 'active'
+  })
+  fake.replace('business_nodes', 'node-dormant', {
+    _id: 'node-dormant', businessLineId: 'line-1', nodeCode: 'BL-1-N002', sequence: 1,
+    name: '未走分支', status: 'waiting', routeState: 'dormant', workflowMode: 'review',
+    processorUserIds: ['user'], reviewerUserIds: ['root'], reviewMode: 'any',
+    processingDueStatus: 'pending_calendar', processingOverdueWorkMinutes: 99,
+    reviewDueStatus: 'not_started'
+  })
+  const actor = { _id: 'root', role: 'super_admin', status: 'active' }
+  const range = {
+    startAt: new Date('2026-08-01T16:00:00Z'), endAt: new Date('2026-08-18T16:00:00Z'),
+    cursor: '', pageSize: 50
+  }
+  const dashboard = await repository.getDashboard({ actor, range })
+  assert.equal(dashboard.stats.overdueProcessing, 1)
+  assert.equal(dashboard.stats.pendingCalendar, 2)
+  const exported = await repository.exportRows({ actor, range })
+  assert.equal(exported.items.some(item => item.nodeCode === 'BL-1-N002'), false)
+})
+
 test('运营仓储按审核开始时间稳定分页返回实际提交人与实际投票人工时', async () => {
   const { repository } = harness()
   const actor = { _id: 'root', role: 'super_admin', status: 'active' }
@@ -222,6 +250,34 @@ test('追加节点汇总返回决定样本、启用数量、启用率和平均�
   assert.deepEqual(summary.optionalTail, {
     activationCount: 1, decisionCount: 2, activationRatePercent: 50,
     averageDecisionMinutes: 7, pendingCount: 0, unrecordedCount: 0
+  })
+})
+
+test('分支决定汇总同时纳入通用人工分支事实', async () => {
+  const { fake, repository } = harness()
+  fake.replace('operations_analytics_daily', 'daily-manual-decision', {
+    _id: 'daily-manual-decision', day: '2026-08-13', templateId: 'template-1', templateVersion: 2,
+    stableNodeId: 'branch-1', nodeName: '人工分流', nodeSequence: 1,
+    metric: 'manual_route_decision_duration', dimensionRole: 'global', dimensionFilterToken: '',
+    sampleCount: 2, totalMinutes: 10, pendingCount: 0, unrecordedCount: 0
+  })
+  fake.replace('operations_analytics_daily', 'daily-manual-activation', {
+    _id: 'daily-manual-activation', day: '2026-08-13', templateId: 'template-1', templateVersion: 2,
+    stableNodeId: 'branch-1', nodeName: '人工分流', nodeSequence: 1,
+    metric: 'manual_route_activation', dimensionRole: 'global', dimensionFilterToken: '',
+    sampleCount: 2, totalMinutes: 1, pendingCount: 0, unrecordedCount: 0
+  })
+  const summary = await repository.getAnalyticsSummary({
+    actor: { _id: 'user', role: 'user', status: 'active' },
+    range: {
+      startDate: '2026-08-01', endDate: '2026-08-19', grain: 'week', templateId: 'template-1',
+      templateVersion: null, status: '', businessLineId: '', stableNodeId: '', processorToken: '', reviewerToken: '',
+      metric: '', cursor: '', pageSize: 20
+    }
+  })
+  assert.deepEqual(summary.optionalTail, {
+    activationCount: 1, decisionCount: 2, activationRatePercent: 50,
+    averageDecisionMinutes: 5, pendingCount: 0, unrecordedCount: 0
   })
 })
 

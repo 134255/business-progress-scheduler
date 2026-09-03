@@ -11,6 +11,7 @@ const {
   safeAverage,
   materializeNodeSource,
   materializeOptionalTailDecisionSource,
+  materializeDecisionSource,
   materializeBusinessSource
 } = require('../lib/analytics-domain')
 
@@ -187,6 +188,29 @@ test('追加节点待补算决定先生成启用事件但不生成分钟事实',
   ])
 })
 
+test('通用人工分支决定生成独立时长和选择事件且不混入旧追加节点口径', () => {
+  const facts = materializeDecisionSource({
+    line: {
+      _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 3,
+      flowSchemaVersion: 2, traversedNodeIds: ['node-source', 'node-target']
+    },
+    node: {
+      _id: 'node-source', businessLineId: 'line-1', sourceTemplateNodeKey: 'source-1',
+      name: '人工判断', sequence: 1, routeState: 'completed',
+      next: { mode: 'manual', activateTargetNodeId: 'node-target', skipTargetNodeId: 'end' },
+      decision: 'activate', decisionAnalyticsSnapshotStatus: 'pending',
+      decisionAnalyticsSourceVersion: 2,
+      decisionStartedAt: new Date('2026-09-03T01:00:00Z'),
+      decisionAt: new Date('2026-09-03T01:08:00Z'),
+      decisionTimingStatus: 'calculated', decisionWorkMinutes: 8
+    }
+  })
+  assert.deepEqual(facts.map(item => [item.sourceType, item.factType, item.metric, item.workMinutes, item.sampleValue]), [
+    ['manual_route_decision', 'manual_route_decision', 'manual_route_decision_duration', 8, undefined],
+    ['manual_route_decision', 'manual_route_activation', 'manual_route_activation', undefined, 1]
+  ])
+})
+
 test('业务来源生成业务完成和每业务节点累计指标，日历缺失不伪装为零', async () => {
   const source = {
     line: {
@@ -242,6 +266,35 @@ test('业务汇总忽略未启用追加节点的处理与审核事实', async ()
   }, { async workingMinutesBetween() { return { status: 'calculated', minutes: 20 } } })
   assert.deepEqual(facts.map(item => [item.metric, item.workMinutes]), [
     ['business_completion', 20], ['business_node_processing_total', 10], ['business_review_total', 2]
+  ])
+})
+
+test('版本二业务汇总只校验并累计实际走完的节点', async () => {
+  const facts = await materializeBusinessSource({
+    line: {
+      _id: 'line-1', sourceTemplateId: 'template-1', sourceTemplateVersion: 4,
+      flowSchemaVersion: 2, traversedNodeIds: ['node-1'],
+      createdAt: new Date('2026-09-03T01:00:00Z'), analyticsCompletedAt: new Date('2026-09-03T02:00:00Z'),
+      analyticsSnapshotStatus: 'pending', analyticsSourceVersion: 1
+    },
+    nodes: [
+      { _id: 'node-1', businessLineId: 'line-1', sourceTemplateNodeKey: 'required-1', status: 'completed',
+        routeState: 'completed', analyticsSnapshotStatus: 'generated', analyticsSourceVersion: 1,
+        analyticsGeneratedVersion: 1 },
+      { _id: 'node-2', businessLineId: 'line-1', sourceTemplateNodeKey: 'unused-1', status: 'waiting',
+        routeState: 'dormant' }
+    ],
+    nodeFacts: [
+      { sourceType: 'node', sourceId: 'node-1', sourceVersion: 1, businessLineId: 'line-1', nodeId: 'node-1',
+        templateId: 'template-1', templateVersion: 4, stableNodeId: 'required-1', metric: 'node_processing',
+        dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 11 },
+      { sourceType: 'node', sourceId: 'node-1', sourceVersion: 1, businessLineId: 'line-1', nodeId: 'node-1',
+        templateId: 'template-1', templateVersion: 4, stableNodeId: 'required-1', metric: 'node_review',
+        dimensionRole: 'global', timingStatus: 'calculated', workMinutes: 3 }
+    ]
+  }, { async workingMinutesBetween() { return { status: 'calculated', minutes: 60 } } })
+  assert.deepEqual(facts.map(item => [item.metric, item.workMinutes]), [
+    ['business_completion', 60], ['business_node_processing_total', 11], ['business_review_total', 3]
   ])
 })
 

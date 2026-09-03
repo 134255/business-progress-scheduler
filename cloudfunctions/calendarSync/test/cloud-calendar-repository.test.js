@@ -1141,6 +1141,35 @@ test('可选尾节点决策候选在版本变化后拒绝覆盖', async () => {
   }), false)
 })
 
+test('通用人工分支决定使用相同独立日历补算且排除未走节点', async () => {
+  const startAt = new Date('2026-09-03T01:00:00Z')
+  const endAt = new Date('2026-09-03T02:07:00Z')
+  const fake = createFakeCloudDatabase({
+    business_lines: [{
+      _id: 'line-1', status: 'active', flowSchemaVersion: 2,
+      currentNodeId: 'node-target', traversedNodeIds: ['node-source']
+    }],
+    business_nodes: [{
+      _id: 'node-source', businessLineId: 'line-1', status: 'completed', routeState: 'completed', version: 5,
+      next: { mode: 'manual', activateTargetNodeId: 'node-target', skipTargetNodeId: 'end' },
+      decision: 'activate', decisionTimingStatus: 'pending_calendar',
+      decisionStartedAt: startAt, decisionAt: endAt, decisionWorkMinutes: null,
+      decisionCalendarVersion: null, decisionAnalyticsSnapshotStatus: 'pending',
+      decisionAnalyticsSourceVersion: 1
+    }]
+  })
+  const repository = createCloudCalendarRepository({ db: fake.db })
+  const candidate = (await repository.listPendingDueCandidates({ limit: 40 }))
+    .find(item => item.kind === 'manual_route_decision')
+  assert.ok(candidate)
+  assert.equal(await repository.applyDueCalculation({
+    candidate,
+    calculation: { status: 'calculated', minutes: 67, calendarVersion: 'calendar-route' },
+    now: new Date('2026-09-03T03:00:00Z')
+  }), true)
+  assert.equal(fake.documents('business_nodes')[0].decisionWorkMinutes, 67)
+})
+
 test('无审核直接完成处理时长以独立游标补算并刷新统计来源', async () => {
   const startAt = new Date('2026-08-11T01:00:00Z')
   const endAt = new Date('2026-08-11T04:00:00Z')

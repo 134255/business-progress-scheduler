@@ -455,6 +455,7 @@ function createCloudBusinessRepository({
       const entryNodeId = ownDataValue(line, 'entryNodeId')
       const traversedNodeIds = ownDataValue(line, 'traversedNodeIds')
       const routeDecisionVersion = ownDataValue(line, 'routeDecisionVersion')
+      const awaitingManualDecision = ownDataValue(line, 'awaitingManualDecision')
       if (!flowSchemaVersion.valid || flowSchemaVersion.value !== 2 ||
           !entryNodeId.valid || typeof entryNodeId.value !== 'string' || !entryNodeId.value ||
           !traversedNodeIds.valid || !Array.isArray(traversedNodeIds.value) ||
@@ -462,14 +463,17 @@ function createCloudBusinessRepository({
           !traversedNodeIds.value.every(id => typeof id === 'string' && id) ||
           new Set(traversedNodeIds.value).size !== traversedNodeIds.value.length ||
           !routeDecisionVersion.valid || !Number.isSafeInteger(routeDecisionVersion.value) ||
-          routeDecisionVersion.value < 0 || typeof line.currentNodeId !== 'string' || !line.currentNodeId) {
+          routeDecisionVersion.value < 0 || typeof line.currentNodeId !== 'string' || !line.currentNodeId ||
+          awaitingManualDecision.present && (!awaitingManualDecision.valid ||
+            typeof awaitingManualDecision.value !== 'boolean')) {
         throw createError('FORBIDDEN')
       }
       route = {
         flowSchemaVersion: 2,
         entryNodeId: entryNodeId.value,
         traversedNodeIds: clone(traversedNodeIds.value),
-        routeDecisionVersion: routeDecisionVersion.value
+        routeDecisionVersion: routeDecisionVersion.value,
+        awaitingManualDecision: awaitingManualDecision.present ? awaitingManualDecision.value : false
       }
     }
     return {
@@ -648,7 +652,8 @@ function createCloudBusinessRepository({
     return { requiresEvidence, allowedEvidenceTypes }
   }
 
-  function publicNodeProjection(node, actor, canManage, accountSchema, displayNames, line) {
+  function publicNodeProjection(node, actor, canManage, accountSchema, displayNames, line,
+    canDecideNodeRoute = false) {
     const evidencePolicy = safeEvidencePolicy(node)
     const fieldDefinitions = safeFieldDefinitions(
       Object.prototype.hasOwnProperty.call(node, 'fieldDefinitions') ? node.fieldDefinitions : []
@@ -725,6 +730,7 @@ function createCloudBusinessRepository({
         canDecideOptionalTail: activationMode === ACTIVATION_MODE.OPTIONAL_TAIL &&
           node.status === 'awaiting_decision' && line.optionalTailState === 'pending' &&
           line.currentNodeId === node._id && validDate(node.decisionStartedAt) && processors.includes(actor._id),
+        ...(line.flowSchemaVersion === 2 ? { canDecideNodeRoute } : {}),
         processorDisplayNames,
         reviewerDisplayNames,
         reviewMode: node.reviewMode,
@@ -1242,8 +1248,30 @@ function createCloudBusinessRepository({
           return isActualRouteState(route.routeState)
         })
       : nodes
-    const projectedNodes = actualNodes.map(node =>
-      publicNodeProjection(node, currentActor, canManage, accountSchema, displayNames, line))
+    const allNodesById = new Map(nodes.map(node => [node._id, node]))
+    const projectedNodes = actualNodes.map(node => {
+      let canDecideNodeRoute = false
+      if (projectedLine.flowSchemaVersion === 2 && node.routeState === ROUTE_STATE.AWAITING_MANUAL_DECISION &&
+          node.status === 'awaiting_decision' && line.awaitingManualDecision === true &&
+          line.currentNodeId === node._id && validDate(node.decisionStartedAt) &&
+          node.next && node.next.mode === 'manual') {
+        const target = allNodesById.get(node.next.activateTargetNodeId)
+        const targetProcessors = target && ownExactAccountIds(target, 'processorUserIds', { nonEmpty: true })
+        const targetReviewers = target && ownExactAccountIds(target, 'reviewerUserIds', { nonEmpty: false })
+        if (!target || target.businessLineId !== line._id || target.routeState !== ROUTE_STATE.DORMANT ||
+            target.status !== 'waiting' || !targetProcessors || !targetReviewers ||
+            targetProcessors.some(id => targetReviewers.includes(id))) throw createError('FORBIDDEN')
+        canDecideNodeRoute = targetProcessors.includes(currentActor._id)
+      }
+      return publicNodeProjection(
+        node, currentActor, canManage, accountSchema, displayNames, line, canDecideNodeRoute
+      )
+    })
+    if (projectedLine.flowSchemaVersion === 2) {
+      projectedLine.traversedNodeCount = projectedLine.traversedNodeIds.length
+      projectedLine.completedNodeCount = actualNodes.filter(node =>
+        node.routeState === ROUTE_STATE.COMPLETED).length
+    }
     const canEditNodes = !accountSchema && canManage && Number(line.progress || 0) === 0 &&
       nodes.every(node => ['pending', 'ready'].includes(node.status) && !node.latestComment)
     await db.runTransaction(async transaction => {

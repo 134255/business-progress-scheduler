@@ -41,10 +41,15 @@ function exactIds(value, key, { nonEmpty = true } = {}) {
 }
 
 function assertCreateAccess({ actor, line, node, source, reviewed, businessLineId, nodeId }) {
+  const hasFlowVersion = Object.prototype.hasOwnProperty.call(line, 'flowSchemaVersion')
+  const versionTwoRouteValid = !hasFlowVersion || line.flowSchemaVersion === 2 &&
+    node.routeState === 'completed' && Array.isArray(line.traversedNodeIds) &&
+    line.traversedNodeIds.length <= 48 && new Set(line.traversedNodeIds).size === line.traversedNodeIds.length &&
+    line.traversedNodeIds.includes(nodeId)
   if (!actor || actor.status !== 'active' || line._id !== businessLineId || node._id !== nodeId ||
       node.businessLineId !== businessLineId || source.businessLineId !== businessLineId || source.nodeId !== nodeId ||
       !['active', 'in_progress', 'completed', 'closed', 'cancelled'].includes(line.status) ||
-      node.status !== 'completed' || node.workflowMode !== 'review' ||
+      node.status !== 'completed' || node.workflowMode !== 'review' || !versionTwoRouteValid ||
       (reviewed
         ? node.lastReviewRoundId !== source._id || source.status !== 'approved' || source.finalDecision !== 'approved'
         : node.lastReviewRoundId != null || source.action !== 'complete_node' || source.status !== 'completed' ||

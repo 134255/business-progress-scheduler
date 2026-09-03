@@ -218,20 +218,37 @@ function createCloudReminderRepository({ db } = {}) {
     const cursor = validateCursor(
       await readDocument(db, 'system_settings', DECISION_CURSOR_ID),
       DECISION_CURSOR_ID, 'workflow_reminder_optional_tail_decision')
-    const where = {
+    const legacyWhere = {
       status: 'awaiting_decision', activationMode: 'optional_tail',
       decisionReminderStatus: 'pending',
       ...(cursor ? { _id: db.command.gt(cursor) } : {})
     }
-    let raw = await readCandidates(db.collection('business_nodes')
-      .where(where).orderBy('_id', 'asc'), limit)
+    const routeWhere = {
+      status: 'awaiting_decision', routeState: 'awaiting_manual_decision',
+      decisionReminderStatus: 'pending',
+      ...(cursor ? { _id: db.command.gt(cursor) } : {})
+    }
+    let legacyRaw = await readCandidates(db.collection('business_nodes')
+      .where(legacyWhere).orderBy('_id', 'asc'), limit)
+    let routeRaw = await readCandidates(db.collection('business_nodes')
+      .where(routeWhere).orderBy('_id', 'asc'), limit)
+    let raw = [...new Map([...legacyRaw, ...routeRaw].map(node => [node._id, node])).values()]
+      .sort((left, right) => left._id.localeCompare(right._id)).slice(0, limit)
     if (!raw.length && cursor) {
-      raw = await readCandidates(db.collection('business_nodes')
+      legacyRaw = await readCandidates(db.collection('business_nodes')
         .where({
           status: 'awaiting_decision', activationMode: 'optional_tail',
           decisionReminderStatus: 'pending'
         })
         .orderBy('_id', 'asc'), limit)
+      routeRaw = await readCandidates(db.collection('business_nodes')
+        .where({
+          status: 'awaiting_decision', routeState: 'awaiting_manual_decision',
+          decisionReminderStatus: 'pending'
+        })
+        .orderBy('_id', 'asc'), limit)
+      raw = [...new Map([...legacyRaw, ...routeRaw].map(node => [node._id, node])).values()]
+        .sort((left, right) => left._id.localeCompare(right._id)).slice(0, limit)
     }
     return {
       items: raw.filter(node => typeof node._id === 'string' && DOCUMENT_ID.test(node._id) &&
@@ -406,14 +423,25 @@ function createCloudReminderRepository({ db } = {}) {
     return db.runTransaction(async transaction => {
       const node = await readDocument(transaction, 'business_nodes', value.nodeId)
       const line = node && await readDocument(transaction, 'business_lines', node.businessLineId)
+      const isLegacy = node && node.activationMode === 'optional_tail' &&
+        line && line.optionalTailNodeId === node._id && line.optionalTailState === 'pending'
+      const isVersionTwo = node && line && line.flowSchemaVersion === 2 &&
+        line.awaitingManualDecision === true && node.routeState === 'awaiting_manual_decision' &&
+        node.next && node.next.mode === 'manual' && typeof node.next.activateTargetNodeId === 'string'
       if (!node || !line || line.status !== 'active' || line.currentNodeId !== node._id ||
-          line.optionalTailNodeId !== node._id || line.optionalTailState !== 'pending' ||
-          node.status !== 'awaiting_decision' || node.activationMode !== 'optional_tail' ||
+          (!isLegacy && !isVersionTwo) || node.status !== 'awaiting_decision' ||
           node.decisionReminderStatus !== 'pending' ||
           node.version !== value.expectedVersion || !validDate(node.decisionStartedAt)) {
         return { created: false }
       }
-      const processors = ownExactIds(node, 'processorUserIds', { nonEmpty: true })
+      const decisionTarget = isVersionTwo
+        ? await readDocument(transaction, 'business_nodes', node.next.activateTargetNodeId)
+        : node
+      if (!decisionTarget || decisionTarget.businessLineId !== line._id ||
+          isVersionTwo && (decisionTarget.routeState !== 'dormant' || decisionTarget.status !== 'waiting')) {
+        return { created: false }
+      }
+      const processors = ownExactIds(decisionTarget, 'processorUserIds', { nonEmpty: true })
       const reviewers = ownExactIds(node, 'reviewerUserIds')
       const lineMembers = ownExactIds(line, 'memberUserIds', { nonEmpty: true })
       const lineManagers = ownExactIds(line, 'managerUserIds', { nonEmpty: true })
@@ -428,7 +456,8 @@ function createCloudReminderRepository({ db } = {}) {
       const existing = await readDocument(transaction, 'notifications', notificationId)
       if (existing) {
         const recipients = ownExactIds(existing, 'recipientUserIds', { nonEmpty: true })
-        if (existing.type !== 'optional_tail_decision_reminder' || !recipients ||
+        const expectedType = isVersionTwo ? 'node_route_decision_reminder' : 'optional_tail_decision_reminder'
+        if (existing.type !== expectedType || !recipients ||
             recipients.length !== activeProcessors.length ||
             activeProcessors.some((id, index) => id !== recipients[index]) ||
             existing.businessLineId !== line._id || existing.nodeId !== node._id ||
@@ -436,7 +465,7 @@ function createCloudReminderRepository({ db } = {}) {
             existing.status !== 'pending') return { created: false }
       } else {
         await transaction.collection('notifications').doc(notificationId).set({ data: {
-          type: 'optional_tail_decision_reminder',
+          type: isVersionTwo ? 'node_route_decision_reminder' : 'optional_tail_decision_reminder',
           recipientUserIds: activeProcessors,
           businessLineId: line._id,
           nodeId: node._id,

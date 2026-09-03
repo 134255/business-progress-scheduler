@@ -509,7 +509,14 @@ function createCloudCalendarRepository({
     if (!decisionCursorClaimed) return result
     for (const node of decisionRows) {
       if (result.length >= limit) break
-      if (node.activationMode !== 'optional_tail' ||
+      const line = typeof node.businessLineId === 'string'
+        ? await readDocument(db, 'business_lines', node.businessLineId)
+        : null
+      const legacyDecision = node.activationMode === 'optional_tail'
+      const manualRouteDecision = line && line.flowSchemaVersion === 2 &&
+        node.routeState === 'completed' && node.next && node.next.mode === 'manual' &&
+        Array.isArray(line.traversedNodeIds) && line.traversedNodeIds.includes(node._id)
+      if ((!legacyDecision && !manualRouteDecision) ||
           !['activate', 'skip'].includes(node.decision) ||
           safeVersion(node.version) === null || typeof node.businessLineId !== 'string' ||
           !['pending', 'generated'].includes(node.decisionAnalyticsSnapshotStatus) ||
@@ -519,7 +526,7 @@ function createCloudCalendarRepository({
           node.decisionStartedAt.getTime() > node.decisionAt.getTime() ||
           node.decisionWorkMinutes !== null || node.decisionCalendarVersion !== null) continue
       result.push({
-        kind: 'optional_tail_decision', id: node._id,
+        kind: manualRouteDecision ? 'manual_route_decision' : 'optional_tail_decision', id: node._id,
         businessLineId: node.businessLineId, nodeId: node._id,
         status: node.status, decision: node.decision, version: node.version,
         decisionAnalyticsSourceVersion: node.decisionAnalyticsSourceVersion,
@@ -798,7 +805,8 @@ function createCloudCalendarRepository({
     const reviewTimingCarryoverCalculation = candidate &&
       candidate.kind === 'review_timing_carryover'
     const reviewResponseCalculation = candidate && candidate.kind === 'review_response'
-    const optionalTailDecisionCalculation = candidate && candidate.kind === 'optional_tail_decision'
+    const optionalTailDecisionCalculation = candidate &&
+      ['optional_tail_decision', 'manual_route_decision'].includes(candidate.kind)
     const directProcessingCompletionCalculation = candidate &&
       candidate.kind === 'direct_processing_completion'
     if (!candidate || !calculation || calculation.status !== 'calculated' ||
@@ -879,6 +887,29 @@ function createCloudCalendarRepository({
           calendarRecalculatedAt: new Date(now),
           version: nextVersion,
           updatedAt: db.serverDate()
+        } })
+        return true
+      }
+      if (candidate.kind === 'manual_route_decision') {
+        const node = await readDocument(transaction, 'business_nodes', candidate.nodeId)
+        if (!node || node.businessLineId !== line._id || node._id !== candidate.id ||
+            line.flowSchemaVersion !== 2 || node.routeState !== 'completed' ||
+            !node.next || node.next.mode !== 'manual' || !Array.isArray(line.traversedNodeIds) ||
+            !line.traversedNodeIds.includes(node._id) || node.decision !== candidate.decision ||
+            node.version !== candidate.version ||
+            node.decisionAnalyticsSourceVersion !== candidate.decisionAnalyticsSourceVersion ||
+            !['pending', 'generated'].includes(node.decisionAnalyticsSnapshotStatus) ||
+            node.decisionTimingStatus !== 'pending_calendar' || node.decisionWorkMinutes !== null ||
+            node.decisionCalendarVersion !== null ||
+            !sameDate(node.decisionStartedAt, candidate.startAt) ||
+            !sameDate(node.decisionAt, candidate.endAt) || node.version === Number.MAX_SAFE_INTEGER) {
+          return false
+        }
+        await transaction.collection('business_nodes').doc(node._id).update({ data: {
+          decisionTimingStatus: 'calculated', decisionWorkMinutes: calculation.minutes,
+          decisionCalendarVersion: calculation.calendarVersion,
+          decisionAnalyticsSnapshotStatus: 'pending', calendarRecalculatedAt: new Date(now),
+          version: node.version + 1, updatedAt: db.serverDate()
         } })
         return true
       }
