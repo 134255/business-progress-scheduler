@@ -6,6 +6,7 @@ const {
   applyRecognitionPreview,
   recognitionSnapshotStillCurrent
 } = require('../../utils/node-text-recognition')
+const { deriveConditionalForm, nonemptyVisibleValues } = require('../../utils/conditional-form')
 
 const FROZEN_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const STATUS_OPTIONS = Object.freeze([
@@ -78,7 +79,8 @@ function schemaFingerprint(fields) {
     name: field.name,
     type: field.type,
     required: field.required,
-    constraints: field.constraints
+    constraints: field.constraints,
+    condition: field.condition || null
   })))
 }
 
@@ -209,6 +211,7 @@ Page({
     draftDirty: false,
     frozen: false,
     fields: [],
+    visibleFields: [],
     fieldValues: {},
     history: [],
     loadingHistory: true,
@@ -308,11 +311,7 @@ Page({
         field.fieldKey,
         latestValues.has(field.fieldKey) ? latestValues.get(field.fieldKey) : initialValue(field)
       ]))
-      for (const field of fields) {
-        if (field.type !== 'multi_select') continue
-        const selected = Array.isArray(fieldValues[field.fieldKey]) ? fieldValues[field.fieldKey] : []
-        field.optionItems = field.optionItems.map(option => ({ ...option, selected: selected.includes(option.value) }))
-      }
+      const conditionalForm = deriveConditionalForm(fields, fieldValues)
       const frozen = FROZEN_STATUSES.has(workspace.line && workspace.line.status)
       const canSubmit = Boolean(workspace.canSubmit) && !frozen
       const requiresReview = legacyMode ? true : node.requiresReview !== false
@@ -324,7 +323,8 @@ Page({
         expectedNodeVersion: node.version,
         lineVersion: workspace.line.version,
         fields,
-        fieldValues,
+        visibleFields: conditionalForm.visibleFields,
+        fieldValues: conditionalForm.fieldValues,
         requiresEvidence,
         allowedEvidenceTypes,
         history: formattedHistory(workspace.history),
@@ -404,7 +404,7 @@ Page({
       lineId: this.data.lineId,
       nodeId: this.data.nodeId,
       nodeVersion: this.data.expectedNodeVersion,
-      schemaDigest: schemaFingerprint(this.data.fields),
+      schemaDigest: schemaFingerprint(this.data.visibleFields),
       formRevision: this.formRevision
     }
   },
@@ -425,6 +425,7 @@ Page({
         nodeId: snapshot.nodeId,
         expectedNodeVersion: snapshot.nodeVersion,
         text,
+        fieldValues: nonemptyVisibleValues(this.data.visibleFields, this.data.fieldValues),
         requestKey: requestKey('recognize').replace(/[^A-Za-z0-9_-]/g, '_')
       })
       if (!this.pageAlive || sequence !== this.recognitionSequence ||
@@ -432,7 +433,7 @@ Page({
         wx.showToast({ title: '表单已变化，识别结果已丢弃，请重试', icon: 'none' })
         return
       }
-      const candidates = buildRecognitionPreview(this.data.fields, this.data.fieldValues, result && result.candidates)
+      const candidates = buildRecognitionPreview(this.data.visibleFields, this.data.fieldValues, result && result.candidates)
       this.setData({ recognitionCandidates: candidates })
       wx.showToast({ title: candidates.length ? '识别完成，请确认结果' : '未识别到可填写内容', icon: 'none' })
     } catch (error) {
@@ -465,14 +466,12 @@ Page({
       wx.showToast({ title: '请先选择需要填入的识别结果', icon: 'none' })
       return
     }
-    const applied = applyRecognitionPreview(this.data.fields, this.data.fieldValues, selected)
-    if (!this.markDraftDirty({
-      fields: applied.fields,
-      fieldValues: applied.fieldValues,
-      recognitionText: '',
-      recognitionCandidates: []
-    })) return
-    wx.showToast({ title: '已填入选中字段', icon: 'success' })
+    const applied = applyRecognitionPreview(this.data.visibleFields, this.data.fieldValues, selected)
+    return this.applyConditionalValues(applied.fieldValues, {
+      recognitionText: '', recognitionCandidates: []
+    }, () => {
+      wx.showToast({ title: '已填入选中字段', icon: 'success' })
+    })
   },
 
   onComment(event) {
@@ -482,7 +481,7 @@ Page({
 
   onFieldInput(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    this.markDraftDirty({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: event.detail.value })
+    return this.applyFieldValue(event.currentTarget.dataset.fieldkey, event.detail.value)
   },
 
   onNumberInput(event) {
@@ -493,7 +492,7 @@ Page({
     if (this.data.readOnly || this.data.reviewDraftLocked) return
     const raw = event.detail.value
     const value = raw === true || raw === 'true' ? true : raw === false || raw === 'false' ? false : null
-    this.markDraftDirty({ [`fieldValues.${event.currentTarget.dataset.fieldkey}`]: value })
+    return this.applyFieldValue(event.currentTarget.dataset.fieldkey, value)
   },
 
   onDateChange(event) {
@@ -503,24 +502,48 @@ Page({
   onSingleSelectChange(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
     const key = event.currentTarget.dataset.fieldkey
-    const field = this.data.fields.find(item => item.fieldKey === key)
+    const field = this.data.visibleFields.find(item => item.fieldKey === key)
     const options = field && field.constraints && field.constraints.options
     const value = Array.isArray(options) ? options[Number(event.detail.value)] : null
-    this.markDraftDirty({ [`fieldValues.${key}`]: value === undefined ? null : value })
+    return this.applyFieldValue(key, value === undefined ? null : value)
   },
 
   onMultiSelectChange(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
     const key = event.currentTarget.dataset.fieldkey
     const selected = event.detail.value.slice()
-    const fields = this.data.fields.map(field => field.fieldKey === key
-      ? { ...field, optionItems: field.optionItems.map(option => ({ ...option, selected: selected.includes(option.value) })) }
-      : field)
-    this.markDraftDirty({ [`fieldValues.${key}`]: selected, fields })
+    return this.applyFieldValue(key, selected)
+  },
+
+  applyFieldValue(fieldKey, value) {
+    return this.applyConditionalValues({ ...this.data.fieldValues, [fieldKey]: value })
+  },
+
+  applyConditionalValues(values, extraUpdate = {}, onApplied) {
+    const derived = deriveConditionalForm(this.data.fields, values)
+    const commit = () => {
+      if (!this.markDraftDirty({
+        fieldValues: derived.fieldValues,
+        visibleFields: derived.visibleFields,
+        ...extraUpdate
+      })) return false
+      if (typeof onApplied === 'function') onApplied()
+      return true
+    }
+    if (!derived.clearedFieldKeys.length) return commit()
+    return new Promise(resolve => {
+      wx.showModal({
+        title: '切换后将清空字段',
+        content: `将清空 ${derived.clearedFieldKeys.length} 个不再适用的已填字段，是否继续？`,
+        confirmText: '继续切换',
+        success: result => resolve(result.confirm ? commit() : false),
+        fail: () => resolve(false)
+      })
+    })
   },
 
   normalizedFieldValues() {
-    return this.data.fields.map(field => {
+    return this.data.visibleFields.map(field => {
       let value = this.data.fieldValues[field.fieldKey]
       const label = field.name || '动态字段'
       const missing = value === null || value === undefined || value === '' || (Array.isArray(value) && !value.length)

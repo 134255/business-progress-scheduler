@@ -486,7 +486,7 @@ function createNodeTextRecognitionRoutes(recognitionService) {
     recognizeNodeText: ({ actor, payload }) => recognitionService.recognize({
       actor,
       input: selectProtectedPayload(payload, new Set([
-        'businessLineId', 'nodeId', 'expectedNodeVersion', 'text', 'requestKey'
+        'businessLineId', 'nodeId', 'expectedNodeVersion', 'text', 'requestKey', 'fieldValues'
       ]))
     })
   }

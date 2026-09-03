@@ -44,7 +44,7 @@
       </view>
     </view>
 
-    <view class="field dynamic-field" wx:for="{{fields}}" wx:key="fieldKey">
+    <view class="field dynamic-field" wx:for="{{visibleFields}}" wx:key="fieldKey">
       <text class="field-label">{{item.name}}{{item.required ? ' *' : ''}}</text>
       <text wx:if="{{item.description}}" class="muted field-description">{{item.description}}</text>
       <input wx:if="{{item.type === 'short_text'}}" class="input" disabled="{{readOnly || reviewDraftLocked || submitting}}" value="{{fieldValues[item.fieldKey]}}" data-fieldkey="{{item.fieldKey}}" bindinput="onFieldInput" />

@@ -145,6 +145,83 @@ test('当前处理人可粘贴文本识别并预览，确定空字段默认勾�
   assert.equal(page.data.recognitionText, '')
 })
 
+test('条件字段随父级单选逐级显示，并在切换分支前确认清空已有后代值', async () => {
+  const modalTitles = []
+  let confirmClear = false
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showModal(options) {
+      modalTitles.push(options.title)
+      options.success({ confirm: confirmClear, cancel: !confirmClear })
+    }
+  }
+  const conditionalFields = [
+    { fieldKey: 'category', sequence: 0, name: '品类', type: 'single_select', required: true, constraints: { options: ['手机', '电脑'] } },
+    { fieldKey: 'model', sequence: 1, name: '型号', type: 'single_select', required: true, constraints: { options: ['S1', 'S2', 'M1'] }, condition: {
+      parentFieldKey: 'category', visibleWhen: ['手机', '电脑'], optionsByParentValue: { 手机: ['S1', 'S2'], 电脑: ['M1'] }
+    } },
+    { fieldKey: 'serial', sequence: 2, name: '序列号', type: 'short_text', required: true, constraints: {}, condition: {
+      parentFieldKey: 'model', visibleWhen: ['S1']
+    } }
+  ]
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: [], fieldDefinitions: conditionalFields })),
+    getNodeHistory: async () => ({ canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  assert.deepEqual(page.data.visibleFields.map(field => field.fieldKey), ['category'])
+
+  await page.onSingleSelectChange({ currentTarget: { dataset: { fieldkey: 'category' } }, detail: { value: 0 } })
+  assert.deepEqual(page.data.visibleFields.map(field => field.fieldKey), ['category', 'model'])
+  assert.deepEqual(page.data.visibleFields[1].constraints.options, ['S1', 'S2'])
+  await page.onSingleSelectChange({ currentTarget: { dataset: { fieldkey: 'model' } }, detail: { value: 0 } })
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'serial' } }, detail: { value: 'SN-001' } })
+  assert.deepEqual(page.data.visibleFields.map(field => field.fieldKey), ['category', 'model', 'serial'])
+
+  await page.onSingleSelectChange({ currentTarget: { dataset: { fieldkey: 'category' } }, detail: { value: 1 } })
+  assert.equal(page.data.fieldValues.category, '手机', '取消确认必须完整保留原分支')
+  assert.equal(page.data.fieldValues.serial, 'SN-001')
+  confirmClear = true
+  await page.onSingleSelectChange({ currentTarget: { dataset: { fieldkey: 'category' } }, detail: { value: 1 } })
+  assert.equal(page.data.fieldValues.category, '电脑')
+  assert.equal(page.data.fieldValues.model, null)
+  assert.equal(page.data.fieldValues.serial, '')
+  assert.deepEqual(page.data.visibleFields.map(field => field.fieldKey), ['category', 'model'])
+  assert.deepEqual(page.data.files, [], '级联清空不得触碰凭证列表')
+  assert.ok(modalTitles.every(title => title === '切换后将清空字段'))
+  delete global.getApp
+  delete global.wx
+})
+
+test('隐藏字段不进入提交或智能识别，服务端返回的隐藏候选也会被客户端拒绝', async () => {
+  let recognitionInput
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向') }
+  const conditionalFields = [
+    { fieldKey: 'category', sequence: 0, name: '品类', type: 'single_select', required: true, constraints: { options: ['手机', '电脑'] } },
+    { fieldKey: 'phoneModel', sequence: 1, name: '手机型号', type: 'short_text', required: true, constraints: {}, condition: {
+      parentFieldKey: 'category', visibleWhen: ['手机']
+    } }
+  ]
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: [], fieldDefinitions: conditionalFields })),
+    getNodeHistory: async () => ({ canSubmit: true, history: [{ status: 'in_progress', fieldValues: [{ fieldKey: 'category', value: '电脑' }, { fieldKey: 'phoneModel', value: '不应恢复' }] }] }),
+    recognizeNodeText: async input => {
+      recognitionInput = input
+      return { candidates: [{ fieldKey: 'phoneModel', value: '越权候选', confidence: 1, sourceExcerpt: '手机型号：越权候选', matchKind: 'direct', requiresConfirmation: false, alternatives: [] }] }
+    }
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  assert.deepEqual(page.normalizedFieldValues(), [{ fieldKey: 'category', value: '电脑' }])
+  page.onRecognitionText({ detail: { value: '手机型号：越权候选' } })
+  await page.onRecognizeText()
+  assert.deepEqual(recognitionInput.fieldValues, [{ fieldKey: 'category', value: '电脑' }])
+  assert.deepEqual(page.data.recognitionCandidates, [])
+  delete global.getApp
+  delete global.wx
+})
+
 test('识别等待期间表单发生变化时丢弃迟到结果且不覆盖用户输入', async () => {
   const pending = deferred()
   const toasts = []
@@ -189,12 +266,12 @@ test('连续输入不同字段时每次只原子更新一次且保留其他字�
   assert.equal(updates.length, 1, '一次输入不得分成两次视图更新')
   assert.equal(updates[0].draftDirty, true)
   assert.deepEqual(updates[0].recognitionCandidates, [])
-  assert.equal(updates[0]['fieldValues.summary'], '第一个字段')
+  assert.equal(updates[0].fieldValues.summary, '第一个字段')
 
   updates.length = 0
   page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'detail' } }, detail: { value: '第二个字段' } })
   assert.equal(updates.length, 1, '切换输入框后仍应单次原子更新')
-  assert.equal(updates[0]['fieldValues.detail'], '第二个字段')
+  assert.equal(updates[0].fieldValues.detail, '第二个字段')
   assert.equal(page.data.fieldValues.summary, '第一个字段')
   assert.equal(page.data.fieldValues.detail, '第二个字段')
 })

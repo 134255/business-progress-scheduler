@@ -77,3 +77,30 @@ test('business service revalidates parser candidates against the current normali
     [{ fieldKey: 'choice', value: 'A', matchKind: 'semantic', alternatives: [{ value: 'C', confidence: 0.8 }] }]
   ]) assert.throws(() => validateReturnedCandidates(definitions, candidates), error => error.code === 'NODE_TEXT_PARSE_FAILED')
 })
+
+test('recognition parser receives only definitions visible for the submitted conditional form state', async () => {
+  const definitions = [
+    { fieldKey: 'category', sequence: 0, name: '品类', type: 'single_select', required: true, constraints: { options: ['手机', '电脑'] } },
+    { fieldKey: 'phoneModel', sequence: 1, name: '手机型号', type: 'short_text', required: true, constraints: {}, condition: {
+      parentFieldKey: 'category', visibleWhen: ['手机']
+    } },
+    { fieldKey: 'computerModel', sequence: 2, name: '电脑型号', type: 'short_text', required: true, constraints: {}, condition: {
+      parentFieldKey: 'category', visibleWhen: ['电脑']
+    } }
+  ]
+  let parserSchema
+  const service = createNodeTextRecognitionService({
+    repository: {
+      async authorizeRecognition() { return { fieldDefinitions: definitions } },
+      async claimUsageAndCreateTicket() { return { ticketId: 'ticket', actorHash: 'a'.repeat(64), lockToken: 'lock' } },
+      async releaseUsage() {}
+    },
+    parserClient: { async parse(input) { parserSchema = input.schema; return { candidates: [] } } }
+  })
+  await service.recognize({ actor: { _id: 'user-1' }, input: {
+    businessLineId: 'business-1', nodeId: 'node-1', expectedNodeVersion: 2,
+    text: '电脑型号 M1', requestKey: 'request_1234567890123456',
+    fieldValues: [{ fieldKey: 'category', value: '电脑' }]
+  } })
+  assert.deepEqual(parserSchema.map(field => field.fieldKey), ['category', 'computerModel'])
+})

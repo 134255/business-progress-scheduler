@@ -3,6 +3,7 @@
 const crypto = require('node:crypto')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { isSafeRegularExpression } = require('./field-domain')
+const { resolveConditionalFields } = require('./conditional-field-domain')
 
 const MAX_TEXT_LENGTH = 8000
 const FIELD_TYPES = new Set(['short_text', 'long_text', 'number', 'boolean', 'date', 'single_select', 'multi_select'])
@@ -120,6 +121,42 @@ function digest(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex')
 }
 
+function normalizeRecognitionValues(value) {
+  if (value === undefined) return []
+  if (!denseArray(value)) throw createError('VALIDATION_ERROR', '当前表单内容无效，请刷新后重试')
+  const seen = new Set()
+  return value.map(item => {
+    if (!plainRecord(item) || Object.keys(item).some(key => !['fieldKey', 'value'].includes(key)) ||
+        !ownData(item, 'fieldKey').valid || !ownData(item, 'value').valid ||
+        typeof item.fieldKey !== 'string' || !item.fieldKey.trim()) {
+      throw createError('VALIDATION_ERROR', '当前表单内容无效，请刷新后重试')
+    }
+    const fieldKey = item.fieldKey.trim()
+    const candidate = ownData(item, 'value').value
+    const validScalar = typeof candidate === 'string' && candidate.length <= 1000 ||
+      typeof candidate === 'boolean' || typeof candidate === 'number' && Number.isFinite(candidate)
+    const validArray = denseArray(candidate) && candidate.length <= 100 &&
+      candidate.every(entry => typeof entry === 'string' && entry.length <= 100)
+    if (seen.has(fieldKey) || !validScalar && !validArray) {
+      throw createError('VALIDATION_ERROR', '当前表单内容无效，请刷新后重试')
+    }
+    seen.add(fieldKey)
+    return { fieldKey, value: Array.isArray(candidate) ? candidate.slice() : candidate }
+  })
+}
+
+function visibleSchema(definitions, fieldValues) {
+  try {
+    if (!definitions.some(definition => definition && definition.condition !== undefined)) {
+      return normalizeSchema(definitions)
+    }
+    return normalizeSchema(resolveConditionalFields(definitions, fieldValues).visibleDefinitions)
+  } catch (error) {
+    if (error && ['NODE_TEXT_STALE', 'VALIDATION_ERROR'].includes(error.code)) throw error
+    throw createError('NODE_TEXT_STALE', '当前节点字段已变化，请刷新后重试')
+  }
+}
+
 function validDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
   const [year, month, day] = value.split('-').map(Number)
@@ -188,10 +225,11 @@ function createNodeTextRecognitionService({ repository, parserClient, dailyLimit
       }
       const expectedNodeVersion = input.expectedNodeVersion
       if (!Number.isSafeInteger(expectedNodeVersion) || expectedNodeVersion < 0) throw createError('VERSION_CONFLICT', '数据已变化，请刷新后重试')
+      const formValues = normalizeRecognitionValues(input.fieldValues)
       const before = await repository.authorizeRecognition({
         actorId: actor._id, businessLineId: input.businessLineId, nodeId: input.nodeId, expectedNodeVersion
       })
-      const schema = normalizeSchema(before.fieldDefinitions)
+      const schema = visibleSchema(before.fieldDefinitions, formValues)
       const schemaDigest = digest(JSON.stringify(schema))
       const claim = await repository.claimUsageAndCreateTicket({
         actorId: actor._id,
@@ -218,7 +256,7 @@ function createNodeTextRecognitionService({ repository, parserClient, dailyLimit
         const after = await repository.authorizeRecognition({
           actorId: actor._id, businessLineId: input.businessLineId, nodeId: input.nodeId, expectedNodeVersion
         })
-        if (digest(JSON.stringify(normalizeSchema(after.fieldDefinitions))) !== schemaDigest) {
+        if (digest(JSON.stringify(visibleSchema(after.fieldDefinitions, formValues))) !== schemaDigest) {
           throw createError('NODE_TEXT_STALE', '当前节点字段已变化，请刷新后重试')
         }
         return { candidates: validateReturnedCandidates(schema, result.candidates), nodeVersion: expectedNodeVersion, schemaDigest }
