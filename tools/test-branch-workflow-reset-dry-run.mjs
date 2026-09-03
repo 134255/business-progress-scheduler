@@ -66,12 +66,12 @@ function fixtureReader() {
     {
       _id: `evidence-${'7'.repeat(64)}`, businessLineId: 'line-amend', nodeId: null,
       uploadPurpose: 'audit_amendment', extension: 'pdf', storageStatus: 'available', purgedAt: null,
-      size: 400, fileId: `${CLOUD_PREFIX}/amendment/line-amend/1788400000000-0-proof.pdf`
+      size: 400, fileId: `${CLOUD_PREFIX}/amendment/line-amend/1788400000000-0-proof.PDF`
     },
     {
       _id: `evidence-${'8'.repeat(64)}`, businessLineId: 'line-amend', nodeId: null,
       uploadPurpose: 'audit_amendment', extension: 'mov', storageStatus: 'purge_pending', purgedAt: null,
-      size: 500, fileId: `${CLOUD_PREFIX}/amendment/line-amend/1788400000001-1-proof.mov`
+      size: 500, fileId: `${CLOUD_PREFIX}/amendment/line-amend/1788400000001-1-proof.MoV`
     },
     {
       _id: `evidence-${'9'.repeat(64)}`, businessLineId: 'line-amend', nodeId: null,
@@ -125,8 +125,8 @@ test('dry-run inventories every approved collection and only exact managed COS o
   assert.equal(result.cosObjects.count, 2)
   assert.equal(result.cosObjects.totalDeclaredBytes, 300)
   assert.deepEqual(result.cloudFiles.fileIds, [
-    `${CLOUD_PREFIX}/amendment/line-amend/1788400000000-0-proof.pdf`,
-    `${CLOUD_PREFIX}/amendment/line-amend/1788400000001-1-proof.mov`
+    `${CLOUD_PREFIX}/amendment/line-amend/1788400000000-0-proof.PDF`,
+    `${CLOUD_PREFIX}/amendment/line-amend/1788400000001-1-proof.MoV`
   ])
   assert.equal(result.cloudFiles.count, 2)
   assert.equal(result.cloudFiles.totalDeclaredBytes, 900)

@@ -144,7 +144,7 @@ function classifyEvidence(evidence, cloudFilePrefix) {
     }
     const fileKey = fileId.slice(cloudFilePrefix.length + 1)
     const match = AMENDMENT_FILE_KEY.exec(fileKey)
-    if (!match || match[1] !== businessLineId || !match[2].endsWith(`.${extension}`)) {
+    if (!match || match[1] !== businessLineId || !match[2].toLowerCase().endsWith(`.${extension}`)) {
       return { kind: 'invalid' }
     }
     return { kind: 'cloudFile', evidenceId, fileId, size }
