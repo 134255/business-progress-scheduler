@@ -1451,6 +1451,10 @@ test('版本二最终审核通过人工分支后停在原节点等待决定', as
   assert.equal(source.routeState, 'awaiting_manual_decision')
   assert.equal(candidate.routeState, 'dormant')
   assert.equal(Object.hasOwn(candidate, 'processingStartedAt'), false)
+  const notifications = fake.documents('notifications')
+    .filter(item => item.type === 'node_route_decision_pending')
+  assert.equal(notifications.length, 1)
+  assert.deepEqual(notifications[0].recipientUserIds, candidate.processorUserIds)
 
   const retryContext = await repository.prepareReviewVote({
     actor: value.actor, input: value.input,

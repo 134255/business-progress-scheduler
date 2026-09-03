@@ -612,6 +612,107 @@ test('optional-tail decision cancellation does not call the backend or alter the
   assert.equal(page.data.optionalDecisionPanelOpen, false)
 })
 
+test('version 2 detail shows the actual path without an active percentage and terminal lines show 100 percent', () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser('member-1') } })
+  global.wx = { reLaunch: () => {} }
+  const page = loadPage('pages/business-detail/index.js', { 'services/business.js': {} })
+  const active = page.presentDetail({
+    canManage: false,
+    line: {
+      _id: 'line-v2', status: 'active', version: 4, progress: 75, flowSchemaVersion: 2,
+      currentNodeId: 'node-manual', completedNodeCount: 1, traversedNodeCount: 2
+    },
+    nodes: [
+      { _id: 'node-complete', sequence: 0, name: '已完成', status: 'completed', workflowMode: 'review', routeState: 'completed', processorDisplayNames: ['甲'], reviewerDisplayNames: [] },
+      { _id: 'node-manual', sequence: 1, name: '人工决定', status: 'awaiting_decision', workflowMode: 'review', routeState: 'awaiting_manual_decision', processorDisplayNames: ['乙'], reviewerDisplayNames: [] },
+      { _id: 'node-dormant', sequence: 2, name: '未走分支', status: 'waiting', workflowMode: 'review', routeState: 'dormant', processorDisplayNames: ['丙'], reviewerDisplayNames: [] },
+      { _id: 'node-skipped', sequence: 3, name: '跳过分支', status: 'skipped', workflowMode: 'review', routeState: 'skipped', processorDisplayNames: ['丁'], reviewerDisplayNames: [] }
+    ]
+  })
+  assert.deepEqual(active.nodes.map(node => node._id), ['node-complete', 'node-manual'])
+  assert.equal(active.showProgressPercent, false)
+  assert.equal(active.pathSummary, '已完成 1 个节点 · 当前：人工决定')
+
+  const terminal = page.presentDetail({
+    line: { _id: 'line-v2', status: 'completed', progress: 20, flowSchemaVersion: 2, currentNodeId: 'node-complete', completedNodeCount: 2, traversedNodeCount: 2 },
+    nodes: [{ _id: 'node-complete', sequence: 0, name: '终点', status: 'completed', workflowMode: 'review', routeState: 'completed', processorDisplayNames: ['甲'], reviewerDisplayNames: [] }]
+  })
+  assert.equal(terminal.showProgressPercent, true)
+  assert.equal(terminal.displayProgress, 100)
+  delete global.getApp
+  delete global.wx
+})
+
+test('authorized target processor can retry one stable manual-route decision and refresh the selected target', async () => {
+  const calls = []
+  let attempts = 0
+  global.getApp = () => ({ globalData: { currentUser: activeUser('target-processor') } })
+  global.wx = { reLaunch: () => {}, showToast: () => {} }
+  const page = loadPage('pages/business-detail/index.js', {
+    'services/business.js': {
+      decideNodeRoute: async input => {
+        calls.push(input)
+        attempts += 1
+        if (attempts === 1) throw Object.assign(new Error('网络异常'), { code: 'NETWORK_ERROR' })
+        return { currentNodeId: 'target-node', lineVersion: 8 }
+      }
+    }
+  })
+  page.pageAlive = true
+  page.actorId = 'target-processor'
+  page.detailSequence = 0
+  page.setData({
+    id: 'line-v2',
+    line: { _id: 'line-v2', version: 7, flowSchemaVersion: 2 },
+    currentNode: {
+      _id: 'source-node', version: 4, canDecideNodeRoute: true,
+      routeActivateTargetName: '补充处理', routeSkipTargetName: '结束售后'
+    }
+  })
+  let refreshes = 0
+  page.loadDetail = async () => { refreshes += 1 }
+  page.openRouteDecision({ currentTarget: { dataset: { decision: 'activate' } } })
+  page.onRouteDecisionComment({ detail: { value: '确有必要' } })
+  assert.equal(await page.confirmRouteDecision(), false)
+  assert.equal(await page.confirmRouteDecision(), true)
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].requestKey, calls[1].requestKey)
+  assert.deepEqual(calls[1], {
+    businessLineId: 'line-v2', nodeId: 'source-node', expectedLineVersion: 7,
+    expectedNodeVersion: 4, decision: 'activate', comment: '确有必要', requestKey: calls[0].requestKey
+  })
+  assert.equal(refreshes, 1)
+
+  page.setData({ currentNode: { _id: 'source-node', version: 4, canDecideNodeRoute: false } })
+  page.openRouteDecision({ currentTarget: { dataset: { decision: 'skip' } } })
+  assert.equal(page.data.routeDecisionPanelOpen, false)
+  assert.equal(calls.length, 2)
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/business-detail/index.wxml'), 'utf8')
+  assert.match(wxml, /开启.*routeActivateTargetName/)
+  assert.match(wxml, /跳过.*routeSkipTargetName/)
+  delete global.getApp
+  delete global.wx
+})
+
+test('dashboard recent version 2 lines use route counts instead of an active percentage', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser('member-1') } })
+  global.wx = { reLaunch: () => {} }
+  const page = loadPage('pages/dashboard/index.js', {
+    'services/business.js': { dashboard: async () => ({
+      stats: { active: 1, pendingMine: 0, completed: 0 },
+      recent: [{ _id: 'line-v2', name: '分支售后', status: 'active', flowSchemaVersion: 2, completedNodeCount: 2, traversedNodeCount: 3, currentNodeName: '复核', progress: 66 }]
+    }) }
+  })
+  await page.onShow()
+  assert.equal(page.data.recent[0].showProgressPercent, false)
+  assert.equal(page.data.recent[0].pathSummary, '已完成 2 个节点 · 当前：复核')
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/dashboard/index.wxml'), 'utf8')
+  assert.match(wxml, /wx:if="{{item\.showProgressPercent}}"/)
+  assert.match(wxml, /item\.pathSummary/)
+  delete global.getApp
+  delete global.wx
+})
+
 test('pending server reads fail closed when the authenticated account changes', async () => {
   const pending = deferred()
   const app = { globalData: { currentUser: activeUser('user-before') } }

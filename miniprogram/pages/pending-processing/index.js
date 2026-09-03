@@ -6,6 +6,7 @@ function activeUserId() {
 }
 
 function dueText(item) {
+  if (item.actionKind === 'node_route_decision') return '等待决定后续节点走向'
   if (item.actionKind === 'optional_tail_decision') return '等待决定是否开启追加节点'
   if (!item.processingDueAt) return '处理截止待计算'
   const date = new Date(item.processingDueAt)
@@ -15,8 +16,8 @@ function dueText(item) {
 }
 
 function present(item) {
-  const actionKind = item.actionKind === 'optional_tail_decision'
-    ? 'optional_tail_decision'
+  const actionKind = ['optional_tail_decision', 'node_route_decision'].includes(item.actionKind)
+    ? item.actionKind
     : 'process_node'
   return {
     nodeId: item.nodeId,
@@ -29,7 +30,9 @@ function present(item) {
     actionKind,
     actionText: actionKind === 'optional_tail_decision'
       ? '决定是否开启追加节点 →'
-      : '继续处理 →',
+      : actionKind === 'node_route_decision'
+        ? '决定后续节点走向 →'
+        : '继续处理 →',
     processingRoundNumber: Number(item.processingRoundNumber || 0),
     dueText: dueText(item)
   }
@@ -112,7 +115,7 @@ Page({
     if (!this.data.items.some(item => item.businessLineId === lineId && item.nodeId === nodeId)) return
     const item = this.data.items.find(current =>
       current.businessLineId === lineId && current.nodeId === nodeId)
-    wx.navigateTo({ url: item.actionKind === 'optional_tail_decision'
+    wx.navigateTo({ url: ['optional_tail_decision', 'node_route_decision'].includes(item.actionKind)
       ? `/pages/business-detail/index?id=${encodeURIComponent(lineId)}`
       : `/pages/node-feedback/index?lineId=${encodeURIComponent(lineId)}&nodeId=${encodeURIComponent(nodeId)}` })
   }

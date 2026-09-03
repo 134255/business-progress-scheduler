@@ -47,8 +47,9 @@
         <status-pill status="{{item.status}}" />
       </view>
       <text class="muted">编号：{{item.code}}</text>
-      <view class="progress"><view class="progress-value" style="width: {{item.progress || 0}}%"></view></view>
-      <text class="muted">当前节点：{{item.currentNodeName || '待配置'}}</text>
+      <view wx:if="{{item.showProgressPercent}}" class="progress"><view class="progress-value" style="width: {{item.displayProgress || 0}}%"></view></view>
+      <text wx:if="{{item.showProgressPercent}}" class="muted">当前节点：{{item.currentNodeName || '待配置'}}</text>
+      <text wx:else class="muted">{{item.pathSummary}}</text>
     </view>
   </view>
   <view class="empty" wx:else>{{loading ? '加载中…' : '暂无售后线，先创建一条吧'}}</view>

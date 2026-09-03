@@ -987,9 +987,14 @@ function createCloudBusinessRepository({
 
   async function readPendingCandidates(actor) {
     const statusFilter = db.command.in(PENDING_PROCESSING_STATUSES)
-    const groups = [await readAll(() => db.collection(COLLECTIONS.nodes)
-      .where({ processorUserIds: actor._id, status: statusFilter })
-      .orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1)]
+    const groups = [
+      await readAll(() => db.collection(COLLECTIONS.nodes)
+        .where({ processorUserIds: actor._id, status: statusFilter })
+        .orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1),
+      await readAll(() => db.collection(COLLECTIONS.nodes)
+        .where({ manualDecisionProcessorUserIds: actor._id, status: statusFilter })
+        .orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1)
+    ]
     if (actor.openid) {
       groups.push(await readAll(() => db.collection(COLLECTIONS.nodes)
         .where({ assigneeIds: actor.openid, status: statusFilter })
@@ -1014,15 +1019,40 @@ function createCloudBusinessRepository({
         const bindingUserId = ownDataValue(binding, 'userId')
         legacyBindingValid = bindingUserId.valid && bindingUserId.value === currentActor._id
       }
+      const genericManualDecision = Boolean(line && node &&
+        line.flowSchemaVersion === 2 && line.awaitingManualDecision === true &&
+        node.status === 'awaiting_decision' && node.routeState === ROUTE_STATE.AWAITING_MANUAL_DECISION &&
+        node.next && node.next.mode === 'manual' && line.currentNodeId === node._id)
+      let genericManualAuthorized = false
+      if (genericManualDecision) {
+        const decisionProcessors = ownExactAccountIds(
+          node, 'manualDecisionProcessorUserIds', { nonEmpty: true }
+        )
+        const target = decisionProcessors && await readDocument(
+          transaction, COLLECTIONS.nodes, node.next.activateTargetNodeId
+        )
+        const targetProcessors = ownExactAccountIds(target, 'processorUserIds', { nonEmpty: true })
+        const targetReviewers = ownExactAccountIds(target, 'reviewerUserIds', { nonEmpty: false })
+        const managers = ownExactAccountIds(line, 'managerUserIds', { nonEmpty: true })
+        const members = ownExactAccountIds(line, 'memberUserIds', { nonEmpty: true })
+        genericManualAuthorized = Boolean(decisionProcessors && target && targetProcessors && targetReviewers &&
+          managers && members && members.includes(currentActor && currentActor._id) &&
+          decisionProcessors.includes(currentActor && currentActor._id) &&
+          JSON.stringify(decisionProcessors) === JSON.stringify(targetProcessors) &&
+          target.businessLineId === line._id && target.routeState === ROUTE_STATE.DORMANT &&
+          target.status === 'waiting' && !targetProcessors.some(id => targetReviewers.includes(id)))
+      }
       if (!currentActor || currentActor.status !== 'active' || !line || !node ||
           line.status !== 'active' || line.currentNodeId !== node._id ||
           node.businessLineId !== line._id || !PENDING_PROCESSING_STATUSES.includes(node.status) ||
-          (node.status === 'awaiting_decision' &&
+          (node.status === 'awaiting_decision' && !genericManualDecision &&
             (node.activationMode !== ACTIVATION_MODE.OPTIONAL_TAIL ||
              line.optionalTailNodeId !== node._id || line.optionalTailState !== 'pending')) ||
-          !safePendingRelationships(
-            line, node, { ...currentActor, openid: actor.openid }, legacyBindingValid
-          )) return null
+          (genericManualDecision
+            ? !genericManualAuthorized
+            : !safePendingRelationships(
+                line, node, { ...currentActor, openid: actor.openid }, legacyBindingValid
+              ))) return null
       return {
         _id: node._id,
         nodeId: node._id,
@@ -1032,7 +1062,9 @@ function createCloudBusinessRepository({
         nodeCode: node.nodeCode || '',
         nodeName: node.name || '',
         status: node.status,
-        actionKind: node.status === 'awaiting_decision' ? 'optional_tail_decision' : 'process_node',
+        actionKind: genericManualDecision
+          ? 'node_route_decision'
+          : node.status === 'awaiting_decision' ? 'optional_tail_decision' : 'process_node',
         processingRoundNumber: Number(node.processingRoundNumber || 0),
         processingDueAt: clone(node.processingDueAt || null),
         processingOverdueWorkMinutes: Number(node.processingOverdueWorkMinutes || 0),
@@ -1251,6 +1283,7 @@ function createCloudBusinessRepository({
     const allNodesById = new Map(nodes.map(node => [node._id, node]))
     const projectedNodes = actualNodes.map(node => {
       let canDecideNodeRoute = false
+      let routeDecisionLabels = {}
       if (projectedLine.flowSchemaVersion === 2 && node.routeState === ROUTE_STATE.AWAITING_MANUAL_DECISION &&
           node.status === 'awaiting_decision' && line.awaitingManualDecision === true &&
           line.currentNodeId === node._id && validDate(node.decisionStartedAt) &&
@@ -1262,10 +1295,27 @@ function createCloudBusinessRepository({
             target.status !== 'waiting' || !targetProcessors || !targetReviewers ||
             targetProcessors.some(id => targetReviewers.includes(id))) throw createError('FORBIDDEN')
         canDecideNodeRoute = targetProcessors.includes(currentActor._id)
+        if (canDecideNodeRoute) {
+          const skipTarget = node.next.skipTargetNodeId === 'end'
+            ? null
+            : allNodesById.get(node.next.skipTargetNodeId)
+          if (node.next.skipTargetNodeId !== 'end' &&
+              (!skipTarget || skipTarget.businessLineId !== line._id ||
+               skipTarget.routeState !== ROUTE_STATE.DORMANT || skipTarget.status !== 'waiting')) {
+            throw createError('FORBIDDEN')
+          }
+          routeDecisionLabels = {
+            routeActivateTargetName: target.name || '后续节点',
+            routeSkipTargetName: skipTarget ? skipTarget.name || '后续节点' : '结束售后'
+          }
+        }
       }
-      return publicNodeProjection(
-        node, currentActor, canManage, accountSchema, displayNames, line, canDecideNodeRoute
-      )
+      return {
+        ...publicNodeProjection(
+          node, currentActor, canManage, accountSchema, displayNames, line, canDecideNodeRoute
+        ),
+        ...routeDecisionLabels
+      }
     })
     if (projectedLine.flowSchemaVersion === 2) {
       projectedLine.traversedNodeCount = projectedLine.traversedNodeIds.length
@@ -1746,6 +1796,7 @@ function createCloudBusinessRepository({
     const initialSearch = advanceSearchVersion({})
     const ordered = sourceNodes.slice().sort(compareNodes)
     const nodeIdsByKey = new Map(ordered.map((source, index) => [source.nodeKey, nodeId(lineId, index)]))
+    const sourceByKey = new Map(ordered.map(source => [source.nodeKey, source]))
     return ordered.map((source, index) => {
       const activationMode = normalizeActivationMode(source)
       const isEntry = route ? source.nodeKey === route.entryNodeKey : index === 0
@@ -1758,7 +1809,14 @@ function createCloudBusinessRepository({
           ...(route ? {
             nodeKey: source.nodeKey,
             next: translatedSnapshotNext(source.next, nodeIdsByKey),
-            routeState: isEntry ? 'active' : 'dormant'
+            routeState: isEntry ? 'active' : 'dormant',
+            ...(source.next && source.next.mode === 'manual'
+              ? {
+                  manualDecisionProcessorUserIds: clone(
+                    sourceByKey.get(source.next.activateTarget).processorUserIds
+                  )
+                }
+              : {})
           } : {}),
           sequence: index,
           name: source.name,

@@ -186,9 +186,10 @@ function createCloudWorkflowTransitionRepository({ db, clock = () => new Date() 
       exactRoute(line, node, value, account._id)
       const outcome = resolve(node, value.input.fieldValues)
       let targetNode = null
-      if (outcome.kind === 'node') {
-        targetNode = await readDocument(transaction, 'business_nodes', outcome.nodeId)
-        assertTarget(targetNode, line._id, outcome.nodeId)
+      if (outcome.kind === 'node' || outcome.kind === 'manual') {
+        const targetNodeId = outcome.kind === 'node' ? outcome.nodeId : node.next.activateTargetNodeId
+        targetNode = await readDocument(transaction, 'business_nodes', targetNodeId)
+        assertTarget(targetNode, line._id, targetNodeId)
       }
       return { node: clone(node), targetNode: clone(targetNode) }
     })
@@ -240,12 +241,13 @@ function createCloudWorkflowTransitionRepository({ db, clock = () => new Date() 
       }
       let target = null
       let targetRelationships = null
-      if (outcome.kind === 'node') {
-        target = await readDocument(transaction, 'business_nodes', outcome.nodeId)
-        targetRelationships = assertTarget(target, line._id, outcome.nodeId)
+      if (outcome.kind === 'node' || outcome.kind === 'manual') {
+        const targetNodeId = outcome.kind === 'node' ? outcome.nodeId : node.next.activateTargetNodeId
+        target = await readDocument(transaction, 'business_nodes', targetNodeId)
+        targetRelationships = assertTarget(target, line._id, targetNodeId)
         if (!value.context.targetNode || value.context.targetNode.version !== target.version ||
             value.context.targetNode._id !== target._id) throw createError('VERSION_CONFLICT')
-        assertTiming(value.timing, target)
+        if (outcome.kind === 'node') assertTiming(value.timing, target)
       }
       const at = clock()
       if (!validDate(at)) throw new TypeError('clock must return a Date')
@@ -322,7 +324,7 @@ function createCloudWorkflowTransitionRepository({ db, clock = () => new Date() 
           routeState: 'awaiting_manual_decision', lineVersion, nodeVersion
         }
         notificationType = 'node_route_decision_pending'
-        recipients = [...new Set([...relationships.processors, ...relationships.reviewers])]
+        recipients = targetRelationships.processors
       } else {
         const purgeDueAt = new Date(at.getTime() + RETENTION_MS)
         await transaction.collection('business_nodes').doc(node._id).update({ data: {

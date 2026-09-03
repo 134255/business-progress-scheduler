@@ -263,6 +263,10 @@ test('版本二无审核人工分支完成后仅进入待决定且不启动候�
   assert.equal(current.routeState, 'awaiting_manual_decision')
   assert.equal(candidate.routeState, 'dormant')
   assert.equal(Object.hasOwn(candidate, 'processingStartedAt'), false)
+  const notifications = fake.documents('notifications')
+    .filter(item => item.type === 'node_route_decision_pending')
+  assert.equal(notifications.length, 1)
+  assert.deepEqual(notifications[0].recipientUserIds, candidate.processorUserIds)
   assert.deepEqual(await repository.commitFeedback(directCompletion()), result)
 })
 

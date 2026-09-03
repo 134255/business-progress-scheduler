@@ -19,3 +19,5 @@
 .optional-decision-panel { border: 2rpx solid #99f6e4; }
 .decision-confirm-actions { display: flex; gap: 18rpx; margin-top: 18rpx; }
 .decision-confirm-actions button { flex: 1; }
+.route-progress-summary { display: block; margin-top: 24rpx; color: #0f766e; font-weight: 650; }
+.route-actions { padding-top: 8rpx; border-top: 1rpx solid #ccfbf1; }

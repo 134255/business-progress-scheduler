@@ -49,11 +49,17 @@ Page({
     previousNode: null,
     currentNode: null,
     displayProgress: 0,
+    showProgressPercent: true,
+    pathSummary: '',
     optionalTailSummary: '',
     optionalDecisionPanelOpen: false,
     optionalDecision: '',
     optionalDecisionComment: '',
     optionalDecisionSubmitting: false,
+    routeDecisionPanelOpen: false,
+    routeDecision: '',
+    routeDecisionComment: '',
+    routeDecisionSubmitting: false,
     showAmendmentEntry: false,
     rejectionReason: '',
     rejecting: false,
@@ -107,11 +113,17 @@ Page({
       previousNode: null,
       currentNode: null,
       displayProgress: 0,
+      showProgressPercent: true,
+      pathSummary: '',
       optionalTailSummary: '',
       optionalDecisionPanelOpen: false,
       optionalDecision: '',
       optionalDecisionComment: '',
       optionalDecisionSubmitting: false,
+      routeDecisionPanelOpen: false,
+      routeDecision: '',
+      routeDecisionComment: '',
+      routeDecisionSubmitting: false,
       showAmendmentEntry: false,
       shareCreatingNodeId: '',
       errorMessage: ''
@@ -123,7 +135,9 @@ Page({
   presentDetail(data) {
     const user = activeUser()
     const line = data.line || null
-    const nodes = (data.nodes || []).slice().sort((left, right) =>
+    const versionTwo = Boolean(line && line.flowSchemaVersion === 2)
+    const nodes = (data.nodes || []).filter(node => !versionTwo ||
+      ['active', 'completed', 'awaiting_manual_decision'].includes(node.routeState)).slice().sort((left, right) =>
       Number(left.sequence) - Number(right.sequence)).map(node => node.workflowMode === 'review'
       ? (() => {
         const decisionParts = []
@@ -162,6 +176,8 @@ Page({
     const superAdmin = Boolean(user && user.role === 'super_admin')
     const pendingOptional = Boolean(line && line.optionalTailState === 'pending')
     const activatedOptional = Boolean(line && line.optionalTailState === 'activated')
+    const completedNodeCount = Number(line && line.completedNodeCount || 0)
+    const terminalCompleted = Boolean(versionTwo && line.status === 'completed')
     return {
       ...data,
       line,
@@ -169,13 +185,85 @@ Page({
       frozen,
       currentNode,
       previousNode,
-      displayProgress: pendingOptional ? Math.min(99, Number(line && line.progress || 0)) : Number(line && line.progress || 0),
+      displayProgress: terminalCompleted
+        ? 100
+        : pendingOptional ? Math.min(99, Number(line && line.progress || 0)) : Number(line && line.progress || 0),
+      showProgressPercent: !versionTwo || terminalCompleted,
+      pathSummary: versionTwo
+        ? line.status === 'completed'
+          ? `已完成 ${completedNodeCount} 个节点 · 售后已完成`
+          : `已完成 ${completedNodeCount} 个节点 · 当前：${currentNode && currentNode.name || line.currentNodeName || '待处理'}`
+        : '',
       optionalTailSummary: pendingOptional
         ? '必经流程已完成 · 待决定'
         : activatedOptional ? '必经流程已完成 · 追加处理中' : '',
       canRejectPrevious,
       canClose: Boolean(line && line.status === 'active' && (data.canManage || superAdmin)),
       showAmendmentEntry: frozen && superAdmin
+    }
+  },
+
+  openRouteDecision(event) {
+    const decision = String(event.currentTarget.dataset.decision || '')
+    if (!['activate', 'skip'].includes(decision) || !this.data.currentNode ||
+        !this.data.currentNode.canDecideNodeRoute || this.data.routeDecisionSubmitting) return
+    this.routeDecisionRequestKey = ''
+    this.setData({ routeDecisionPanelOpen: true, routeDecision: decision, routeDecisionComment: '' })
+  },
+
+  onRouteDecisionComment(event) {
+    if (!this.data.routeDecisionSubmitting) {
+      this.setData({ routeDecisionComment: String(event.detail.value || '') })
+    }
+  },
+
+  cancelRouteDecision() {
+    if (this.data.routeDecisionSubmitting) return
+    this.routeDecisionRequestKey = ''
+    this.setData({ routeDecisionPanelOpen: false, routeDecision: '', routeDecisionComment: '' })
+  },
+
+  async confirmRouteDecision() {
+    if (this.data.routeDecisionSubmitting || !this.data.routeDecisionPanelOpen) return false
+    const node = this.data.currentNode
+    const line = this.data.line
+    const decision = this.data.routeDecision
+    const comment = this.data.routeDecisionComment.trim()
+    if (!node || !line || !node.canDecideNodeRoute || !['activate', 'skip'].includes(decision)) return false
+    if (decision === 'skip' && !comment) {
+      wx.showToast({ title: '请填写跳过原因', icon: 'none' })
+      return false
+    }
+    if (!this.routeDecisionRequestKey) this.routeDecisionRequestKey = newRequestKey('node-route')
+    const actorId = this.actorId
+    const lineId = line._id
+    this.setData({ routeDecisionSubmitting: true })
+    try {
+      await businessService.decideNodeRoute({
+        businessLineId: lineId,
+        nodeId: node._id,
+        expectedLineVersion: line.version,
+        expectedNodeVersion: node.version,
+        decision,
+        comment,
+        requestKey: this.routeDecisionRequestKey
+      })
+      if (!this.pageAlive || !this.actorStillCurrent() || this.actorId !== actorId || this.data.id !== lineId) return false
+      this.routeDecisionRequestKey = ''
+      this.setData({ routeDecisionPanelOpen: false, routeDecision: '', routeDecisionComment: '' })
+      wx.showToast({ title: decision === 'activate' ? '后续节点已开启' : '已按跳过路径继续', icon: 'success' })
+      await this.loadDetail()
+      return true
+    } catch (error) {
+      if (this.pageAlive && this.actorStillCurrent() && this.actorId === actorId && this.data.id === lineId) {
+        if (error.code === 'VERSION_CONFLICT') await this.loadDetail()
+        wx.showToast({ title: safeErrorMessage(error, '节点分支决定失败，请稍后重试'), icon: 'none' })
+      }
+      return false
+    } finally {
+      if (this.pageAlive && activeUser() && activeUser()._id === actorId && this.data.id === lineId) {
+        this.setData({ routeDecisionSubmitting: false })
+      }
     }
   },
 

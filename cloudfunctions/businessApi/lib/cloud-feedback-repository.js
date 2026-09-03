@@ -11,6 +11,7 @@ const {
 const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
 const { classifyCompletedNodeTransition } = require('./optional-tail-domain')
 const { resolveCompletedNodeTarget } = require('./workflow-routing-domain')
+const { fitsIndexedAccountArray } = require('./index-key-budget')
 
 const COLLECTIONS = Object.freeze({
   users: 'users', lines: 'business_lines', nodes: 'business_nodes',
@@ -131,6 +132,23 @@ function resolveVersionTwoCompletion(line, node, fieldValues) {
     completionTransition: 'next_node', nextNodeId: outcome.nodeId,
     routeTransition: { kind: 'activate_node', targetNodeId: outcome.nodeId }
   }
+}
+
+function exactManualDecisionTarget(line, source, target) {
+  const nextField = ownDataValue(source, 'next')
+  const next = nextField.valid && nextField.value
+  const processors = target && exactAccountIds(target.processorUserIds, { nonEmpty: true })
+  const reviewers = target && exactAccountIds(target.reviewerUserIds, { nonEmpty: false })
+  if (!next || typeof next !== 'object' || next.mode !== 'manual' ||
+      typeof next.activateTargetNodeId !== 'string' || !DOCUMENT_ID.test(next.activateTargetNodeId) ||
+      !target || target._id !== next.activateTargetNodeId || target.businessLineId !== line._id ||
+      target.status !== 'waiting' || target.routeState !== 'dormant' || target.workflowMode !== 'review' ||
+      !Number.isSafeInteger(target.version) || target.version < 1 ||
+      !processors || !reviewers || !fitsIndexedAccountArray(processors) ||
+      processors.some(id => reviewers.includes(id)) || !accountSchema(line, target)) {
+    throw createError('VERSION_CONFLICT')
+  }
+  return processors
 }
 
 function processorIds(node) {
@@ -565,6 +583,9 @@ function createCloudFeedbackRepository({
       let plannedOptionalTailState = current.line.optionalTailState || 'none'
       let nextProcessingWorkMinutes = null
       let routeTransition = null
+      let manualDecisionTargetNodeId = null
+      let manualDecisionTargetNodeVersion = null
+      let manualDecisionProcessorUserIds = null
       if (value.input.status === 'completed') {
         if (isVersionTwoLine(current.line)) {
           const plan = resolveVersionTwoCompletion(current.line, current.node, value.fieldSnapshots)
@@ -595,6 +616,14 @@ function createCloudFeedbackRepository({
               nextNode._id !== current.line.optionalTailNodeId || nextNode.status !== 'awaiting_decision' ||
               !accountSchema(current.line, nextNode))) throw createError('NODE_NOT_ACTIVE')
         if (completionTransition === 'await_optional_decision') plannedOptionalTailState = 'pending'
+        if (completionTransition === 'await_manual_decision') {
+          const target = await readDocument(
+            transaction, COLLECTIONS.nodes, current.node.next && current.node.next.activateTargetNodeId
+          )
+          manualDecisionProcessorUserIds = exactManualDecisionTarget(current.line, current.node, target)
+          manualDecisionTargetNodeId = target._id
+          manualDecisionTargetNodeVersion = target.version
+        }
         if (completionTransition === 'complete_line' && current.node.activationMode === 'optional_tail') {
           plannedOptionalTailState = 'completed'
         }
@@ -640,6 +669,13 @@ function createCloudFeedbackRepository({
         completionTransition,
         nextNodeId: plannedNextNodeId,
         ...(routeTransition ? { routeTransition } : {}),
+        ...(manualDecisionTargetNodeId
+          ? {
+              manualDecisionTargetNodeId,
+              manualDecisionTargetNodeVersion,
+              manualDecisionProcessorUserIds: clone(manualDecisionProcessorUserIds)
+            }
+          : {}),
         optionalTailState: plannedOptionalTailState,
         transitionAt: at,
         ...(nextProcessingWorkMinutes === null ? {} : { nextProcessingWorkMinutes }),
@@ -831,6 +867,19 @@ function createCloudFeedbackRepository({
           throw createError('VERSION_CONFLICT')
         }
       }
+      let manualDecisionProcessorUserIds = null
+      if (versionTwo && completionTransition === 'await_manual_decision') {
+        const target = await readDocument(
+          transaction, COLLECTIONS.nodes, current.node.next && current.node.next.activateTargetNodeId
+        )
+        manualDecisionProcessorUserIds = exactManualDecisionTarget(current.line, current.node, target)
+        if (reservation.manualDecisionTargetNodeId !== target._id ||
+            reservation.manualDecisionTargetNodeVersion !== target.version ||
+            JSON.stringify(reservation.manualDecisionProcessorUserIds) !==
+              JSON.stringify(manualDecisionProcessorUserIds)) {
+          throw createError('VERSION_CONFLICT')
+        }
+      }
       const nodeVersion = increment(current.node.version)
       const nextLineSearch = advanceSearchVersion(current.line)
       const nextNodeSearch = advanceSearchVersion(current.node)
@@ -970,6 +1019,17 @@ function createCloudFeedbackRepository({
           ...versionTwoLineChanges,
           ...nextLineSearch,
           updatedAt: db.serverDate()
+        } })
+        const notificationId = `node-route-decision-pending-${hash(
+          `${current.line._id}\0${current.node._id}`
+        ).slice(0, 40)}`
+        await transaction.collection(COLLECTIONS.notifications).doc(notificationId).set({ data: {
+          type: 'node_route_decision_pending',
+          recipientUserIds: clone(manualDecisionProcessorUserIds),
+          businessLineId: current.line._id,
+          nodeId: current.node._id,
+          status: 'unread',
+          createdAt: db.serverDate()
         } })
       } else if (value.input.status === 'completed' &&
           completionTransition === 'await_optional_decision') {

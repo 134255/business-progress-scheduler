@@ -148,6 +148,21 @@ function isVersionTwoLine(line) {
   return Boolean(line && line.flowSchemaVersion === 2)
 }
 
+function exactManualDecisionTarget(line, source, target) {
+  const nextField = ownDataValue(source, 'next')
+  const next = nextField.valid && nextField.value
+  const processors = ownExactAccountIds(target, 'processorUserIds', { nonEmpty: true })
+  const reviewers = ownExactAccountIds(target, 'reviewerUserIds', { nonEmpty: false })
+  if (!next || typeof next !== 'object' || next.mode !== 'manual' ||
+      typeof next.activateTargetNodeId !== 'string' || !DOCUMENT_ID.test(next.activateTargetNodeId) ||
+      !target || target._id !== next.activateTargetNodeId || target.businessLineId !== line._id ||
+      target.status !== 'waiting' || target.routeState !== 'dormant' || target.workflowMode !== 'review' ||
+      !safeInteger(target.version, 1) || !processors || !reviewers ||
+      !fitsIndexedAccountArray(processors) || !fitsIndexedAccountArray(reviewers) ||
+      processors.some(id => reviewers.includes(id))) throw createError('VERSION_CONFLICT')
+  return processors
+}
+
 function exactTraversedNodeIds(line, nodeId) {
   const field = ownDataValue(line, 'traversedNodeIds')
   if (!field.valid || !Array.isArray(field.value) || field.value.length >= 48 ||
@@ -1183,7 +1198,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       }
       if (isVersionTwoLine(line)) {
         const plan = resolveVersionTwoCompletion(line, node, round.fieldValues)
-        if (plan.transition === 'complete_line' || plan.transition === 'await_manual_decision') {
+        if (plan.transition === 'complete_line') {
           return {
             businessLineId: line._id,
             nodeId: node._id,
@@ -1192,6 +1207,25 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
             transition: plan.transition,
             routeTransition: plan.routeTransition,
             processingWorkMinutes: null,
+            ...reviewContext
+          }
+        }
+        if (plan.transition === 'await_manual_decision') {
+          const target = await readDocument(
+            transaction, 'business_nodes', node.next && node.next.activateTargetNodeId
+          )
+          const targetProcessors = exactManualDecisionTarget(line, node, target)
+          return {
+            businessLineId: line._id,
+            nodeId: node._id,
+            nodeVersion: node.version,
+            roundVersion: round.version,
+            transition: plan.transition,
+            routeTransition: plan.routeTransition,
+            processingWorkMinutes: null,
+            manualDecisionTargetNodeId: target._id,
+            manualDecisionTargetNodeVersion: target.version,
+            manualDecisionProcessorUserIds: clone(targetProcessors),
             ...reviewContext
           }
         }
@@ -1311,6 +1345,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       let expectedTransition
       let expectedMinutes = null
       let expectedRouteTransition
+      let manualDecisionProcessorUserIds = null
       if (value.input.decision === 'reject') {
         expectedTransition = 'rework'
         expectedMinutes = round.processingRemainingWorkMinutes
@@ -1328,6 +1363,17 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
               !nextProcessors || !nextReviewers || nextProcessors.some(id => nextReviewers.includes(id)) ||
               !safeInteger(next.version, 1) || next.version !== context.nextNodeVersion ||
               !safeInteger(expectedMinutes, 1)) throw createError('VERSION_CONFLICT')
+        } else if (plan.transition === 'await_manual_decision') {
+          next = await readDocument(
+            transaction, 'business_nodes', node.next && node.next.activateTargetNodeId
+          )
+          manualDecisionProcessorUserIds = exactManualDecisionTarget(line, node, next)
+          if (context.manualDecisionTargetNodeId !== next._id ||
+              context.manualDecisionTargetNodeVersion !== next.version ||
+              JSON.stringify(context.manualDecisionProcessorUserIds) !==
+                JSON.stringify(manualDecisionProcessorUserIds)) {
+            throw createError('VERSION_CONFLICT')
+          }
         }
       } else if (node.sequence + 1 === line.nodeCount) {
         expectedTransition = 'complete_line'
@@ -1626,7 +1672,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
             ...nextLineSearch,
             updatedAt: db.serverDate()
           } })
-          recipients = [...new Set([...processors, ...reviewers])].sort()
+          recipients = manualDecisionProcessorUserIds
           notificationType = 'node_route_decision_pending'
         } else {
           nextNodeId = next._id

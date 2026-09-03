@@ -7,8 +7,9 @@
     <text class="muted block">编号：{{line.code}}</text>
     <text class="muted block">版本：{{line.version}}</text>
     <text class="muted block">{{line.description || '暂无说明'}}</text>
-    <view class="progress"><view class="progress-value" style="width: {{displayProgress || 0}}%"></view></view>
-    <text class="muted">总体进度 {{displayProgress || 0}}%</text>
+    <view wx:if="{{showProgressPercent}}" class="progress"><view class="progress-value" style="width: {{displayProgress || 0}}%"></view></view>
+    <text wx:if="{{showProgressPercent}}" class="muted">总体进度 {{displayProgress || 0}}%</text>
+    <text wx:else class="route-progress-summary">{{pathSummary}}</text>
     <text wx:if="{{optionalTailSummary}}" class="optional-summary">必经流程已完成{{line.optionalTailState === 'pending' ? ' · 待决定' : ' · 追加处理中'}}</text>
     <button wx:if="{{canManage && !frozen}}" class="secondary-button edit-button" bindtap="editLine">编辑售后线</button>
     <button wx:if="{{showAmendmentEntry}}" class="secondary-button edit-button" bindtap="openAmendment">审计式修订</button>
@@ -38,8 +39,22 @@
           <button class="primary-button" data-decision="activate" catchtap="openOptionalDecision" disabled="{{optionalDecisionSubmitting}}">启用追加节点</button>
           <button class="secondary-button" data-decision="skip" catchtap="openOptionalDecision" disabled="{{optionalDecisionSubmitting}}">不启用并完成售后</button>
         </view>
+        <view wx:if="{{item.canDecideNodeRoute}}" class="optional-actions route-actions">
+          <button class="primary-button" data-decision="activate" catchtap="openRouteDecision" disabled="{{routeDecisionSubmitting}}">开启“{{item.routeActivateTargetName}}”</button>
+          <button class="secondary-button" data-decision="skip" catchtap="openRouteDecision" disabled="{{routeDecisionSubmitting}}">跳过，进入“{{item.routeSkipTargetName}}”</button>
+        </view>
         <button wx:if="{{item.canShareResult}}" class="secondary-button" data-index="{{index}}" catchtap="createNodeShare" loading="{{shareCreatingNodeId === item._id}}" disabled="{{!!shareCreatingNodeId}}">生成固定分享快照</button>
       </view>
+    </view>
+  </view>
+
+  <view wx:if="{{routeDecisionPanelOpen}}" class="card operation-card optional-decision-panel">
+    <view class="section-title compact-title">{{routeDecision === 'activate' ? '确认开启后续节点' : '确认跳过该节点'}}</view>
+    <text class="muted block">{{routeDecision === 'activate' ? '确认后“' + currentNode.routeActivateTargetName + '”立即开始处理。' : '确认后进入“' + currentNode.routeSkipTargetName + '”，并保留本次决定记录。'}}</text>
+    <textarea class="textarea" value="{{routeDecisionComment}}" maxlength="500" disabled="{{routeDecisionSubmitting}}" bindinput="onRouteDecisionComment" placeholder="{{routeDecision === 'activate' ? '可填写开启说明' : '请填写跳过原因'}}" />
+    <view class="decision-confirm-actions">
+      <button class="secondary-button" bindtap="cancelRouteDecision" disabled="{{routeDecisionSubmitting}}">取消</button>
+      <button class="primary-button" bindtap="confirmRouteDecision" loading="{{routeDecisionSubmitting}}" disabled="{{routeDecisionSubmitting}}">确认</button>
     </view>
   </view>
 

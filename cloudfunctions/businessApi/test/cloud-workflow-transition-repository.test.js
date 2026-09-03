@@ -147,6 +147,7 @@ test('manual completion waits without activating candidates and exact replay is 
   assert.equal(Object.hasOwn(target, 'processingStartedAt'), false)
   assert.equal(fake.documents('audit_logs').length, 1)
   assert.equal(fake.documents('notifications').length, 1)
+  assert.deepEqual(fake.documents('notifications')[0].recipientUserIds, ['target-processor'])
 })
 
 test('commit rejects a changed target and leaves the whole transition untouched', async () => {

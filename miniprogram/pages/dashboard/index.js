@@ -4,6 +4,22 @@ const { safeErrorMessage } = require('../../utils/safe-error')
 let cachedAccountId = ''
 let cachedDashboard = null
 
+function presentRecent(item) {
+  const versionTwo = item && item.flowSchemaVersion === 2
+  const terminalCompleted = Boolean(versionTwo && item.status === 'completed')
+  const completedNodeCount = Number(item && item.completedNodeCount || 0)
+  return {
+    ...item,
+    showProgressPercent: !versionTwo || terminalCompleted,
+    displayProgress: terminalCompleted ? 100 : Number(item && item.progress || 0),
+    pathSummary: versionTwo
+      ? terminalCompleted
+        ? `已完成 ${completedNodeCount} 个节点 · 售后已完成`
+        : `已完成 ${completedNodeCount} 个节点 · 当前：${item.currentNodeName || '待处理'}`
+      : ''
+  }
+}
+
 Page({
   data: {
     loading: true,
@@ -52,8 +68,9 @@ Page({
       const data = await businessService.dashboard()
       if (requestSequence !== this.dashboardSequence || !this.requireActiveUser(expectedUserId)) return
       cachedAccountId = expectedUserId
-      cachedDashboard = { stats: data.stats, recent: data.recent || [] }
-      this.setData({ stats: data.stats, recent: data.recent || [] })
+      const recent = (data.recent || []).map(presentRecent)
+      cachedDashboard = { stats: data.stats, recent }
+      this.setData({ stats: data.stats, recent })
     } catch (error) {
       if (requestSequence === this.dashboardSequence && this.requireActiveUser(expectedUserId)) {
         this.setData({ errorMessage: safeErrorMessage(error, '售后概览加载失败，请稍后重试') })

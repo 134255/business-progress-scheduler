@@ -262,6 +262,7 @@ test('version 2 creation freezes graph edges by snapshot id and activates only t
   assert.deepEqual(byKey.get('manual').next, {
     mode: 'manual', activateTargetNodeId: byKey.get('finish')._id, skipTargetNodeId: 'end'
   })
+  assert.deepEqual(byKey.get('manual').manualDecisionProcessorUserIds, ['user-4'])
   assert.deepEqual(byKey.get('finish').next, { mode: 'end' })
   assert.deepEqual(byKey.get('entry').processorUserIds, ['user-2', 'user-1'])
   assert.deepEqual(byKey.get('entry').processorDisplayNames, ['用户二', '用户一'])
@@ -338,6 +339,8 @@ test('version 2 detail exposes only the actual route and authorizes manual decis
   assert.equal(detail.line.traversedNodeCount, 2)
   assert.equal(detail.line.awaitingManualDecision, true)
   assert.equal(detail.nodes[1].canDecideNodeRoute, true)
+  assert.equal(detail.nodes[1].routeActivateTargetName, '可选节点')
+  assert.equal(detail.nodes[1].routeSkipTargetName, '跳过目标')
 })
 
 test('version 2 creator processor merge deduplicates a creator already in fixed processors', async () => {
@@ -700,6 +703,12 @@ test('待我处理查询只返回当前业务节点，并按处理截止时间�
         currentNodeId: 'node-decision', optionalTailNodeId: 'node-decision', optionalTailState: 'pending',
         managerUserIds: ['user-1'], memberUserIds: ['user-1'],
         updatedAt: new Date('2026-08-17T05:00:00Z')
+      },
+      {
+        _id: 'line-route-decision', code: 'BL-ROUTE-DECISION', name: '分支待决定业务',
+        status: 'active', flowSchemaVersion: 2, currentNodeId: 'node-route-decision',
+        awaitingManualDecision: true, managerUserIds: ['user-1'], memberUserIds: ['user-1'],
+        updatedAt: new Date('2026-08-17T06:00:00Z')
       }
     ],
     business_nodes: [
@@ -731,6 +740,20 @@ test('待我处理查询只返回当前业务节点，并按处理截止时间�
         processorUserIds: ['user-1'], reviewerUserIds: [], processingRoundNumber: 0,
         decisionStartedAt: new Date('2026-08-17T04:30:00Z'), nextDecisionReminderWorkHour: 1,
         updatedAt: new Date('2026-08-17T05:00:00Z')
+      },
+      {
+        _id: 'node-route-decision', businessLineId: 'line-route-decision', name: '人工分支源节点',
+        status: 'awaiting_decision', routeState: 'awaiting_manual_decision', workflowMode: 'review',
+        processorUserIds: ['user-2'], reviewerUserIds: [], manualDecisionProcessorUserIds: ['user-1'],
+        next: { mode: 'manual', activateTargetNodeId: 'node-route-target', skipTargetNodeId: 'end' },
+        processingRoundNumber: 1, decisionStartedAt: new Date('2026-08-17T05:30:00Z'),
+        updatedAt: new Date('2026-08-17T06:00:00Z')
+      },
+      {
+        _id: 'node-route-target', businessLineId: 'line-route-decision', name: '分支目标节点',
+        status: 'waiting', routeState: 'dormant', workflowMode: 'review',
+        processorUserIds: ['user-1'], reviewerUserIds: [], processingRoundNumber: 1,
+        updatedAt: new Date('2026-08-17T05:00:00Z')
       }
     ]
   })
@@ -739,12 +762,15 @@ test('待我处理查询只返回当前业务节点，并按处理截止时间�
     actor: { _id: 'user-1', status: 'active' }, query: { pageSize: 10 }
   })
 
-  assert.deepEqual(result.items.map(item => item.nodeId), ['node-early', 'node-late', 'node-decision'])
+  assert.deepEqual(result.items.map(item => item.nodeId), [
+    'node-early', 'node-late', 'node-route-decision', 'node-decision'
+  ])
   assert.equal(result.items[0].processingRoundNumber, 2)
   assert.equal(result.items[0].actionKind, 'process_node')
-  assert.equal(result.items[2].actionKind, 'optional_tail_decision')
+  assert.equal(result.items[2].actionKind, 'node_route_decision')
+  assert.equal(result.items[3].actionKind, 'optional_tail_decision')
   assert.equal(result.hasMore, false)
-  assert.equal(result.total, 3)
+  assert.equal(result.total, 4)
 })
 
 test('旧节点待处理查询在事务内重验当前 OpenID 绑定', async () => {
