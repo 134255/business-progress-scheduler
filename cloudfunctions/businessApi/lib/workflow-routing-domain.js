@@ -15,6 +15,7 @@ const NEXT_KEYS = Object.freeze({
   single_select: new Set(['mode', 'fieldKey', 'optionTargets']),
   manual: new Set(['mode', 'activateTarget', 'skipTarget'])
 })
+const DOCUMENT_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 function createError(code) {
   const error = new Error(code)
@@ -176,8 +177,79 @@ function normalizeFinalValues(fieldValues) {
   return byKey
 }
 
+function snapshotTarget(value, { allowEnd = true } = {}) {
+  if (allowEnd && value === END_TARGET) return value
+  if (value === END_TARGET || typeof value !== 'string' || !DOCUMENT_ID.test(value)) {
+    throw createError('BUSINESS_STATE_INVALID')
+  }
+  return value
+}
+
+function normalizeSnapshotNext(node, fields) {
+  let input
+  try {
+    input = ownDataObject(readNodeProperty(node, 'next'))
+  } catch (error) {
+    throw createError('BUSINESS_STATE_INVALID')
+  }
+  const mode = input.mode
+  if (mode === NEXT_MODE.END && Reflect.ownKeys(input).length === 1) return { mode }
+  if (mode === NEXT_MODE.DEFAULT && Reflect.ownKeys(input).length === 2 && hasOwn(input, 'targetNodeId')) {
+    return { mode, targetNodeId: snapshotTarget(input.targetNodeId, { allowEnd: false }) }
+  }
+  if (mode === NEXT_MODE.MANUAL && Reflect.ownKeys(input).length === 3 &&
+      hasOwn(input, 'activateTargetNodeId') && hasOwn(input, 'skipTargetNodeId')) {
+    return {
+      mode,
+      activateTargetNodeId: snapshotTarget(input.activateTargetNodeId),
+      skipTargetNodeId: snapshotTarget(input.skipTargetNodeId)
+    }
+  }
+  if (mode !== NEXT_MODE.SINGLE_SELECT || Reflect.ownKeys(input).length !== 3 ||
+      !hasOwn(input, 'fieldKey') || !hasOwn(input, 'optionTargets')) {
+    throw createError('BUSINESS_STATE_INVALID')
+  }
+  const definition = fields.find(field => field.fieldKey === input.fieldKey)
+  if (!definition || definition.type !== 'single_select' || definition.required !== true ||
+      definition.condition || !definition.constraints || !Array.isArray(definition.constraints.options)) {
+    throw createError('BUSINESS_STATE_INVALID')
+  }
+  let sourceTargets
+  try {
+    sourceTargets = ownDataObject(input.optionTargets)
+  } catch (error) {
+    throw createError('BUSINESS_STATE_INVALID')
+  }
+  const options = definition.constraints.options
+  if (Object.keys(sourceTargets).length !== options.length ||
+      options.some(option => !hasOwn(sourceTargets, option))) throw createError('BUSINESS_STATE_INVALID')
+  const optionTargets = {}
+  for (const option of options) optionTargets[option] = snapshotTarget(sourceTargets[option])
+  return { mode, fieldKey: input.fieldKey, optionTargets }
+}
+
 function resolveCompletedNodeTarget({ node, fieldValues }) {
   if (!isPlainOwnObject(node)) throw createError('BUSINESS_STATE_INVALID')
+  const snapshotFields = Object.getOwnPropertyDescriptor(node, 'fieldDefinitions')
+  if (snapshotFields) {
+    if (!hasOwn(snapshotFields, 'value')) throw createError('BUSINESS_STATE_INVALID')
+    let fields
+    try {
+      fields = normalizeConditionalFields(snapshotFields.value)
+    } catch (error) {
+      throw createError('BUSINESS_STATE_INVALID')
+    }
+    const next = normalizeSnapshotNext(node, fields)
+    if (next.mode === NEXT_MODE.END) return { kind: 'end' }
+    if (next.mode === NEXT_MODE.DEFAULT) return { kind: 'node', nodeId: next.targetNodeId }
+    if (next.mode === NEXT_MODE.MANUAL) return { kind: 'manual' }
+    const value = normalizeFinalValues(fieldValues).get(next.fieldKey)
+    if (typeof value !== 'string' || !hasOwn(next.optionTargets, value)) {
+      throw createError('BUSINESS_STATE_INVALID')
+    }
+    const destination = next.optionTargets[value]
+    return destination === END_TARGET ? { kind: 'end' } : { kind: 'node', nodeId: destination }
+  }
   let fields
   let next
   try {

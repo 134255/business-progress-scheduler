@@ -21,7 +21,12 @@ const {
   normalizeVersion2TemplateDefinition,
   version2TemplateDefinitionDigest
 } = require('./template-domain')
-const { ACTIVATION_MODE, normalizeActivationMode } = require('./optional-tail-domain')
+const {
+  ACTIVATION_MODE,
+  ROUTE_STATE,
+  isActualRouteState,
+  normalizeActivationMode
+} = require('./optional-tail-domain')
 const {
   INDEXED_ACCOUNT_ARRAY_LIMIT_MESSAGE,
   fitsBusinessMemberArray,
@@ -583,7 +588,7 @@ function createCloudBusinessRepository({
     }
     if (!nodeKey.valid || typeof nodeKey.value !== 'string' || !nodeKey.value ||
         !next.valid || !next.value || typeof next.value !== 'object' || Array.isArray(next.value) ||
-        !routeState.valid || !['dormant', 'active', 'completed', 'skipped'].includes(routeState.value)) {
+        !routeState.valid || !Object.values(ROUTE_STATE).includes(routeState.value)) {
       throw createError('FORBIDDEN')
     }
     return { nodeKey: nodeKey.value, routeState: routeState.value }
@@ -1234,7 +1239,7 @@ function createCloudBusinessRepository({
     const actualNodes = projectedLine.flowSchemaVersion === 2
       ? nodes.filter(node => {
           const route = publicNodeRouteProjection(node, line)
-          return route.routeState === 'active' || route.routeState === 'completed'
+          return isActualRouteState(route.routeState)
         })
       : nodes
     const projectedNodes = actualNodes.map(node =>

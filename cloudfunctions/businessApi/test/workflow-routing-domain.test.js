@@ -150,3 +150,37 @@ test('fails closed when a single-select route cannot be uniquely resolved', () =
     { fieldKey: 'kind', value: '简单' }, { fieldKey: 'kind', value: '复杂' }
   ] }), error => error.code === 'BUSINESS_STATE_INVALID')
 })
+
+test('resolves immutable snapshot node ids for every non-manual completion mode', () => {
+  const fieldDefinitions = [select('route', ['A', 'B'])]
+  assert.deepEqual(resolveCompletedNodeTarget({
+    node: { fieldDefinitions, next: { mode: 'end' } }, fieldValues: []
+  }), { kind: 'end' })
+  assert.deepEqual(resolveCompletedNodeTarget({
+    node: { fieldDefinitions, next: { mode: 'default', targetNodeId: 'line-node-2' } }, fieldValues: []
+  }), { kind: 'node', nodeId: 'line-node-2' })
+  assert.deepEqual(resolveCompletedNodeTarget({
+    node: {
+      fieldDefinitions,
+      next: {
+        mode: 'single_select', fieldKey: 'route',
+        optionTargets: { A: 'line-node-2', B: 'end' }
+      }
+    },
+    fieldValues: [{ fieldKey: 'route', name: '路线', type: 'single_select', value: 'A' }]
+  }), { kind: 'node', nodeId: 'line-node-2' })
+})
+
+test('snapshot routing rejects malformed target ids and unapproved field values', () => {
+  const fieldDefinitions = [select('route', ['A', 'B'])]
+  assert.throws(() => resolveCompletedNodeTarget({
+    node: { fieldDefinitions, next: { mode: 'default', targetNodeId: 'end' } }, fieldValues: []
+  }), error => error.code === 'BUSINESS_STATE_INVALID')
+  assert.throws(() => resolveCompletedNodeTarget({
+    node: {
+      fieldDefinitions,
+      next: { mode: 'single_select', fieldKey: 'route', optionTargets: { A: 'node-a', B: 'end' } }
+    },
+    fieldValues: [{ fieldKey: 'route', name: '路线', type: 'single_select', value: '未知' }]
+  }), error => error.code === 'BUSINESS_STATE_INVALID')
+})

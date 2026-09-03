@@ -2,6 +2,18 @@ const ACTIVATION_MODE = Object.freeze({
   REQUIRED: 'required',
   OPTIONAL_TAIL: 'optional_tail'
 })
+const ROUTE_STATE = Object.freeze({
+  DORMANT: 'dormant',
+  ACTIVE: 'active',
+  COMPLETED: 'completed',
+  SKIPPED: 'skipped',
+  AWAITING_MANUAL_DECISION: 'awaiting_manual_decision'
+})
+const ACTUAL_ROUTE_STATES = new Set([
+  ROUTE_STATE.ACTIVE,
+  ROUTE_STATE.COMPLETED,
+  ROUTE_STATE.AWAITING_MANUAL_DECISION
+])
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -48,8 +60,14 @@ function classifyCompletedNodeTransition({ line, node, nextNode }) {
     : 'next_node'
 }
 
+function isActualRouteState(value) {
+  return ACTUAL_ROUTE_STATES.has(value)
+}
+
 module.exports = {
   ACTIVATION_MODE,
+  ROUTE_STATE,
+  isActualRouteState,
   normalizeActivationMode,
   classifyCompletedNodeTransition
 }
