@@ -93,6 +93,7 @@ function createRouteHarness({
   nodeWorkspaceService,
   nodeSubmitService,
   optionalTailService,
+  manualRouteService,
   calendarAdminService,
   legacyRoutes,
   contextOpenid = 'wx-context'
@@ -153,6 +154,7 @@ function createRouteHarness({
     nodeWorkspaceService,
     nodeSubmitService,
     optionalTailService,
+    manualRouteService,
     calendarAdminService,
     protectedRoutes,
     getContext: () => ({ OPENID: contextOpenid, REQUESTID: 'request-1' }),
@@ -277,6 +279,32 @@ test('可选尾节点决策路由只传递当前活动账号与精确白名单�
     action: 'decideOptionalTailNode', payload: { ...payload, unexpected: true }
   })
   assert.equal(invalid.code, 'VALIDATION_ERROR')
+})
+
+test('通用人工分支路由只传递当前活动账号与精确白名单输入', async () => {
+  const calls = []
+  const harness = createRouteHarness({
+    manualRouteService: {
+      async decide(input) { calls.push(input); return { decision: input.input.decision } }
+    }
+  })
+  const payload = {
+    businessLineId: 'line-1', nodeId: 'source-node', expectedLineVersion: 7,
+    expectedNodeVersion: 3, decision: 'skip', comment: '无需可选处理',
+    requestKey: 'manual-route-1', actorId: 'forged'
+  }
+  assert.deepEqual(await harness.api.main({ action: 'decideNodeRoute', payload }), {
+    ok: true, data: { decision: 'skip' }
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].actor._id, 'actor-1')
+  assert.deepEqual(calls[0].input, {
+    businessLineId: 'line-1', nodeId: 'source-node', expectedLineVersion: 7,
+    expectedNodeVersion: 3, decision: 'skip', comment: '无需可选处理', requestKey: 'manual-route-1'
+  })
+  assert.equal((await harness.api.main({
+    action: 'decideNodeRoute', payload: { ...payload, unexpected: true }
+  })).code, 'VALIDATION_ERROR')
 })
 
 test('节点文本识别路由只传递当前活动账号与白名单输入', async () => {

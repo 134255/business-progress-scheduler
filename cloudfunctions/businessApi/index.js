@@ -55,6 +55,8 @@ const { createNodeWorkspaceService } = require('./lib/node-workspace-service')
 const { createNodeSubmitService } = require('./lib/node-submit-service')
 const { createOptionalTailService } = require('./lib/optional-tail-service')
 const { createCloudOptionalTailRepository } = require('./lib/cloud-optional-tail-repository')
+const { createManualRouteService } = require('./lib/manual-route-service')
+const { createCloudManualRouteRepository } = require('./lib/cloud-manual-route-repository')
 
 const COLLECTIONS = {
   users: 'users',
@@ -503,6 +505,19 @@ function createOptionalTailRoutes(optionalTailService) {
   }
 }
 
+function createManualRouteRoutes(manualRouteService) {
+  if (!manualRouteService) return null
+  return {
+    decideNodeRoute: ({ actor, payload }) => manualRouteService.decide({
+      actor,
+      input: selectProtectedPayload(payload, new Set([
+        'businessLineId', 'nodeId', 'expectedLineVersion', 'expectedNodeVersion',
+        'decision', 'comment', 'requestKey'
+      ]))
+    })
+  }
+}
+
 function createBusinessApi({
   repository,
   authService,
@@ -522,6 +537,7 @@ function createBusinessApi({
   nodeWorkspaceService,
   nodeSubmitService,
   optionalTailService,
+  manualRouteService,
   businessSearchClient,
   protectedRoutes = Object.create(null),
   legacyRoutes = Object.create(null),
@@ -537,6 +553,7 @@ function createBusinessApi({
     createNodeWorkspaceRoutes(nodeWorkspaceService),
     createNodeSubmitRoutes(nodeSubmitService),
     createOptionalTailRoutes(optionalTailService),
+    createManualRouteRoutes(manualRouteService),
     businessLifecycleService ? createBusinessLifecycleRoutes(businessLifecycleService) : null,
     evidenceService ? createEvidenceRoutes(evidenceService) : null,
     createEvidenceUploadRoutes(evidenceUploadService),
@@ -1017,6 +1034,12 @@ function createDefaultBusinessApi() {
     businessSearchClient,
     clock: () => new Date()
   })
+  const manualRouteService = createManualRouteService({
+    repository: createCloudManualRouteRepository({ db }),
+    workTimeService,
+    businessSearchClient,
+    clock: () => new Date()
+  })
   const calendarAdminService = createCalendarAdminService({
     db,
     invokeCalendarSync: data => cloud.callFunction({ name: 'calendarSync', data }),
@@ -1057,6 +1080,7 @@ function createDefaultBusinessApi() {
     nodeWorkspaceService,
     nodeSubmitService,
     optionalTailService,
+    manualRouteService,
     businessSearchClient,
     getContext: () => cloud.getWXContext(),
     clock,
