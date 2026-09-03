@@ -92,6 +92,95 @@ test('template creation assigns stable keys and creates a draft', async () => {
   assert.equal(harness.audits[0].action, 'CREATE_TEMPLATE')
 })
 
+test('流程版本二模板持久化入口、路由、条件字段和发起人处理标记', async () => {
+  const harness = createTemplateHarness({ users: [
+    { _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }
+  ] })
+  const first = validDefinition().nodes[0]
+  const definition = {
+    name: '分支模板',
+    description: '嵌套并汇合',
+    flowSchemaVersion: 2,
+    entryNodeKey: 'entry',
+    nodes: [{
+      ...first,
+      nodeKey: 'entry',
+      includeBusinessCreatorAsProcessor: true,
+      fields: [{
+        fieldKey: 'kind', name: '类型', type: 'single_select', required: true,
+        constraints: { options: ['简单', '复杂'] }
+      }],
+      next: { mode: 'single_select', fieldKey: 'kind', optionTargets: { 简单: 'end', 复杂: 'detail' } }
+    }, {
+      ...first,
+      nodeKey: 'detail',
+      name: '补充',
+      fields: [{
+        fieldKey: 'detail-kind', name: '详情类型', type: 'single_select', required: true,
+        constraints: { options: ['文字'] }
+      }, {
+        fieldKey: 'detail-text', name: '详情', type: 'short_text', required: true,
+        condition: { parentFieldKey: 'detail-kind', visibleWhen: ['文字'] }
+      }],
+      next: { mode: 'end' }
+    }]
+  }
+
+  const created = await harness.service.createTemplate({ actor: harness.admin, input: definition })
+  assert.equal(created.template.flowSchemaVersion, 2)
+  assert.equal(created.template.entryNodeKey, 'entry')
+  assert.match(created.template.definitionDigest, /^[a-f0-9]{64}$/)
+  assert.deepEqual(created.nodes.map(node => node.nodeKey), ['entry', 'detail'])
+  assert.equal(created.nodes[0].includeBusinessCreatorAsProcessor, true)
+  assert.deepEqual(created.nodes[0].next.optionTargets, { 简单: 'end', 复杂: 'detail' })
+  assert.equal(created.nodes[1].fields[1].condition.parentFieldKey, 'detail-kind')
+
+  const enabled = await harness.service.changeTemplateStatus({
+    actor: harness.admin,
+    templateId: created.template._id,
+    expectedVersion: 1,
+    status: 'enabled'
+  })
+  assert.equal(enabled.template.status, 'enabled')
+  assert.equal(enabled.template.entryNodeKey, 'entry')
+})
+
+test('流程版本二模板更新保留既有稳定节点并重新绑定入口和边摘要', async () => {
+  const harness = createTemplateHarness({ users: [
+    { _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }
+  ] })
+  const base = validDefinition().nodes[0]
+  const created = await harness.service.createTemplate({
+    actor: harness.admin,
+    input: {
+      name: '分支模板', description: '', flowSchemaVersion: 2, entryNodeKey: 'entry',
+      nodes: [
+        { ...base, nodeKey: 'entry', fields: [], next: { mode: 'default', targetNodeKey: 'finish' } },
+        { ...base, nodeKey: 'finish', name: '完成', fields: [], next: { mode: 'end' } }
+      ]
+    }
+  })
+  const priorNodeIds = created.nodes.map(node => node._id)
+  const updated = await harness.service.updateTemplate({
+    actor: harness.admin,
+    templateId: created.template._id,
+    expectedVersion: 1,
+    input: {
+      name: '分支模板二版', description: '', flowSchemaVersion: 2, entryNodeKey: 'entry',
+      nodes: [
+        { ...created.nodes[0], fields: [], next: { mode: 'manual', activateTarget: 'finish', skipTarget: 'end' } },
+        { ...created.nodes[1], fields: [], next: { mode: 'end' } }
+      ]
+    }
+  })
+
+  assert.deepEqual(updated.nodes.map(node => node._id), priorNodeIds)
+  assert.equal(updated.nodes[0].next.mode, 'manual')
+  assert.equal(updated.template.flowSchemaVersion, 2)
+  assert.equal(updated.template.entryNodeKey, 'entry')
+  assert.notEqual(updated.template.definitionDigest, created.template.definitionDigest)
+})
+
 test('template creation preserves business creator reviewer mode without fixed reviewer participants', async () => {
   const harness = createTemplateHarness({ users: [
     { _id: 'account-1', status: 'active' }
@@ -426,6 +515,27 @@ test('ordinary template listings expose safe availability projections only', asy
       available: false, unavailableReason: 'PROCESSOR_INACTIVE'
     }]
   })
+})
+
+test('普通可用模板列表对损坏的流程版本二图失败关闭', async () => {
+  const malformed = storedNode('t-v2', {
+    nodeKey: 'entry',
+    fields: [],
+    next: { mode: 'default', targetNodeKey: 'missing' },
+    includeBusinessCreatorAsProcessor: false
+  })
+  const harness = createTemplateHarness({
+    templates: [{
+      _id: 't-v2', name: '损坏分支模板', description: '', status: 'enabled', version: 1,
+      nodeCount: 1, flowSchemaVersion: 2, entryNodeKey: 'entry'
+    }],
+    nodes: [malformed],
+    users: [{ _id: 'account-1', status: 'active' }, { _id: 'account-2', status: 'active' }]
+  })
+
+  const result = await harness.service.listEnabledTemplates({ actor: harness.user })
+  assert.equal(result.items[0].available, false)
+  assert.equal(result.items[0].unavailableReason, 'TEMPLATE_INVALID')
 })
 
 test('ordinary listings do not advertise legacy enabled templates that exceed the snapshot operation budget', async () => {

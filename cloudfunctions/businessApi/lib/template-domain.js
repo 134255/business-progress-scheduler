@@ -161,6 +161,10 @@ function normalizeTemplateNode(input) {
   input = ownDataObject(input)
   if (hasOwn(input, 'assigneeUserIds') || hasOwn(input, 'slaWorkHours')) throw createError('TEMPLATE_INVALID')
   const processorAssignmentMode = normalizeProcessorAssignmentMode(input)
+  const includeBusinessCreatorAsProcessor = input.includeBusinessCreatorAsProcessor === undefined
+    ? false
+    : input.includeBusinessCreatorAsProcessor
+  if (typeof includeBusinessCreatorAsProcessor !== 'boolean') throw createError('TEMPLATE_INVALID')
   const reviewerAssignmentMode = normalizeReviewerAssignmentMode(input)
   const requiresEvidence = input.requiresEvidence === undefined ? false : input.requiresEvidence
   if (typeof requiresEvidence !== 'boolean') throw createError('TEMPLATE_INVALID')
@@ -194,6 +198,9 @@ function normalizeTemplateNode(input) {
     activationMode,
     processorAssignmentMode,
     processorUserIds,
+    ...(hasOwn(input, 'includeBusinessCreatorAsProcessor')
+      ? { includeBusinessCreatorAsProcessor }
+      : {}),
     reviewerAssignmentMode,
     reviewerUserIds,
     reviewMode,
@@ -275,7 +282,14 @@ function normalizeVersion2TemplateDefinition(input) {
   const nodes = sourceNodes.map(source => {
     const safeSource = ownDataObject(source)
     if (!hasOwn(safeSource, 'next')) throw createError('TEMPLATE_INVALID')
-    return { ...normalizeTemplateNode(safeSource), next: safeSource.next }
+    const normalized = normalizeTemplateNode(safeSource)
+    const creatorFromLegacyMode = normalized.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR
+    return {
+      ...normalized,
+      processorAssignmentMode: PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS,
+      includeBusinessCreatorAsProcessor: creatorFromLegacyMode || normalized.includeBusinessCreatorAsProcessor === true,
+      next: safeSource.next
+    }
   })
   try {
     return normalizeWorkflowGraph({
@@ -348,11 +362,13 @@ function validateTemplateForEnable(template, nodes, activeUserIds) {
       if (node.assigneeUserIds.some(id => !active.has(id))) throw createError('ASSIGNEE_INACTIVE')
       continue
     }
-    if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR &&
+    if ((node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.BUSINESS_CREATOR ||
+        node.includeBusinessCreatorAsProcessor === true) &&
         node.reviewerAssignmentMode === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR) {
       throw createError('ROLE_OVERLAP')
     }
-    if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS && !node.processorUserIds.length) {
+    if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS &&
+        node.includeBusinessCreatorAsProcessor !== true && !node.processorUserIds.length) {
       throw createError('TEMPLATE_INVALID')
     }
     if (node.processorAssignmentMode === PROCESSOR_ASSIGNMENT_MODE.FIXED_ACCOUNTS &&

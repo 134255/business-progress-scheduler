@@ -244,6 +244,53 @@ test('负责人来源按节点独立规范化，旧节点默认固定账号且�
   )
 })
 
+test('流程版本二允许发起人与固定处理人并存并在启用时保持角色隔离', () => {
+  const input = {
+    flowSchemaVersion: 2,
+    entryNodeKey: 'entry',
+    nodes: [createNode({
+      nodeKey: 'entry',
+      includeBusinessCreatorAsProcessor: true,
+      next: { mode: 'end' }
+    })]
+  }
+  const definition = normalizeVersion2TemplateDefinition(input)
+  assert.deepEqual(definition.nodes[0].processorUserIds, ['user-1'])
+  assert.equal(definition.nodes[0].includeBusinessCreatorAsProcessor, true)
+  assert.equal(definition.nodes[0].processorAssignmentMode, 'fixed_accounts')
+  assert.equal(validateTemplateForEnable({}, definition.nodes, ['user-1', 'reviewer-1']), true)
+
+  const creatorOnly = normalizeVersion2TemplateDefinition({
+    flowSchemaVersion: 2,
+    entryNodeKey: 'entry',
+    nodes: [createNode({
+      nodeKey: 'entry',
+      processorUserIds: [],
+      includeBusinessCreatorAsProcessor: true,
+      reviewerUserIds: [],
+      next: { mode: 'end' }
+    })]
+  })
+  assert.equal(validateTemplateForEnable({}, creatorOnly.nodes, []), true)
+
+  const selfReview = normalizeVersion2TemplateDefinition({
+    flowSchemaVersion: 2,
+    entryNodeKey: 'entry',
+    nodes: [createNode({
+      nodeKey: 'entry',
+      processorUserIds: [],
+      includeBusinessCreatorAsProcessor: true,
+      reviewerAssignmentMode: 'business_creator',
+      reviewerUserIds: [],
+      next: { mode: 'end' }
+    })]
+  })
+  assert.throws(
+    () => validateTemplateForEnable({}, selfReview.nodes, []),
+    error => error.code === 'ROLE_OVERLAP'
+  )
+})
+
 test('负责人来源只接受自有数据属性，访问器或继承值不得执行或降级兼容', () => {
   let getterCalls = 0
   const accessorNode = createNode()

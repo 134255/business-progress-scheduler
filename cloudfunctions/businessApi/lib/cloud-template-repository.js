@@ -2,7 +2,8 @@ const crypto = require('node:crypto')
 const {
   REVIEWER_ASSIGNMENT_MODE,
   templateDefinitionDigest,
-  preActivationModeTemplateDefinitionDigest
+  preActivationModeTemplateDefinitionDigest,
+  version2TemplateDefinitionDigest
 } = require('./template-domain')
 
 const COLLECTIONS = Object.freeze({
@@ -106,7 +107,8 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
   }
 
   function assertStoredDefinitionDigest(template, nodes) {
-    const requiresNodeIds = nodes.some(node => {
+    const version2 = template.flowSchemaVersion === 2
+    const requiresNodeIds = version2 || nodes.some(node => {
       const descriptor = node && Object.getOwnPropertyDescriptor(node, 'reviewerAssignmentMode')
       return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
         descriptor.value === REVIEWER_ASSIGNMENT_MODE.BUSINESS_CREATOR
@@ -132,13 +134,19 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     if (!Object.prototype.hasOwnProperty.call(template, 'definitionDigest')) return
     let actualDigest = null
     try {
-      actualDigest = templateDefinitionDigest(nodes)
+      actualDigest = version2
+        ? version2TemplateDefinitionDigest({
+          flowSchemaVersion: 2,
+          entryNodeKey: template.entryNodeKey,
+          nodes
+        })
+        : templateDefinitionDigest(nodes)
     } catch (error) {
       throw createError('TEMPLATE_INVALID')
     }
     const storedDigest = template.definitionDigest
     const storedDigestIsValid = typeof storedDigest === 'string' && /^[a-f0-9]{64}$/.test(storedDigest)
-    const legacyDigestMatches = storedDigestIsValid && actualDigest !== storedDigest &&
+    const legacyDigestMatches = !version2 && storedDigestIsValid && actualDigest !== storedDigest &&
       nodes.every(node => !Object.prototype.hasOwnProperty.call(node, 'activationMode')) &&
       preActivationModeTemplateDefinitionDigest(nodes) === storedDigest
     if (!storedDigestIsValid || (actualDigest !== storedDigest && !legacyDigestMatches)) {

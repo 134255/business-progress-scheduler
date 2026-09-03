@@ -1,5 +1,7 @@
 const {
   normalizeTemplateNode,
+  normalizeVersion2TemplateDefinition,
+  version2TemplateDefinitionDigest,
   templateDefinitionDigest,
   collectTemplateParticipantUserIds,
   validateTemplateForEnable,
@@ -117,6 +119,31 @@ function requireSnapshotBudget(nodes, participantUserIds) {
 
 function normalizeNodeInput(node, sequence, nodeKey) {
   return callTemplateDomain(() => normalizeTemplateNode({ ...safeOwnDataRecord(node), nodeKey, sequence }))
+}
+
+function normalizeVersion2Input(input) {
+  const safeInput = safeOwnDataRecord(input)
+  const nodes = safeArrayValues(requireNodeBudget(safeInput.nodes)).map((node, sequence) => {
+    const safeNode = safeOwnDataRecord(node)
+    const fields = safeArrayValues(safeNode.fields === undefined ? [] : safeNode.fields)
+      .map((field, fieldSequence) => ({ ...safeOwnDataRecord(field), sequence: fieldSequence }))
+    return { ...safeNode, sequence, fields }
+  })
+  return callTemplateDomain(() => normalizeVersion2TemplateDefinition({
+    flowSchemaVersion: safeInput.flowSchemaVersion,
+    entryNodeKey: safeInput.entryNodeKey,
+    nodes
+  }))
+}
+
+function digestForDefinition(template, nodes) {
+  return template.flowSchemaVersion === 2
+    ? callTemplateDomain(() => version2TemplateDefinitionDigest({
+      flowSchemaVersion: 2,
+      entryNodeKey: template.entryNodeKey,
+      nodes
+    }))
+    : callTemplateDomain(() => templateDefinitionDigest(nodes))
 }
 
 function uniqueKey(keyFactory, prefix, occupied) {
@@ -257,8 +284,14 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
 
   async function createTemplate({ actor, input }) {
     requireSuperAdmin(actor)
-    const metadata = normalizeMetadata(input)
-    const nodes = assignCreateKeys(requireNodeBudget(input.nodes === undefined ? [] : input.nodes), keyFactory)
+    const safeInput = safeOwnDataRecord(input)
+    const metadata = normalizeMetadata(safeInput)
+    const version2 = safeInput.flowSchemaVersion === 2
+      ? normalizeVersion2Input(safeInput)
+      : null
+    const nodes = version2
+      ? version2.nodes
+      : assignCreateKeys(requireNodeBudget(safeInput.nodes === undefined ? [] : safeInput.nodes), keyFactory)
     const participantUserIds = await assertActiveParticipants(repository, nodes)
     const at = clock()
     return repository.createTemplateDefinition({
@@ -267,9 +300,15 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       definition: {
         template: {
           ...metadata,
+          ...(version2 ? {
+            flowSchemaVersion: version2.flowSchemaVersion,
+            entryNodeKey: version2.entryNodeKey
+          } : {}),
           status: 'draft',
           nodeCount: nodes.length,
-          definitionDigest: templateDefinitionDigest(nodes),
+          definitionDigest: version2
+            ? version2TemplateDefinitionDigest(version2)
+            : templateDefinitionDigest(nodes),
           createdBy: actor._id,
           createdAt: at,
           updatedBy: actor._id,
@@ -286,12 +325,26 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     const current = requireCurrent(await repository.getTemplateDefinition(requireText(templateId)))
     assertExpectedVersion(current, expectedVersion)
     callTemplateDomain(() => assertTemplateEditable(current.template))
-    const metadata = normalizeMetadata(input)
-    const nodes = assignUpdateKeys(
-      current,
-      requireNodeBudget(input.nodes === undefined ? [] : input.nodes),
-      keyFactory
-    )
+    const safeInput = safeOwnDataRecord(input)
+    const metadata = normalizeMetadata(safeInput)
+    const isVersion2 = current.template.flowSchemaVersion === 2 || safeInput.flowSchemaVersion === 2
+    if (isVersion2 && (current.template.flowSchemaVersion !== 2 || safeInput.flowSchemaVersion !== 2)) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    const version2 = isVersion2 ? normalizeVersion2Input(safeInput) : null
+    const currentByKey = new Map(current.nodes.map(node => [node.nodeKey, node]))
+    const nodes = version2
+      ? version2.nodes.map(node => ({
+        ...node,
+        ...(currentByKey.has(node.nodeKey) && currentByKey.get(node.nodeKey)._id
+          ? { _id: currentByKey.get(node.nodeKey)._id }
+          : {})
+      }))
+      : assignUpdateKeys(
+        current,
+        requireNodeBudget(safeInput.nodes === undefined ? [] : safeInput.nodes),
+        keyFactory
+      )
     const participantUserIds = await assertActiveParticipants(repository, nodes)
     return repository.mutateTemplateDefinition({
       actor,
@@ -302,8 +355,11 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
       definition: {
         template: {
           ...metadata,
+          ...(version2 ? { flowSchemaVersion: 2, entryNodeKey: version2.entryNodeKey } : {}),
           nodeCount: nodes.length,
-          definitionDigest: templateDefinitionDigest(nodes),
+          definitionDigest: version2
+            ? version2TemplateDefinitionDigest(version2)
+            : templateDefinitionDigest(nodes),
           updatedBy: actor._id,
           updatedAt: clock()
         },
@@ -325,6 +381,13 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     if (!validTransition) throw createError('INVALID_STATUS')
     if (status === 'enabled') {
       requireNodeBudget(current.nodes)
+      if (current.template.flowSchemaVersion === 2) {
+        callTemplateDomain(() => normalizeVersion2TemplateDefinition({
+          flowSchemaVersion: 2,
+          entryNodeKey: current.template.entryNodeKey,
+          nodes: current.nodes
+        }))
+      }
       const participantUserIds = await assertActiveParticipants(repository, current.nodes, { requireNodes: true })
       requireSnapshotBudget(current.nodes, participantUserIds)
       return repository.mutateTemplateDefinition({
@@ -336,7 +399,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
         definition: {
           template: {
             status,
-            definitionDigest: templateDefinitionDigest(current.nodes),
+            definitionDigest: digestForDefinition(current.template, current.nodes),
             enabledAt: clock(),
             updatedBy: actor._id,
             updatedAt: clock()
@@ -398,6 +461,13 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
         let unavailableReason = ''
         try {
           if (!participantUserIds) throw createError('TEMPLATE_INVALID')
+          if (definition.template.flowSchemaVersion === 2) {
+            callTemplateDomain(() => normalizeVersion2TemplateDefinition({
+              flowSchemaVersion: 2,
+              entryNodeKey: definition.template.entryNodeKey,
+              nodes: definition.nodes
+            }))
+          }
           validateTemplateForEnable(definition.template, definition.nodes, [...active])
           if (!canCreateBusinessSnapshot(nodesForSnapshotBudget(definition.nodes, participantUserIds))) {
             unavailableReason = 'TEMPLATE_LIMIT_EXCEEDED'

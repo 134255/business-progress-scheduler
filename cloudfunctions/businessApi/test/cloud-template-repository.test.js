@@ -3,7 +3,12 @@ const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 
 const { createCloudTemplateRepository } = require('../lib/cloud-template-repository')
-const { normalizeTemplateNode, templateDefinitionDigest } = require('../lib/template-domain')
+const {
+  normalizeTemplateNode,
+  templateDefinitionDigest,
+  normalizeVersion2TemplateDefinition,
+  version2TemplateDefinitionDigest
+} = require('../lib/template-domain')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 
 function createRepositoryHarness(seed = {}) {
@@ -112,6 +117,44 @@ test('definition reads fail closed when stored nodes no longer match the templat
     repository.getTemplateDefinition('t1'),
     error => error.code === 'TEMPLATE_INVALID'
   )
+})
+
+test('流程版本二读取使用模板入口和完整路由摘要校验权威节点', async () => {
+  const sourceNodes = [{
+    nodeKey: 'entry', sequence: 0, name: '入口', description: '',
+    processorUserIds: ['account-1'], reviewerUserIds: [], reviewMode: 'any',
+    processingSlaWorkHours: 8, reviewSlaWorkHours: 4,
+    requiresEvidence: false, allowedEvidenceTypes: [], fields: [],
+    includeBusinessCreatorAsProcessor: true,
+    next: { mode: 'default', targetNodeKey: 'finish' }
+  }, {
+    nodeKey: 'finish', sequence: 1, name: '结束', description: '',
+    processorUserIds: ['account-1'], reviewerUserIds: [], reviewMode: 'any',
+    processingSlaWorkHours: 8, reviewSlaWorkHours: 4,
+    requiresEvidence: false, allowedEvidenceTypes: [], fields: [],
+    includeBusinessCreatorAsProcessor: false,
+    next: { mode: 'end' }
+  }]
+  const definition = normalizeVersion2TemplateDefinition({
+    flowSchemaVersion: 2, entryNodeKey: 'entry', nodes: sourceNodes
+  })
+  const storedNodes = definition.nodes.map((item, index) => ({
+    _id: `n-${index + 1}`, templateId: 't1', version: 1, ...item
+  }))
+  const template = {
+    _id: 't1', name: '分支模板', status: 'enabled', version: 1, nodeCount: 2,
+    flowSchemaVersion: 2, entryNodeKey: 'entry', definitionNodeIds: ['n-1', 'n-2'],
+    definitionDigest: version2TemplateDefinitionDigest(definition)
+  }
+  const { repository } = createRepositoryHarness({ templates: [template], template_nodes: storedNodes })
+  const fetched = await repository.getTemplateDefinition('t1')
+  assert.equal(fetched.template.entryNodeKey, 'entry')
+  assert.equal(fetched.nodes[0].next.targetNodeKey, 'finish')
+
+  const tampered = structuredClone(storedNodes)
+  tampered[0].next.targetNodeKey = 'end'
+  const invalid = createRepositoryHarness({ templates: [template], template_nodes: tampered })
+  await assert.rejects(invalid.repository.getTemplateDefinition('t1'), error => error.code === 'TEMPLATE_INVALID')
 })
 
 test('definition reads accept intact review templates published before activation mode existed', async () => {
