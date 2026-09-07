@@ -178,9 +178,9 @@ function storedNode(overrides = {}) {
 }
 
 function createNodeEditor({ users, node = null, readOnly = false, optionalTailExistsOutsideCurrentNode = false,
-  nodeOptions = [], acceptNodeFromEditor = () => {} }) {
+  flowSchemaVersion = 1, nodeOptions = [], acceptNodeFromEditor = () => {} }) {
   const previousPage = {
-    getNodeEditorContext: () => ({ readOnly, assigneeOptions: users, node, optionalTailExistsOutsideCurrentNode, nodeOptions }),
+    getNodeEditorContext: () => ({ readOnly, assigneeOptions: users, node, flowSchemaVersion, optionalTailExistsOutsideCurrentNode, nodeOptions }),
     acceptNodeFromEditor
   }
   global.getApp = () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
@@ -190,6 +190,45 @@ function createNodeEditor({ users, node = null, readOnly = false, optionalTailEx
   page.onLoad({ index: node ? '0' : '-1' })
   return page
 }
+
+test('version 2 new node accepts a name and returns it to the template draft', async () => {
+  const accepted = []
+  const page = createNodeEditor({ users: [], flowSchemaVersion: 2,
+    acceptNodeFromEditor: (index, node) => accepted.push({ index, node }) })
+  try {
+    assert.equal(page.data.flowSchemaVersion, 2)
+    assert.equal(page.data.name, '')
+    page.onNameInput({ detail: { value: '  售后信息收集  ' } })
+    page.onIncludeBusinessCreatorAsProcessorChange({ detail: { value: true } })
+    await page.submit()
+    assert.equal(accepted.length, 1)
+    assert.equal(accepted[0].index, -1)
+    assert.equal(accepted[0].node.name, '售后信息收集')
+    assert.deepEqual(accepted[0].node.next, { mode: 'end' })
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('version 2 enabled node retains its name and rejects rename and save', async () => {
+  let accepted = 0
+  const page = createNodeEditor({ users: [], flowSchemaVersion: 2, readOnly: true,
+    node: storedNode({ name: '已启用节点', next: { mode: 'end' } }),
+    acceptNodeFromEditor: () => { accepted += 1 } })
+  try {
+    assert.equal(page.data.name, '已启用节点')
+    page.onNameInput({ detail: { value: '不可写入' } })
+    await page.submit()
+    assert.equal(page.data.name, '已启用节点')
+    assert.equal(accepted, 0)
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
 
 test('node editor saves separate processor reviewer mode and dual SLA fields', () => {
   const processor = { _id: 'processor-1', displayName: '处理人', username: 'processor' }
@@ -304,6 +343,180 @@ test('node editor builds conditional child fields and protects referenced parent
   page.removeField({ currentTarget: { dataset: { index: 0 } } })
   assert.equal(page.data.fields.length, 2)
   assert.match(page.data.errorMessage, /依赖/)
+})
+
+function conditionalOptionEditor(overrides = {}) {
+  return createNodeEditor({ users: [], flowSchemaVersion: 2,
+    node: storedNode({ workflowMode: 'review', processorUserIds: ['processor-1'], reviewerUserIds: [],
+      next: { mode: 'end' }, fields: [
+        { fieldKey: 'model', sequence: 0, name: '型号', type: 'single_select', required: true,
+          constraints: { options: ['S1', 'S2'] } },
+        { fieldKey: 'color', sequence: 1, name: '颜色', type: 'single_select', required: true,
+          constraints: { options: ['石墨灰', '冰川白', 'Black'] },
+          condition: { parentFieldKey: 'model', visibleWhen: ['S1', 'S2'],
+            optionsByParentValue: { S1: [], S2: ['Black'] } } }
+      ] }), ...overrides })
+}
+
+function conditionalOptionInput(page, value, parentValue = 'S1', index = 1) {
+  page.onFieldConditionalOptionsInput({ currentTarget: { dataset: { index, parentValue } }, detail: { value } })
+}
+
+function conditionalOptionText(page, value = 'S1', index = 1) {
+  return page.data.fields[index].conditionParentValueRows.find(row => row.value === value).optionText
+}
+
+test('conditional option typing preserves partial words separators and deletion through unrelated refreshes', () => {
+  const page = conditionalOptionEditor()
+  try {
+    for (const value of ['s', 'shi', '石', '石墨', '石墨灰', '石墨灰，', '石墨灰，冰', '石墨灰，冰川白',
+      '石墨灰，冰川', '', 'B', 'Bl', 'Black', 'Black, ', 'Black, 石墨灰']) {
+      conditionalOptionInput(page, value)
+      assert.equal(conditionalOptionText(page), value)
+      page.onFieldDescriptionInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: '更新说明' } })
+      assert.equal(conditionalOptionText(page), value, 'unrelated refresh must not replace the input draft')
+      assert.equal(conditionalOptionText(page, 'S2'), 'Black')
+    }
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('conditional option paste saves only canonical known values without UI drafts', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  try {
+    conditionalOptionInput(page, ' 石墨灰，冰川白, 石墨灰\nBlack ')
+    await page.submit()
+    assert.equal(accepted.length, 1)
+    assert.deepEqual(accepted[0].fields[1], {
+      _uiKey: 'color', fieldKey: 'color', sequence: 1, name: '颜色', description: '',
+      type: 'single_select', required: true, constraints: { options: ['石墨灰', '冰川白', 'Black'] },
+      condition: { parentFieldKey: 'model', visibleWhen: ['S1', 'S2'],
+        optionsByParentValue: { S1: ['石墨灰', '冰川白', 'Black'], S2: ['Black'] } }
+    })
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('conditional option save rejects incomplete or unknown values without erasing typed text', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  try {
+    for (const value of ['石', '石墨灰，未知颜色', '', '， ']) {
+      conditionalOptionInput(page, value)
+      await page.submit()
+      assert.equal(accepted.length, 0)
+      assert.match(page.data.errorMessage, /颜色/)
+      assert.match(page.data.errorMessage, /S1/)
+      assert.equal(conditionalOptionText(page), value)
+    }
+    conditionalOptionInput(page, '石墨灰')
+    await page.submit()
+    assert.equal(accepted.length, 1, 'correcting a draft must allow retry')
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('conditional option drafts cannot mutate read-only or demoted pages', () => {
+  const page = conditionalOptionEditor({ readOnly: true })
+  try {
+    const before = JSON.stringify(page.data.fields)
+    conditionalOptionInput(page, '石')
+    assert.equal(JSON.stringify(page.data.fields), before)
+    page.data.readOnly = false
+    global.getApp = () => ({ globalData: { currentUser: { role: 'user', status: 'active' } } })
+    conditionalOptionInput(page, '石')
+    assert.equal(JSON.stringify(page.data.fields), before)
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('conditional option save uses the final draft after base options change', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  try {
+    conditionalOptionInput(page, '新颜色')
+    page.onFieldOptionsInput({ currentTarget: { dataset: { index: 1 } }, detail: { value: '新颜色, Black' } })
+    await page.submit()
+    assert.equal(accepted.length, 1)
+    assert.deepEqual(accepted[0].fields[1].condition.optionsByParentValue, { S1: ['新颜色'], S2: ['Black'] })
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('conditional option drafts are discarded when changing dependency or disabling the condition', () => {
+  const page = conditionalOptionEditor()
+  try {
+    const alternate = { fieldKey: 'alternate', sequence: 1, name: '备用型号', type: 'single_select',
+      required: false, constraints: { options: ['S1'] } }
+    page.refreshFields([page.data.fields[0], alternate, page.data.fields[1]])
+    conditionalOptionInput(page, '未完成', 'S1', 2)
+    page.setFieldParent(2, 'alternate')
+    assert.equal(conditionalOptionText(page, 'S1', 2), '石墨灰, 冰川白, Black')
+    conditionalOptionInput(page, '还未完成', 'S1', 2)
+    page.onFieldConditionChange({ currentTarget: { dataset: { index: 2 } }, detail: { value: false } })
+    page.onFieldConditionChange({ currentTarget: { dataset: { index: 2 } }, detail: { value: true } })
+    assert.equal(conditionalOptionText(page, 'S1', 2), '石墨灰, 冰川白, Black')
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('editing one conditional row preserves implicit options for the other parent values', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  try {
+    page.updateField(1, { condition: { parentFieldKey: 'model', visibleWhen: ['S1', 'S2'] } })
+    conditionalOptionInput(page, '石墨灰')
+    await page.submit()
+    assert.equal(accepted.length, 1)
+    assert.deepEqual(accepted[0].fields[1].condition.optionsByParentValue, {
+      S1: ['石墨灰'], S2: ['石墨灰', '冰川白', 'Black']
+    })
+    const { normalizeConditionalFields } = require('../../cloudfunctions/businessApi/lib/conditional-field-domain')
+    assert.doesNotThrow(() => normalizeConditionalFields(accepted[0].fields))
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('conditional option drafts for deselected parent values or changed field types do not reappear', () => {
+  const page = conditionalOptionEditor()
+  try {
+    conditionalOptionInput(page, '未完成')
+    page.onFieldVisibleWhenChange({ currentTarget: { dataset: { index: 1 } }, detail: { value: ['S2'] } })
+    conditionalOptionInput(page, '不能写入隐藏行')
+    page.onFieldVisibleWhenChange({ currentTarget: { dataset: { index: 1 } }, detail: { value: ['S1', 'S2'] } })
+    assert.equal(conditionalOptionText(page), '石墨灰, 冰川白, Black')
+    conditionalOptionInput(page, '未完成')
+    page.onFieldTypeChange({ currentTarget: { dataset: { index: 1 } }, detail: { value: 0 } })
+    page.onFieldTypeChange({ currentTarget: { dataset: { index: 1 } }, detail: { value: 5 } })
+    page.onFieldOptionsInput({ currentTarget: { dataset: { index: 1 } }, detail: { value: '石墨灰, 冰川白, Black' } })
+    assert.equal(conditionalOptionText(page), '石墨灰, 冰川白, Black')
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
 })
 
 test('version 2 template editor preserves graph metadata and opens authoritative flow preview', async () => {

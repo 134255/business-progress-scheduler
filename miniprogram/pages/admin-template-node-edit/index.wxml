@@ -3,7 +3,7 @@
   <view wx:if="{{readOnly}}" class="readonly-banner">模板已启用，此节点只能查看。</view>
 
   <view class="card">
-    <view class="field" wx:if="{{flowSchemaVersion !== 2}}">
+    <view class="field">
       <label class="field-label" for="node-name">节点名称</label>
       <input id="node-name" class="input" value="{{name}}" maxlength="60" disabled="{{readOnly}}" bindinput="onNameInput" />
     </view>
@@ -11,7 +11,7 @@
       <label class="field-label" for="node-description">节点说明</label>
       <textarea id="node-description" class="textarea" value="{{description}}" maxlength="500" disabled="{{readOnly}}" bindinput="onDescriptionInput" />
     </view>
-    <view class="field">
+    <view class="field" wx:if="{{flowSchemaVersion !== 2}}">
       <text class="field-label">节点启用方式</text>
       <label class="assignment-mode-row">
         <switch checked="{{activationMode === 'optional_tail'}}" disabled="{{readOnly || optionalTailExistsOutsideCurrentNode}}" bindchange="onOptionalTailChange" />

@@ -63,12 +63,40 @@ git diff --check f651fbe..HEAD
 
 `nodeTextParser` 本功能没有代码变更，不需要重复部署。所有定时函数沿用部署前触发器；本手册不授权新增、删除或修改 Timer。部署后逐个核对版本时间、入口、运行时及触发器，没有对应代码变化的配置不得改变。
 
+### ZIP 打包及启动门禁
+
+控制台“部署成功”只代表上传/部署完成，不代表函数能启动。Windows 本地解压后的目录也不能证明原 ZIP 的路径可在 Linux 运行时解析。
+
+- ZIP 根目录必须直接包含 `index.js`、`package.json`、`package-lock.json`，不得再套一层函数目录；完整保留 `lib/`，尤其是 `lib/domain.js`，并按大小写检查所有相对依赖。
+- ZIP 条目使用 `/` 路径，拒绝 `\`、绝对路径和 `..` 路径段；不得包含密钥、`.env` 或操作员本地配置。
+- 对已验证且已提交的版本，可在功能工作树执行下列命令生成可重复的标准包；`git archive` **不包含未提交修改**，必须先核对 HEAD 与待部署版本一致。输出保留在本地，不加入 Git。
+
+```powershell
+New-Item -ItemType Directory -Force outputs/diagnostics
+git archive --format=zip --output=outputs/diagnostics/businessApi-verified.zip HEAD:cloudfunctions/businessApi
+```
+
+- 上传前检查 ZIP 条目清单及与该提交的文件一致性；未打包 `node_modules` 时选择云端安装依赖，不选择“部署且不安装依赖”。
+- 部署后确认新部署时间、在线文件树的 `lib/` 与入口，再以 `{"action":"getSession"}` 做只读启动检查。控制台无可信微信上下文时，应用返回 `INVALID_WECHAT_IDENTITY` 是预期的安全拒绝，只能证明启动和身份边界，不能标记账号登录验收通过；`Cannot find module`、超时或其他初始化异常均阻断交付。
+- 最后使用正确工作树的小程序验证真实微信会话和页面加载，不输入伪造身份、不降低校验、不重置账号来绕过问题。此步骤与真机验收分别记录。
+
 ## 5. 隔离验收矩阵
+
+模板节点编辑页变更后，在安装微信开发者工具的受信任机器上运行实际 WXML 渲染回归；`WECHAT_WCC_PATH` 指向该安装目录内的官方 `wcc.exe`（或对应系统可执行文件），不要从非官方来源下载编译器。此脚本还需要支持 `import.meta.dirname` 的 Node.js 版本（20.11+）。
+
+```powershell
+$env:WECHAT_WCC_PATH = '<微信开发者工具安装目录>/resources/app.asar.unpacked/node_modules/wcc-exec/wcc.exe'
+node tools/test-template-node-rendering.mjs
+```
+
+必须通过新版/旧版 × 可编辑/只读的名称实际渲染与绑定检查、各版本路由控件隔离检查，以及条件选项逐字输入后实际渲染值与字段/父选项绑定检查；未安装编译器时记录该项为 `unverified`，不能用 WXML 文本包含输入框替代实际渲染验证。前端修复还需重新上传体验包；仅重新部署云函数不会更新手机页面。
 
 只使用无敏感隔离模板、隔离账号和测试凭证。不要先重置旧数据。
 
 | 场景 | 开发者工具 | iPhone | Android/HarmonyOS | Mac 微信 |
 |---|---:|---:|---:|---:|
+| 新版/旧版节点名称均显示；可编辑草稿可输入并保存，已启用模板保持只读 | 必测 | 必测 | 必测 | 抽测 |
+| 条件候选项可逐字输入中文/英文、输入逗号、删除和粘贴；未知/未完成选项保存时提示且原文保留 | 必测 | 必测 | 必测 | 抽测 |
 | 多级单选联动：父选项改变子选项/字段，取消清空则原值保留，确认后只清空后代 | 必测 | 必测 | 必测 | 必测 |
 | 单选路由嵌套：分支后仍可再次分支，命中唯一目标或结束 | 必测 | 必测 | 必测 | 抽测 |
 | 人工路由：授权目标处理人可开启/跳过，重复点击幂等，无关账号拒绝 | 必测 | 必测 | 必测 | 抽测 |

@@ -107,8 +107,10 @@ Page({
         fieldIndex: sequence,
         value,
         visible: Boolean(condition && condition.visibleWhen && condition.visibleWhen.includes(value)),
-        optionText: condition && condition.optionsByParentValue && condition.optionsByParentValue[value]
-          ? condition.optionsByParentValue[value].join(', ') : childOptions.join(', ')
+        optionText: field.conditionalOptionTexts && hasOwn(field.conditionalOptionTexts, value)
+          ? field.conditionalOptionTexts[value]
+          : condition && condition.optionsByParentValue && condition.optionsByParentValue[value]
+            ? condition.optionsByParentValue[value].join(', ') : childOptions.join(', ')
       }))
     }
   },
@@ -398,7 +400,7 @@ Page({
     const type = FIELD_TYPE_OPTIONS[Number(event.detail.value)] && FIELD_TYPE_OPTIONS[Number(event.detail.value)][0]
     if (!type) return
     const constraints = type === 'single_select' || type === 'multi_select' ? { options: [] } : {}
-    this.updateField(Number(event.currentTarget.dataset.index), { type, constraints, optionText: '' })
+    this.updateField(Number(event.currentTarget.dataset.index), { type, constraints, optionText: '', conditionalOptionTexts: {} })
   },
   onFieldConditionChange(event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
@@ -406,7 +408,7 @@ Page({
     const field = this.data.fields[index]
     if (!field) return
     if (!event.detail.value) {
-      this.updateField(index, { condition: null, conditionEnabled: false })
+      this.updateField(index, { condition: null, conditionEnabled: false, conditionalOptionTexts: {} })
       return
     }
     const parent = field.conditionParentOptions[0]
@@ -426,7 +428,7 @@ Page({
       const options = field.constraints && Array.isArray(field.constraints.options) ? field.constraints.options.slice() : []
       condition.optionsByParentValue = Object.fromEntries(values.map(value => [value, options.slice()]))
     }
-    this.updateField(index, { condition, conditionEnabled: true })
+    this.updateField(index, { condition, conditionEnabled: true, conditionalOptionTexts: {} })
   },
   onFieldConditionParentChange(event) {
     const index = Number(event.currentTarget.dataset.index)
@@ -445,20 +447,20 @@ Page({
         value, condition.optionsByParentValue[value] || (field.constraints.options || []).slice()
       ]))
     }
-    this.updateField(index, { condition })
+    const conditionalOptionTexts = Object.fromEntries(Object.entries(field.conditionalOptionTexts || {})
+      .filter(([value]) => visibleWhen.includes(value)))
+    this.updateField(index, { condition, conditionalOptionTexts })
   },
   onFieldConditionalOptionsInput(event) {
     const index = Number(event.currentTarget.dataset.index)
     const parentValue = event.currentTarget.dataset.parentValue
     const field = this.data.fields[index]
     if (!field || !field.condition || field.type !== 'single_select') return
-    const allowed = new Set(field.constraints.options || [])
-    const options = uniqueTexts(event.detail.value).filter(option => allowed.has(option))
+    if (!field.conditionParentValueRows.some(row => row.value === parentValue && row.visible)) return
     this.updateField(index, {
-      condition: {
-        ...field.condition,
-        optionsByParentValue: { ...(field.condition.optionsByParentValue || {}), [parentValue]: options }
-      }
+      // Keep the editing buffer separate from canonical options: incomplete words,
+      // IME text and delimiters must not be replaced by filtered values on input.
+      conditionalOptionTexts: { ...(field.conditionalOptionTexts || {}), [parentValue]: event.detail.value }
     })
   },
   onFieldOptionsInput(event) {
@@ -546,8 +548,34 @@ Page({
       normalized.constraints.options = uniqueTexts(constraints.options && constraints.options.join
         ? constraints.options.join(',') : constraints.options)
     }
-    if (field.condition) normalized.condition = clone(field.condition)
+    if (field.condition) {
+      normalized.condition = clone(field.condition)
+      if (field.type === 'single_select' && field.conditionalOptionTexts &&
+          field.condition.visibleWhen.some(value => hasOwn(field.conditionalOptionTexts, value))) {
+        const existing = normalized.condition.optionsByParentValue || {}
+        normalized.condition.optionsByParentValue = Object.fromEntries(field.condition.visibleWhen.map(value => [
+          value, hasOwn(field.conditionalOptionTexts, value)
+            ? uniqueTexts(field.conditionalOptionTexts[value])
+            : hasOwn(existing, value) ? existing[value] : normalized.constraints.options.slice()
+        ]))
+      }
+    }
     return normalized
+  },
+
+  conditionalOptionsError() {
+    for (const field of this.data.fields) {
+      if (field.type !== 'single_select' || !field.condition) continue
+      const allowed = new Set(field.constraints.options || [])
+      for (const row of field.conditionParentValueRows) {
+        if (!row.visible) continue
+        const options = uniqueTexts(row.optionText)
+        if (!options.length || options.some(option => !allowed.has(option))) {
+          return `字段「${field.name || '未命名字段'}」在「${row.value}」下的可选项未填完整或不在本字段选项中，请检查后保存`
+        }
+      }
+    }
+    return ''
   },
 
   buildNext(fields) {
@@ -631,6 +659,11 @@ Page({
     if (node.fields.some(field => !field.name ||
       ((field.type === 'single_select' || field.type === 'multi_select') && !field.constraints.options.length))) {
       this.setData({ errorMessage: '请完整填写字段名称和选项' })
+      return
+    }
+    const conditionalError = this.conditionalOptionsError()
+    if (conditionalError) {
+      this.setData({ errorMessage: conditionalError })
       return
     }
     if (this.data.flowSchemaVersion === 2 && (
