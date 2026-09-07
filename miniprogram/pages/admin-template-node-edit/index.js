@@ -1,3 +1,5 @@
+const { createKeyAllocator } = require('../../utils/template-editor-keys')
+
 const FIELD_TYPE_OPTIONS = Object.freeze([
   ['short_text', '短文本'], ['long_text', '长文本'], ['number', '数字'],
   ['boolean', '布尔'], ['date', '日期'], ['single_select', '单选'],
@@ -12,27 +14,21 @@ const NEXT_MODE_OPTIONS = Object.freeze([
   ['single_select', '按本节点单选字段分支'], ['manual', '完成后由处理人决定']
 ])
 
-let uiKeySequence = 0
-function nextUiKey(prefix) {
-  uiKeySequence += 1
-  return `${prefix}-ui-${uiKeySequence}`
-}
-
 function clone(value) { return JSON.parse(JSON.stringify(value)) }
 function hasOwn(value, key) { return Object.prototype.hasOwnProperty.call(value, key) }
 function uniqueTexts(value) {
   return [...new Set(String(value || '').split(/[,，\n]/).map(item => item.trim()).filter(Boolean))]
 }
-function newField(versionTwo = false) {
+function newField(versionTwo, allocateKey) {
   return {
-    _uiKey: nextUiKey('field'), sequence: 0, name: '', description: '',
-    ...(versionTwo ? { fieldKey: nextUiKey('field-key') } : {}),
+    _uiKey: allocateKey('field'), sequence: 0, name: '', description: '',
+    ...(versionTwo ? { fieldKey: allocateKey('field-key') } : {}),
     type: 'short_text', required: false, constraints: {}, optionText: '', conditionEnabled: false
   }
 }
-function newNode(versionTwo = false) {
+function newNode(versionTwo, allocateKey) {
   return {
-    _uiKey: nextUiKey('node'), ...(versionTwo ? { nodeKey: nextUiKey('node-key'), next: { mode: 'end' } } : {}),
+    _uiKey: allocateKey('node'), ...(versionTwo ? { nodeKey: allocateKey('node-key'), next: { mode: 'end' } } : {}),
     sequence: 0, name: '', description: '', workflowMode: 'review',
     activationMode: 'required',
     processorAssignmentMode: 'fixed_accounts',
@@ -93,7 +89,7 @@ Page({
     const childOptions = field.constraints && Array.isArray(field.constraints.options) ? field.constraints.options : []
     return {
       ...field,
-      _uiKey: field._uiKey || field.fieldKey || nextUiKey('field'),
+      _uiKey: field._uiKey || field.fieldKey || this.allocateKey('field'),
       sequence,
       optionText: field.optionText !== undefined
         ? field.optionText
@@ -150,7 +146,13 @@ Page({
     const index = Number.isInteger(parsed) ? parsed : -1
     const context = this.ownerPage.getNodeEditorContext(index)
     const versionTwo = context.flowSchemaVersion === 2 || Boolean(context.node && context.node.next)
-    const node = context.node || newNode(versionTwo)
+    const existing = context.node || {}
+    this.allocateKey = createKeyAllocator([
+      ...(context.nodeOptions || []).flatMap(item => [item.nodeKey, item._uiKey]),
+      existing.nodeKey, existing._uiKey,
+      ...(existing.fields || []).flatMap(field => [field.fieldKey, field._uiKey])
+    ])
+    const node = context.node || newNode(versionTwo, this.allocateKey)
     const isLegacyNode = !hasOwn(node, 'workflowMode')
     const processorUserIds = clone(isLegacyNode ? (node.assigneeUserIds || []) : (node.processorUserIds || []))
     const reviewerUserIds = clone(isLegacyNode ? [] : (node.reviewerUserIds || []))
@@ -162,7 +164,7 @@ Page({
       : 'fixed_accounts'
     this.fixedProcessorUserIds = processorAssignmentMode === 'fixed_accounts' ? processorUserIds.slice() : []
     this.nodeKey = node.nodeKey
-    this.uiKey = node._uiKey || node.nodeKey || nextUiKey('node')
+    this.uiKey = node._uiKey || node.nodeKey || this.allocateKey('node')
     const nodeOptions = clone(context.nodeOptions || [])
     const targetOptions = [{ nodeKey: 'end', name: '结束售后' }, ...nodeOptions.filter(item => item.nodeKey !== node.nodeKey)]
     const fields = clone(node.fields || []).map((field, sequence) => this.decorateField(field, sequence, node.fields || []))
@@ -489,7 +491,7 @@ Page({
   addField() {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     this.refreshFields(this.data.fields.concat({
-      ...newField(this.data.flowSchemaVersion === 2), sequence: this.data.fields.length
+      ...newField(this.data.flowSchemaVersion === 2, this.allocateKey), sequence: this.data.fields.length
     }))
   },
   removeField(event) {
@@ -523,9 +525,33 @@ Page({
     this.refreshFields(moved, { errorMessage: '' })
   },
 
+  fieldsForSave() {
+    // Reconcile only at the save boundary: partial parent-option input must not
+    // erase dependent configuration that may become valid again while typing.
+    return this.data.fields.map((field, index, fields) => {
+      if (!field.condition) return field
+      const parents = fields.filter(item => item.fieldKey === field.condition.parentFieldKey)
+      const parent = parents.length === 1 ? parents[0] : null
+      if (!parent || fields.indexOf(parent) >= index || parent.type !== 'single_select') return field
+      const options = new Set(parent.constraints.options || [])
+      const visibleWhen = field.condition.visibleWhen.filter(value => options.has(value))
+      const condition = { ...field.condition, visibleWhen }
+      if (condition.optionsByParentValue) {
+        condition.optionsByParentValue = Object.fromEntries(Object.entries(condition.optionsByParentValue)
+          .filter(([value]) => options.has(value)))
+      }
+      return {
+        ...field,
+        condition,
+        conditionalOptionTexts: Object.fromEntries(Object.entries(field.conditionalOptionTexts || {})
+          .filter(([value]) => options.has(value)))
+      }
+    })
+  },
+
   normalizedField(field, sequence) {
     const normalized = {
-      _uiKey: field._uiKey || nextUiKey('field'),
+      _uiKey: field._uiKey || this.allocateKey('field'),
       ...(field.fieldKey ? { fieldKey: field.fieldKey } : {}),
       sequence,
       name: String(field.name || '').trim(),
@@ -552,26 +578,43 @@ Page({
       normalized.condition = clone(field.condition)
       if (field.type === 'single_select' && field.conditionalOptionTexts &&
           field.condition.visibleWhen.some(value => hasOwn(field.conditionalOptionTexts, value))) {
-        const existing = normalized.condition.optionsByParentValue || {}
-        normalized.condition.optionsByParentValue = Object.fromEntries(field.condition.visibleWhen.map(value => [
-          value, hasOwn(field.conditionalOptionTexts, value)
-            ? uniqueTexts(field.conditionalOptionTexts[value])
-            : hasOwn(existing, value) ? existing[value] : normalized.constraints.options.slice()
-        ]))
+        const hasExplicitMapping = hasOwn(normalized.condition, 'optionsByParentValue')
+        const mapping = { ...(normalized.condition.optionsByParentValue || {}) }
+        for (const value of field.condition.visibleWhen) {
+          if (hasOwn(field.conditionalOptionTexts, value)) mapping[value] = uniqueTexts(field.conditionalOptionTexts[value])
+          else if (!hasExplicitMapping) mapping[value] = normalized.constraints.options.slice()
+        }
+        normalized.condition.optionsByParentValue = mapping
       }
     }
     return normalized
   },
 
-  conditionalOptionsError() {
-    for (const field of this.data.fields) {
-      if (field.type !== 'single_select' || !field.condition) continue
+  conditionalOptionsError(fields = this.fieldsForSave().map((field, sequence) => this.normalizedField(field, sequence))) {
+    for (const [index, field] of fields.entries()) {
+      if (!field.condition) continue
+      const parents = fields.filter(item => item.fieldKey === field.condition.parentFieldKey)
+      const parent = parents.length === 1 ? parents[0] : null
+      if (!parent || fields.indexOf(parent) >= index || parent.type !== 'single_select') {
+        return `字段「${field.name || '未命名字段'}」的父字段必须是唯一的前置单选字段，请重新配置显示条件`
+      }
+      if (!field.condition.visibleWhen.length) {
+        return `字段「${field.name || '未命名字段'}」的显示条件没有有效父选项，请至少选择一个当前父选项`
+      }
+      if (!field.condition.optionsByParentValue) continue
+      if (field.type !== 'single_select') {
+        return `字段「${field.name || '未命名字段'}」只有单选字段才能配置条件候选项，请重新配置显示条件`
+      }
+      const extraValue = Object.keys(field.condition.optionsByParentValue)
+        .find(value => !field.condition.visibleWhen.includes(value))
+      if (extraValue !== undefined) {
+        return `字段「${field.name || '未命名字段'}」在未选择的父选项「${extraValue}」下仍有候选项配置，请重新配置显示条件`
+      }
       const allowed = new Set(field.constraints.options || [])
-      for (const row of field.conditionParentValueRows) {
-        if (!row.visible) continue
-        const options = uniqueTexts(row.optionText)
+      for (const value of field.condition.visibleWhen) {
+        const options = field.condition.optionsByParentValue[value] || []
         if (!options.length || options.some(option => !allowed.has(option))) {
-          return `字段「${field.name || '未命名字段'}」在「${row.value}」下的可选项未填完整或不在本字段选项中，请检查后保存`
+          return `字段「${field.name || '未命名字段'}」在「${value}」下的可选项未填完整或不在本字段选项中，请检查后保存`
         }
       }
     }
@@ -601,7 +644,7 @@ Page({
   },
 
   buildNodeForSave() {
-    const fields = this.data.fields.map((field, sequence) => this.normalizedField(field, sequence))
+    const fields = this.fieldsForSave().map((field, sequence) => this.normalizedField(field, sequence))
     const node = {
       _uiKey: this.uiKey,
       ...(this.nodeKey ? { nodeKey: this.nodeKey } : {}),
@@ -661,7 +704,7 @@ Page({
       this.setData({ errorMessage: '请完整填写字段名称和选项' })
       return
     }
-    const conditionalError = this.conditionalOptionsError()
+    const conditionalError = this.conditionalOptionsError(node.fields)
     if (conditionalError) {
       this.setData({ errorMessage: conditionalError })
       return
@@ -687,6 +730,7 @@ Page({
     this.setData({ submitting: true, errorMessage: '' })
     try {
       this.ownerPage.acceptNodeFromEditor(this.data.index, node)
+      this.refreshFields(this.fieldsForSave())
       wx.navigateBack({ delta: 1 })
     } catch (error) {
       this.committed = false

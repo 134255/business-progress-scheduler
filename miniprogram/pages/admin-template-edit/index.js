@@ -1,11 +1,7 @@
 const templates = require('../../services/templates')
 const adminUsers = require('../../services/admin-users')
-
-let uiKeySequence = 0
-function nextUiKey(prefix) {
-  uiKeySequence += 1
-  return `${prefix}-ui-${uiKeySequence}`
-}
+const { createKeyAllocator } = require('../../utils/template-editor-keys')
+const { templateDefinitionIssue } = require('../../utils/template-definition-diagnostics')
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -29,7 +25,8 @@ function orderedNodes(nodes) {
 }
 
 function withNodeUiKeys(nodes) {
-  return nodes.map(node => ({ ...node, _uiKey: node._uiKey || node.nodeKey || nextUiKey('node') }))
+  const allocateKey = createKeyAllocator(nodes.flatMap(node => [node.nodeKey, node._uiKey]))
+  return nodes.map(node => ({ ...node, _uiKey: node._uiKey || node.nodeKey || allocateKey('node') }))
 }
 
 function cleanField(field, sequence) {
@@ -182,7 +179,7 @@ Page({
       assigneeOptions: clone(this.data.assigneeOptions),
       node: node ? clone(node) : null,
       flowSchemaVersion: this.data.flowSchemaVersion,
-      nodeOptions: this.data.nodes.map(item => ({ nodeKey: item.nodeKey || item._uiKey, name: item.name || '未命名节点' })),
+      nodeOptions: this.data.nodes.map(item => ({ nodeKey: item.nodeKey || item._uiKey, _uiKey: item._uiKey, name: item.name || '未命名节点' })),
       optionalTailExistsOutsideCurrentNode: this.data.nodes.some((item, itemIndex) =>
         itemIndex !== index && item.activationMode === 'optional_tail')
     }
@@ -203,7 +200,10 @@ Page({
   acceptNodeFromEditor(index, node) {
     if (!this.requireSuperAdmin() || this.data.readOnly || !node) return
     const nodes = this.data.nodes.slice()
-    if (this.data.flowSchemaVersion === 2 && !node.nodeKey) node.nodeKey = node._uiKey || nextUiKey('node')
+    if (this.data.flowSchemaVersion === 2 && !node.nodeKey) {
+      const allocateKey = createKeyAllocator(nodes.flatMap(item => [item.nodeKey, item._uiKey]))
+      node.nodeKey = node._uiKey || allocateKey('node')
+    }
     if (this.data.flowSchemaVersion === 2 && !node.next) node.next = { mode: 'end' }
     if (this.data.flowSchemaVersion !== 2 && node.activationMode === 'optional_tail' && nodes.some((item, itemIndex) =>
       itemIndex !== index && item.activationMode === 'optional_tail')) {
@@ -297,6 +297,11 @@ Page({
     }
     if (!definition.nodes.length) {
       this.setData({ errorMessage: '请至少添加一个节点' })
+      return
+    }
+    const issue = templateDefinitionIssue(definition)
+    if (issue) {
+      this.setData({ errorMessage: issue })
       return
     }
     this.setData({ submitting: true, errorMessage: '' })

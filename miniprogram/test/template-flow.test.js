@@ -212,6 +212,50 @@ test('version 2 new node accepts a name and returns it to the template draft', a
   }
 })
 
+test('reloaded node editor allocates field keys outside existing stable and UI keys', () => {
+  const page = createNodeEditor({ users: [], flowSchemaVersion: 2,
+    node: storedNode({ workflowMode: 'review', next: { mode: 'single_select', fieldKey: 'field-key-ui-2',
+      optionTargets: { A: 'end' } }, fields: [
+      { fieldKey: 'field-key-ui-2', _uiKey: 'field-ui-1', sequence: 0, name: '父字段',
+        type: 'single_select', required: true, constraints: { options: ['A'] } },
+      { fieldKey: 'dependent', _uiKey: 'field-ui-3', sequence: 1, name: '子字段',
+        type: 'short_text', required: false, constraints: {},
+        condition: { parentFieldKey: 'field-key-ui-2', visibleWhen: ['A'] } }
+    ] }) })
+  const occupied = new Set(['field-key-ui-2', 'field-ui-1', 'dependent', 'field-ui-3'])
+  page.addField()
+  const added = page.data.fields[2]
+  assert.equal(occupied.has(added.fieldKey), false)
+  assert.equal(occupied.has(added._uiKey), false)
+  assert.notEqual(added.fieldKey, added._uiKey)
+  const saved = page.buildNodeForSave()
+  assert.equal(saved.fields[0].fieldKey, 'field-key-ui-2')
+  assert.equal(saved.fields[1].condition.parentFieldKey, 'field-key-ui-2')
+  assert.equal(saved.next.fieldKey, 'field-key-ui-2')
+})
+
+test('reloaded node editor allocates new node keys outside existing template keys', () => {
+  const page = createNodeEditor({ users: [], flowSchemaVersion: 2,
+    nodeOptions: [{ nodeKey: 'node-key-ui-2', _uiKey: 'node-ui-1', name: '已有节点' }] })
+  assert.notEqual(page.nodeKey, 'node-key-ui-2')
+  assert.notEqual(page.uiKey, 'node-ui-1')
+  assert.notEqual(page.nodeKey, page.uiKey)
+})
+
+test('loading and saving duplicate existing field keys never silently rewrites references', () => {
+  const page = createNodeEditor({ users: [], flowSchemaVersion: 2,
+    node: storedNode({ workflowMode: 'review', next: { mode: 'end' }, fields: [
+      { fieldKey: 'shared', sequence: 0, name: '相同名称', type: 'single_select', required: false,
+        constraints: { options: ['A'] } },
+      { fieldKey: 'shared', sequence: 1, name: '相同名称', type: 'date', required: false, constraints: {} },
+      { fieldKey: 'child', sequence: 2, name: '子字段', type: 'short_text', required: false, constraints: {},
+        condition: { parentFieldKey: 'shared', visibleWhen: ['A'] } }
+    ] }) })
+  const saved = page.buildNodeForSave()
+  assert.deepEqual(saved.fields.map(field => field.fieldKey), ['shared', 'shared', 'child'])
+  assert.equal(saved.fields[2].condition.parentFieldKey, 'shared')
+})
+
 test('version 2 enabled node retains its name and rejects rename and save', async () => {
   let accepted = 0
   const page = createNodeEditor({ users: [], flowSchemaVersion: 2, readOnly: true,
@@ -365,6 +409,118 @@ function conditionalOptionInput(page, value, parentValue = 'S1', index = 1) {
 function conditionalOptionText(page, value = 'S1', index = 1) {
   return page.data.fields[index].conditionParentValueRows.find(row => row.value === value).optionText
 }
+
+test('saving removes obsolete parent conditions without destroying in-progress option edits', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  conditionalOptionInput(page, '未完成草稿', 'S1')
+  page.onFieldOptionsInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: 'S' } })
+  assert.deepEqual(page.data.fields[1].condition.visibleWhen, ['S1', 'S2'])
+  assert.equal(page.data.fields[1].conditionalOptionTexts.S1, '未完成草稿')
+  page.onFieldOptionsInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: 'S1,S2' } })
+  assert.equal(conditionalOptionText(page), '未完成草稿')
+  page.onFieldOptionsInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: 'S2' } })
+  await page.submit()
+  assert.equal(accepted.length, 1)
+  assert.deepEqual(accepted[0].fields[1].condition, {
+    parentFieldKey: 'model', visibleWhen: ['S2'], optionsByParentValue: { S2: ['Black'] }
+  })
+  assert.equal(Object.hasOwn(page.data.fields[1].conditionalOptionTexts || {}, 'S1'), false)
+  const { normalizeTemplateNode } = require('../../cloudfunctions/businessApi/lib/template-domain')
+  assert.doesNotThrow(() => normalizeTemplateNode(accepted[0]))
+})
+
+test('saving rejects a condition with no remaining selected parent values', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  page.onFieldOptionsInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: '替代值' } })
+  await page.submit()
+  assert.equal(accepted.length, 0)
+  assert.match(page.data.errorMessage, /颜色/)
+  assert.match(page.data.errorMessage, /显示条件|父选项/)
+  assert.ok(page.data.fields[1].condition, 'must not downgrade an invalid condition to unconditional')
+})
+
+test('saving rejects a condition whose parent changed away from single select', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  page.onFieldTypeChange({ currentTarget: { dataset: { index: 0 } }, detail: { value: 0 } })
+  await page.submit()
+  assert.equal(accepted.length, 0)
+  assert.match(page.data.errorMessage, /颜色/)
+  assert.match(page.data.errorMessage, /父字段|单选/)
+})
+
+test('saving never fills a missing explicit conditional mapping from the base options', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  page.updateField(1, { condition: { parentFieldKey: 'model', visibleWhen: ['S1', 'S2'],
+    optionsByParentValue: { S1: ['石墨灰'] } } })
+  conditionalOptionInput(page, '石墨灰')
+  await page.submit()
+  assert.equal(accepted.length, 0)
+  assert.match(page.data.errorMessage, /颜色/)
+  assert.match(page.data.errorMessage, /S2/)
+})
+
+test('saving rejects an extra mapping for a still-existing but unselected parent value', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  page.updateField(1, { condition: { parentFieldKey: 'model', visibleWhen: ['S1'],
+    optionsByParentValue: { S1: ['石墨灰'], S2: ['Black'] } } })
+  await page.submit()
+  assert.equal(accepted.length, 0)
+  assert.match(page.data.errorMessage, /颜色/)
+  assert.match(page.data.errorMessage, /S2/)
+})
+
+test('failed saving preserves every raw conditional draft including obsolete parent rows', async () => {
+  const accepted = []
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  conditionalOptionInput(page, '旧值未完成', 'S1')
+  conditionalOptionInput(page, '当前值未完成', 'S2')
+  page.onFieldOptionsInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: 'S2' } })
+  const before = JSON.parse(JSON.stringify(page.data.fields))
+  await page.submit()
+  assert.equal(accepted.length, 0)
+  assert.match(page.data.errorMessage, /颜色.*S2/)
+  assert.deepEqual(page.data.fields, before)
+})
+
+test('failed handoff to the template page preserves obsolete conditional input drafts', async () => {
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: () => { throw new Error('handoff failed') } })
+  conditionalOptionInput(page, '旧值未完成', 'S1')
+  page.onFieldOptionsInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: 'S2' } })
+  const before = JSON.parse(JSON.stringify(page.data.fields))
+  await page.submit()
+  assert.match(page.data.errorMessage, /保存节点失败/)
+  assert.deepEqual(page.data.fields, before)
+  assert.equal(page.committed, false)
+})
+
+test('saving cleans multi-level conditions by stable keys even with same-name fields', async () => {
+  const accepted = []
+  const page = createNodeEditor({ users: [], flowSchemaVersion: 2,
+    acceptNodeFromEditor: (index, node) => accepted.push(node),
+    node: storedNode({ workflowMode: 'review', processorUserIds: ['processor-1'], reviewerUserIds: [],
+      next: { mode: 'end' }, fields: [
+        { fieldKey: 'root', sequence: 0, name: '相同名称', type: 'single_select', required: false,
+          constraints: { options: ['A'] } },
+        { fieldKey: 'middle', sequence: 1, name: '相同名称', type: 'single_select', required: false,
+          constraints: { options: ['B'] }, condition: { parentFieldKey: 'root', visibleWhen: ['A', 'old-A'],
+            optionsByParentValue: { A: ['B'], 'old-A': [] } } },
+        { fieldKey: 'leaf', sequence: 2, name: '末级', type: 'short_text', required: false, constraints: {},
+          condition: { parentFieldKey: 'middle', visibleWhen: ['B', 'old-B'] } }
+      ] }) })
+  await page.submit()
+  assert.equal(accepted.length, 1)
+  assert.deepEqual(accepted[0].fields[1].condition, {
+    parentFieldKey: 'root', visibleWhen: ['A'], optionsByParentValue: { A: ['B'] }
+  })
+  assert.deepEqual(accepted[0].fields[2].condition, { parentFieldKey: 'middle', visibleWhen: ['B'] })
+  const { normalizeTemplateNode } = require('../../cloudfunctions/businessApi/lib/template-domain')
+  assert.doesNotThrow(() => normalizeTemplateNode(accepted[0]))
+})
 
 test('conditional option typing preserves partial words separators and deletion through unrelated refreshes', () => {
   const page = conditionalOptionEditor()

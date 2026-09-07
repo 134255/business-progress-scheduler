@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
 
 // Use the installed WeChat compiler, not a hand-written approximation of wx:if.
 // Set WECHAT_WCC_PATH to the trusted developer tools' wcc executable before running.
@@ -17,6 +18,7 @@ const compiled = execFileSync(compilerPath, [`${pagePath}.wxml`], {
 let defaultData;
 let pageDefinition;
 vm.runInNewContext(fs.readFileSync(path.join(miniProgramRoot, `${pagePath}.js`), 'utf8'), {
+  require: createRequire(path.join(miniProgramRoot, `${pagePath}.js`)),
   Page: definition => { pageDefinition = definition; defaultData = definition.data; }, module: { exports: {} },
   getApp: () => ({ globalData: { currentUser: { role: 'super_admin', status: 'active' } } })
 }, { timeout: 5000 });
