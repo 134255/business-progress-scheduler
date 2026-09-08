@@ -276,6 +276,77 @@ test('连续输入不同字段时每次只原子更新一次且保留其他字�
   assert.equal(page.data.fieldValues.detail, '第二个字段')
 })
 
+for (const [fieldKey, fieldType] of [['summary', 'short_text'], ['detail', 'long_text']]) {
+  test(`${fieldType} 输入回调不返回替换值，连续输入和删除保持文本及其他字段`, async () => {
+    global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+    global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向') }
+    const page = loadPage({
+      getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'], reviewMode: 'any' })),
+      getNodeHistory: async () => ({ canSubmit: true, history: [] })
+    })
+    await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+    page.setData({ 'fieldValues.level': '高', 'fieldValues.confirmed': false })
+    const values = fieldType === 'long_text'
+      ? ['测', '测试文本', '测试文本\n第二行', '测试文', '', 'true', '重新填写']
+      : ['测', '测试文本', '测试文', '', 'true', '重新填写']
+
+    for (const value of values) {
+      const result = page.onFieldInput({ currentTarget: { dataset: { fieldkey: fieldKey } }, detail: { value } })
+      assert.equal(result, undefined, 'bindinput 不应把内部成功标志返回给原生输入框')
+      assert.equal(page.data.fieldValues[fieldKey], value)
+      assert.equal(typeof page.data.fieldValues[fieldKey], 'string')
+      assert.equal(page.data.fieldValues.level, '高')
+      assert.equal(page.data.fieldValues.confirmed, false)
+      assert.equal(page.data.draftDirty, true)
+    }
+  })
+}
+
+test('只读、审核草稿锁定和提交中拒绝文本输入，且不向原生输入框返回 false', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向') }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'], reviewMode: 'any' })),
+    getNodeHistory: async () => ({ canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({ 'fieldValues.detail': '保留原始文本' })
+  for (const lock of ['readOnly', 'reviewDraftLocked', 'submitting']) {
+    page.setData({ readOnly: false, reviewDraftLocked: false, submitting: false, [lock]: true })
+    const result = page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'detail' } }, detail: { value: '不应写入' } })
+    assert.equal(result, undefined, `${lock} 不应向输入框返回布尔值`)
+    assert.equal(page.data.fieldValues.detail, '保留原始文本')
+  }
+})
+
+test('待确认的失效选项清理不把 Promise 返回给文本输入框，取消后原值不变', async () => {
+  let modal
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showModal: options => { modal = options }
+  }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ workflowMode: 'review', processorUserIds: ['account-1'], reviewerUserIds: ['account-2'], reviewMode: 'any' })),
+    getNodeHistory: async () => ({ canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({ 'fieldValues.detail': '原始文本', 'fieldValues.level': '失效选项' })
+
+  const event = { currentTarget: { dataset: { fieldkey: 'detail' } }, detail: { value: '修改后文本' } }
+  assert.equal(page.onFieldInput(event), undefined)
+  assert.ok(modal, '失效选项仍需确认，不能绕过原有清理保护')
+  assert.equal(page.data.fieldValues.detail, '原始文本')
+  modal.success({ confirm: false, cancel: true })
+  assert.equal(page.data.fieldValues.detail, '原始文本')
+  assert.equal(page.data.fieldValues.level, '失效选项')
+
+  assert.equal(page.onFieldInput(event), undefined)
+  modal.success({ confirm: true, cancel: false })
+  assert.equal(page.data.fieldValues.detail, '修改后文本')
+  assert.equal(page.data.fieldValues.level, null)
+})
+
 test('本地草稿未保存时页面重新显示不得用服务端旧草稿覆盖，干净状态仍会刷新', async () => {
   let lineReads = 0
   let historyReads = 0

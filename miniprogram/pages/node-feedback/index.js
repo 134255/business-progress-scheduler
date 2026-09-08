@@ -481,7 +481,8 @@ Page({
 
   onFieldInput(event) {
     if (this.data.readOnly || this.data.reviewDraftLocked) return
-    return this.applyFieldValue(event.currentTarget.dataset.fieldkey, event.detail.value)
+    // Keep internal boolean/Promise results out of the native bindinput return channel.
+    this.applyFieldValue(event.currentTarget.dataset.fieldkey, event.detail.value)
   },
 
   onNumberInput(event) {
