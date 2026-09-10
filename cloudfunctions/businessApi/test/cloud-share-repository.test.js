@@ -36,11 +36,12 @@ function seed(evidenceCount = 2) {
   }
 }
 
-function harness(evidenceCount = 2, seeded = seed(evidenceCount), databaseOptions = {}) {
+function harness(evidenceCount = 2, seeded = seed(evidenceCount), databaseOptions = {}, fileReferenceContext) {
   const fake = createFakeCloudDatabase(seeded, databaseOptions)
   const tempCalls = []
   const repository = createCloudShareRepository({
     db: fake.db,
+    fileReferenceContext,
     cloud: {
       async getTempFileURL({ fileList }) {
         tempCalls.push(fileList)
@@ -51,6 +52,27 @@ function harness(evidenceCount = 2, seeded = seed(evidenceCount), databaseOption
   })
   return { fake, repository, tempCalls }
 }
+
+test('existing protected share snapshots resolve the same historical bucket-only evidence object', async () => {
+  const documents = seed(1)
+  const evidenceId = `evidence-${'1'.repeat(64)}`
+  Object.assign(documents.evidences[0], { _id: evidenceId, extension: 'jpg',
+    fileId: `cloud://bucket-1234567890/evidence-uploads/line-1/node-1/${evidenceId}.jpg` })
+  documents.node_review_rounds[0].evidenceIds = [evidenceId]
+  const { fake, repository, tempCalls } = harness(1, documents, {},
+    () => ({ environmentId: 'env-test', bucket: 'bucket-1234567890' }))
+  const token = Buffer.alloc(32, 6).toString('base64url')
+  await repository.createSnapshot({ actor: { _id: 'processor', status: 'active' },
+    businessLineId: 'line-1', nodeId: 'node-1', token, createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: '1'.repeat(64), inputHash: '2'.repeat(64) })
+  const before = fake.documents('evidences')
+  const result = await repository.getPublicSnapshot({ token, cursor: '', pageSize: 40 })
+  assert.equal(result.evidences.length, 1)
+  assert.equal(tempCalls[0][0].fileID,
+    `cloud://env-test.bucket-1234567890/evidence-uploads/line-1/node-1/${evidenceId}.jpg`)
+  assert.deepEqual(fake.documents('evidences'), before)
+})
 
 test('处理人创建不可变分享快照并以40条分块处理105个凭证', async () => {
   const { fake, repository } = harness(105)

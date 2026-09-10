@@ -554,7 +554,7 @@ test('售后检索路由只传递白名单查询字段和受信账号', async ()
   await harness.api.main({
     action: 'listBusinessLines',
     payload: {
-      keyword: '客户 合同', pageSize: 10, cursor: 'safe',
+      keyword: '客户 合同', pageSize: 10, cursor: 'safe', status: 'completed', scope: 'mine',
       actorId: 'forged', role: 'super_admin', visibleBusinessLineIds: ['foreign']
     }
   })
@@ -562,9 +562,61 @@ test('售后检索路由只传递白名单查询字段和受信账号', async ()
     actor: {
       _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
     },
-    query: { keyword: '客户 合同', pageSize: 10, cursor: 'safe' }
+    query: { keyword: '客户 合同', pageSize: 10, cursor: 'safe', status: 'completed', scope: 'mine' }
   }])
 })
+
+for (const role of ['user', 'super_admin']) {
+  for (const [status, expectedIds] of [
+    ['active', ['line-10', 'line-08', 'line-06', 'line-04', 'line-02', 'line-00']],
+    ['completed', ['line-11', 'line-09', 'line-07', 'line-05', 'line-03', 'line-01']]
+  ]) {
+    test(`状态卡入口 ${role}/${status} 无需检索条件即返回有权查看的售后并正确分页`, async () => {
+      const { createBusinessService } = require('../lib/business-service')
+      const { createCloudBusinessRepository } = require('../lib/cloud-business-repository')
+      const user = { _id: 'actor-1', username: 'fixture', status: 'active', role }
+      const fake = createFakeCloudDatabase({
+        users: [user],
+        business_lines: Array.from({ length: 14 }, (_, index) => ({
+          _id: `line-${String(index).padStart(2, '0')}`, name: '测试售后', code: `BL-${index}`,
+          status: index % 2 ? 'completed' : 'active', updatedAt: new Date(2026, 7, index + 1),
+          managerUserIds: ['other'], memberUserIds: index < 12 ? ['actor-1'] : ['other']
+        }))
+      })
+      const service = createBusinessService({
+        repository: createCloudBusinessRepository({ db: fake.db }),
+        workTimeService: { async tryAddWorkMinutes() { throw new Error('list must not calculate work time') } }
+      })
+      const { api } = createRouteHarness({ user, businessService: service })
+      const payload = { keyword: '', startDate: '', endDate: '', page: 1, pageSize: 20, status, scope: 'mine' }
+      const first = await api.main({ action: 'listBusinessLines', payload })
+      assert.equal(first.ok, true, JSON.stringify(first))
+      assert.deepEqual(first.data.items.map(item => item._id), expectedIds)
+      assert.ok(first.data.items.every(item => item.status === status))
+      assert.equal(first.data.total, 6)
+      assert.equal(first.data.hasMore, false)
+
+      const pageOne = await api.main({ action: 'listBusinessLines', payload: { ...payload, pageSize: 5 } })
+      const pageTwo = await api.main({ action: 'listBusinessLines', payload: { ...payload, pageSize: 5, page: 2 } })
+      assert.equal(pageOne.ok, true)
+      assert.equal(pageTwo.ok, true)
+      assert.deepEqual(pageOne.data.items.map(item => item._id), expectedIds.slice(0, 5))
+      assert.deepEqual(pageTwo.data.items.map(item => item._id), expectedIds.slice(5))
+      assert.equal(pageOne.data.total, 6)
+      assert.equal(pageOne.data.hasMore, true)
+      assert.equal(pageTwo.data.hasMore, false)
+
+      const all = await api.main({ action: 'listBusinessLines', payload: { pageSize: 20 } })
+      assert.equal(all.ok, true)
+      assert.equal(all.data.total, role === 'super_admin' ? 14 : 12)
+      for (const invalid of [{ status: 'deleted' }, { scope: 'all' }, { extra: true }]) {
+        const rejected = await api.main({ action: 'listBusinessLines', payload: { ...payload, ...invalid } })
+        assert.equal(rejected.ok, false)
+        assert.equal(rejected.code, 'VALIDATION_ERROR')
+      }
+    })
+  }
+}
 
 test('待处理与概览路由剥离客户端身份并委托受保护服务', async () => {
   const calls = []

@@ -31,3 +31,7 @@ CloudBase 同时存在 100 次事务文档操作上限和保守索引键预算�
 - 真实 CloudBase 索引选择、代际并发、一次性票据、历史回填、超级管理员降权和普通账号存在性隔离必须单独人工验收。
 
 完整规则见 `docs/superpowers/specs/2026-08-25-authorized-after-sales-content-search-design.md`。
+
+## 2026-09-10 补充
+
+`ADR-0017-request-driven-search-recovery.md` 增加关键词请求驱动的有界索引恢复，补充上文“历史回填、失败恢复只接受 Timer”的限制；旧代清理仍仅可信 Timer，默认触发器不变。索引增加独立格式版本，防止修复代码部署后继续把缺内容的旧代视为当前；未完成或失败恢复必须向客户端提供诚实状态。

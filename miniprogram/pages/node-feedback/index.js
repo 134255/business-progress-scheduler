@@ -27,13 +27,26 @@ const SAFE_UPLOAD_ERROR_CODES = new Set([
   'UNSUPPORTED_FILE_TYPE', 'EVIDENCE_TOTAL_LIMIT_EXCEEDED', 'EVIDENCE_UPLOAD_EXPIRED',
   'EVIDENCE_UPLOAD_MISMATCH', 'EVIDENCE_UPLOAD_NOT_FOUND', 'EVIDENCE_UPLOAD_CANCELLED'
 ])
+const UPLOAD_DIAGNOSTIC_CODES = new Set([
+  ...SAFE_UPLOAD_ERROR_CODES, 'EVIDENCE_UPLOAD_FAILED', 'EVIDENCE_UPLOAD_UNAVAILABLE',
+  'FORBIDDEN', 'VERSION_CONFLICT', 'NODE_VERSION_CONFLICT', 'BUSINESS_NOT_ACTIVE',
+  'FEEDBACK_TOTAL_TOO_LARGE', 'AccessDenied', 'SignatureDoesNotMatch',
+  'RequestError', 'NetworkError', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'UPLOAD_FAILED',
+  'ExpiredToken', 'ExpiredTokenException', 'InvalidSecurityToken', 'RequestTimeTooSkewed'
+])
+const UPLOAD_STAGE_LABELS = Object.freeze({ authorize: '申请上传授权', transfer: '文件传输', finalize: '文件核验' })
 
 function safeUploadError(error) {
-  const code = error && typeof error.code === 'string' ? error.code : 'EVIDENCE_UPLOAD_FAILED'
+  const code = error && UPLOAD_DIAGNOSTIC_CODES.has(error.code) ? error.code : 'EVIDENCE_UPLOAD_FAILED'
   const message = SAFE_UPLOAD_ERROR_CODES.has(code)
     ? safeErrorMessage(error, '上传失败，请重试')
     : '上传失败，请重试'
-  return Object.assign(new Error(message), { code })
+  const stage = error && Object.prototype.hasOwnProperty.call(UPLOAD_STAGE_LABELS, error.uploadStage)
+    ? UPLOAD_STAGE_LABELS[error.uploadStage] : ''
+  const status = error && error.statusCode
+  const httpStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? ` · HTTP ${status}` : ''
+  const detail = stage ? `（${stage} · ${code}${httpStatus}）` : ''
+  return Object.assign(new Error(message + detail), { code })
 }
 
 function effectiveClientEvidenceTypes(requiresEvidence, allowedTypes) {
@@ -252,7 +265,7 @@ Page({
   },
 
   onShow() {
-    if (!this.data.lineId || !this.hasLoaded || this.data.draftDirty ||
+    if (!this.data.lineId || !this.hasLoaded || this.evidencePickerPending > 0 || this.data.draftDirty ||
         this.data.submitting || this.data.reviewDraftLocked) return
     return this.loadData()
   },
@@ -628,21 +641,75 @@ Page({
     }
   },
 
+  invokeEvidencePicker(api, options) {
+    const actorId = currentUserId()
+    const { lineId, nodeId, expectedNodeVersion } = this.data
+    let pending = false
+    const release = () => {
+      if (!pending) return
+      pending = false
+      this.evidencePickerPending -= 1
+    }
+    const stillCurrent = () => this.pageAlive && actorId === currentUserId() && actorId === this.loadActorId &&
+      lineId === this.data.lineId && nodeId === this.data.nodeId && expectedNodeVersion === this.data.expectedNodeVersion &&
+      !this.data.readOnly && !this.data.reviewDraftLocked && !this.data.submitting
+    if (!stillCurrent()) return
+    const fail = error => {
+      release()
+      if (!stillCurrent()) return
+      const message = error && typeof error.errMsg === 'string' ? error.errMsg : ''
+      if (/\bcancel(?:led)?\b/i.test(message)) return
+      wx.showToast({ title: '无法完成文件选择，请检查微信版本及系统授权后重试', icon: 'none' })
+    }
+    try {
+      if (typeof wx[api] !== 'function' || typeof wx.canIUse === 'function' && !wx.canIUse(api)) {
+        fail()
+        return
+      }
+      this.evidencePickerPending = (this.evidencePickerPending || 0) + 1
+      pending = true
+      wx[api]({ ...options, success: result => { release(); if (stillCurrent()) options.success(result) }, fail })
+    } catch (error) {
+      fail()
+    }
+  },
+
   chooseMediaEvidence() {
     if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
     if (isDesktopPlatform()) {
-      wx.chooseMessageFile({
-        count: 100,
-        type: 'all',
-        success: result => this.addSelectedFiles((result.tempFiles || []).map((file, index) => ({
-          name: displayName(file, `media-${index + 1}`),
-          path: file.path || file.tempFilePath,
-          size: file.size
-        })))
+      // chooseMessageFile selects chat attachments, not local media.
+      this.invokeEvidencePicker('showActionSheet', {
+        itemList: ['选择本机图片', '选择本机视频'],
+        success: result => {
+          if (result.tapIndex === 0) {
+            this.invokeEvidencePicker('chooseImage', {
+              count: 9,
+              sourceType: ['album'],
+              sizeType: ['original'],
+              success: selected => this.addSelectedFiles((selected.tempFiles || []).map((file, index) => ({
+                name: displayName(file, `image-${index + 1}.jpg`),
+                path: file.path,
+                size: file.size,
+                category: 'image'
+              })))
+            })
+          } else if (result.tapIndex === 1) {
+            this.invokeEvidencePicker('chooseVideo', {
+              sourceType: ['album'],
+              compressed: false,
+              success: selected => this.addSelectedFiles([{
+                name: displayName(selected, 'video.mp4'),
+                path: selected.tempFilePath,
+                size: selected.size,
+                category: 'video'
+              }])
+            })
+          }
+        }
       })
       return
     }
-    wx.chooseMedia({
+    this.invokeEvidencePicker('chooseMedia', {
       count: 9,
       mediaType: ['image', 'video'],
       sourceType: ['album', 'camera'],
@@ -662,7 +729,7 @@ Page({
 
   choosePdfEvidence() {
     if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
-    wx.chooseMessageFile({
+    this.invokeEvidencePicker('chooseMessageFile', {
       count: 100,
       type: 'file',
       extension: ['pdf'],
@@ -707,6 +774,8 @@ Page({
         if (typeof globalThis === 'object' && typeof globalThis.window === 'undefined') globalThis.window = globalThis
         const COS = require('../../vendor/cos-wx-sdk-v5')
         return new COS({
+          // The scoped server grant permits PutObject, not PostObject.
+          SimpleUploadMethod: 'putObject',
           getAuthorization: (request, callback) => {
             Promise.resolve(options.getAuthorization()).then(callback).catch(error => {
               options.onAuthorizationError(error)
@@ -1055,11 +1124,14 @@ Page({
       progressExpectedNodeVersion: this.progressExpectedNodeVersion,
       reviewExpectedNodeVersion: this.reviewExpectedNodeVersion
     })
+    const previouslyLocked = this.data.reviewDraftLocked
+    let reviewRequestDispatched = false
     this.setData({ submitting: true, reviewDraftLocked: true, errorMessage: '' })
     try {
       if (!useStoredDraft) {
         const payload = savedProgress ? operation.draftPayload : await this.progressPayload(operation)
         if (!this.writeStillCurrent(operation)) return
+        reviewRequestDispatched = true
         const result = await businessService.saveAndSubmitNodeForReview({
           businessLineId: operation.lineId,
           nodeId: operation.nodeId,
@@ -1077,6 +1149,7 @@ Page({
           throw new Error('提交审核结果无效，请刷新后重试')
         }
       } else {
+        reviewRequestDispatched = true
         await businessService.submitNodeForReview({
           businessLineId: operation.lineId,
           nodeId: operation.nodeId,
@@ -1091,7 +1164,12 @@ Page({
       this.finishReviewSubmission(operation)
     } catch (error) {
       if (this.writeStillCurrent(operation)) {
-        const committed = await this.reviewSubmissionVisible(operation)
+        // Upload failure cannot have submitted a new review. Keep the local
+        // draft editable; only an already-dispatched write needs replay locks.
+        if (!reviewRequestDispatched && !previouslyLocked) {
+          this.setData({ reviewDraftLocked: false, draftDirty: true })
+        }
+        const committed = reviewRequestDispatched && await this.reviewSubmissionVisible(operation)
         if (committed) this.finishReviewSubmission(operation)
         else if (this.writeStillCurrent(operation)) {
           wx.showToast({ title: safeErrorMessage(error, '提交审核失败，请重试'), icon: 'none' })

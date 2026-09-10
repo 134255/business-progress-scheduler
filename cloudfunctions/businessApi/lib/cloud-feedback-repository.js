@@ -12,6 +12,7 @@ const { advanceSearchVersion, currentSearchVersion } = require('./search-version
 const { classifyCompletedNodeTransition } = require('./optional-tail-domain')
 const { resolveCompletedNodeTarget } = require('./workflow-routing-domain')
 const { fitsIndexedAccountArray } = require('./index-key-budget')
+const { boundedMap } = require('./bounded-map')
 
 const COLLECTIONS = Object.freeze({
   users: 'users', lines: 'business_lines', nodes: 'business_nodes',
@@ -1345,9 +1346,10 @@ function createCloudFeedbackRepository({
     }
   }
 
-  async function readAll(buildQuery) {
+  async function readAll(buildQuery, signal) {
     const items = []
     for (let offset = 0; ; offset += QUERY_PAGE_SIZE) {
+      if (signal) signal.throwIfStopped()
       const response = await buildQuery().orderBy('_id', 'asc').skip(offset).limit(QUERY_PAGE_SIZE).get()
       const page = response.data || []
       items.push(...page)
@@ -1512,9 +1514,9 @@ function createCloudFeedbackRepository({
       if (revision) return revision
       return String(left._id).localeCompare(String(right._id))
     })
-    const history = []
-    for (const feedback of visible) {
-      const associated = await readAll(() => db.collection(COLLECTIONS.evidences).where({ feedbackId: feedback._id }))
+    const history = await boundedMap(visible, async (feedback, index, signal) => {
+      const associated = await readAll(() => db.collection(COLLECTIONS.evidences)
+        .where({ feedbackId: feedback._id }), signal)
       const evidenceById = new Map()
       for (const evidence of associated) {
         const retention = classifyEvidenceRetention(evidence, context.line)
@@ -1529,6 +1531,7 @@ function createCloudFeedbackRepository({
       if (feedback.publishState === undefined && Array.isArray(feedback.evidenceIds)) {
         for (const evidenceId of [...new Set(feedback.evidenceIds)]) {
           if (typeof evidenceId !== 'string' || !evidenceId) continue
+          signal.throwIfStopped()
           const evidence = await readDocument(db, COLLECTIONS.evidences, evidenceId)
           const retention = classifyEvidenceRetention(evidence, context.line, { allowLegacy: true })
           if (evidence && evidence._id === evidenceId && evidence.businessLineId === businessLineId &&
@@ -1538,8 +1541,8 @@ function createCloudFeedbackRepository({
       }
       const evidences = [...evidenceById.values()].sort((left, right) =>
         String(left.evidence._id).localeCompare(String(right.evidence._id)))
-      history.push(feedbackProjection(feedback, evidences.map(item => evidenceProjection(item.evidence, item.retention))))
-    }
+      return feedbackProjection(feedback, evidences.map(item => evidenceProjection(item.evidence, item.retention)))
+    })
     const canSubmit = context.line.status === 'active' && isCurrentNode(context.line, context.node) &&
       ACTIVE_NODE_STATUSES.has(context.node.status) && accountSchema(context.line, context.node) &&
       processorIds(context.node).includes(context.actor._id)

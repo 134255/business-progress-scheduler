@@ -2,6 +2,8 @@ const templates = require('../../services/templates')
 const adminUsers = require('../../services/admin-users')
 const { createKeyAllocator } = require('../../utils/template-editor-keys')
 const { templateDefinitionIssue } = require('../../utils/template-definition-diagnostics')
+const { presentBusinessCard } = require('../../utils/business-card')
+const { isAccountAccessError } = require('../../utils/safe-error')
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -74,6 +76,7 @@ function cleanNode(node, sequence) {
 }
 
 function messageFor(error) {
+  if (error && error.code === 'CARD_DISPLAY_INVALID') return '请先调整售后卡片展示配置，再删除引用的节点或字段；展示字段须来自已保存的定义'
   if (error && error.code === 'VERSION_CONFLICT') return '模板已被其他管理员更新，已刷新为最新版本'
   if (error && error.code === 'TEMPLATE_NOT_EDITABLE') return '启用中的模板为只读，请先停用模板'
   if (error && error.code === 'PROCESSOR_INACTIVE') return '节点处理人已停用，请重新选择启用账号'
@@ -81,6 +84,23 @@ function messageFor(error) {
   if (error && error.code === 'ROLE_OVERLAP') return '同一节点的处理人与审核人不能使用同一账号'
   if (error && error.code === 'TEMPLATE_INVALID') return '模板定义不完整，请检查节点、字段和负责人'
   return error && error.message ? error.message : '网络异常，请稍后重试'
+}
+
+function cardMessage(error) {
+  if (error && error.code === 'CARD_DISPLAY_INVALID') return messageFor(error)
+  if (error && error.code === 'VERSION_CONFLICT') return '展示配置已被其他管理员更新，请核对最新配置后重试'
+  if (isAccountAccessError(error)) return '当前账号无权编辑展示配置，请重新登录后重试'
+  return '展示配置加载或保存失败，请重试；未保存的流程定义不受影响'
+}
+
+function cardRowId(nodeKey, fieldKey) { return JSON.stringify([nodeKey, fieldKey]) }
+
+function savedCardNodes(definition) {
+  return (definition.nodes || []).filter(node => typeof node.nodeKey === 'string' && node.nodeKey).map(node => ({
+    nodeKey: node.nodeKey, name: node.name,
+    fields: (node.fields || []).filter(field => typeof field.fieldKey === 'string' && field.fieldKey)
+      .map(field => ({ fieldKey: field.fieldKey, name: field.name }))
+  }))
 }
 
 Page({
@@ -98,24 +118,211 @@ Page({
     nodes: [],
     assigneeOptions: [],
     readOnly: false,
-    errorMessage: ''
+    errorMessage: '',
+    cardLoading: false,
+    cardSubmitting: false,
+    cardLoaded: false,
+    cardError: '',
+    cardRevision: 0,
+    cardFields: [],
+    cardNodeOptions: [],
+    cardFieldOptions: [],
+    cardNodeIndex: 0,
+    cardFieldIndex: -1,
+    cardPreview: null
   },
 
   async onLoad(options = {}) {
     if (!this.requireSuperAdmin()) return
+    this._cardOwnerId = getApp().globalData.currentUser._id
+    this._cardSequence = 0
+    this._cardDisposed = false
     const templateId = decode(options.id)
     this.setData({ editMode: Boolean(templateId), templateId })
     wx.setNavigationBarTitle({ title: templateId ? '编辑模板' : '新建模板' })
     this.setData({ loading: true })
     try {
       if (!await this.loadActiveAccounts()) return
-      if (templateId) await this.loadTemplate()
+      if (templateId) {
+        const definition = await this.loadTemplate()
+        if (definition) await this.loadCardDisplay(definition)
+      }
     } catch (error) {
       if (!this.requireSuperAdmin()) return
       this.unavailable = true
       this.setData({ errorMessage: messageFor(error) })
     } finally {
       if (this.requireSuperAdmin()) this.setData({ loading: false })
+    }
+  },
+
+  onShow() {
+    if (!this.data.editMode || !this._cardOwnerId) return
+    if (!this.requireCardAdmin()) return
+    if (this._cardInterrupted) {
+      this._cardInterrupted = false
+      return this.loadCardDisplay()
+    }
+  },
+
+  onHide() {
+    this._cardInterrupted = this.data.cardLoading || this.data.cardSubmitting
+    this._cardSequence = (this._cardSequence || 0) + 1
+    this.setData({ cardLoading: false, cardSubmitting: false,
+      ...(this._cardInterrupted ? { cardLoaded: false } : {}) })
+  },
+
+  onUnload() {
+    this._cardDisposed = true
+    this.clearCardEditor()
+  },
+
+  clearCardEditor() {
+    this._cardSequence = (this._cardSequence || 0) + 1
+    this._cardSavedNodes = []
+    this.setData({ cardFields: [], cardNodeOptions: [], cardFieldOptions: [], cardPreview: null,
+      cardRevision: 0, cardLoading: false, cardSubmitting: false, cardLoaded: false })
+  },
+
+  requireCardAdmin() {
+    const actor = getApp().globalData.currentUser
+    if (!this._cardDisposed && this._cardOwnerId && actor && actor._id === this._cardOwnerId &&
+        actor.role === 'super_admin' && actor.status === 'active') return true
+    this.clearCardEditor()
+    return false
+  },
+
+  acceptCardResponse(sequence) {
+    return this.requireCardAdmin() && sequence === this._cardSequence
+  },
+
+  canEditCard() {
+    return this.requireCardAdmin() && this.data.editMode && this.data.cardLoaded &&
+      !this.data.cardLoading && !this.data.cardSubmitting
+  },
+
+  setCardFields(fields, revision = this.data.cardRevision) {
+    const rows = fields.map(field => {
+      const node = (this._cardSavedNodes || []).find(node => node.nodeKey === field.nodeKey)
+      const saved = node && node.fields.find(item => item.fieldKey === field.fieldKey)
+      if (!saved) throw Object.assign(new Error('CARD_DISPLAY_INVALID'), { code: 'CARD_DISPLAY_INVALID' })
+      return { nodeKey: node.nodeKey, fieldKey: saved.fieldKey, id: cardRowId(node.nodeKey, saved.fieldKey),
+        label: saved.name, nodeName: node.name }
+    })
+    this.setData({ cardFields: rows, cardPreview: presentBusinessCard({
+      code: 'BL-DEMO-0001', status: 'active', cardSummary: { state: 'ready', configRevision: revision,
+        fields: rows.map(row => ({ id: row.id, label: row.label, value: '示例内容' })) }
+    }) })
+  },
+
+  applyCardConfig(config) {
+    const unique = new Set()
+    if (!config || config.templateId !== this.data.templateId || !Number.isSafeInteger(config.revision) ||
+        config.revision < 0 || !Array.isArray(config.fields) || config.fields.length > 4 ||
+        !config.fields.every(field => {
+          if (!field || typeof field.nodeKey !== 'string' || typeof field.fieldKey !== 'string') return false
+          const id = cardRowId(field.nodeKey, field.fieldKey)
+          if (unique.has(id)) return false
+          unique.add(id)
+          return true
+        })) throw Object.assign(new Error('CARD_DISPLAY_INVALID'), { code: 'CARD_DISPLAY_INVALID' })
+    this.setCardFields(config.fields, config.revision)
+    this.setData({ cardRevision: config.revision, cardLoaded: true })
+  },
+
+  async loadCardDisplay(savedDefinition) {
+    if (!this.data.editMode || !this.requireCardAdmin() || this.data.cardSubmitting) return
+    const sequence = ++this._cardSequence
+    this.setData({ cardLoading: true, cardLoaded: false, cardError: '' })
+    try {
+      const [definition, config] = await Promise.all([
+        savedDefinition && savedDefinition.template && Array.isArray(savedDefinition.nodes)
+          ? savedDefinition : templates.getTemplate(this.data.templateId),
+        templates.getTemplateCardDisplay(this.data.templateId)
+      ])
+      if (!this.acceptCardResponse(sequence)) return
+      // These choices deliberately never come from mutable this.data.nodes.
+      this._cardSavedNodes = savedCardNodes(definition)
+      this.setData({ cardNodeOptions: this._cardSavedNodes.map(({ nodeKey, name }) => ({ nodeKey, name })),
+        cardNodeIndex: 0, cardFieldIndex: -1, cardFieldOptions: this._cardSavedNodes[0] ? this._cardSavedNodes[0].fields : [] })
+      this.applyCardConfig(config)
+    } catch (error) {
+      if (!this.acceptCardResponse(sequence)) return
+      if (isAccountAccessError(error)) this.clearCardEditor()
+      this.setData({ cardError: cardMessage(error) })
+    } finally {
+      if (this.acceptCardResponse(sequence)) this.setData({ cardLoading: false })
+    }
+  },
+
+  onCardNodeChange(event) {
+    if (!this.canEditCard()) return
+    const index = Number(event.detail.value)
+    const node = Number.isInteger(index) && (this._cardSavedNodes || [])[index]
+    if (node) this.setData({ cardNodeIndex: index, cardFieldIndex: -1, cardFieldOptions: node.fields })
+  },
+
+  onCardFieldChange(event) {
+    if (!this.canEditCard()) return
+    const index = Number(event.detail.value)
+    this.setData({ cardFieldIndex: Number.isInteger(index) && this.data.cardFieldOptions[index] ? index : -1 })
+  },
+
+  addCardField() {
+    if (!this.canEditCard()) return
+    const node = this._cardSavedNodes[this.data.cardNodeIndex]
+    const field = node && node.fields[this.data.cardFieldIndex]
+    if (!field) return
+    if (this.data.cardFields.length >= 4) { this.setData({ cardError: '最多选择 4 个展示字段' }); return }
+    const id = cardRowId(node.nodeKey, field.fieldKey)
+    if (this.data.cardFields.some(row => row.id === id)) { this.setData({ cardError: '该字段已在展示配置中' }); return }
+    this.setCardFields([...this.data.cardFields, { nodeKey: node.nodeKey, fieldKey: field.fieldKey }])
+    this.setData({ cardError: '' })
+  },
+
+  moveCardField(event) {
+    if (!this.canEditCard()) return
+    const { id, direction } = event.currentTarget.dataset
+    const index = this.data.cardFields.findIndex(row => row.id === id)
+    const step = Number(direction), target = index + step
+    if (index < 0 || ![-1, 1].includes(step) || target < 0 || target >= this.data.cardFields.length) return
+    const fields = this.data.cardFields.slice()
+    ;[fields[index], fields[target]] = [fields[target], fields[index]]
+    this.setCardFields(fields)
+  },
+
+  removeCardField(event) {
+    if (this.canEditCard()) this.setCardFields(this.data.cardFields.filter(row => row.id !== event.currentTarget.dataset.id))
+  },
+
+  clearCardFields() { if (this.canEditCard()) this.setCardFields([]) },
+
+  async saveCardDisplay() {
+    if (!this.canEditCard()) return
+    const sequence = ++this._cardSequence
+    const fields = this.data.cardFields.map(({ nodeKey, fieldKey }) => ({ nodeKey, fieldKey }))
+    this.setData({ cardSubmitting: true, cardError: '' })
+    try {
+      const config = await templates.updateTemplateCardDisplay(this.data.templateId, this.data.cardRevision, fields)
+      if (!this.acceptCardResponse(sequence)) return
+      this.applyCardConfig(config)
+      wx.showToast({ title: '展示配置已保存', icon: 'success' })
+    } catch (error) {
+      if (!this.acceptCardResponse(sequence)) return
+      const message = cardMessage(error)
+      if (error && error.code === 'VERSION_CONFLICT') {
+        this.setData({ cardSubmitting: false })
+        const reload = this.loadCardDisplay()
+        const reloadSequence = this._cardSequence
+        await reload
+        if (!this.acceptCardResponse(reloadSequence)) return
+        this.setData({ cardError: this.data.cardError ? `${message}；${this.data.cardError}` : message })
+      } else {
+        if (isAccountAccessError(error)) this.clearCardEditor()
+        this.setData({ cardError: message })
+      }
+    } finally {
+      if (this.acceptCardResponse(sequence)) this.setData({ cardSubmitting: false })
     }
   },
 

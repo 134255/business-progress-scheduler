@@ -11,6 +11,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   const transactionRuns = []
   const beforeTransactionHooks = []
   const pendingWriteFailures = []
+  const pendingReadFailures = []
   const metrics = { activeCallbacks: 0, maxActiveCallbacks: 0, conflicts: 0, retries: 0 }
   let serverDateSequence = 0
   let stateVersion = 0
@@ -87,6 +88,17 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     throw failure.error
   }
 
+  function maybeFailRead(name, id, transaction) {
+    const index = pendingReadFailures.findIndex(failure => failure.collection === name &&
+      (failure.id === undefined || failure.id === id) &&
+      (failure.transaction === undefined || failure.transaction === transaction))
+    if (index < 0) return
+    const failure = pendingReadFailures[index]
+    if (failure.after > 0) { failure.after -= 1; return }
+    pendingReadFailures.splice(index, 1)
+    throw failure.error
+  }
+
   function createDocument(name, id, transactionRecord = null, targetState = state) {
     function countOperation() {
       if (transactionRecord) transactionRecord.operations += 1
@@ -94,6 +106,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     return {
       async get() {
         countOperation()
+        maybeFailRead(name, id, Boolean(transactionRecord))
         const document = documents(name, targetState).get(id)
         if (!document) {
           throw new Error(`document.get:fail document with _id ${id} does not exist`)
@@ -204,7 +217,13 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
         let result = [...documents(name, targetState).values()].filter(document => matches(document, criteria))
         for (const [field, direction] of order.slice().reverse()) {
           result.sort((left, right) => {
-            const comparison = String(left[field] || '').localeCompare(String(right[field] || ''))
+            const comparison = typeof left[field] === 'number' && typeof right[field] === 'number'
+              ? left[field] - right[field]
+              : typeof left[field] === 'string' && typeof right[field] === 'string'
+                // Match the keyset operators above; locale punctuation ordering
+                // would put node:10:0 before node:100:0 but filter it afterwards.
+                ? left[field] < right[field] ? -1 : left[field] > right[field] ? 1 : 0
+                : String(left[field] || '').localeCompare(String(right[field] || ''))
             return direction === 'desc' ? -comparison : comparison
           })
         }
@@ -347,6 +366,9 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     },
     failNextWrite(failure) {
       pendingWriteFailures.push(failure)
+    },
+    failNextRead(failure) {
+      pendingReadFailures.push({ ...failure })
     }
   }
 }

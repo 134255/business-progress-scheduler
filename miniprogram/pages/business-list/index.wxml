@@ -1,23 +1,26 @@
+<import src="../../templates/business-card.wxml" />
 <view class="page">
   <view class="card">
+  <form bindsubmit="onSearchSubmit">
+    <view class="filter-scope" wx:if="{{filterLabel}}">{{filterLabel}}</view>
     <view class="field">
       <text class="field-label">检索内容</text>
-      <input class="input" value="{{keyword}}" placeholder="输入售后、节点、字段或凭证名称" bindinput="onKeyword" confirm-type="search" bindconfirm="search" />
-      <text class="search-help">可检索售后、节点、字段和凭证名称；仅返回你有权查看的售后</text>
+      <input class="input" name="keyword" value="{{keyword}}" placeholder="输入编号、节点名称、字段内容或凭证名称" bindinput="onKeyword" bindblur="onKeyword" confirm-type="search" bindconfirm="onSearchConfirm" />
+      <text class="search-help">支持售后编号任意字符、售后名称、节点名称、字段名称和内容、凭证名称的部分匹配；仅返回你有权查看的售后</text>
     </view>
     <view class="date-row">
       <picker mode="date" value="{{startDate}}" bindchange="onStartDate"><view class="date-box">{{startDate || '创建开始日期'}}</view></picker>
       <text class="muted">至</text>
       <picker mode="date" value="{{endDate}}" bindchange="onEndDate"><view class="date-box">{{endDate || '创建结束日期'}}</view></picker>
     </view>
-    <button class="primary-button" bindtap="search" loading="{{loading}}">检索</button>
+    <button class="primary-button" form-type="submit" loading="{{loading}}" disabled="{{loading}}">检索</button>
+  </form>
   </view>
 
   <button class="secondary-button create" bindtap="createBusiness">+ 新建售后线</button>
 
   <view class="card" wx:for="{{items}}" wx:key="_id" data-id="{{item._id}}" bindtap="openDetail">
-    <view class="row-between"><text class="name">{{item.name}}</text><status-pill status="{{item.status}}" /></view>
-    <text class="muted block">{{item.code}}</text>
+    <template is="business-card" data="{{item}}" />
     <text class="muted block">当前节点：{{item.currentNodeName || '待配置'}}</text>
     <view class="search-matches" wx:if="{{item.matches.length}}">
       <view class="search-match" wx:for="{{item.visibleMatches}}" wx:for-item="match" wx:key="id">
@@ -29,6 +32,10 @@
       </button>
     </view>
   </view>
-  <view class="empty" wx:if="{{!loading && !items.length}}">没有匹配的售后</view>
-  <view class="load-more" wx:if="{{items.length}}">{{loading ? '加载中…' : loadMoreText}}</view>
+  <view class="search-error" wx:if="{{errorMessage}}">{{errorMessage}}；可再次点击检索重试。</view>
+  <view class="search-pending" wx:if="{{queryDirty}}">检索条件已修改，请点击检索。</view>
+  <view class="search-index-status" wx:if="{{indexStatus === 'incomplete' && !queryDirty}}">部分检索内容暂未更新，结果可能不完整。</view>
+  <view class="empty" wx:if="{{!loading && !queryDirty && !errorMessage && !indexStatus && !items.length && !hasMore}}">没有匹配的售后</view>
+  <button class="secondary-button" wx:if="{{hasMore}}" bindtap="loadMore" loading="{{loading}}" disabled="{{loading}}">{{indexStatus === 'recovering' ? '继续更新检索' : '加载更多'}}</button>
+  <view class="load-more" wx:if="{{items.length || hasMore || loading}}">{{loading ? (indexStatus === 'recovering' ? '正在更新检索内容…' : '加载中…') : loadMoreText}}</view>
 </view>

@@ -2,6 +2,7 @@
 
 const { createSearchService } = require('./lib/search-service')
 const { createCloudSearchRepository } = require('./lib/cloud-search-repository')
+const { reportSearchFailure } = require('./lib/search-diagnostics')
 
 function safeError(code, message) {
   const error = new Error(message)
@@ -46,7 +47,8 @@ function createBusinessSearchHandler({
       }
     } catch (error) {
       if (error && error.code === 'FORBIDDEN') throw error
-      logger.error('[businessSearch]', { code: 'BUSINESS_SEARCH_FAILED' })
+      reportSearchFailure(logger, error,
+        event && ['index', 'query'].includes(event.operation) ? event.operation : 'cycle')
       throw safeError('BUSINESS_SEARCH_FAILED', '售后检索服务暂时不可用，请稍后重试')
     }
   }

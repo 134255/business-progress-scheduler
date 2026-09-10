@@ -1,5 +1,6 @@
 const { collectTemplateParticipantUserIds, validateTemplateForEnable } = require('./template-domain')
 const { stripSearchEnvelope, synchronizeSearchResult } = require('./search-version')
+const { normalizeBusinessListFilters } = require('./business-list-filters')
 const {
   APPLICATION_ERROR_MARKER,
   MAX_TEMPLATE_NODES,
@@ -13,7 +14,7 @@ const METADATA_INPUT_KEYS = new Set([
   'plannedStartDate', 'plannedEndDate'
 ])
 const LIST_QUERY_KEYS = new Set([
-  'keyword', 'startDate', 'endDate', 'page', 'pageSize', 'cursor'
+  'keyword', 'startDate', 'endDate', 'page', 'pageSize', 'cursor', 'status', 'scope'
 ])
 
 function createError(code, message = code) {
@@ -137,6 +138,7 @@ function normalizeListQuery(query = {}) {
       Object.keys(query).some(key => !LIST_QUERY_KEYS.has(key))) {
     throw createError('VALIDATION_ERROR')
   }
+  const filters = normalizeBusinessListFilters(query, () => createError('VALIDATION_ERROR'))
   const keyword = query.keyword === undefined ? '' : query.keyword
   if (typeof keyword !== 'string') throw createError('VALIDATION_ERROR')
   const normalizedKeyword = keyword.normalize('NFKC').replace(/\s+/gu, ' ').trim()
@@ -158,6 +160,7 @@ function normalizeListQuery(query = {}) {
   const cursor = query.cursor === undefined ? '' : query.cursor
   if (typeof cursor !== 'string' || cursor.length > 2048) throw createError('VALIDATION_ERROR')
   return {
+    ...filters,
     keyword: normalizedKeyword,
     startDate,
     endDate,
@@ -169,6 +172,19 @@ function normalizeListQuery(query = {}) {
 
 function safeSearchResult(result) {
   if (!result || typeof result !== 'object' || Array.isArray(result) || !Array.isArray(result.items)) {
+    throw createError('BUSINESS_SEARCH_PENDING')
+  }
+  const statusField = Object.getOwnPropertyDescriptor(result, 'indexStatus')
+  if (('indexStatus' in result && !statusField) ||
+      (statusField && !Object.prototype.hasOwnProperty.call(statusField, 'value'))) {
+    throw createError('BUSINESS_SEARCH_PENDING')
+  }
+  const indexStatus = statusField && statusField.value
+  if (indexStatus !== undefined && indexStatus !== 'recovering' && indexStatus !== 'incomplete') {
+    throw createError('BUSINESS_SEARCH_PENDING')
+  }
+  if (indexStatus === 'recovering' && (result.items.length !== 0 || result.hasMore !== true ||
+      typeof result.cursor !== 'string' || !result.cursor.trim() || result.cursor.length > 2048)) {
     throw createError('BUSINESS_SEARCH_PENDING')
   }
   const items = result.items.map(item => ({
@@ -188,7 +204,8 @@ function safeSearchResult(result) {
     items,
     cursor: typeof result.cursor === 'string' ? result.cursor : '',
     hasMore: result.hasMore === true,
-    total: null
+    total: null,
+    ...(indexStatus === undefined ? {} : { indexStatus })
   }
 }
 
@@ -238,6 +255,8 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
         return safeSearchResult(await businessSearchClient.query({
           actorId: actor._id,
           query: {
+            ...(normalized.status ? { status: normalized.status } : {}),
+            ...(normalized.scope ? { scope: normalized.scope } : {}),
             keyword: normalized.keyword,
             pageSize: normalized.pageSize,
             cursor: normalized.cursor,
@@ -253,6 +272,8 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
     return repository.listBusinessLines({
       actor,
       query: {
+        ...(normalized.status ? { status: normalized.status } : {}),
+        ...(normalized.scope ? { scope: normalized.scope } : {}),
         ...(normalized.startDate ? { startDate: normalized.startDate } : {}),
         ...(normalized.endDate ? { endDate: normalized.endDate } : {}),
         page: normalized.page,

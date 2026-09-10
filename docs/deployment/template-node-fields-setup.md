@@ -229,7 +229,8 @@
 3. 等待部署完成，不要在上传进度未结束时重复点击。
 4. 在 CloudBase 控制台确认函数更新时间、Node.js 运行时和环境变量。
    为 `businessApi` 在安全配置界面新增 `PUBLIC_NODE_SHARE_HMAC_SECRET`：使用密码管理器生成至少 32 字节高熵随机值，只粘贴到目标环境，不写入仓库、终端历史、截图或验收记录。缺失或过短时只有“生成分享快照”失败关闭，其他接口不受影响。
-   大凭证直传还需要在同一安全配置界面设置 `EVIDENCE_COS_BUCKET`、`EVIDENCE_COS_REGION`、`EVIDENCE_COS_SECRET_ID`、`EVIDENCE_COS_SECRET_KEY` 与 `EVIDENCE_CLOUD_FILE_PREFIX`。前两项分别是目标 COS 存储桶名称（含 AppID 后缀）和地域；长期 Secret 只存在于云函数环境变量，`EVIDENCE_CLOUD_FILE_PREFIX` 必须是目标 CloudBase 环境对应的 `cloud://...` 前缀。不得把任何变量值写入 Git、日志、截图或验收记录。任一变量缺失或损坏时，只有大凭证上传授权失败关闭，其他接口不受影响。
+   大凭证直传还需要在同一安全配置界面设置 `EVIDENCE_COS_BUCKET`、`EVIDENCE_COS_REGION`、`EVIDENCE_COS_SECRET_ID`、`EVIDENCE_COS_SECRET_KEY` 与 `EVIDENCE_CLOUD_FILE_PREFIX`。前两项分别是目标 COS 存储桶名称（含 AppID 后缀）和地域；长期 Secret 只存在于云函数环境变量，`EVIDENCE_CLOUD_FILE_PREFIX` 必须为 `cloud://<环境标识>.<存储桶名称>`，环境标识由服务端 `cloud.getWXContext().ENV` 核对，不能由客户端提供。历史配置若精确等于 `cloud://<当前桶名>`，上传入口会规范化后保存；其他环境、桶名或带路径的前缀失败关闭。不得把任何变量值写入 Git、日志、截图或验收记录。变量缺失或损坏时大凭证上传授权失败关闭，不影响无关接口。
+   对已经保存的仅当前桶名前缀，凭证查看和现有公开分享读取在原权限、归属、有效期校验之后，仅当对象键严格等于 `evidence-uploads/<businessLineId>/<nodeId>/<evidenceId>.<ext>` 且与凭证自有元数据一致，才补齐当前环境标识后申请临时地址；不改数据库、不重传文件。此兼容依赖有效的服务端环境和当前桶名，原规范引用及旧 SDK 引用保持原行为。此修复不改变清理函数；任何历史错误引用的清理验收须独立完成后才能启用相关触发器。
 5. 查看一次函数日志，确认没有依赖安装错误、权限错误或集合/索引错误。
 6. 暂不删除旧云函数版本，保留部署前记录的可回退版本。
 

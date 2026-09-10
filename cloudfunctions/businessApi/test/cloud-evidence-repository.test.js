@@ -31,7 +31,7 @@ function seed(overrides = {}) {
   }
 }
 
-function createHarness({ documents = seed(), download, temporary, idFactory, transformRead } = {}) {
+function createHarness({ documents = seed(), download, temporary, idFactory, transformRead, fileReferenceContext } = {}) {
   const fake = createFakeCloudDatabase(documents, { transformRead })
   const calls = []
   const cloud = {
@@ -58,6 +58,7 @@ function createHarness({ documents = seed(), download, temporary, idFactory, tra
     repository: createCloudEvidenceRepository({
       db: fake.db,
       cloud,
+      fileReferenceContext,
       clock: () => new Date(NOW),
       idFactory: idFactory || (() => 'evidence-1'),
       temporaryUrlTtlSeconds: 300
@@ -844,6 +845,56 @@ function attachedEvidence(overrides = {}) {
     ...overrides
   })
 }
+
+function bucketOnlyEvidence(overrides = {}) {
+  return attachedEvidence({
+    _id: `evidence-${'1'.repeat(64)}`, extension: 'pdf',
+    fileId: `cloud://bucket-1234567890/evidence-uploads/business-1/node-1/evidence-${'1'.repeat(64)}.pdf`,
+    ...overrides
+  })
+}
+
+test('authorized historical bucket-only evidence resolves the exact canonical object without rewriting records', async () => {
+  const evidence = bucketOnlyEvidence()
+  const documents = seed({ evidences: [evidence] })
+  const harness = createHarness({ documents,
+    fileReferenceContext: () => ({ environmentId: 'env-test', bucket: 'bucket-1234567890' }),
+    temporary: async ({ fileList }) => {
+      assert.equal(fileList[0].fileID,
+        `cloud://env-test.bucket-1234567890/evidence-uploads/business-1/node-1/evidence-${'1'.repeat(64)}.pdf`)
+      return { fileList: [{ ...fileList[0], status: 0, tempFileURL: 'https://temporary.example/report.pdf' }] }
+    }
+  })
+  const result = await harness.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: evidence._id })
+  assert.equal(result.url, 'https://temporary.example/report.pdf')
+  assert.deepEqual(harness.fake.documents('evidences'), [evidence])
+})
+
+test('bucket-only compatibility cannot change another line, node, evidence id or extension', async () => {
+  for (const changes of [{ businessLineId: 'business-other' }, { nodeId: 'node-other' },
+    { _id: `evidence-${'2'.repeat(64)}` }, { extension: 'jpg' },
+    { fileId: 'cloud://bucket-1234567890/evidence/report.pdf' }]) {
+    const evidence = bucketOnlyEvidence(changes)
+    const harness = createHarness({ documents: seed({ evidences: [evidence] }),
+      fileReferenceContext: () => ({ environmentId: 'env-test', bucket: 'bucket-1234567890' }) })
+    await assert.rejects(harness.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: evidence._id }))
+    assert.equal(harness.calls.length, 0)
+  }
+})
+
+test('expired or unauthorized legacy references never reach normalization or URL issuance', async () => {
+  for (const forbidden of [true, false]) {
+    let contextCalls = 0
+    const evidence = bucketOnlyEvidence(forbidden ? {} : { storageStatus: 'purged', purgedAt: NOW })
+    const documents = seed({ evidences: [evidence] })
+    if (forbidden) documents.business_lines[0].memberUserIds = []
+    const harness = createHarness({ documents, fileReferenceContext: () => { contextCalls++; return {} } })
+    await assert.rejects(harness.repository.getAccessGrant({ actor: { _id: 'account-1' }, evidenceId: evidence._id }),
+      assertCode(forbidden ? 'FORBIDDEN' : 'EVIDENCE_EXPIRED'))
+    assert.equal(contextCalls, 0)
+    assert.equal(harness.calls.length, 0)
+  }
+})
 
 test('issues only a short-lived safe access projection to active business members', async () => {
   const documents = seed({ evidences: [accessibleEvidence()] })

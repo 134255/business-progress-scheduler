@@ -1,0 +1,15 @@
+<template name="business-card">
+  <view class="business-card-heading">
+    <text class="business-card-title">{{item.cardTitle}}</text>
+    <status-pill status="{{item.status}}" />
+  </view>
+  <view wx:if="{{item.cardRows.length}}" class="business-card-fields">
+    <view wx:for="{{item.cardRows}}" wx:for-item="row" wx:key="id" class="business-card-field {{row.long ? 'business-card-field-long' : ''}}">
+      <text class="business-card-field-text">{{row.label}}：{{row.value}}</text>
+    </view>
+  </view>
+  <view wx:if="{{item.cardState === 'unavailable'}}" class="business-card-unavailable">
+    <text>字段摘要暂不可用，完整内容请查看详情。</text>
+    <button class="business-card-retry" size="mini" catchtap="retryCards">重试</button>
+  </view>
+</template>

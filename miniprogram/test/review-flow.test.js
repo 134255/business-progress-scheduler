@@ -251,6 +251,44 @@ test('审核节点以单次调用幂等保存并提交审核，失败重试时�
   assert.equal(page.data.readOnly, true)
 })
 
+test('审核请求发出前上传失败会解锁草稿并保留字段、说明和已登记附件', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => {} }
+  let workspaceReads = 0
+  let reviewCalls = 0
+  const page = loadPage('pages/node-feedback/index.js', {
+    getNodeWorkspace: async () => {
+      workspaceReads += 1
+      return { line: { _id: 'line-1', status: 'active' }, node: reviewNode(), canSubmit: true, history: [] }
+    },
+    saveAndSubmitNodeForReview: async () => { reviewCalls += 1; assert.fail('上传未完成不得提交审核') }
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '本地未提交内容' } })
+  page.onComment({ detail: { value: '本地说明' } })
+  page.setData({ files: [
+    { localKey: 'done', status: 'registered', evidenceId: 'evidence-done', size: 10 },
+    { localKey: 'failed', name: 'proof.jpg', path: 'wxfile://proof.jpg', size: 372429, status: 'pending' }
+  ] })
+  page.createEvidenceUploader = () => ({ upload: async () => { throw new Error('transport failed') } })
+
+  await page.onSubmitReview()
+
+  assert.equal(page.data.reviewDraftLocked, false)
+  assert.equal(page.data.submitting, false)
+  assert.equal(page.data.draftDirty, true)
+  assert.equal(page.data.fieldValues.summary, '本地未提交内容')
+  assert.equal(page.data.comment, '本地说明')
+  assert.equal(page.data.files[0].evidenceId, 'evidence-done')
+  assert.equal(page.data.files[1].status, 'failed')
+  assert.equal(reviewCalls, 0)
+  assert.equal(workspaceReads, 1, '未发审核请求无需额外查询提交结果')
+  page.removeFile({ currentTarget: { dataset: { index: 1 } } })
+  page.onFieldInput({ currentTarget: { dataset: { fieldkey: 'summary' } }, detail: { value: '继续补充内容' } })
+  assert.equal(page.data.files.length, 1)
+  assert.equal(page.data.fieldValues.summary, '继续补充内容')
+})
+
 test('提交审核等待单次响应期间冻结草稿文件并保持不可变请求快照', async () => {
   const submit = deferred()
   const calls = []

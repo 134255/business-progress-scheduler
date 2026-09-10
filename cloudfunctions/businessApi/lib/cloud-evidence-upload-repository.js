@@ -103,6 +103,10 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
 
   async function authorize(database, actorId, businessLineId, nodeId, expectedNodeVersion) {
     const actor = await readDocument(database, COLLECTIONS.users, actorId)
+    return authorizeNode(database, actor, businessLineId, nodeId, expectedNodeVersion)
+  }
+
+  async function authorizeNode(database, actor, businessLineId, nodeId, expectedNodeVersion) {
     if (!actor || actor.status !== 'active') throw createError('FORBIDDEN')
     const line = await readDocument(database, COLLECTIONS.lines, businessLineId)
     if (!line || line.status === 'creating') throw createError('NOT_FOUND')
@@ -248,8 +252,10 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
       const at = clock()
       if (!safeDate(at)) throw new TypeError('clock must return a Date')
       if (!expiresAt || expiresAt <= at) throw createError('EVIDENCE_UPLOAD_EXPIRED')
-      const authorized = await authorize(
-        transaction, actor._id, evidence.businessLineId, evidence.nodeId, expectedNodeVersion
+      // This account was read in this same transaction. Commit authorization below
+      // still reads its own current account; no snapshot crosses transaction boundaries.
+      const authorized = await authorizeNode(
+        transaction, user, evidence.businessLineId, evidence.nodeId, expectedNodeVersion
       )
       if (authorized.processingRoundNumber !== evidence.processingRoundNumber) throw createError('VERSION_CONFLICT')
       return { evidence, allowedTypes: authorized.allowedTypes }

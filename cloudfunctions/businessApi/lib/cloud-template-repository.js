@@ -1,4 +1,9 @@
 const crypto = require('node:crypto')
+const { isDeepStrictEqual } = require('node:util')
+const { ownDataValue } = require('./account-relationship-schema')
+const {
+  readCardDisplay, normalizeCardDisplayFields, assertCardDisplayReferences
+} = require('./business-card-display')
 const {
   REVIEWER_ASSIGNMENT_MODE,
   templateDefinitionDigest,
@@ -222,10 +227,122 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
       resultCode: audit.resultCode,
       targetType: 'template',
       targetId,
+      ...(audit.configRevision === undefined ? {} : { configRevision: audit.configRevision }),
       createdAt: db.serverDate()
     }
     await database.collection(COLLECTIONS.audit).doc(auditId).set({ data: stored })
     return { _id: auditId, ...stored }
+  }
+
+  function requireCardAdmin(actor) {
+    const id = ownDataValue(actor, '_id').value
+    if (ownDataValue(actor, 'role').value !== 'super_admin' ||
+        ownDataValue(actor, 'status').value !== 'active' ||
+        typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw createError('FORBIDDEN')
+    return id
+  }
+
+  async function readCardTemplate(transaction, actor, templateId) {
+    const actorId = requireCardAdmin(actor)
+    const currentActor = await readDocument(transaction, COLLECTIONS.users, actorId)
+    if (requireCardAdmin(currentActor) !== actorId) throw createError('FORBIDDEN')
+    const template = await readDocument(transaction, COLLECTIONS.templates, templateId)
+    if (!template) throw createError('NOT_FOUND')
+    assertCardDefinitionHeader(template)
+    if (template.status === 'deleted') throw createError('NOT_FOUND')
+    return template
+  }
+
+  function assertCardDefinitionHeader(template) {
+    readCardDisplay(template)
+    for (const key of ['status', 'version', 'definitionDigest', 'definitionNodeIds', 'flowSchemaVersion', 'entryNodeKey']) {
+      const field = ownDataValue(template, key)
+      if (field.present ? !field.valid : key in template) throw createError('TEMPLATE_INVALID')
+    }
+    if (!['draft', 'enabled', 'disabled', 'deleted'].includes(ownDataValue(template, 'status').value)) {
+      throw createError('TEMPLATE_INVALID')
+    }
+    const ids = ownDataValue(template, 'definitionNodeIds')
+    if (ids.present && (!Array.isArray(ids.value) || Object.getPrototypeOf(ids.value) !== Array.prototype ||
+        Reflect.ownKeys(ids.value).length !== ids.value.length + 1)) throw createError('TEMPLATE_INVALID')
+    if (ids.present) {
+      for (let index = 0; index < ids.value.length; index += 1) {
+        const item = ownDataValue(ids.value, String(index))
+        if (!item.valid || typeof item.value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(item.value)) {
+          throw createError('TEMPLATE_INVALID')
+        }
+      }
+    }
+  }
+
+  async function readDisplayDefinition(templateId) {
+    const template = await readDocument(db, COLLECTIONS.templates, templateId)
+    if (!template) throw createError('NOT_FOUND')
+    assertCardDefinitionHeader(template)
+    if (template.status === 'deleted') throw createError('NOT_FOUND')
+    const nodes = await readNodes(templateId)
+    if (nodes.length > MAX_TEMPLATE_NODES) throw createTemplateLimitError()
+    assertStoredDefinitionDigest(template, nodes)
+    return { template, nodes }
+  }
+
+  async function checkCardDefinition(transaction, current, initial, fields) {
+    assertCardDefinitionHeader(current)
+    if (!Number.isSafeInteger(current.version) || current.version < 1 ||
+        ['version', 'definitionDigest', 'definitionNodeIds', 'flowSchemaVersion', 'entryNodeKey']
+          .some(key => !isDeepStrictEqual(ownDataValue(current, key), ownDataValue(initial.template, key)))) {
+      throw createError('VERSION_CONFLICT')
+    }
+    const normalized = normalizeCardDisplayFields(fields, initial.nodes)
+    const referencedKeys = new Set(normalized.map(field => field.nodeKey))
+    const checkedNodes = new Map()
+    for (const node of initial.nodes.filter(node => referencedKeys.has(node.nodeKey))) {
+      const checked = await readDocument(transaction, COLLECTIONS.nodes, node._id)
+      if (!checked || checked.templateId !== current._id || !isDeepStrictEqual(checked, node)) {
+        throw createError('VERSION_CONFLICT')
+      }
+      checkedNodes.set(node._id, checked)
+    }
+    const nodes = initial.nodes.map(node => checkedNodes.get(node._id) || node)
+    assertStoredDefinitionDigest(current, nodes)
+    return normalizeCardDisplayFields(normalized, nodes)
+  }
+
+  async function getTemplateCardDisplay({ actor, templateId }) {
+    requireCardAdmin(actor)
+    const initial = await readDisplayDefinition(templateId)
+    return db.runTransaction(async transaction => {
+      const template = await readCardTemplate(transaction, actor, templateId)
+      const { revision, fields } = readCardDisplay(template)
+      return { templateId, revision, fields: await checkCardDefinition(transaction, template, initial, fields) }
+    })
+  }
+
+  async function updateTemplateCardDisplay({ actor, templateId, expectedRevision, fields }) {
+    requireCardAdmin(actor)
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 ||
+        expectedRevision === Number.MAX_SAFE_INTEGER) throw createError('VERSION_CONFLICT')
+    const initial = await readDisplayDefinition(templateId)
+    const normalized = normalizeCardDisplayFields(fields, initial.nodes)
+    const auditId = idFactory('audit')
+    return db.runTransaction(async transaction => {
+      const current = await readCardTemplate(transaction, actor, templateId)
+      const display = readCardDisplay(current)
+      if (display.revision !== expectedRevision) throw createError('VERSION_CONFLICT')
+      const cardDisplay = {
+        schemaVersion: 1, revision: display.revision + 1,
+        fields: await checkCardDefinition(transaction, current, initial, normalized)
+      }
+      const updated = await transaction.collection(COLLECTIONS.templates).doc(templateId).update({ data: {
+        cardDisplay, cardDisplayUpdatedAt: db.serverDate(), cardDisplayUpdatedBy: actor._id
+      } })
+      if (!updated.stats || updated.stats.updated !== 1) throw createError('NOT_FOUND')
+      await writeAudit(transaction, actor, templateId, {
+        action: 'UPDATE_TEMPLATE_CARD_DISPLAY', resultCode: 'TEMPLATE_CARD_DISPLAY_UPDATED',
+        configRevision: cardDisplay.revision
+      }, auditId)
+      return { templateId, revision: cardDisplay.revision, fields: cardDisplay.fields }
+    })
   }
 
   async function createTemplateDefinition({ actor, participantUserIds = [], definition, audit }) {
@@ -295,6 +412,12 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
           current.status !== expectedStatus) {
         throw createError('VERSION_CONFLICT')
       }
+      // Display saves do not advance the definition version: guard the current
+      // transactional configuration, never the earlier definition pre-read.
+      if (preparedNodes !== undefined) {
+        const display = readCardDisplay(current)
+        if (display.fields.length) assertCardDisplayReferences(display, definition.nodes)
+      }
       await assertActiveParticipantDocuments(transaction, participantIds)
       const version = current.version + 1
       const authoritativeNodes = preparedNodes === undefined
@@ -334,6 +457,8 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
   }
 
   return {
+    getTemplateCardDisplay,
+    updateTemplateCardDisplay,
     getTemplateDefinition,
     listTemplateDefinitions,
     listActiveUserIds,

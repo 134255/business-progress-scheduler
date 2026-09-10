@@ -7,6 +7,55 @@ const { templateDefinitionDigest, version2TemplateDefinitionDigest } = require('
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 const { createOptimisticBusinessDatabase } = require('./helpers/business-harness')
 
+function statusListSeed() {
+  return { users: [
+    { _id: 'root', status: 'active', role: 'super_admin' },
+    { _id: 'member', status: 'active', role: 'user' },
+    { _id: 'outsider', status: 'active', role: 'user' }
+  ], business_lines: Array.from({ length: 14 }, (_, index) => ({
+    _id: `line-${String(index).padStart(2, '0')}`, name: '筛选售后', code: `BL-${index}`,
+    status: index % 2 ? 'completed' : 'active', updatedAt: new Date(2026, 7, index + 1),
+    managerUserIds: ['member'], memberUserIds: index < 12 ? ['member', 'root'] : ['member']
+  })) }
+}
+
+test('status filtering precedes pagination and mine limits a super administrator without changing default scope', async () => {
+  const { repository } = createRepositoryHarness(statusListSeed())
+  const actor = { _id: 'root' }
+  for (const [status, firstIds, secondIds] of [
+    ['active', ['line-10', 'line-08', 'line-06', 'line-04', 'line-02'], ['line-00']],
+    ['completed', ['line-11', 'line-09', 'line-07', 'line-05', 'line-03'], ['line-01']]
+  ]) {
+    const query = { status, scope: 'mine', pageSize: 5 }
+    const first = await repository.listBusinessLines({ actor, query: { ...query, page: 1 } })
+    const second = await repository.listBusinessLines({ actor, query: { ...query, page: 2 } })
+    assert.deepEqual(first.items.map(item => item._id), firstIds)
+    assert.deepEqual(second.items.map(item => item._id), secondIds)
+    assert.equal(first.total, 6)
+    assert.equal(first.hasMore, true)
+    assert.equal(second.hasMore, false)
+    assert.equal((await repository.listBusinessLines({ actor, query: { status } })).total, 7)
+  }
+  assert.equal((await repository.listBusinessLines({ actor })).total, 14)
+  assert.equal((await repository.listBusinessLines({ actor: { _id: 'member' }, query: { status: 'active', scope: 'mine' } })).total, 7)
+  assert.deepEqual((await repository.listBusinessLines({ actor: { _id: 'outsider' }, query: { status: 'active' } })).items, [])
+})
+
+test('status and mine relationships are rechecked on authoritative reread before totals', async () => {
+  for (const changed of [{ status: 'completed' }, { managerUserIds: ['member'], memberUserIds: ['member'] }]) {
+    let reads = 0
+    const seed = statusListSeed()
+    seed.business_lines = [seed.business_lines[0]]
+    const { repository } = createRepositoryHarness(seed, { fakeOptions: { transformRead({ collection, data }) {
+      if (collection === 'business_lines' && ++reads >= 2) return { ...data, ...changed }
+      return data
+    } } })
+    const result = await repository.listBusinessLines({ actor: { _id: 'root' }, query: { status: 'active', scope: 'mine' } })
+    assert.deepEqual(result.items, [])
+    assert.equal(result.total, 0)
+  }
+})
+
 function sourceNode(overrides = {}) {
   return {
     _id: 'template-node-1',

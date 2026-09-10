@@ -1,9 +1,10 @@
 const FUNCTION_NAME = 'businessApi'
+const { recordPerformanceTiming, readTimingClock, notifyTiming } = require('./performance-timing')
 
 async function callBusinessApi(action, payload, options = {}) {
   const clock = typeof options.clock === 'function' ? options.clock : Date.now
-  const onTiming = typeof options.onTiming === 'function' ? options.onTiming : null
-  const startedAt = Number(clock())
+  const onTiming = typeof options.onTiming === 'function' ? options.onTiming : recordPerformanceTiming
+  const startedAt = readTimingClock(clock)
   let outcomeCode = 'NETWORK_ERROR'
   try {
     const response = await wx.cloud.callFunction({
@@ -28,14 +29,17 @@ async function callBusinessApi(action, payload, options = {}) {
     }
     throw error
   } finally {
-    if (onTiming) {
-      const endedAt = Number(clock())
-      const safeCode = /^[A-Z][A-Z0-9_]{0,63}$/.test(outcomeCode) ? outcomeCode : 'BUSINESS_ERROR'
-      const durationMs = Number.isFinite(startedAt) && Number.isFinite(endedAt)
-        ? Math.max(0, Math.round(endedAt - startedAt))
-        : 0
-      try { onTiming({ action: String(action || ''), durationMs, outcomeCode: safeCode }) } catch (error) {}
-    }
+    try {
+      if (onTiming) {
+        const endedAt = readTimingClock(clock)
+        const safeCode = typeof outcomeCode === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(outcomeCode)
+          ? outcomeCode : 'BUSINESS_ERROR'
+        const durationMs = Number.isFinite(startedAt) && Number.isFinite(endedAt)
+          ? Math.max(0, Math.round(endedAt - startedAt))
+          : 0
+        notifyTiming(onTiming, { action: typeof action === 'string' ? action : '', durationMs, outcomeCode: safeCode })
+      }
+    } catch (error) {}
   }
 }
 

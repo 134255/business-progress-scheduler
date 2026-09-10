@@ -15,6 +15,10 @@ function unavailableReasonMessage(reason) {
 
 function listTemplates(query) { return callBusinessApi('listTemplates', query) }
 function getTemplate(templateId) { return callBusinessApi('getTemplate', { templateId }) }
+function getTemplateCardDisplay(templateId) { return callBusinessApi('getTemplateCardDisplay', { templateId }) }
+function updateTemplateCardDisplay(templateId, expectedRevision, fields) {
+  return callBusinessApi('updateTemplateCardDisplay', { templateId, expectedRevision, fields })
+}
 function createTemplate(definition) { return callBusinessApi('createTemplate', definition) }
 function updateTemplate(templateId, expectedVersion, definition) {
   return callBusinessApi('updateTemplate', { templateId, expectedVersion, definition })
@@ -28,6 +32,6 @@ function deleteTemplate(templateId, expectedVersion) {
 function listEnabledTemplates() { return callBusinessApi('listEnabledTemplates', {}) }
 
 module.exports = {
-  listTemplates, getTemplate, createTemplate, updateTemplate,
+  listTemplates, getTemplate, createTemplate, updateTemplate, getTemplateCardDisplay, updateTemplateCardDisplay,
   changeTemplateStatus, deleteTemplate, listEnabledTemplates, unavailableReasonMessage
 }

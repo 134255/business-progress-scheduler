@@ -282,6 +282,16 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     return requireCurrent(await repository.getTemplateDefinition(requireText(templateId)))
   }
 
+  async function getTemplateCardDisplay({ actor, templateId }) {
+    requireSuperAdmin(actor)
+    return repository.getTemplateCardDisplay({ actor, templateId: requireText(templateId) })
+  }
+
+  async function updateTemplateCardDisplay({ actor, templateId, expectedRevision, fields }) {
+    requireSuperAdmin(actor)
+    return repository.updateTemplateCardDisplay({ actor, templateId: requireText(templateId), expectedRevision, fields })
+  }
+
   async function createTemplate({ actor, input }) {
     requireSuperAdmin(actor)
     const safeInput = safeOwnDataRecord(input)
@@ -486,6 +496,8 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
   }
 
   return {
+    getTemplateCardDisplay,
+    updateTemplateCardDisplay,
     listTemplates,
     getTemplate,
     createTemplate,

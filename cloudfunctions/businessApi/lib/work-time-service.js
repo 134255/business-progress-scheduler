@@ -6,6 +6,7 @@ const MINUTE_MS = 60 * 1000
 const WORK_START_MINUTE = 9 * 60
 const WORK_END_MINUTE = 20 * 60
 const MINUTES_PER_WORKDAY = WORK_END_MINUTE - WORK_START_MINUTE
+const MAX_CALENDAR_ATTEMPTS = 3
 
 function validDate(value) {
   return value instanceof Date && !Number.isNaN(value.getTime())
@@ -45,9 +46,22 @@ function createWorkTimeService({ calendarRepository } = {}) {
     throw new TypeError('calendarRepository.getDayRule is required')
   }
 
-  async function readRule(day) {
+  async function withCalendarSession(calculate, pending) {
+    // Older/injected repositories keep their getDayRule-only contract.
+    if (typeof calendarRepository.createReadSession !== 'function') return calculate(calendarRepository)
+    for (let attempt = 0; attempt < MAX_CALENDAR_ATTEMPTS; attempt += 1) {
+      const session = calendarRepository.createReadSession()
+      const result = await calculate(session)
+      const changedDate = await session.findChangedDate()
+      if (changedDate === null) return result
+      // Discard all dates, versions and partial arithmetic on a generation switch.
+      if (attempt === MAX_CALENDAR_ATTEMPTS - 1) return pending(changedDate)
+    }
+  }
+
+  async function readRule(calendar, day) {
     const key = dateKey(day)
-    const rule = await calendarRepository.getDayRule(key)
+    const rule = await calendar.getDayRule(key)
     if (!rule || rule.date !== key || typeof rule.isWorkday !== 'boolean') return null
     return rule
   }
@@ -58,7 +72,7 @@ function createWorkTimeService({ calendarRepository } = {}) {
     }
   }
 
-  async function tryAddWorkMinutes(startAt, minutes) {
+  async function tryAddWorkMinutes(calendar, startAt, minutes) {
     requireDate(startAt, 'startAt')
     if (!Number.isSafeInteger(minutes) || minutes < 0) {
       throw new TypeError('minutes must be a non-negative safe integer')
@@ -76,7 +90,7 @@ function createWorkTimeService({ calendarRepository } = {}) {
         day += 1
         cursor = workStart(day)
       }
-      const rule = await readRule(day)
+      const rule = await readRule(calendar, day)
       if (!rule) return pendingDue(dateKey(day))
       recordVersion(versions, rule)
       if (!rule.isWorkday) {
@@ -97,7 +111,7 @@ function createWorkTimeService({ calendarRepository } = {}) {
     }
   }
 
-  async function nextWorkInstant(at) {
+  async function nextWorkInstant(calendar, at) {
     requireDate(at, 'at')
     let cursor = at.getTime()
     const versions = new Set()
@@ -107,7 +121,7 @@ function createWorkTimeService({ calendarRepository } = {}) {
         day += 1
         cursor = workStart(day)
       }
-      const rule = await readRule(day)
+      const rule = await readRule(calendar, day)
       if (!rule) return pendingDue(dateKey(day))
       recordVersion(versions, rule)
       if (rule.isWorkday) {
@@ -121,7 +135,7 @@ function createWorkTimeService({ calendarRepository } = {}) {
     }
   }
 
-  async function workingMinutesBetween(startAt, endAt) {
+  async function workingMinutesBetween(calendar, startAt, endAt) {
     requireDate(startAt, 'startAt')
     requireDate(endAt, 'endAt')
     if (endAt.getTime() < startAt.getTime()) throw new RangeError('endAt must not be before startAt')
@@ -136,7 +150,7 @@ function createWorkTimeService({ calendarRepository } = {}) {
       const overlapStart = Math.max(startAt.getTime(), workStart(day))
       const overlapEnd = Math.min(endAt.getTime(), workEnd(day))
       if (overlapEnd <= overlapStart) continue
-      const rule = await readRule(day)
+      const rule = await readRule(calendar, day)
       if (!rule) {
         return { status: 'pending_calendar', minutes: null, missingDate: dateKey(day) }
       }
@@ -154,7 +168,14 @@ function createWorkTimeService({ calendarRepository } = {}) {
     }
   }
 
-  return { tryAddWorkMinutes, workingMinutesBetween, nextWorkInstant }
+  return {
+    tryAddWorkMinutes: (startAt, minutes) => withCalendarSession(
+      calendar => tryAddWorkMinutes(calendar, startAt, minutes), pendingDue),
+    workingMinutesBetween: (startAt, endAt) => withCalendarSession(
+      calendar => workingMinutesBetween(calendar, startAt, endAt),
+      missingDate => ({ status: 'pending_calendar', minutes: null, missingDate })),
+    nextWorkInstant: at => withCalendarSession(calendar => nextWorkInstant(calendar, at), pendingDue)
+  }
 }
 
 module.exports = {

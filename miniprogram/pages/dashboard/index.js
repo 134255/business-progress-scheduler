@@ -1,14 +1,16 @@
 const businessService = require('../../services/business')
-const { safeErrorMessage } = require('../../utils/safe-error')
+const { safeErrorMessage, isAccountAccessError } = require('../../utils/safe-error')
+const { presentBusinessCard } = require('../../utils/business-card')
 
 let cachedAccountId = ''
+let cachedRole = ''
 let cachedDashboard = null
 
 function presentRecent(item) {
   const versionTwo = item && item.flowSchemaVersion === 2
   const terminalCompleted = Boolean(versionTwo && item.status === 'completed')
   const completedNodeCount = Number(item && item.completedNodeCount || 0)
-  return {
+  return presentBusinessCard({
     ...item,
     showProgressPercent: !versionTwo || terminalCompleted,
     displayProgress: terminalCompleted ? 100 : Number(item && item.progress || 0),
@@ -17,7 +19,7 @@ function presentRecent(item) {
         ? `已完成 ${completedNodeCount} 个节点 · 售后已完成`
         : `已完成 ${completedNodeCount} 个节点 · 当前：${item.currentNodeName || '待处理'}`
       : ''
-  }
+  })
 }
 
 Page({
@@ -32,8 +34,9 @@ Page({
   onShow() {
     const currentUser = this.requireActiveUser()
     if (!currentUser) return
-    if (cachedAccountId && cachedAccountId !== currentUser._id) cachedDashboard = null
+    if (cachedAccountId !== currentUser._id || cachedRole !== currentUser.role) this.clearDashboard()
     cachedAccountId = currentUser._id
+    cachedRole = currentUser.role
     this.setData({ profile: currentUser })
     if (cachedDashboard) {
       this.setData({
@@ -53,6 +56,7 @@ Page({
       this.authRedirected = false
       return currentUser
     }
+    this.clearDashboard()
     if (!this.authRedirected) {
       this.authRedirected = true
       wx.reLaunch({ url: '/pages/login/index' })
@@ -61,22 +65,30 @@ Page({
   },
 
   async loadDashboard(expectedUserId) {
+    const actor = this.requireActiveUser(expectedUserId)
+    if (!actor) return
+    expectedUserId = actor._id
+    const expectedRole = actor.role
+    if (cachedAccountId !== expectedUserId || cachedRole !== expectedRole) this.clearDashboard()
+    this.setData({ profile: actor })
     const requestSequence = (this.dashboardSequence || 0) + 1
     this.dashboardSequence = requestSequence
     this.setData({ loading: !cachedDashboard, errorMessage: '' })
     try {
       const data = await businessService.dashboard()
-      if (requestSequence !== this.dashboardSequence || !this.requireActiveUser(expectedUserId)) return
+      if (!this.acceptDashboard(requestSequence, expectedUserId, expectedRole)) return
       cachedAccountId = expectedUserId
+      cachedRole = expectedRole
       const recent = (data.recent || []).map(presentRecent)
       cachedDashboard = { stats: data.stats, recent }
       this.setData({ stats: data.stats, recent })
     } catch (error) {
-      if (requestSequence === this.dashboardSequence && this.requireActiveUser(expectedUserId)) {
+      if (this.acceptDashboard(requestSequence, expectedUserId, expectedRole)) {
+        if (isAccountAccessError(error)) this.clearDashboard()
         this.setData({ errorMessage: safeErrorMessage(error, '售后概览加载失败，请稍后重试') })
       }
     } finally {
-      if (requestSequence === this.dashboardSequence && this.requireActiveUser(expectedUserId)) {
+      if (this.acceptDashboard(requestSequence, expectedUserId, expectedRole)) {
         this.setData({ loading: false })
       }
     }
@@ -84,6 +96,39 @@ Page({
 
   openList() {
     wx.navigateTo({ url: '/pages/business-list/index' })
+  },
+
+  clearDashboard() {
+    cachedDashboard = null
+    cachedAccountId = ''
+    cachedRole = ''
+    this.setData({ recent: [], profile: null, loading: false,
+      stats: { active: 0, pendingMine: null, pendingMineAvailable: false, completed: 0 } })
+  },
+
+  acceptDashboard(sequence, actorId, role) {
+    if (sequence !== this.dashboardSequence) return false
+    const actor = this.requireActiveUser(actorId)
+    if (!actor) return false
+    if (actor.role !== role) { this.clearDashboard(); return false }
+    return true
+  },
+
+  onHide() { this.dashboardSequence = (this.dashboardSequence || 0) + 1 },
+  onUnload() { this.onHide() },
+  retryCards() {
+    const actor = this.requireActiveUser()
+    if (actor) return this.loadDashboard(actor._id)
+  },
+  async onPullDownRefresh() {
+    try { await this.retryCards() } finally { wx.stopPullDownRefresh() }
+  },
+
+  openStatusList(event) {
+    const status = event && event.currentTarget && event.currentTarget.dataset && event.currentTarget.dataset.status
+    if (status !== 'active' && status !== 'completed') return
+    if (!this.requireActiveUser()) return
+    wx.navigateTo({ url: `/pages/business-list/index?status=${status}&scope=mine` })
   },
 
   createBusiness() {

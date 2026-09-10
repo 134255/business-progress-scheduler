@@ -6,6 +6,8 @@ const { createWorkTimeService } = require('./work-time-service')
 const { FEEDBACK_TOTAL_LIMIT } = require('./evidence-policy')
 const { parseStrictTimestamp } = require('./evidence-retention')
 const { advanceSearchVersion, currentSearchVersion } = require('./search-version')
+const { normalizeBusinessListFilters } = require('./business-list-filters')
+const { boundedMap } = require('./bounded-map')
 const {
   hasAccountRelationshipMarker,
   ownDataValue,
@@ -360,15 +362,25 @@ function createCloudBusinessRepository({
     }
   }
 
-  async function readAll(buildQuery, maximum = Number.MAX_SAFE_INTEGER) {
+  async function readAll(buildQuery, maximum = Number.MAX_SAFE_INTEGER, signal) {
     const results = []
     for (let offset = 0; results.length < maximum; offset += QUERY_PAGE_SIZE) {
+      if (signal) signal.throwIfStopped()
       const response = await buildQuery().skip(offset).limit(Math.min(QUERY_PAGE_SIZE, maximum - results.length)).get()
       const page = response.data || []
       results.push(...page)
       if (page.length < QUERY_PAGE_SIZE || results.length >= maximum) return results
     }
     return results
+  }
+
+  async function readRelatedLines(actor, maximum = Number.MAX_SAFE_INTEGER) {
+    const criteria = [{ memberUserIds: actor._id }, { managerUserIds: actor._id }]
+    if (actor.openid) criteria.push({ memberIds: actor.openid }, { managerIds: actor.openid })
+    // Group order is part of candidate deduplication and the dashboard scan
+    // boundary. boundedMap preserves it even when queries finish out of order.
+    return boundedMap(criteria, (where, index, signal) => readAll(() => db.collection(COLLECTIONS.lines)
+      .where(where).orderBy('updatedAt', 'desc'), maximum, signal))
   }
 
   function membershipArray(value) {
@@ -418,9 +430,9 @@ function createCloudBusinessRepository({
     }
   }
 
-  async function requireCurrentReader(actor) {
+  async function requireCurrentReader(actor, database = db) {
     if (!actor || typeof actor._id !== 'string') throw createError('FORBIDDEN')
-    const current = await readDocument(db, COLLECTIONS.users, actor._id)
+    const current = await readDocument(database, COLLECTIONS.users, actor._id)
     if (!current || current.status !== 'active') throw createError('FORBIDDEN')
     return { ...current, openid: actor.openid }
   }
@@ -842,44 +854,26 @@ function createCloudBusinessRepository({
   }
 
   async function listBusinessLines({ actor, query = {} }) {
+    const filters = normalizeBusinessListFilters(query, () => createError('VALIDATION_ERROR'))
     const currentActor = await requireCurrentReader(actor)
     let byId
-    if (currentActor.role === 'super_admin') {
+    if (currentActor.role === 'super_admin' && filters.scope !== 'mine') {
       const allLines = await readAll(() => db.collection(COLLECTIONS.lines)
         .orderBy('updatedAt', 'desc'))
       byId = new Map(allLines.map(line => [line._id, line]))
     } else {
-      const accountMemberLines = await readAll(() => db.collection(COLLECTIONS.lines)
-        .where({ memberUserIds: currentActor._id })
-        .orderBy('updatedAt', 'desc'))
-      const accountManagerLines = await readAll(() => db.collection(COLLECTIONS.lines)
-        .where({ managerUserIds: currentActor._id })
-        .orderBy('updatedAt', 'desc'))
-      const legacyMemberLines = currentActor.openid
-        ? await readAll(() => db.collection(COLLECTIONS.lines)
-          .where({ memberIds: currentActor.openid })
-          .orderBy('updatedAt', 'desc'))
-        : []
-      const legacyManagerLines = currentActor.openid
-        ? await readAll(() => db.collection(COLLECTIONS.lines)
-          .where({ managerIds: currentActor.openid })
-          .orderBy('updatedAt', 'desc'))
-        : []
-      byId = new Map([
-        ...accountMemberLines,
-        ...accountManagerLines,
-        ...legacyMemberLines,
-        ...legacyManagerLines
-      ].map(line => [line._id, line]))
+      const groups = await readRelatedLines(currentActor)
+      byId = new Map(groups.flat().map(line => [line._id, line]))
     }
     const keyword = String(query.keyword || '').trim().toLowerCase()
     const start = query.startDate ? new Date(`${query.startDate}T00:00:00+08:00`) : null
     const end = query.endDate ? new Date(`${query.endDate}T23:59:59+08:00`) : null
     const initiallyVisible = [...byId.values()]
-      .filter(line => currentActor.role === 'super_admin' || (usesAccountMembership(line)
+      .filter(line => (currentActor.role === 'super_admin' && filters.scope !== 'mine') || (usesAccountMembership(line)
         ? safeNewLineMember(line, currentActor._id)
         : isLegacyLineMember(line, currentActor.openid)))
       .filter(line => line.status !== 'creating' && line.status !== 'deleted')
+      .filter(line => !filters.status || line.status === filters.status)
       .filter(line => !keyword || [line.name, line.code]
         .some(value => String(value || '').toLowerCase().includes(keyword)))
       .filter(line => {
@@ -888,19 +882,19 @@ function createCloudBusinessRepository({
       })
       .sort(compareUpdatedDesc)
     const finalActor = await requireCurrentReader(actor)
-    const visible = []
-    for (const candidate of initiallyVisible) {
+    const visible = (await boundedMap(initiallyVisible, async candidate => {
       const line = await readDocument(db, COLLECTIONS.lines, candidate._id)
-      if (!line || line.status === 'creating' || line.status === 'deleted') continue
-      if (finalActor.role !== 'super_admin' && !(usesAccountMembership(line)
+      if (!line || line.status === 'creating' || line.status === 'deleted') return null
+      if (filters.status && line.status !== filters.status) return null
+      if ((finalActor.role !== 'super_admin' || filters.scope === 'mine') && !(usesAccountMembership(line)
         ? safeNewLineMember(line, finalActor._id)
-        : isLegacyLineMember(line, finalActor.openid))) continue
+        : isLegacyLineMember(line, finalActor.openid))) return null
       if (keyword && ![line.name, line.code]
-        .some(value => String(value || '').toLowerCase().includes(keyword))) continue
+        .some(value => String(value || '').toLowerCase().includes(keyword))) return null
       const itemDate = line.createdAt ? new Date(line.createdAt) : null
-      if ((start && (!itemDate || itemDate < start)) || (end && (!itemDate || itemDate > end))) continue
-      visible.push(line)
-    }
+      if ((start && (!itemDate || itemDate < start)) || (end && (!itemDate || itemDate > end))) return null
+      return line
+    })).filter(Boolean)
     visible.sort(compareUpdatedDesc)
     const page = Number.isSafeInteger(query.page) && query.page > 0 ? query.page : 1
     const pageSize = Number.isSafeInteger(query.pageSize) && query.pageSize >= 5 && query.pageSize <= 50
@@ -987,19 +981,13 @@ function createCloudBusinessRepository({
 
   async function readPendingCandidates(actor) {
     const statusFilter = db.command.in(PENDING_PROCESSING_STATUSES)
-    const groups = [
-      await readAll(() => db.collection(COLLECTIONS.nodes)
-        .where({ processorUserIds: actor._id, status: statusFilter })
-        .orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1),
-      await readAll(() => db.collection(COLLECTIONS.nodes)
-        .where({ manualDecisionProcessorUserIds: actor._id, status: statusFilter })
-        .orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1)
+    const criteria = [
+      { processorUserIds: actor._id, status: statusFilter },
+      { manualDecisionProcessorUserIds: actor._id, status: statusFilter }
     ]
-    if (actor.openid) {
-      groups.push(await readAll(() => db.collection(COLLECTIONS.nodes)
-        .where({ assigneeIds: actor.openid, status: statusFilter })
-        .orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1))
-    }
+    if (actor.openid) criteria.push({ assigneeIds: actor.openid, status: statusFilter })
+    const groups = await boundedMap(criteria, (where, index, signal) => readAll(() => db.collection(COLLECTIONS.nodes)
+      .where(where).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1, signal))
     const byId = new Map(groups.flat().map(node => [node._id, node]))
     return {
       items: [...byId.values()].slice(0, DASHBOARD_SCAN_LIMIT + 1),
@@ -1076,11 +1064,8 @@ function createCloudBusinessRepository({
   async function collectPendingProcessing(actor) {
     const currentActor = await requireCurrentReader(actor)
     const candidates = await readPendingCandidates(currentActor)
-    const visible = []
-    for (const candidate of candidates.items.slice(0, DASHBOARD_SCAN_LIMIT)) {
-      const item = await authorizePendingCandidate(currentActor, candidate)
-      if (item) visible.push(item)
-    }
+    const visible = (await boundedMap(candidates.items.slice(0, DASHBOARD_SCAN_LIMIT),
+      candidate => authorizePendingCandidate(currentActor, candidate))).filter(Boolean)
     return { items: visible.sort(comparePendingProcessing), complete: candidates.complete }
   }
 
@@ -1104,20 +1089,7 @@ function createCloudBusinessRepository({
 
   async function getMyBusinessSummary({ actor }) {
     const currentActor = await requireCurrentReader(actor)
-    const groups = [
-      await readAll(() => db.collection(COLLECTIONS.lines)
-        .where({ memberUserIds: currentActor._id }).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1),
-      await readAll(() => db.collection(COLLECTIONS.lines)
-        .where({ managerUserIds: currentActor._id }).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1)
-    ]
-    if (currentActor.openid) {
-      groups.push(
-        await readAll(() => db.collection(COLLECTIONS.lines)
-          .where({ memberIds: currentActor.openid }).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1),
-        await readAll(() => db.collection(COLLECTIONS.lines)
-          .where({ managerIds: currentActor.openid }).orderBy('updatedAt', 'desc'), DASHBOARD_SCAN_LIMIT + 1)
-      )
-    }
+    const groups = await readRelatedLines(currentActor, DASHBOARD_SCAN_LIMIT + 1)
     const byId = new Map(groups.flat().map(line => [line._id, line]))
     const complete = byId.size <= DASHBOARD_SCAN_LIMIT
     const visible = [...byId.values()].slice(0, DASHBOARD_SCAN_LIMIT)
@@ -1258,13 +1230,31 @@ function createCloudBusinessRepository({
     }
   }
 
-  async function getBusinessLine({ actor, lineId }) {
-    const currentActor = await requireCurrentReader(actor)
-    const line = await readDocument(db, COLLECTIONS.lines, lineId)
+  async function readAuthorizedLine({ actor, lineId, database = db, allowGlobal = false }) {
+    const currentActor = await requireCurrentReader(actor, database)
+    const line = await readDocument(database, COLLECTIONS.lines, lineId)
     if (!line || line.status === 'creating' || line.status === 'deleted') throw createError('NOT_FOUND')
-    if (usesAccountMembership(line)) {
-      if (!safeNewLineMember(line, currentActor._id)) throw createError('FORBIDDEN')
-    } else assertLineMember(line, currentActor)
+    let canReadFields = true
+    try {
+      if (usesAccountMembership(line)) {
+        if (!safeNewLineMember(line, currentActor._id)) throw createError('FORBIDDEN')
+      } else assertLineMember(line, currentActor)
+    } catch (error) {
+      if (!allowGlobal || currentActor.role !== 'super_admin' || error.code !== 'FORBIDDEN') throw error
+      canReadFields = false
+    }
+    return { actor: currentActor, line, canReadFields }
+  }
+
+  // Internal raw read. Global-list access is intentionally weaker than field
+  // access; callers MUST honor canReadFields and revalidate at their boundary.
+  async function getAuthorizedCardLine({ actor, lineId, database = db }) {
+    if (typeof lineId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(lineId)) throw createError('NOT_FOUND')
+    return readAuthorizedLine({ actor, lineId, database, allowGlobal: true })
+  }
+
+  async function getBusinessLine({ actor, lineId }) {
+    const { actor: currentActor, line } = await readAuthorizedLine({ actor, lineId })
     const nodes = (await readAll(() => db.collection(COLLECTIONS.nodes)
       .where({ businessLineId: line._id })
       .orderBy('sequence', 'asc'))).sort(compareNodes)
@@ -2217,6 +2207,7 @@ function createCloudBusinessRepository({
     listMyPendingProcessing,
     getMyBusinessSummary,
     getBusinessLine,
+    getAuthorizedCardLine,
     updateBusinessMetadata,
     listFrozenBusinessesForAdmin,
     getFrozenBusinessForAdmin,

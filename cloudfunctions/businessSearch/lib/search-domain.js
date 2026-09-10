@@ -101,6 +101,9 @@ function formatFieldValue(field) {
   const type = ownData(field, 'type')
   const value = ownData(field, 'value')
   if (!FIELD_TYPES.has(type)) throw createError('SEARCH_SOURCE_INVALID')
+  // Published optional fields use null for an unfilled value. Keep the label,
+  // but never stringify the absence or prevent the whole generation publishing.
+  if (value === null) return { name, text: '' }
 
   if (type === 'short_text' || type === 'long_text' || type === 'single_select') {
     return { name, text: optionalText(value) }

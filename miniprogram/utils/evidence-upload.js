@@ -1,4 +1,5 @@
 const RETRY_DELAYS_MS = Object.freeze([250, 500])
+const { recordPerformanceTiming, readTimingClock, notifyTiming } = require('./performance-timing')
 const RETRYABLE_CODES = new Set([
   'RequestError', 'NetworkError', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'UPLOAD_FAILED'
 ])
@@ -12,6 +13,19 @@ function uploadError(code, message) {
   const error = new Error(message || code)
   error.code = code
   return error
+}
+
+async function atUploadStage(stage, action) {
+  try {
+    return await action()
+  } catch (error) {
+    const source = error && typeof error.error === 'object' && error.error ? error.error : error
+    const failure = uploadError(source && (source.code || source.Code) || error && error.code || 'EVIDENCE_UPLOAD_FAILED', '上传失败，请重试')
+    failure.uploadStage = stage
+    const status = Number(error && error.statusCode || source && source.statusCode)
+    if (Number.isInteger(status) && status >= 100 && status <= 599) failure.statusCode = status
+    throw failure
+  }
 }
 
 function assertNotCancelled(signal) {
@@ -76,11 +90,30 @@ function createEvidenceUploader({
   refreshUpload,
   finalizeUpload,
   delay = ms => new Promise(resolve => setTimeout(resolve, ms)),
-  nowSeconds = () => Math.floor(Date.now() / 1000)
+  nowSeconds = () => Math.floor(Date.now() / 1000),
+  clock = Date.now,
+  onTiming = recordPerformanceTiming
 }) {
   if (typeof cosFactory !== 'function' || typeof beginUpload !== 'function' ||
       typeof refreshUpload !== 'function' || typeof finalizeUpload !== 'function') {
     throw new TypeError('cosFactory, beginUpload, refreshUpload and finalizeUpload are required')
+  }
+
+  async function timedUploadStage(stage, action) {
+    const startedAt = readTimingClock(clock)
+    let outcomeCode = 'ERROR'
+    try {
+      const result = await atUploadStage(stage, action)
+      outcomeCode = 'OK'
+      return result
+    } finally {
+      try {
+        const endedAt = readTimingClock(clock)
+        const durationMs = Number.isFinite(startedAt) && Number.isFinite(endedAt)
+          ? Math.max(0, Math.round(endedAt - startedAt)) : 0
+        notifyTiming(onTiming, { action: 'evidenceUpload', stage, durationMs, outcomeCode })
+      } catch (error) {}
+    }
   }
 
   async function uploadOnce({ session, file, onProgress, signal }) {
@@ -157,20 +190,20 @@ function createEvidenceUploader({
       declaredSize: input.file.size
     }
     const session = {
-      ...(await beginUpload(beginInput)),
+      ...(await timedUploadStage('authorize', () => beginUpload(beginInput))),
       expectedNodeVersion: input.expectedNodeVersion
     }
-    const uploadState = await uploadOnce({
+    const uploadState = await timedUploadStage('transfer', () => uploadOnce({
       session, file: input.file, onProgress: input.onProgress, signal: input.signal
-    })
+    }))
     for (let finalizeAttempt = 0; finalizeAttempt < 2; finalizeAttempt += 1) {
       assertNotCancelled(input.signal)
       try {
-        return await finalizeUpload({
+        return await timedUploadStage('finalize', () => finalizeUpload({
           evidenceId: session.evidenceId,
           uploadSessionToken: session.uploadSessionToken,
           expectedNodeVersion: input.expectedNodeVersion
-        })
+        }))
       } catch (error) {
         if (error && error.code === 'EVIDENCE_UPLOAD_EXPIRED' && finalizeAttempt === 0) {
           await uploadState.refreshSession(true)

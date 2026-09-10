@@ -3,6 +3,34 @@ const assert = require('node:assert/strict')
 
 const { businessTemplate, createBusinessHarness } = require('./helpers/business-harness')
 
+test('status and mine filters survive both ordinary and keyword list dispatch', async () => {
+  const searchCalls = []
+  const harness = createBusinessHarness({ businessSearchClient: { async query(input) {
+    searchCalls.push(input)
+    return { items: [], cursor: '', hasMore: false }
+  } } })
+  for (const status of ['active', 'completed']) {
+    await harness.service.listBusinessLines({ actor: harness.actor, query: { status, scope: 'mine' } })
+    assert.deepEqual(harness.calls.at(-1)[1].query, { status, scope: 'mine', page: 1, pageSize: 20 })
+    await harness.service.listBusinessLines({ actor: harness.actor,
+      query: { keyword: '售后', status, scope: 'mine' } })
+    assert.deepEqual(searchCalls.at(-1).query,
+      { keyword: '售后', status, scope: 'mine', pageSize: 20, cursor: '' })
+  }
+})
+
+test('list filters reject unsupported values, inherited fields and accessors without evaluating them', async () => {
+  const harness = createBusinessHarness()
+  let accessed = false
+  const accessor = Object.defineProperty({}, 'status', { enumerable: true, get() { accessed = true; return 'active' } })
+  for (const query of [
+    ...['', 'closed', 'in_progress', null, 1, true, [], {}, undefined].map(status => ({ status })),
+    ...['', 'global', null, 1, true, [], {}, undefined].map(scope => ({ scope })),
+    Object.create({ status: 'active' }), accessor
+  ]) await assert.rejects(harness.service.listBusinessLines({ actor: harness.actor, query }), { code: 'VALIDATION_ERROR' })
+  assert.equal(accessed, false)
+})
+
 function validInput(overrides = {}) {
   return {
     templateId: 'template-1',
@@ -416,6 +444,49 @@ test('售后列表严格校验关键词、日期和分页输入', async () => {
       error => error.code === 'VALIDATION_ERROR'
     )
   }
+})
+
+test('search recovery projection preserves only approved status and opaque cursor without internal details', async () => {
+  for (const indexStatus of ['recovering', 'incomplete', undefined]) {
+    const harness = createBusinessHarness({ businessSearchClient: { async query() {
+      return { items: [], cursor: 'recovery:signed', hasMore: true, indexStatus,
+        failedLineIds: ['private'], scanned: 40, rebuilt: 2 }
+    } } })
+    const result = await harness.service.listBusinessLines({ actor: harness.actor, query: { keyword: '1' } })
+    assert.deepEqual(result, { items: [], cursor: 'recovery:signed', hasMore: true, total: null,
+      ...(indexStatus === undefined ? {} : { indexStatus }) })
+  }
+})
+
+test('search recovery projection rejects unknown status and malformed recovery envelopes without evaluating accessors', async () => {
+  const valid = { items: [], cursor: 'recovery:signed', hasMore: true, indexStatus: 'recovering' }
+  let accessed = false
+  const accessor = Object.defineProperty({ ...valid }, 'indexStatus', { get() { accessed = true; return 'recovering' } })
+  const inherited = Object.assign(Object.create({ indexStatus: 'recovering' }), { items: [], cursor: 'next', hasMore: true })
+  for (const response of [
+    ...['', null, 1, true, {}, 'generated', 'pending'].map(indexStatus => ({ ...valid, indexStatus })),
+    ...['', ' ', null, 1, 'x'.repeat(2049)].map(cursor => ({ ...valid, cursor })),
+    ...[false, undefined, 'true', 1].map(hasMore => ({ ...valid, hasMore })),
+    { ...valid, items: [{ _id: 'must-not-publish' }] }, accessor, inherited
+  ]) {
+    const harness = createBusinessHarness({ businessSearchClient: { async query() { return response } } })
+    await assert.rejects(harness.service.listBusinessLines({ actor: harness.actor, query: { keyword: '1' } }),
+      { code: 'BUSINESS_SEARCH_PENDING' })
+  }
+  assert.equal(accessed, false)
+})
+
+test('single code characters and partial field or node terms remain unchanged through protected search dispatch', async () => {
+  const queries = []
+  const harness = createBusinessHarness({ businessSearchClient: { async query({ query }) {
+    queries.push(query)
+    return { items: [], cursor: '', hasMore: false }
+  } } })
+  for (const keyword of ['B', '-', '0', '收', '客户', '甲']) {
+    await harness.service.listBusinessLines({ actor: harness.actor, query: { keyword, cursor: 'recovery:signed' } })
+  }
+  assert.deepEqual(queries.map(query => query.keyword), ['B', '-', '0', '收', '客户', '甲'])
+  assert.ok(queries.every(query => query.cursor === 'recovery:signed'))
 })
 
 test('元数据修改成功后同步检索并剥离内部信封', async () => {

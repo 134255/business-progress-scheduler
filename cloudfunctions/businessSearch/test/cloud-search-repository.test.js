@@ -78,12 +78,12 @@ function authoritativeSeed() {
       {
         _id: 'feedback-old', businessLineId: 'line-1', nodeId: 'node-1', processingRoundNumber: 2,
         revision: 1, publishState: 'published', action: 'save_progress', fieldValues: fieldValues('旧版'),
-        processingComment: '旧处理说明', evidenceIds: []
+        comment: '旧处理说明', evidenceCount: 0, claimedCount: 0
       },
       {
         _id: 'feedback-current', businessLineId: 'line-1', nodeId: 'node-1', processingRoundNumber: 2,
         revision: 2, publishState: 'published', action: 'save_progress', fieldValues: fieldValues('当前'),
-        processingComment: '当前处理说明', evidenceIds: ['evidence-current']
+        comment: '当前处理说明', evidenceCount: 1, claimedCount: 1
       }
     ],
     node_review_rounds: [
@@ -122,6 +122,7 @@ function authoritativeSeed() {
     evidences: [
       {
         _id: 'evidence-current', businessLineId: 'line-1', nodeId: 'node-1', feedbackId: 'feedback-current',
+        feedbackRevision: 2, processingRoundNumber: 2, attachmentState: 'attached', feedbackEvidenceOrder: 0,
         fileName: '当前现场照片.jpg', storageStatus: 'available', purgedAt: null, fileId: 'cloud://secret/current'
       },
       {

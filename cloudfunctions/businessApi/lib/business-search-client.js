@@ -1,4 +1,5 @@
 const crypto = require('node:crypto')
+const { normalizeBusinessListFilters } = require('./business-list-filters')
 
 function createError(code) {
   const error = new Error(code)
@@ -95,6 +96,7 @@ function createBusinessSearchClient({ db, callFunction, secret, clock = () => ne
     if (typeof actorId !== 'string' || !actorId || !input || typeof input !== 'object' || Array.isArray(input)) {
       throw createError('INVALID_SEARCH_QUERY')
     }
+    const filters = normalizeBusinessListFilters(input, () => createError('INVALID_SEARCH_QUERY'))
     const normalized = normalizeKeyword(input.keyword)
     const pageSize = safePageSize(input.pageSize)
     const cursor = safeCursor(input.cursor)
@@ -102,6 +104,8 @@ function createBusinessSearchClient({ db, callFunction, secret, clock = () => ne
     const endDate = safeDate(input.endDate)
     if (startDate && endDate && startDate > endDate) throw createError('INVALID_SEARCH_QUERY')
     const ticket = await storeRequest('query', {
+      ...(filters.status ? { businessStatus: filters.status } : {}),
+      ...(filters.scope ? { scope: filters.scope } : {}),
       actorId,
       normalizedKeywords: normalized.normalizedKeywords,
       digestInput: `${normalized.digestInput}\u0000${startDate}\u0000${endDate}`,

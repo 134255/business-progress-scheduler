@@ -1,0 +1,9 @@
+.business-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18rpx; }
+.business-card-title { flex: 1; min-width: 0; font-size: 31rpx; font-weight: 650; overflow-wrap: anywhere; word-break: break-all; }
+.business-card-heading status-pill { flex-shrink: 0; }
+.business-card-fields { display: flex; flex-wrap: wrap; gap: 12rpx 24rpx; margin-top: 18rpx; }
+.business-card-field { flex: 1 1 42%; min-width: 0; max-width: 100%; }
+.business-card-field-long { flex-basis: 100%; }
+.business-card-field-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; word-break: break-all; line-height: 1.6; color: #374151; font-size: 26rpx; }
+.business-card-unavailable { margin-top: 16rpx; color: #92400e; font-size: 24rpx; line-height: 1.6; }
+.business-card-retry { margin: 8rpx 0 0; color: #0f766e; }

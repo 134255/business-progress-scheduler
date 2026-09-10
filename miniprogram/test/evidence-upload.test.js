@@ -3,6 +3,50 @@ const assert = require('node:assert/strict')
 
 const { createEvidenceUploader } = require('../utils/evidence-upload')
 
+test('upload stage timings separate authorization, transfer and verification without disclosing file or credentials', async () => {
+  const timings = []
+  let clock = 0
+  const uploader = createEvidenceUploader({
+    clock: () => clock,
+    onTiming: value => timings.push(value),
+    beginUpload: async () => { clock += 10; return session() },
+    refreshUpload: async () => assert.fail('must not refresh'),
+    finalizeUpload: async () => { clock += 30; return { storageStatus: 'available' } },
+    cosFactory: () => ({ uploadFile(params, callback) { clock += 20; callback(null, { statusCode: 200 }) } })
+  })
+  const result = await uploader.upload({
+    businessLineId: 'private-line', nodeId: 'private-node', expectedNodeVersion: 4,
+    file: { name: 'private-file.mp4', path: 'wxfile://private', size: 10 }
+  })
+  assert.equal(result.storageStatus, 'available')
+  assert.deepEqual(timings, [
+    { action: 'evidenceUpload', stage: 'authorize', durationMs: 10, outcomeCode: 'OK' },
+    { action: 'evidenceUpload', stage: 'transfer', durationMs: 20, outcomeCode: 'OK' },
+    { action: 'evidenceUpload', stage: 'finalize', durationMs: 30, outcomeCode: 'OK' }
+  ])
+  assert.doesNotMatch(JSON.stringify(timings), /private|token|bucket|credentials|objectKey/)
+})
+
+test('failed stage emits a safe timing and a throwing timing observer cannot replace the upload result', async () => {
+  for (const observerThrows of [false, true]) {
+    const timings = []
+    let clock = 0
+    const uploader = createEvidenceUploader({
+      clock: () => clock,
+      onTiming(value) { timings.push(value); if (observerThrows) throw new Error('observer failed') },
+      beginUpload: async () => { clock = 12; throw Object.assign(new Error('private'), { code: 'FORBIDDEN' }) },
+      refreshUpload: async () => assert.fail('must not refresh'),
+      finalizeUpload: async () => assert.fail('must not finalize'),
+      cosFactory: () => assert.fail('must not transfer')
+    })
+    await assert.rejects(uploader.upload({ businessLineId: 'line', nodeId: 'node',
+      expectedNodeVersion: 4, file: { name: 'private.pdf', size: 10 } }), { code: 'FORBIDDEN', uploadStage: 'authorize' })
+    assert.deepEqual(timings, [
+      { action: 'evidenceUpload', stage: 'authorize', durationMs: 12, outcomeCode: 'ERROR' }
+    ])
+  }
+})
+
 function session(number = 1) {
   return {
     evidenceId: `evidence-${number}`,
@@ -259,3 +303,31 @@ test('cancellation stops before authorization or retry and produces a stable saf
   }), error => error && error.code === 'UPLOAD_CANCELLED')
   assert.equal(calls, 0)
 })
+
+for (const stage of ['authorize', 'transfer', 'finalize']) {
+  test(`upload failure identifies ${stage} without discarding its classification`, async () => {
+    const failure = Object.assign(new Error('private provider detail'), { code: 'AccessDenied', statusCode: 403 })
+    const events = []
+    const uploader = createEvidenceUploader({
+      beginUpload: async () => { events.push('authorize'); if (stage === 'authorize') throw failure; return session() },
+      refreshUpload: async () => assert.fail('not expired'),
+      cosFactory: () => ({ uploadFile(params, callback) {
+        events.push('transfer')
+        callback(stage === 'transfer' ? failure : null, { statusCode: 200 })
+      } }),
+      finalizeUpload: async () => { events.push('finalize'); throw failure },
+      delay: async () => assert.fail('403 must not retry')
+    })
+    await assert.rejects(uploader.upload({
+      businessLineId: 'line', nodeId: 'node', expectedNodeVersion: 4,
+      file: { name: 'proof.png', path: 'wxfile://proof.png', size: 372429 }
+    }), error => {
+      assert.equal(error.uploadStage, stage)
+      assert.equal(error.code, 'AccessDenied')
+      assert.equal(error.statusCode, 403)
+      assert.doesNotMatch(error.message, /private provider/)
+      return true
+    })
+    assert.equal(events.at(-1), stage)
+  })
+}

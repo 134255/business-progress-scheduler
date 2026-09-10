@@ -1,6 +1,6 @@
 <view class="page">
   <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
-  <view wx:if="{{readOnly}}" class="readonly-banner">模板已启用，定义为只读。请先停用后再编辑。</view>
+  <view wx:if="{{readOnly}}" class="readonly-banner">模板已启用，流程定义为只读，须先停用再编辑；售后卡片展示可独立调整。</view>
 
   <view class="card">
     <view class="field">
@@ -12,6 +12,50 @@
       <textarea id="template-description" class="textarea" value="{{description}}" maxlength="500" disabled="{{readOnly || loading}}" bindinput="onDescriptionInput" />
     </view>
     <view wx:if="{{editMode}}" class="meta">状态：{{status === 'enabled' ? '已启用' : status === 'disabled' ? '已停用' : '草稿'}} · 版本 {{version}}</view>
+  </view>
+
+  <view class="card card-display-editor">
+    <view class="section-title">售后卡片展示</view>
+    <text class="card-display-help">最多选择 4 个字段，留空只显示编号、状态和当前节点。保存后，此模板创建的新旧售后卡片将在下一次成功刷新时更新，不修改历史内容。</text>
+    <text class="card-display-help">仅使用已保存的节点和字段。新模板或新增字段须先保存流程定义，再重新打开本页配置；此处保存不会提交流程草稿。</text>
+    <view wx:if="{{!editMode}}" class="card-display-help">请先保存模板，再设置展示字段。</view>
+    <view wx:else>
+      <view wx:if="{{cardError}}" class="error">{{cardError}}</view>
+      <view wx:if="{{cardLoading}}" class="card-display-help">正在读取已保存的展示配置…</view>
+      <view wx:if="{{cardLoaded}}">
+        <text class="meta">展示修订 {{cardRevision}} · 已选 {{cardFields.length}} / 4</text>
+        <view class="card-display-pickers">
+          <picker range="{{cardNodeOptions}}" range-key="name" value="{{cardNodeIndex}}" disabled="{{cardLoading || cardSubmitting}}" bindchange="onCardNodeChange">
+            <view class="picker-value">节点：{{cardNodeOptions[cardNodeIndex].name || '暂无已保存节点'}}</view>
+          </picker>
+          <picker range="{{cardFieldOptions}}" range-key="name" value="{{cardFieldIndex < 0 ? 0 : cardFieldIndex}}" disabled="{{cardLoading || cardSubmitting || !cardFieldOptions.length}}" bindchange="onCardFieldChange">
+            <view class="picker-value">字段：{{cardFieldIndex < 0 ? '请选择字段' : cardFieldOptions[cardFieldIndex].name}}</view>
+          </picker>
+          <button size="mini" bindtap="addCardField" disabled="{{cardLoading || cardSubmitting || cardFieldIndex < 0 || cardFields.length >= 4}}">添加展示字段</button>
+        </view>
+        <view class="card-display-selected" wx:for="{{cardFields}}" wx:key="id">
+          <text>{{index + 1}}. {{item.nodeName}} · {{item.label}}</text>
+          <view class="actions">
+            <button size="mini" data-id="{{item.id}}" data-direction="-1" bindtap="moveCardField" disabled="{{cardLoading || cardSubmitting || index === 0}}">上移</button>
+            <button size="mini" data-id="{{item.id}}" data-direction="1" bindtap="moveCardField" disabled="{{cardLoading || cardSubmitting || index + 1 === cardFields.length}}">下移</button>
+            <button size="mini" data-id="{{item.id}}" bindtap="removeCardField" disabled="{{cardLoading || cardSubmitting}}">移除</button>
+          </view>
+        </view>
+        <view class="card-display-preview">
+          <text class="card-display-help">合成示例预览（非客户数据）</text>
+          <view class="business-card-heading"><text class="business-card-title">{{cardPreview.cardTitle}}</text><text class="meta">进行中</text></view>
+          <view class="business-card-fields">
+            <view class="business-card-field" wx:for="{{cardPreview.cardRows}}" wx:key="id"><text class="business-card-field-text">{{item.label}}：{{item.value}}</text></view>
+          </view>
+          <text class="card-display-help">当前节点：示例节点</text>
+        </view>
+        <view class="actions">
+          <button class="primary-button" bindtap="saveCardDisplay" loading="{{cardSubmitting}}" disabled="{{cardLoading || cardSubmitting}}">保存展示配置</button>
+          <button bindtap="clearCardFields" disabled="{{cardLoading || cardSubmitting || !cardFields.length}}">清空选择</button>
+        </view>
+      </view>
+      <button class="secondary-button" bindtap="loadCardDisplay" disabled="{{cardLoading || cardSubmitting}}">重新加载展示配置</button>
+    </view>
   </view>
 
   <view class="row-between section-head">

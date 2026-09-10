@@ -7,6 +7,18 @@ const { createBusinessSearchClient } = require('../lib/business-search-client')
 const SECRET = 'search-secret-for-tests-only-1234567890'
 const NOW = new Date('2026-08-25T10:00:00.000Z')
 
+test('query ticket keeps lifecycle separate from business status and binds filter scope', async () => {
+  const value = harness()
+  await value.client.query({ actorId: 'actor-1', query: { keyword: '售后', status: 'completed', scope: 'mine' } })
+  assert.equal(value.writes[0].data.status, 'pending')
+  assert.equal(value.writes[0].data.businessStatus, 'completed')
+  assert.equal(value.writes[0].data.scope, 'mine')
+  for (const query of [{ status: '' }, { status: 'closed' }, { scope: 'global' }, { scope: null }]) {
+    await assert.rejects(value.client.query({ actorId: 'actor-1', query: { keyword: '售后', ...query } }),
+      { code: 'INVALID_SEARCH_QUERY' })
+  }
+})
+
 function harness({ invoke } = {}) {
   const writes = []
   const calls = []

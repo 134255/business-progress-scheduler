@@ -626,36 +626,148 @@ test('图片、PDF 和多个视频可反复选择，不设产品单文件上限�
   assert.match(toasts.at(-1).title, /合计.*120 MB/)
 })
 
-test('Mac 使用本地文件选择器选择图片视频，移动端继续使用相册接口', async () => {
-  const desktopFiles = []
-  let desktopPicker
-  let mobilePicker
+async function loadDesktopPickerPage(overrides = {}) {
   global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = {
     setNavigationBarTitle: () => {},
     reLaunch: () => assert.fail('有效账号不应被重定向'),
     showToast: () => {},
     getDeviceInfo: () => ({ platform: 'mac' }),
-    chooseMedia: () => assert.fail('Mac 不应调用手机相册接口'),
-    chooseMessageFile: options => { desktopPicker = options }
+    showActionSheet: options => options.success({ tapIndex: 0 }),
+    chooseMessageFile: () => assert.fail('本机媒体入口不得转到微信聊天文件'),
+    ...overrides
   }
-  const desktopPage = loadPage({
+  const page = loadPage({
     getBusinessLine: async () => businessFixture(nodeFixture({
-      fieldDefinitions: [], allowedEvidenceTypes: ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'm4v']
+      allowedEvidenceTypes: ['jpg', 'jpeg', 'png', 'heic', 'mp4', 'mov', 'm4v']
     })),
-    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+    getNodeHistory: async () => ({ canSubmit: true, history: [] })
   })
-  await desktopPage.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  return page
+}
 
-  desktopPage.chooseMediaEvidence()
-  assert.equal(desktopPicker.type, 'all')
-  assert.equal(Object.hasOwn(desktopPicker, 'extension'), false)
-  desktopPicker.success({ tempFiles: [
-    { path: 'wxfile://desktop.png', name: 'desktop.png', size: 1024, type: 'file' }
-  ] })
-  desktopFiles.push(...desktopPage.data.files)
-  assert.deepEqual(desktopFiles.map(file => [file.path, file.category]), [['wxfile://desktop.png', 'image']])
+for (const platform of ['mac', 'windows']) {
+  test(`${platform} 本机图片分流使用 chooseImage 原图来源，不调用会话选择（非真机窗口验收）`, async () => {
+    let imagePicker
+    const page = await loadDesktopPickerPage({
+      getDeviceInfo: () => ({ platform }),
+      chooseMedia: () => assert.fail('桌面兼容路径不依赖 chooseMedia'),
+      chooseImage: options => { imagePicker = options }
+    })
+    page.setData({ 'fieldValues.summary': '未保存文字', comment: '保留说明' })
+    page.chooseMediaEvidence()
+    assert.deepEqual(imagePicker.sourceType, ['album'])
+    assert.deepEqual(imagePicker.sizeType, ['original'])
+    imagePicker.success({ tempFilePaths: ['wxfile://本机 图片.PNG'], tempFiles: [
+      { path: 'wxfile://本机 图片.PNG', size: 372429 }
+    ] })
+    assert.deepEqual(page.data.files.map(file => [file.path, file.name, file.category, file.size]), [
+      ['wxfile://本机 图片.PNG', '本机 图片.PNG', 'image', 372429]
+    ])
+    assert.equal(page.data.fieldValues.summary, '未保存文字')
+    assert.equal(page.data.comment, '保留说明')
+    assert.equal(page.data.draftDirty, true)
+  })
+}
 
+test('桌面视频分流调用不压缩的 chooseVideo，并保持 120 MiB 合计边界', async () => {
+  let picker
+  const toasts = []
+  const page = await loadDesktopPickerPage({
+    showActionSheet: options => options.success({ tapIndex: 1 }),
+    chooseVideo: options => { picker = options },
+    showToast: options => toasts.push(options.title)
+  })
+  page.chooseMediaEvidence()
+  assert.deepEqual(picker.sourceType, ['album'])
+  assert.equal(picker.compressed, false)
+  picker.success({ tempFilePath: 'wxfile://本机 视频.MOV', size: 120 * 1024 * 1024, duration: 20, width: 1920, height: 1080 })
+  assert.deepEqual(page.data.files.map(file => [file.path, file.category, file.size]), [
+    ['wxfile://本机 视频.MOV', 'video', 125829120]
+  ])
+  page.chooseMediaEvidence()
+  picker.success({ tempFilePath: 'wxfile://extra.mp4', size: 1, duration: 1, width: 1, height: 1 })
+  assert.equal(page.data.files.length, 1)
+  assert.match(toasts.at(-1), /合计.*120 MB/)
+})
+
+test('本机图片选择取消保持草稿，非取消失败显示安全提示且不转聊天', async () => {
+  let picker
+  const toasts = []
+  const page = await loadDesktopPickerPage({ chooseImage: options => { picker = options }, showToast: options => toasts.push(options.title) })
+  page.setData({ 'fieldValues.summary': '已有字段', comment: '已有说明' })
+  page.addSelectedFiles([{ path: 'wxfile://old.jpg', name: 'old.jpg', size: 10, category: 'image' }])
+  const before = JSON.parse(JSON.stringify(page.data))
+  page.chooseMediaEvidence()
+  picker.fail({ errMsg: 'chooseImage:fail cancel' })
+  assert.deepEqual(page.data, before)
+  assert.equal(toasts.length, 0)
+  page.chooseMediaEvidence()
+  picker.fail({ errMsg: 'chooseImage:fail permission denied private-file-path' })
+  assert.deepEqual(page.data, before)
+  assert.match(toasts.at(-1), /选择.*失败|无法.*选择/)
+  assert.doesNotMatch(toasts.at(-1), /private-file-path/)
+})
+
+for (const capability of ['missing', 'canIUse-false', 'throws']) {
+  test(`本机图片接口 ${capability} 时明确提示而不改走聊天`, async () => {
+    const toasts = []
+    const overrides = { showToast: options => toasts.push(options.title) }
+    if (capability === 'canIUse-false') {
+      overrides.canIUse = name => name !== 'chooseImage'
+      overrides.chooseImage = () => assert.fail('能力被明确否定时不能调用')
+    }
+    if (capability === 'throws') overrides.chooseImage = () => { throw new Error('native-private-detail') }
+    const page = await loadDesktopPickerPage(overrides)
+    assert.doesNotThrow(() => page.chooseMediaEvidence())
+    assert.equal(page.data.files.length, 0)
+    assert.equal(toasts.length, 1)
+    assert.match(toasts[0], /选择|微信版本/)
+    assert.doesNotMatch(toasts[0], /native-private-detail/)
+  })
+}
+
+test('选择菜单返回前进入提交锁时不得继续打开本机选择器', async () => {
+  let menu
+  const page = await loadDesktopPickerPage({
+    showActionSheet: options => { menu = options },
+    chooseImage: () => assert.fail('已进入提交锁不得打开选择器')
+  })
+  page.chooseMediaEvidence()
+  page.setData({ reviewDraftLocked: true })
+  menu.success({ tapIndex: 0 })
+  assert.equal(page.data.files.length, 0)
+})
+
+test('本机选择器回到小程序时不发起覆盖草稿的刷新，取消后恢复普通刷新', async () => {
+  let picker
+  const page = await loadDesktopPickerPage({ chooseImage: options => { picker = options } })
+  let refreshes = 0
+  page.loadData = async () => { refreshes += 1 }
+  page.chooseMediaEvidence()
+  await page.onShow()
+  assert.equal(refreshes, 0)
+  picker.fail({ errMsg: 'chooseImage:fail cancel' })
+  await page.onShow()
+  assert.equal(refreshes, 1)
+})
+
+test('离页或账号改变后丢弃迟到的本机图片选择结果', async () => {
+  for (const transition of ['unload', 'actor']) {
+    let picker
+    const page = await loadDesktopPickerPage({ chooseImage: options => { picker = options } })
+    page.chooseMediaEvidence()
+    if (transition === 'unload') page.onUnload()
+    else global.getApp = () => ({ globalData: { currentUser: activeUser('account-other') } })
+    picker.success({ tempFilePaths: ['wxfile://late.jpg'], tempFiles: [{ path: 'wxfile://late.jpg', size: 1024 }] })
+    assert.equal(page.data.files.length, 0)
+  }
+})
+
+test('移动端继续使用相册媒体接口而不是会话选择', async () => {
+  let mobilePicker
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
   global.wx = {
     setNavigationBarTitle: () => {},
     reLaunch: () => assert.fail('有效账号不应被重定向'),
@@ -930,6 +1042,29 @@ test('审核处理上传异常不会向保存进度或提交审核的外层提�
     assert.equal(page.data.files[0].errorMessage, '上传失败，请重试')
     assert.equal(toasts.at(-1).title, '上传失败，请重试')
     assert.doesNotMatch(toasts.at(-1).title, /errCode|cloud:\/\//)
+  }
+})
+
+test('上传失败显示安全阶段及允许的错误码，不展示存储地址或凭据', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle: () => {}, showToast: () => {}, reLaunch: () => {} }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], allowedEvidenceTypes: ['png'] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1' }, canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  for (const code of ['AccessDenied', 'secret-provider-value']) {
+    page.setData({ statusIndex: 2, files: [{ localKey: 'one', name: 'proof.png', path: 'wxfile://proof.png', size: 372429, status: 'pending' }] })
+    page.createEvidenceUploader = () => ({ upload: async () => {
+      throw Object.assign(new Error('网络失败 cloud://private/path?token=private'), {
+        code, uploadStage: 'transfer', statusCode: 403
+      })
+    } })
+    await page.submit()
+    assert.match(page.data.files[0].errorMessage, /文件传输/)
+    assert.match(page.data.files[0].errorMessage, /HTTP 403/)
+    assert.equal(page.data.files[0].errorCode, code === 'AccessDenied' ? 'AccessDenied' : 'EVIDENCE_UPLOAD_FAILED')
+    assert.doesNotMatch(JSON.stringify(page.data.files[0]), /cloud:\/\/|token=|secret-provider-value/)
   }
 })
 

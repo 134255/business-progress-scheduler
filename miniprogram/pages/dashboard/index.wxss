@@ -1,3 +1,4 @@
+@import "../../templates/business-card.wxss";
 .hero { padding-top: 36rpx; }
 .hero .title { margin: 12rpx 0 28rpx; }
 .hero-actions { display: flex; gap: 18rpx; }
@@ -10,7 +11,6 @@
 .link { color: #0f766e; }
 .admin-links { display: flex; gap: 24rpx; }
 .profile-link { color: #0f766e; font-size: 24rpx; }
-.line-name { max-width: 470rpx; font-size: 31rpx; font-weight: 650; }
 .line-card .muted { display: block; margin-top: 12rpx; }
 .progress { height: 12rpx; margin: 22rpx 0 10rpx; border-radius: 999rpx; background: #e5e7eb; overflow: hidden; }
 .progress-value { height: 100%; background: #14b8a6; border-radius: 999rpx; }

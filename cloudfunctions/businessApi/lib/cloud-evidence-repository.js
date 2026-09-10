@@ -5,6 +5,7 @@ const { normalizeCloudFileId } = require('./evidence-service')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { classifyEvidenceRetention } = require('./evidence-retention')
 const { ownExactAccountIds } = require('./account-relationship-schema')
+const { resolveEvidenceFileId } = require('./evidence-file-reference')
 
 const COLLECTIONS = Object.freeze({
   users: 'users',
@@ -186,6 +187,7 @@ function createCloudEvidenceRepository({
   cloud,
   clock = () => new Date(),
   idFactory = () => `evidence-${crypto.randomUUID()}`,
+  fileReferenceContext = () => ({}),
   temporaryUrlTtlSeconds = DEFAULT_TEMPORARY_URL_TTL_SECONDS
 }) {
   if (!db) throw new TypeError('db is required')
@@ -388,12 +390,14 @@ function createCloudEvidenceRepository({
           !['image', 'pdf', 'video'].includes(currentEvidence.category)) {
         throw createError('EVIDENCE_EXPIRED')
       }
+      let fileId
       try {
         normalizeCloudFileId(currentEvidence.fileId)
+        fileId = normalizeCloudFileId(resolveEvidenceFileId(currentEvidence, fileReferenceContext()))
       } catch (error) {
         throw createError('EVIDENCE_EXPIRED')
       }
-      return currentEvidence
+      return { ...currentEvidence, fileId }
     })
 
     const response = await cloud.getTempFileURL({

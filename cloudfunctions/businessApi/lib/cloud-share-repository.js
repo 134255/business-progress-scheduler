@@ -1,4 +1,5 @@
 const crypto = require('node:crypto')
+const { resolveEvidenceFileId } = require('./evidence-file-reference')
 
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
@@ -210,7 +211,7 @@ function maxHold(current, expiresAt) {
   return current instanceof Date && !Number.isNaN(current.getTime()) && current > expiresAt ? current : expiresAt
 }
 
-function createCloudShareRepository({ db, cloud, clock = () => new Date() }) {
+function createCloudShareRepository({ db, cloud, clock = () => new Date(), fileReferenceContext = () => ({}) }) {
   const users = db.collection('users')
   const lines = db.collection('business_lines')
   const nodes = db.collection('business_nodes')
@@ -417,7 +418,13 @@ function createCloudShareRepository({ db, cloud, clock = () => new Date() }) {
             typeof evidence.fileId !== 'string' || !CLOUD_FILE_ID.test(evidence.fileId)) {
           throw createError('SHARE_UNAVAILABLE')
         }
-        currentEvidences.push({ ...item, fileId: evidence.fileId })
+        let fileId
+        try {
+          fileId = resolveEvidenceFileId(evidence, fileReferenceContext())
+        } catch (error) {
+          throw createError('SHARE_UNAVAILABLE')
+        }
+        currentEvidences.push({ ...item, fileId })
       }
       let urls = []
       if (currentEvidences.length) {

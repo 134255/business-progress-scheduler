@@ -442,6 +442,20 @@ function createReviewService({
     return reviewRepository.listNotifications({ actor, query: normalizeQuery(query) })
   }
 
+  async function getDashboardReviewCounts({ actor }) {
+    requireActiveActor(actor)
+    // Internal bounded window only; public list pagination still caps pages at 50.
+    // Each repository read retains both authorization phases before counting.
+    const [reviews, notifications] = await Promise.all([
+      reviewRepository.listPendingReviews({ actor, query: { page: 1, pageSize: MAX_QUERY_WINDOW } }),
+      reviewRepository.listNotifications({ actor, query: { page: 1, pageSize: MAX_QUERY_WINDOW } })
+    ])
+    return {
+      pendingReviews: reviews.items.length,
+      unreadNotifications: notifications.items.filter(item => !item.read).length
+    }
+  }
+
   async function markNotificationRead({ actor, notificationId }) {
     requireActiveActor(actor)
     return reviewRepository.markNotificationRead({
@@ -456,6 +470,7 @@ function createReviewService({
     listMyPendingReviews,
     getReviewDetail,
     listMyNotifications,
+    getDashboardReviewCounts,
     markNotificationRead
   }
 }

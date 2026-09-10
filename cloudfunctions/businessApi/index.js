@@ -19,6 +19,8 @@ const { createAdminUserService } = require('./lib/admin-user-service')
 const { createCloudAccountRepository } = require('./lib/cloud-account-repository')
 const { createTemplateService } = require('./lib/template-service')
 const { createBusinessService } = require('./lib/business-service')
+const { createBusinessCardService } = require('./lib/business-card-service')
+const { createCloudBusinessCardRepository } = require('./lib/cloud-business-card-repository')
 const { createBusinessLifecycleService } = require('./lib/business-lifecycle-service')
 const {
   APPLICATION_ERROR_MARKER,
@@ -101,6 +103,13 @@ const ADMIN_TARGET_ACTIONS = new Set([
   'unbindWechat'
 ])
 
+const BUSINESS_CARD_MUTATIONS = new Set([
+  'createBusinessFromTemplate', 'updateBusinessMetadata', 'submitFeedback',
+  'saveAndSubmitNodeForReview', 'submitNodeForReview', 'submitReviewVote',
+  'rejectPreviousNode', 'closeBusinessLine', 'amendFrozenBusiness',
+  'decideOptionalTailNode', 'decideNodeRoute'
+])
+
 const LOGGABLE_ERROR_CODES = new Set([
   'ACCOUNT_DISABLED',
   'ACCOUNT_LOCKED',
@@ -114,6 +123,7 @@ const LOGGABLE_ERROR_CODES = new Set([
   'ROLE_OVERLAP',
   'BUSINESS_FROZEN',
   'BUSINESS_ERROR',
+  'CARD_DISPLAY_INVALID',
   'CREDENTIAL_CHANGED',
   'DUPLICATE_CODE',
   'EVIDENCE_EXPIRED',
@@ -210,6 +220,16 @@ function isPublicAction(action) {
 
 function createTemplateRoutes(templateService) {
   return {
+    getTemplateCardDisplay: ({ actor, payload }) => {
+      const input = selectProtectedPayload(payload, new Set(['templateId']))
+      return templateService.getTemplateCardDisplay({ actor, templateId: input.templateId })
+    },
+    updateTemplateCardDisplay: ({ actor, payload }) => {
+      const input = selectProtectedPayload(payload, new Set(['templateId', 'expectedRevision', 'fields']))
+      return templateService.updateTemplateCardDisplay({
+        actor, templateId: input.templateId, expectedRevision: input.expectedRevision, fields: input.fields
+      })
+    },
     listTemplates: ({ actor, payload }) => templateService.listTemplates({ actor, query: payload }),
     getTemplate: ({ actor, payload }) => templateService.getTemplate({ actor, templateId: payload.templateId }),
     createTemplate: ({ actor, payload }) => templateService.createTemplate({ actor, input: payload }),
@@ -239,7 +259,7 @@ function createBusinessRoutes(businessService) {
     listBusinessLines: ({ actor, payload }) => businessService.listBusinessLines({
       actor,
       query: selectProtectedPayload(payload, new Set([
-        'keyword', 'startDate', 'endDate', 'page', 'pageSize', 'cursor'
+        'keyword', 'startDate', 'endDate', 'page', 'pageSize', 'cursor', 'status', 'scope'
       ]))
     }),
     listMyPendingProcessing: ({ actor, payload }) => businessService.listMyPendingProcessing({
@@ -524,6 +544,7 @@ function createBusinessApi({
   adminUserService,
   templateService,
   businessService,
+  businessCardService,
   businessLifecycleService,
   evidenceService,
   evidenceUploadService,
@@ -578,6 +599,23 @@ function createBusinessApi({
     return actor
   }
 
+  async function withBusinessCards({ actor, action, payload, result }) {
+    if (!businessCardService) return result
+    const key = action === 'listBusinessLines' ? 'items'
+      : ['getMyDashboardSummary', 'getDashboardWorkspace'].includes(action) ? 'recent' : null
+    if (key) {
+      return { ...result, [key]: await businessCardService.decorateItems({ actor, items: result[key] }) }
+    }
+    if (BUSINESS_CARD_MUTATIONS.has(action)) {
+      // Only derived work is best-effort. The authoritative route has already
+      // succeeded; never retry it or catch its original failure here.
+      try {
+        await businessCardService.refreshAfterMutation({ actor, action, payload, result })
+      } catch (_) { /* Optional adapters must not reverse an authoritative success. */ }
+    }
+    return result
+  }
+
   function accountRoutes(openid, payload, actor) {
     return Object.assign(Object.create(null), {
       getSession: () => authService.getSession({ openid }),
@@ -614,7 +652,9 @@ function createBusinessApi({
         : knownProtectedAction
           ? await domainRoutes[action]({ actor, payload })
           : await legacyRoutes[action](actor.openid, payload)
-      return ok(data)
+      return ok(knownProtectedAction
+        ? await withBusinessCards({ actor, action, payload, result: data })
+        : data)
     } catch (error) {
       const protectedAction = hasOwn(domainRoutes, action) && typeof domainRoutes[action] === 'function'
       const responseCode = protectedAction && error[APPLICATION_ERROR_MARKER] !== true
@@ -626,6 +666,9 @@ function createBusinessApi({
         requestId: context.REQUESTID || context.requestId || '',
         targetUserId: safeTargetUserId(action, payload)
       })
+      if (responseCode === 'CARD_DISPLAY_INVALID') {
+        return fail('卡片展示配置或字段引用无效，请检查配置后重试', responseCode)
+      }
       const diagnostic = safePublicDiagnostic(error.diagnostic)
       return responseCode === 'INTERNAL_ERROR'
         ? fail('Service error', responseCode, diagnostic)
@@ -910,10 +953,17 @@ function createDefaultBusinessApi() {
   const repository = createCloudAccountRepository({ db, clock: () => new Date() })
   const templateRepository = createCloudTemplateRepository({ db })
   const businessRepository = createCloudBusinessRepository({ db, clock: () => new Date() })
+  const businessCardService = createBusinessCardService({
+    repository: createCloudBusinessCardRepository({ db, businessRepository })
+  })
   const workTimeService = createWorkTimeService({
     calendarRepository: createCloudWorkCalendarRepository({ db })
   })
-  const evidenceRepository = createCloudEvidenceRepository({ db, cloud, clock: () => new Date() })
+  const fileReferenceContext = () => ({
+    environmentId: cloud.getWXContext().ENV,
+    bucket: typeof process.env.EVIDENCE_COS_BUCKET === 'string' ? process.env.EVIDENCE_COS_BUCKET.trim() : ''
+  })
+  const evidenceRepository = createCloudEvidenceRepository({ db, cloud, clock: () => new Date(), fileReferenceContext })
   const feedbackRepository = createCloudFeedbackRepository({
     db, clock: () => new Date(), workTimeService
   })
@@ -965,7 +1015,7 @@ function createDefaultBusinessApi() {
     if (configuredEvidenceUploadService) return configuredEvidenceUploadService
     let uploadConfig
     try {
-      uploadConfig = readEvidenceUploadConfig(process.env)
+      uploadConfig = readEvidenceUploadConfig(process.env, cloud.getWXContext().ENV)
     } catch (error) {
       if (error && typeof error === 'object') error[APPLICATION_ERROR_MARKER] = true
       throw error
@@ -1051,7 +1101,7 @@ function createDefaultBusinessApi() {
     clock: () => new Date()
   })
   const shareService = createShareService({
-    repository: createCloudShareRepository({ db, cloud, clock: () => new Date() }),
+    repository: createCloudShareRepository({ db, cloud, clock: () => new Date(), fileReferenceContext }),
     clock: () => new Date(),
     tokenFactory: () => crypto.randomBytes(32).toString('base64url')
   })
@@ -1067,6 +1117,7 @@ function createDefaultBusinessApi() {
     adminUserService,
     templateService,
     businessService,
+    businessCardService,
     businessLifecycleService,
     evidenceService,
     evidenceUploadService,

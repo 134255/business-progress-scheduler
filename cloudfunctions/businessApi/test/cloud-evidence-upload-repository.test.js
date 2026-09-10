@@ -140,6 +140,35 @@ test('finalization reauthorizes, uses authoritative metadata and bounded bytes, 
   assert.equal(Object.hasOwn(stored, 'objectKey'), false)
 })
 
+test('finalization reads the account once per transaction without reusing preflight authorization for commit', async () => {
+  const { fake, repository } = harness()
+  await reserve(repository)
+  const before = fake.transactionRuns.length
+  await repository.finalizeUpload({
+    actor: { _id: 'account-1', status: 'active' }, evidenceId: EVIDENCE_ID,
+    uploadSessionTokenHash: TOKEN_HASH, expectedNodeVersion: 4
+  })
+  assert.deepEqual(fake.transactionRuns.slice(before).map(item => item.operations), [4, 6])
+})
+
+test('account disabled after upload preflight cannot publish evidence using an earlier account snapshot', async () => {
+  let fake
+  const built = harness(seed(), { storage: {
+    async headObject() {
+      fake.replace('users', 'account-1', { status: 'disabled' })
+      return { size: 100, etag: 'etag-1', crc64: '12345' }
+    },
+    async readObjectHeader() { return Buffer.from('0000ftypheic') }
+  } })
+  fake = built.fake
+  await reserve(built.repository)
+  await assert.rejects(built.repository.finalizeUpload({
+    actor: { _id: 'account-1', status: 'active' }, evidenceId: EVIDENCE_ID,
+    uploadSessionTokenHash: TOKEN_HASH, expectedNodeVersion: 4
+  }), { code: 'FORBIDDEN' })
+  assert.equal(fake.documents('evidences')[0].storageStatus, 'uploading')
+})
+
 test('finalization is idempotent for the same actor, token, node version and evidence id', async () => {
   const { calls, repository } = harness()
   await reserve(repository)

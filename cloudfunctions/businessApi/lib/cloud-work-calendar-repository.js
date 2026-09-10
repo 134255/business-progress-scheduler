@@ -28,12 +28,16 @@ async function readDocument(db, collection, id) {
 function createCloudWorkCalendarRepository({ db } = {}) {
   if (!db || typeof db.collection !== 'function') throw new TypeError('db is required')
 
-  async function getDayRule(dateKey) {
-    if (!validDateKey(dateKey)) throw new TypeError('dateKey must be a real YYYY-MM-DD date')
-    const year = Number(dateKey.slice(0, 4))
+  async function readGeneration(year) {
     const generation = await readDocument(db, 'work_calendar_years', String(year))
     if (!generation || generation.year !== year || typeof generation.sourceVersion !== 'string' ||
         !generation.sourceVersion || typeof generation.generationId !== 'string' || !generation.generationId) return null
+    return { year, generationId: generation.generationId, sourceVersion: generation.sourceVersion }
+  }
+
+  async function readDayRule(dateKey, generation) {
+    if (!generation) return null
+    const year = Number(dateKey.slice(0, 4))
     const recordId = `${generation.generationId}_${dateKey}`
     const record = await readDocument(db, 'work_calendar_entries', recordId)
     if (!record || record._id !== recordId || record.date !== dateKey || typeof record.isWorkday !== 'boolean') {
@@ -50,7 +54,48 @@ function createCloudWorkCalendarRepository({ db } = {}) {
     }
   }
 
-  return { getDayRule }
+  async function getDayRule(dateKey) {
+    if (!validDateKey(dateKey)) throw new TypeError('dateKey must be a real YYYY-MM-DD date')
+    return readDayRule(dateKey, await readGeneration(Number(dateKey.slice(0, 4))))
+  }
+
+  // Owned by one calculation attempt, never by this reused repository instance.
+  // Published entries are immutable. Reused snapshots require a final header check;
+  // without reuse retain the original getDayRule read semantics and budget.
+  function createReadSession() {
+    const years = new Map()
+    const days = new Map()
+    let reused = false
+
+    async function getDayRule(dateKey) {
+      if (!validDateKey(dateKey)) throw new TypeError('dateKey must be a real YYYY-MM-DD date')
+      const year = Number(dateKey.slice(0, 4))
+      if (days.has(dateKey) || years.has(year)) reused = true
+      if (!days.has(dateKey)) {
+        if (!years.has(year)) {
+          years.set(year, { firstDate: dateKey, generation: readGeneration(year) })
+        }
+        days.set(dateKey, years.get(year).generation.then(generation => readDayRule(dateKey, generation)))
+      }
+      return days.get(dateKey)
+    }
+
+    async function findChangedDate() {
+      if (!reused) return null
+      for (const [year, snapshot] of years) {
+        const before = await snapshot.generation
+        const current = await readGeneration(year)
+        if (before === null && current === null) continue
+        if (!before || !current || before.generationId !== current.generationId ||
+            before.sourceVersion !== current.sourceVersion) return snapshot.firstDate
+      }
+      return null
+    }
+
+    return { getDayRule, findChangedDate }
+  }
+
+  return { getDayRule, createReadSession }
 }
 
 module.exports = { createCloudWorkCalendarRepository }

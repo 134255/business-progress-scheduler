@@ -18,10 +18,9 @@ function createDashboardWorkspaceService({ businessService, reviewService }) {
   }
 
   async function getDashboardWorkspace({ actor }) {
-    const [summary, pendingReviews, notifications] = await Promise.all([
+    const [summary, counts] = await Promise.all([
       businessService.getMyDashboardSummary({ actor }),
-      listAtMostTwoPages(input => reviewService.listMyPendingReviews(input), actor),
-      listAtMostTwoPages(input => reviewService.listMyNotifications(input), actor)
+      readReviewCounts(actor)
     ])
     const stats = summary && summary.stats || {}
     return {
@@ -29,12 +28,27 @@ function createDashboardWorkspaceService({ businessService, reviewService }) {
         active: Number(stats.active || 0),
         pendingMine: Number(stats.pendingProcessing || 0),
         pendingMineAvailable: true,
-        pendingReviews: pendingReviews.length,
-        unreadNotifications: notifications.filter(item => !item.read).length,
+        pendingReviews: counts.pendingReviews,
+        unreadNotifications: counts.unreadNotifications,
         completed: Number(stats.completed || 0),
         complete: summary && summary.complete !== false
       },
       recent: Array.isArray(summary && summary.recent) ? summary.recent : []
+    }
+  }
+
+  async function readReviewCounts(actor) {
+    if (typeof reviewService.getDashboardReviewCounts === 'function') {
+      return reviewService.getDashboardReviewCounts({ actor })
+    }
+    // Preserve compatibility with existing injected service adapters.
+    const [reviews, notifications] = await Promise.all([
+      listAtMostTwoPages(input => reviewService.listMyPendingReviews(input), actor),
+      listAtMostTwoPages(input => reviewService.listMyNotifications(input), actor)
+    ])
+    return {
+      pendingReviews: reviews.length,
+      unreadNotifications: notifications.filter(item => !item.read).length
     }
   }
 
