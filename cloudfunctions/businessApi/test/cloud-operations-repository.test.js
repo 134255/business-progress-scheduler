@@ -122,6 +122,85 @@ test('运营仓储统计权威状态并以稳定游标返回脱敏节点行', as
   assert.deepEqual(completedOnly.items.map(item => item.businessCode), ['BL-2'])
 })
 
+for (const hasNameSnapshot of [true, false]) {
+  test(`运营导出兼容无审核节点，保留处理人且不虚构审核人（显示名快照${hasNameSnapshot ? '存在' : '缺失'}）`, async () => {
+    const { fake, repository } = harness()
+    const node = {
+      ...fake.documents('business_nodes').find(item => item._id === 'node-2'),
+      reviewerUserIds: [], reviewerAssignmentMode: 'fixed_accounts',
+      reviewRoundNumber: 0, reviewDueStatus: 'not_required'
+    }
+    if (hasNameSnapshot) node.reviewerDisplayNames = []
+    fake.replace('business_nodes', 'node-2', node)
+    const actor = { _id: 'root', role: 'super_admin', status: 'active' }
+    const range = {
+      startAt: new Date('2026-08-01T16:00:00Z'), endAt: new Date('2026-08-18T16:00:00Z'),
+      cursor: '', pageSize: 1
+    }
+    const first = await repository.exportRows({ actor, range })
+    assert.equal(first.hasMore, true)
+    assert.equal(first.items[0].businessCode, 'BL-2')
+    assert.equal(first.items[0].processorDisplayNames, '当前处理人名')
+    assert.equal(first.items[0].reviewerDisplayNames, '')
+    assert.equal(first.items[0].reviewRoundNumber, 0)
+    const second = await repository.exportRows({ actor, range: { ...range, cursor: first.nextCursor } })
+    assert.equal(second.hasMore, false)
+    assert.equal(second.items[0].businessCode, 'BL-1')
+    assert.equal(second.items[0].reviewerDisplayNames, '创建时审核人')
+    assert.deepEqual(fake.writeCalls, [], '导出不修改节点、历史或权限')
+  })
+}
+
+test('当前运营指标不会被合法无审核节点中断', async () => {
+  const { fake, repository } = harness()
+  fake.replace('business_nodes', 'node-2', {
+    ...fake.documents('business_nodes').find(item => item._id === 'node-2'),
+    reviewerUserIds: [], reviewerDisplayNames: []
+  })
+  const dashboard = await repository.getDashboard({
+    actor: { _id: 'root', role: 'super_admin', status: 'active' },
+    range: { startAt: new Date('2026-08-01T16:00:00Z'), endAt: new Date('2026-08-18T16:00:00Z') }
+  })
+  assert.equal(dashboard.stats.businesses, 3)
+  assert.equal(dashboard.stats.completed, 1)
+})
+
+for (const [label, changes] of [
+  ['缺失审核人字段', { reviewerUserIds: undefined }],
+  ['空值审核人字段', { reviewerUserIds: null }],
+  ['字符串审核人字段', { reviewerUserIds: '' }],
+  ['非法审核人编号', { reviewerUserIds: ['bad/id'] }],
+  ['重复审核人编号', { reviewerUserIds: ['root', 'root'] }],
+  ['空处理人列表', { processorUserIds: [] }],
+  ['无审核但名称快照非空', { reviewerUserIds: [], reviewerDisplayNames: ['错误快照'] }]
+]) {
+  test(`无审核兼容不放行损坏的导出关系：${label}`, async () => {
+    const { fake, repository } = harness()
+    fake.replace('business_nodes', 'node-2', {
+      ...fake.documents('business_nodes').find(item => item._id === 'node-2'), ...changes
+    })
+    await assert.rejects(repository.exportRows({
+      actor: { _id: 'root', role: 'super_admin', status: 'active' },
+      range: { startAt: new Date('2026-08-01'), endAt: new Date('2026-09-01'), cursor: '', pageSize: 50 }
+    }), error => error.code === 'VALIDATION_ERROR')
+    assert.deepEqual(fake.writeCalls, [])
+  })
+}
+
+test('无审核节点的导出仍在读取后复核管理员权限', async () => {
+  const { fake, repository } = harness()
+  fake.replace('business_nodes', 'node-2', {
+    ...fake.documents('business_nodes').find(item => item._id === 'node-2'), reviewerUserIds: [], reviewerDisplayNames: []
+  })
+  fake.beforeNextTransaction(() => fake.beforeNextTransaction(() => {
+    fake.replace('users', 'root', { role: 'user', status: 'active' })
+  }))
+  await assert.rejects(repository.exportRows({
+    actor: { _id: 'root', role: 'super_admin', status: 'active' },
+    range: { startAt: new Date('2026-08-01'), endAt: new Date('2026-09-01'), cursor: '', pageSize: 50 }
+  }), error => error.code === 'FORBIDDEN')
+})
+
 test('版本二运营汇总与导出排除休眠和跳过分支节点', async () => {
   const { fake, repository } = harness()
   fake.replace('business_lines', 'line-1', {

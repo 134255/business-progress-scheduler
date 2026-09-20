@@ -1,3 +1,5 @@
+const { buildOptionLinkageContext } = require('./option-linkage-domain')
+
 function emptyValueFor(field) {
   if (field.type === 'multi_select') return []
   if (field.type === 'short_text' || field.type === 'long_text') return ''
@@ -18,6 +20,7 @@ function deriveConditionalForm(fields, sourceValues) {
   const visibleKeys = new Set()
   const visibleFields = []
   const clearedFieldKeys = []
+  const linkage = buildOptionLinkageContext(definitions)
 
   const clear = field => {
     const current = fieldValues[field.fieldKey]
@@ -26,18 +29,20 @@ function deriveConditionalForm(fields, sourceValues) {
   }
 
   for (const field of definitions) {
+    const linked = linkage.members.has(field.fieldKey)
+    const projected = linked ? linkage.project(field, new Map(Object.entries(fieldValues))) : field
     const condition = field.condition
     const parentVisible = !condition || visibleKeys.has(condition.parentFieldKey)
     const parentValue = condition ? fieldValues[condition.parentFieldKey] : undefined
-    const visible = !condition || parentVisible && Array.isArray(condition.visibleWhen) &&
-      condition.visibleWhen.includes(parentValue)
+    const visible = Boolean(projected) && (!condition || parentVisible && Array.isArray(condition.visibleWhen) &&
+      condition.visibleWhen.includes(parentValue))
     if (!visible) {
       clear(field)
       continue
     }
 
     visibleKeys.add(field.fieldKey)
-    let constraints = { ...(field.constraints || {}) }
+    let constraints = { ...(projected.constraints || {}) }
     if (condition && condition.optionsByParentValue &&
         Array.isArray(condition.optionsByParentValue[parentValue])) {
       constraints.options = condition.optionsByParentValue[parentValue].slice()
@@ -51,7 +56,7 @@ function deriveConditionalForm(fields, sourceValues) {
     }
     const selected = Array.isArray(fieldValues[field.fieldKey]) ? fieldValues[field.fieldKey] : []
     visibleFields.push({
-      ...field,
+      ...projected,
       constraints,
       optionItems: options.map(option => ({ value: option, selected: selected.includes(option) }))
     })

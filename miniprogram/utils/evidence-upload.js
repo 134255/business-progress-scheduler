@@ -89,6 +89,7 @@ function createEvidenceUploader({
   beginUpload,
   refreshUpload,
   finalizeUpload,
+  prepareFile,
   delay = ms => new Promise(resolve => setTimeout(resolve, ms)),
   nowSeconds = () => Math.floor(Date.now() / 1000),
   clock = Date.now,
@@ -182,19 +183,27 @@ function createEvidenceUploader({
 
   async function upload(input) {
     assertNotCancelled(input && input.signal)
+    const assertCurrent = () => {
+      assertNotCancelled(input && input.signal)
+      if (typeof input.isCurrent === 'function' && !input.isCurrent()) throw uploadError('UPLOAD_CANCELLED', '上传已取消')
+    }
+    assertCurrent()
+    const file = typeof prepareFile === 'function'
+      ? await atUploadStage('prepare', () => prepareFile(input.file)) : input.file
+    assertCurrent()
     const beginInput = {
       businessLineId: input.businessLineId,
       nodeId: input.nodeId,
       expectedNodeVersion: input.expectedNodeVersion,
-      fileName: input.file.name,
-      declaredSize: input.file.size
+      fileName: file.name,
+      declaredSize: file.size
     }
     const session = {
       ...(await timedUploadStage('authorize', () => beginUpload(beginInput))),
       expectedNodeVersion: input.expectedNodeVersion
     }
     const uploadState = await timedUploadStage('transfer', () => uploadOnce({
-      session, file: input.file, onProgress: input.onProgress, signal: input.signal
+      session, file, onProgress: input.onProgress, signal: input.signal
     }))
     for (let finalizeAttempt = 0; finalizeAttempt < 2; finalizeAttempt += 1) {
       assertNotCancelled(input.signal)

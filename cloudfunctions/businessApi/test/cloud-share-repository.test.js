@@ -1,9 +1,28 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
+const Module = require('node:module')
 
 const { createCloudShareRepository } = require('../lib/cloud-share-repository')
+const { createShareService } = require('../lib/share-service')
+const { normalizeFieldDefinition, validateFieldValues } = require('../lib/field-domain')
+const { createKeyAllocator } = require('../../../miniprogram/utils/template-editor-keys')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
+
+// Only replace the external SDK import; the public route, service and repository are real.
+const originalLoad = Module._load
+let createBusinessApi
+try {
+  Module._load = function loadWithoutCloud(request, parent, isMain) {
+    if (request === 'wx-server-sdk') return {
+      init() {}, DYNAMIC_CURRENT_ENV: 'test', database: () => createFakeCloudDatabase().db
+    }
+    return originalLoad.call(this, request, parent, isMain)
+  }
+  createBusinessApi = require('../index').createBusinessApi
+} finally {
+  Module._load = originalLoad
+}
 
 const NOW = new Date('2026-08-17T10:00:00.000Z')
 
@@ -52,6 +71,203 @@ function harness(evidenceCount = 2, seeded = seed(evidenceCount), databaseOption
   })
   return { fake, repository, tempCalls }
 }
+
+function reviewedEditorSeed(fieldKey = createKeyAllocator()('field-key')) {
+  const data = seed(1)
+  data.users.push({ _id: 'reviewer', status: 'active', role: 'user' })
+  Object.assign(data.business_lines[0], {
+    status: 'in_progress', currentNodeId: 'node-2', flowSchemaVersion: 2,
+    entryNodeId: 'node-1', traversedNodeIds: ['node-1'], routeDecisionVersion: 1
+  })
+  const node = data.business_nodes[0]
+  Object.assign(node, { nodeKey: 'node-key-ui-1', routeState: 'completed', next: { mode: 'end' } })
+  node.fieldDefinitions = [normalizeFieldDefinition({ ...node.fieldDefinitions[0], fieldKey })]
+  data.node_review_rounds[0].fieldValues = validateFieldValues(node.fieldDefinitions, [
+    { fieldKey, value: '固定结果' }
+  ])
+  return data
+}
+
+function reviewerSnapshotInput(actorId = 'reviewer') {
+  return {
+    actor: { _id: actorId, status: 'active' }, businessLineId: 'line-1', nodeId: 'node-1',
+    token: Buffer.alloc(32, 19).toString('base64url'), createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 7 * 86400000),
+    requestKeyHash: 'a'.repeat(64), inputHash: 'b'.repeat(64)
+  }
+}
+
+test('strict product linked snapshot exposes only selected applicable fields, never full dictionaries or matrix', async () => {
+  const data=reviewedEditorSeed()
+  const fields=Array.from({length:8},(_,index)=>({fieldKey:`f${index}`,sequence:index,name:`字段${index}`,
+    type:'single_select',required:true,constraints:{options:['选中','未选候选']}}))
+  fields[0].optionLinkage={schemaVersion:1,fieldKeys:fields.map(field=>field.fieldKey),
+    rows:[[0,0,0,0,null,null,null,0],[1,1,1,null,null,null,null,null]]}
+  data.business_nodes[0].fieldDefinitions=fields
+  data.node_review_rounds[0].fieldValues=validateFieldValues(fields,
+    [0,1,2,3,7].map(index=>({fieldKey:`f${index}`,value:'选中'})))
+  const {repository}=harness(1,data), input=reviewerSnapshotInput()
+  await repository.createSnapshot(input)
+  const result=await repository.getPublicSnapshot({token:input.token})
+  assert.deepEqual(result.fieldDefinitions.map(field=>field.fieldKey),['f0','f1','f2','f3','f7'])
+  assert.equal(JSON.stringify(result).includes('未选候选'),false)
+  assert.equal(JSON.stringify(result).includes('optionLinkage'),false)
+})
+
+for (const snapshotFormat of ['review-array', 'legacy-object']) {
+  test(`真实编辑器字段键兼容：${snapshotFormat} 创建后公开接口读回固定结果`, async () => {
+    const data = reviewedEditorSeed()
+    assert.equal(data.business_nodes[0].fieldDefinitions[0].fieldKey, 'field-key-ui-1')
+    assert.deepEqual(data.node_review_rounds[0].fieldValues, [
+      { fieldKey: 'field-key-ui-1', name: '摘要', type: 'short_text', value: '固定结果' }
+    ])
+    if (snapshotFormat === 'legacy-object') {
+      data.node_review_rounds[0].fieldValues = { 'field-key-ui-1': '固定结果' }
+    }
+    const { fake, repository, tempCalls } = harness(1, data)
+    const input = reviewerSnapshotInput()
+    await repository.createSnapshot(input)
+    const header = fake.documents('public_node_shares')[0]
+    assert.equal(header.publishState, 'published')
+    assert.equal(header.createdByUserId, 'reviewer')
+
+    // Public reads must use the immutable header, not mutable node/round values.
+    fake.replace('business_nodes', 'node-1', { ...data.business_nodes[0], fieldDefinitions: [] })
+    fake.replace('node_review_rounds', 'round-1', {
+      ...data.node_review_rounds[0], fieldValues: {}, processingComment: '后续修改'
+    })
+    const api = createBusinessApi({
+      shareService: createShareService({ repository }),
+      repository: { findUserByOpenid() { assert.fail('公开读取不得查询登录账号') } },
+      getContext: () => ({})
+    })
+    const response = await api.main({ action: 'getPublicNodeShare', payload: { token: input.token } })
+    assert.equal(response.ok, true)
+    assert.deepEqual(response.data.fieldDefinitions, [
+      { fieldKey: 'field-key-ui-1', sequence: 0, name: '摘要', type: 'short_text', required: true }
+    ])
+    assert.deepEqual(response.data.fieldValues, { 'field-key-ui-1': '固定结果' })
+    assert.equal(response.data.processingComment, '完成说明')
+    assert.deepEqual(response.data.evidences, [
+      { fileName: '凭证0.jpg', category: 'jpg', size: 10, url: 'https://temp/0' }
+    ])
+    assert.deepEqual(tempCalls, [[{ fileID: 'cloud://evidence-0', maxAge: 300 }]])
+    for (const secret of ['cloud://', 'reviewer', 'processor', 'line-1', 'node-1', 'round-1', 'evidence-0']) {
+      assert.equal(JSON.stringify(response).includes(secret), false)
+    }
+  })
+}
+
+test('分享字段键兼容保留旧键及64字符边界', async t => {
+  for (const fieldKey of ['summary', 'field_key_1', `F${'x'.repeat(62)}-`]) {
+    await t.test(fieldKey, async () => {
+      const { repository } = harness(1, reviewedEditorSeed(fieldKey))
+      const input = reviewerSnapshotInput()
+      await repository.createSnapshot(input)
+      const snapshot = await repository.getPublicSnapshot({ token: input.token })
+      assert.equal(snapshot.fieldValues[fieldKey], '固定结果')
+    })
+  }
+})
+
+test('分享字段键兼容仍拒绝非法键且不写分享或凭证保留锁', async t => {
+  for (const fieldKey of ['', '__proto__', '_field', '-field', '1field', 'field.key',
+    'constructor.prototype', 'field/key', 'field[key]', '$field', 'field key', `F${'x'.repeat(64)}`]) {
+    await t.test(JSON.stringify(fieldKey), async () => {
+      const data = reviewedEditorSeed()
+      data.business_nodes[0].fieldDefinitions[0].fieldKey = fieldKey
+      data.node_review_rounds[0].fieldValues[0].fieldKey = fieldKey
+      const { fake, repository } = harness(1, data)
+      await assert.rejects(repository.createSnapshot(reviewerSnapshotInput()), { code: 'FORBIDDEN' })
+      assert.deepEqual(fake.documents('public_node_shares'), [])
+      assert.deepEqual(fake.documents('public_node_share_chunks'), [])
+      assert.deepEqual(fake.documents('audit_logs'), [])
+      assert.deepEqual(fake.documents('evidences'), data.evidences)
+    })
+  }
+})
+
+test('分享字段键兼容仍拒绝重复快照键、未知键和定义不匹配', async t => {
+  for (const [name, mutate] of [
+    ['重复快照键', data => {
+      data.business_nodes[0].fieldDefinitions.push({
+        ...data.business_nodes[0].fieldDefinitions[0], fieldKey: 'field-key-ui-2', sequence: 1
+      })
+      data.node_review_rounds[0].fieldValues.push({ ...data.node_review_rounds[0].fieldValues[0] })
+    }],
+    ['未知快照键', data => { data.node_review_rounds[0].fieldValues[0].fieldKey = 'field-key-ui-2' }],
+    ['字段名称不匹配', data => { data.node_review_rounds[0].fieldValues[0].name = '其他字段' }],
+    ['字段类型不匹配', data => { data.node_review_rounds[0].fieldValues[0].type = 'number' }],
+    ['非标量值', data => { data.node_review_rounds[0].fieldValues[0].value = { nested: '不能公开' } }]
+  ]) {
+    await t.test(name, async () => {
+      const data = reviewedEditorSeed()
+      mutate(data)
+      const { fake, repository } = harness(1, data)
+      await assert.rejects(repository.createSnapshot(reviewerSnapshotInput()), { code: 'FORBIDDEN' })
+      assert.deepEqual(fake.documents('public_node_shares'), [])
+      assert.deepEqual(fake.documents('evidences'), data.evidences)
+    })
+  }
+})
+
+test('分享字段键兼容拒绝访问器且不执行getter', async t => {
+  for (const target of ['definition-key', 'snapshot-key', 'snapshot-value', 'object-value']) {
+    await t.test(target, async () => {
+      let getterCalls = 0
+      const data = reviewedEditorSeed()
+      // Inject after structuredClone so the database double cannot flatten a getter.
+      const { fake, repository } = harness(1, data, {
+        transformRead({ collection, data: document }) {
+          const getter = { enumerable: true, get() { getterCalls += 1; return 'field-key-ui-1' } }
+          if (target === 'definition-key' && collection === 'business_nodes') {
+            Object.defineProperty(document.fieldDefinitions[0], 'fieldKey', getter)
+          } else if (collection === 'node_review_rounds') {
+            if (target === 'snapshot-key' || target === 'snapshot-value') {
+              Object.defineProperty(document.fieldValues[0], target === 'snapshot-key' ? 'fieldKey' : 'value', getter)
+            } else if (target === 'object-value') {
+              document.fieldValues = {}
+              Object.defineProperty(document.fieldValues, 'field-key-ui-1', getter)
+            }
+          }
+          return document
+        }
+      })
+      await assert.rejects(repository.createSnapshot(reviewerSnapshotInput()), { code: 'FORBIDDEN' })
+      assert.equal(getterCalls, 0)
+      assert.deepEqual(fake.documents('public_node_shares'), [])
+    })
+  }
+})
+
+test('分享字段键兼容不放宽成员、节点、通过轮次或凭证权限', async t => {
+  for (const [name, mutate] of [
+    ['无关成员', data => {
+      data.business_nodes[0].reviewerUserIds = ['other-reviewer']
+      data.node_review_rounds[0].reviewerUserIds = ['other-reviewer']
+    }],
+    ['业务撤权', data => { data.business_lines[0].memberUserIds = ['manager', 'processor'] }],
+    ['节点撤权', data => { data.business_nodes[0].reviewerUserIds = ['other-reviewer'] }],
+    ['非通过轮次审核人', data => { data.node_review_rounds[0].reviewerUserIds = ['other-reviewer'] }],
+    ['账号停用', data => { data.users.find(user => user._id === 'reviewer').status = 'disabled' }],
+    ['节点未完成', data => { data.business_nodes[0].status = 'in_progress' }],
+    ['未走过路线', data => { data.business_lines[0].traversedNodeIds = [] }],
+    ['路线未完成', data => { data.business_nodes[0].routeState = 'skipped' }],
+    ['轮次未通过', data => { data.node_review_rounds[0].finalDecision = 'rejected' }],
+    ['凭证跨节点', data => { data.evidences[0].nodeId = 'node-other' }],
+    ['凭证已清理', data => { data.evidences[0].purgedAt = NOW }]
+  ]) {
+    await t.test(name, async () => {
+      const data = reviewedEditorSeed()
+      mutate(data)
+      const { fake, repository } = harness(1, data)
+      await assert.rejects(repository.createSnapshot(reviewerSnapshotInput()), { code: 'FORBIDDEN' })
+      assert.equal(fake.documents('public_node_shares').some(item => item.publishState === 'published'), false)
+      assert.deepEqual(fake.documents('audit_logs'), [])
+      assert.deepEqual(fake.documents('evidences'), data.evidences)
+    })
+  }
+})
 
 test('existing protected share snapshots resolve the same historical bucket-only evidence object', async () => {
   const documents = seed(1)

@@ -1,4 +1,5 @@
 const { normalizeConditionalFields } = require('./conditional-field-domain')
+const { buildOptionLinkageContext } = require('./option-linkage-domain')
 
 const FLOW_SCHEMA_VERSION = 2
 const MAX_WORKFLOW_NODES = 48
@@ -90,7 +91,8 @@ function normalizeNext(node, fields) {
 
   const fieldKey = text(input.fieldKey)
   const definition = fields.find(field => field.fieldKey === fieldKey)
-  if (!definition || definition.type !== 'single_select' || definition.required !== true || definition.condition ||
+  if (!definition || buildOptionLinkageContext(fields).members.has(fieldKey) ||
+      definition.type !== 'single_select' || definition.required !== true || definition.condition ||
       !definition.constraints || !Array.isArray(definition.constraints.options)) throw createError('TEMPLATE_INVALID')
   const sourceTargets = ownDataObject(input.optionTargets)
   const optionTargets = {}
@@ -215,7 +217,8 @@ function normalizeSnapshotNext(node, fields) {
     throw createError('BUSINESS_STATE_INVALID')
   }
   const definition = fields.find(field => field.fieldKey === input.fieldKey)
-  if (!definition || definition.type !== 'single_select' || definition.required !== true ||
+  if (!definition || buildOptionLinkageContext(fields).members.has(input.fieldKey) ||
+      definition.type !== 'single_select' || definition.required !== true ||
       definition.condition || !definition.constraints || !Array.isArray(definition.constraints.options)) {
     throw createError('BUSINESS_STATE_INVALID')
   }

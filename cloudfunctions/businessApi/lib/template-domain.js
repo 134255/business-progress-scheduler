@@ -2,6 +2,7 @@ const crypto = require('node:crypto')
 
 const { normalizeFieldDefinition } = require('./field-domain')
 const { normalizeConditionalFields } = require('./conditional-field-domain')
+const { MAX_NODE_BYTES, jsonByteLength, validateOptionLinkageFields } = require('./option-linkage-domain')
 const {
   FLOW_SCHEMA_VERSION,
   normalizeWorkflowGraph
@@ -141,9 +142,9 @@ function normalizeEvidenceTypes(value) {
 }
 
 function normalizeFields(fields) {
-  const values = ownArrayValues(fields)
   let normalized
   try {
+    const values = validateOptionLinkageFields(fields)
     normalized = values.map(field => normalizeFieldDefinition(ownDataObject(field)))
   } catch (error) {
     throw createError('TEMPLATE_INVALID')
@@ -154,6 +155,11 @@ function normalizeFields(fields) {
   } catch (error) {
     throw createError('TEMPLATE_INVALID')
   }
+}
+
+function checkLinkedNodeBudget(node) {
+  if (node.fields.some(field => field.optionLinkage) && jsonByteLength(node) > MAX_NODE_BYTES) throw createError('TEMPLATE_INVALID')
+  return node
 }
 
 function normalizeTemplateNode(input) {
@@ -189,7 +195,7 @@ function normalizeTemplateNode(input) {
     throw createError('TEMPLATE_INVALID')
   }
 
-  return {
+  return checkLinkedNodeBudget({
     nodeKey: requireText(input.nodeKey),
     sequence: input.sequence === undefined ? 0 : normalizeSequence(input.sequence),
     name: requireText(input.name),
@@ -209,7 +215,7 @@ function normalizeTemplateNode(input) {
     requiresEvidence,
     allowedEvidenceTypes,
     fields: normalizeFields(input.fields === undefined ? [] : input.fields)
-  }
+  })
 }
 
 function normalizeLegacyTemplateNode(input) {
@@ -223,7 +229,7 @@ function normalizeLegacyTemplateNode(input) {
   if (!validSlaHours(slaWorkHours)) throw createError('TEMPLATE_INVALID')
   const allowedEvidenceTypes = normalizeEvidenceTypes(input.allowedEvidenceTypes === undefined ? [] : input.allowedEvidenceTypes)
   if (requiresEvidence && allowedEvidenceTypes.length === 0) throw createError('TEMPLATE_INVALID')
-  return {
+  return checkLinkedNodeBudget({
     nodeKey: requireText(input.nodeKey),
     sequence: input.sequence === undefined ? 0 : normalizeSequence(input.sequence),
     name: requireText(input.name),
@@ -232,7 +238,7 @@ function normalizeLegacyTemplateNode(input) {
     requiresEvidence,
     allowedEvidenceTypes,
     fields: normalizeFields(input.fields === undefined ? [] : input.fields)
-  }
+  })
 }
 
 function normalizeDefinitionNodes(nodes) {
@@ -292,11 +298,13 @@ function normalizeVersion2TemplateDefinition(input) {
     }
   })
   try {
-    return normalizeWorkflowGraph({
+    const definition = normalizeWorkflowGraph({
       flowSchemaVersion: input.flowSchemaVersion,
       entryNodeKey: input.entryNodeKey,
       nodes
     })
+    definition.nodes.forEach(checkLinkedNodeBudget)
+    return definition
   } catch (error) {
     throw createError('TEMPLATE_INVALID')
   }
@@ -388,6 +396,7 @@ module.exports = {
   REVIEWER_ASSIGNMENT_MODE,
   ALLOWED_EVIDENCE_TYPES,
   normalizeTemplateNode,
+  normalizeDefinitionNodes,
   normalizeVersion2TemplateDefinition,
   version2TemplateDefinitionDigest,
   templateDefinitionDigest,

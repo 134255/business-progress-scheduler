@@ -129,8 +129,49 @@
     <view class="section-title">动态字段（{{fields.length}}）</view>
     <button wx:if="{{!readOnly}}" size="mini" class="secondary-button" bindtap="addField">新增字段</button>
   </view>
+  <view class="card linkage-panel">
+    <view class="section-title">商品严格联动</view>
+    <text class="linkage-note">按完整组合联动分类、品牌、型号和属性1至属性5；选项中的逗号、换行保留原文。</text>
+    <view wx:if="{{linkageSummary}}" class="linkage-summary">
+      <text>{{linkageSummary.rowCount}} 个合法组合 · {{linkageSummary.modelCount}} 个型号组 · {{linkageSummary.fieldCount}} 个字段</text>
+      <text class="linkage-note">成员只能通过结构化导入整体更新，不能单独修改、删除或重排。</text>
+    </view>
+    <button wx:if="{{!readOnly}}" size="mini" class="secondary-button" bindtap="openLinkageImport">{{linkageSummary ? '整体更新商品联动' : '导入商品联动 JSON'}}</button>
+    <button wx:if="{{linkageImportPreview || linkageSummary}}" size="mini" class="secondary-button trial-button" bindtap="openLinkageTrial">只读试选商品组合</button>
+    <view wx:if="{{linkageTrialOpen}}" class="linkage-trial">
+      <view class="section-title">只读试选 · {{linkageTrialSource}}</view>
+      <text class="linkage-note">仅检查联动候选，不更改节点或模板草稿，不创建售后、不保存填写内容。每个选项都需手动选择；不适用属性自动跳过。</text>
+      <view wx:for="{{linkageTrialFields}}" wx:key="fieldKey" wx:for-item="trialField">
+        <text>{{trialField.name}}</text>
+        <picker range="{{trialField.choiceLabels}}" value="{{trialField.valueIndex + 1}}" data-field-key="{{trialField.fieldKey}}" bindchange="onLinkageTrialChange">
+          <view class="picker-value">{{trialField.valueIndex < 0 ? '请选择（不会自动选择唯一选项）' : trialField.value}}</view>
+        </picker>
+      </view>
+      <text class="linkage-note">{{linkageTrialComplete ? '试选为合法完整组合；未保存任何数据' : '请继续手动选择；下级只显示当前合法候选'}}</text>
+      <button size="mini" bindtap="resetLinkageTrial">清空试选</button>
+    </view>
+    <view wx:if="{{linkageImportOpen && !readOnly}}">
+      <text class="linkage-note">仅在当前节点草稿中替换 SKU、配置八个联动字段。保存节点后还须保存模板；不会直接写入数据库。</text>
+      <textarea class="textarea linkage-input" maxlength="-1" placeholder="粘贴离线工具生成的完整结构化 JSON" bindinput="onLinkageImportInput" />
+      <button size="mini" bindtap="validateLinkageImport">校验并预览</button>
+      <view wx:if="{{linkageImportError}}" class="error">{{linkageImportError}}</view>
+      <view wx:if="{{linkageImportPreview}}" class="linkage-summary">
+        <text>校验通过：{{linkageImportPreview.rowCount}} 个组合，{{linkageImportPreview.modelCount}} 个型号组</text>
+        <view wx:for="{{linkageImportPreview.fields}}" wx:key="name" wx:for-item="previewField" class="linkage-preview-row">
+          <text>{{previewField.name}}</text><text>{{previewField.optionCount}} 个选项 · {{previewField.applicableCount}} 个适用组合</text>
+        </view>
+        <button class="primary-button" bindtap="applyLinkageImport">确认应用到节点草稿</button>
+      </view>
+    </view>
+  </view>
   <view class="card field-card" wx:for="{{fields}}" wx:key="_uiKey">
     <view class="row-between field-heading"><text>字段 {{index + 1}}</text><text class="muted">{{item.fieldKey ? '稳定标识已保留' : '保存时生成标识'}}</text></view>
+    <view wx:if="{{item.linked}}" class="linkage-summary">
+      <text>{{item.name}} · 单选 · {{item.required ? '必填' : '选填'}}</text>
+      <text class="linkage-note">{{item.description}}</text>
+      <text class="linkage-note">商品联动成员，{{item.optionCount}} 个原文选项；请在上方整体更新。</text>
+    </view>
+    <block wx:else>
     <input class="input compact" value="{{item.name}}" placeholder="字段名称" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldNameInput" />
     <input class="input compact" value="{{item.description}}" placeholder="字段说明（可选）" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldDescriptionInput" />
     <picker range="{{fieldTypeLabels}}" value="{{item.type === 'short_text' ? 0 : item.type === 'long_text' ? 1 : item.type === 'number' ? 2 : item.type === 'boolean' ? 3 : item.type === 'date' ? 4 : item.type === 'single_select' ? 5 : 6}}" disabled="{{readOnly}}" data-index="{{index}}" bindchange="onFieldTypeChange">
@@ -148,7 +189,10 @@
       <input class="input compact" type="digit" value="{{item.constraints.max}}" placeholder="最大值" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldMaxInput" />
       <input class="input compact wide" type="number" value="{{item.constraints.decimalPlaces}}" placeholder="小数位数" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldDecimalPlacesInput" />
     </view>
-    <input wx:elif="{{item.type === 'single_select' || item.type === 'multi_select'}}" class="input compact" value="{{item.optionText}}" placeholder="选项用逗号分隔" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldOptionsInput" />
+    <view wx:elif="{{item.type === 'single_select' || item.type === 'multi_select'}}">
+      <textarea class="textarea option-editor" value="{{item.optionText}}" maxlength="-1" placeholder="选项用逗号或换行分隔，可整段粘贴" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldOptionsInput" />
+      <text class="muted option-count">已识别 {{item.optionCount}} 个选项（重复项自动合并）</text>
+    </view>
 
     <view class="condition-panel" wx:if="{{flowSchemaVersion === 2}}">
       <label class="assignment-mode-row">
@@ -165,10 +209,20 @@
             <checkbox value="{{parentOption.value}}" checked="{{parentOption.visible}}" disabled="{{readOnly}}" />{{parentOption.value}}
           </label>
         </checkbox-group>
+        <view wx:if="{{item.lazyConditional}}" class="conditional-pagination">
+          <text class="linkage-note">分批显示父选项（每页最多20项），其他页的选择保留；仅打开一个候选编辑框。</text>
+          <view class="actions">
+            <button size="mini" disabled="{{readOnly || item.conditionalPage === 0}}" data-index="{{index}}" data-direction="-1" bindtap="onConditionalParentPageChange">上一页</button>
+            <text>{{item.conditionalPage + 1}} / {{item.conditionalPageCount}}</text>
+            <button size="mini" disabled="{{readOnly || item.conditionalPage + 1 >= item.conditionalPageCount}}" data-index="{{index}}" data-direction="1" bindtap="onConditionalParentPageChange">下一页</button>
+          </view>
+        </view>
         <view wx:if="{{item.type === 'single_select'}}">
           <view wx:for="{{item.conditionParentValueRows}}" wx:key="value" wx:for-item="parentOption" class="conditional-option-row">
             <text wx:if="{{parentOption.visible}}" class="muted">{{parentOption.value}} 时可选：</text>
-            <input wx:if="{{parentOption.visible}}" class="input compact" value="{{parentOption.optionText}}" placeholder="从本字段选项中选择，用逗号分隔" disabled="{{readOnly}}" data-index="{{parentOption.fieldIndex}}" data-parent-value="{{parentOption.value}}" bindinput="onFieldConditionalOptionsInput" />
+            <button wx:if="{{item.lazyConditional && parentOption.visible && !parentOption.editing}}" size="mini" disabled="{{readOnly}}" data-index="{{parentOption.fieldIndex}}" data-parent-value="{{parentOption.value}}" bindtap="onConditionalEditorOpen">编辑此父选项的候选</button>
+            <textarea wx:if="{{parentOption.visible && (!item.lazyConditional || parentOption.editing)}}" class="textarea option-editor" value="{{parentOption.optionText}}" maxlength="-1" placeholder="填写本字段已有选项，用逗号或换行分隔" disabled="{{readOnly}}" data-index="{{parentOption.fieldIndex}}" data-parent-value="{{parentOption.value}}" bindinput="onFieldConditionalOptionsInput" />
+            <text wx:if="{{parentOption.visible && (!item.lazyConditional || parentOption.editing)}}" class="muted option-count">已识别 {{parentOption.optionCount}} 个选项（重复项自动合并）</text>
           </view>
         </view>
       </view>
@@ -179,6 +233,7 @@
       <button wx:if="{{index + 1 < fields.length}}" size="mini" data-index="{{index}}" data-direction="1" bindtap="moveField">下移</button>
       <button size="mini" class="danger-button" data-index="{{index}}" bindtap="removeField">删除</button>
     </view>
+    </block>
   </view>
 
   <button wx:if="{{!readOnly}}" class="primary-button submit" bindtap="submit" loading="{{submitting}}" disabled="{{submitting}}">保存节点</button>

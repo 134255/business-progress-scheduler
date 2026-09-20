@@ -13,13 +13,16 @@ function unavailableReasonMessage(reason) {
   return DEFAULT_UNAVAILABLE_MESSAGE
 }
 
-function listTemplates(query) { return callBusinessApi('listTemplates', query) }
+function listTemplates(query, options) { return callBusinessApi('listTemplates', query, options) }
 function getTemplate(templateId) { return callBusinessApi('getTemplate', { templateId }) }
 function getTemplateCardDisplay(templateId) { return callBusinessApi('getTemplateCardDisplay', { templateId }) }
 function updateTemplateCardDisplay(templateId, expectedRevision, fields) {
   return callBusinessApi('updateTemplateCardDisplay', { templateId, expectedRevision, fields })
 }
 function createTemplate(definition) { return callBusinessApi('createTemplate', definition) }
+function copyTemplate(templateId, expectedVersion) {
+  return callBusinessApi('copyTemplate', { templateId, expectedVersion }, { silent: true })
+}
 function updateTemplate(templateId, expectedVersion, definition) {
   return callBusinessApi('updateTemplate', { templateId, expectedVersion, definition })
 }
@@ -32,6 +35,6 @@ function deleteTemplate(templateId, expectedVersion) {
 function listEnabledTemplates() { return callBusinessApi('listEnabledTemplates', {}) }
 
 module.exports = {
-  listTemplates, getTemplate, createTemplate, updateTemplate, getTemplateCardDisplay, updateTemplateCardDisplay,
+  listTemplates, getTemplate, createTemplate, copyTemplate, updateTemplate, getTemplateCardDisplay, updateTemplateCardDisplay,
   changeTemplateStatus, deleteTemplate, listEnabledTemplates, unavailableReasonMessage
 }

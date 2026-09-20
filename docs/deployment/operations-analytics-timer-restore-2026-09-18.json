@@ -1,0 +1,9 @@
+{
+  "triggers": [
+    {
+      "name": "operations-analytics-every-15-min",
+      "type": "timer",
+      "config": "0 */15 * * * * *"
+    }
+  ]
+}

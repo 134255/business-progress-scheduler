@@ -410,6 +410,107 @@ function conditionalOptionText(page, value = 'S1', index = 1) {
   return page.data.fields[index].conditionParentValueRows.find(row => row.value === value).optionText
 }
 
+test('option editors explicitly opt out of native input truncation and allow multiline paste', () => {
+  const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/admin-template-node-edit/index.wxml'), 'utf8')
+  for (const handler of ['onFieldOptionsInput', 'onFieldConditionalOptionsInput']) {
+    const control = (wxml.match(/<(?:input|textarea)\b[^>]*>/g) || [])
+      .find(tag => tag.includes(`bindinput="${handler}"`))
+    assert.ok(control, `missing editor for ${handler}`)
+    assert.match(control, /\bmaxlength="-1"/, `${handler} must not inherit the native 140-character limit`)
+    assert.match(control, /^<textarea\b/, `${handler} must accept multiline lists`)
+    assert.match(control, /\bdisabled="{{readOnly}}"/)
+  }
+  assert.match(wxml, /已识别\s*{{item\.optionCount}}\s*个选项/)
+  assert.match(wxml, /已识别\s*{{parentOption\.optionCount}}\s*个选项/)
+})
+
+for (const type of ['single_select', 'multi_select']) {
+  test(`${type} long option paste counts all values and survives save and reopen`, async () => {
+    const accepted = []
+    const options = Array.from({ length: 200 }, (_, index) => `测试商品 ${index + 1} / Model`)
+    const input = options.join(',') + '\n' + options[0] + '， \r\n'
+    const page = createNodeEditor({ users: [], flowSchemaVersion: 2,
+      node: storedNode({ workflowMode: 'review', processorUserIds: ['processor-1'], reviewerUserIds: [],
+        next: { mode: 'end' }, fields: [{ fieldKey: 'products', name: '商品', type, required: true,
+          constraints: { options: ['原选项'] } }] }),
+      acceptNodeFromEditor: (index, node) => accepted.push(node) })
+    try {
+      assert.equal(page.data.fields[0].optionCount, 1)
+      page.onFieldOptionsInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: input } })
+      assert.equal(page.data.fields[0].optionText, input)
+      assert.equal(page.data.fields[0].optionCount, 200)
+      assert.deepEqual(page.data.fields[0].constraints.options, options)
+      await page.submit()
+      assert.equal(accepted.length, 1)
+      assert.deepEqual(accepted[0].fields[0].constraints.options, options)
+      assert.equal(Object.hasOwn(accepted[0].fields[0], 'optionCount'), false)
+      const { normalizeFieldDefinition } = require('../../cloudfunctions/businessApi/lib/field-domain')
+      assert.deepEqual(normalizeFieldDefinition(accepted[0].fields[0]).constraints.options, options)
+      const reopened = createNodeEditor({ users: [], flowSchemaVersion: 2, node: accepted[0] })
+      assert.equal(reopened.data.fields[0].optionCount, 200)
+      assert.deepEqual(reopened.buildNodeForSave().fields[0].constraints.options, options)
+    } finally {
+      delete global.getApp
+      delete global.getCurrentPages
+      delete global.wx
+    }
+  })
+}
+
+test('option counts use distinct trimmed entries and follow deletion without changing raw input', () => {
+  const page = conditionalOptionEditor()
+  try {
+    for (const [input, count, options] of [
+      [' Alpha，Beta\r\nAlpha, ,Gamma ', 3, ['Alpha', 'Beta', 'Gamma']],
+      ['EVO 跪坐椅,EVO跪坐椅', 2, ['EVO 跪坐椅', 'EVO跪坐椅']],
+      ['， ,\n ', 0, []],
+      ['', 0, []]
+    ]) {
+      page.onFieldOptionsInput({ currentTarget: { dataset: { index: 0 } }, detail: { value: input } })
+      assert.equal(page.data.fields[0].optionCount, count)
+      assert.equal(page.data.fields[0].optionText, input)
+      assert.deepEqual(page.data.fields[0].constraints.options, options)
+    }
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
+test('conditional long option paste counts the draft and preserves every saved mapping', async () => {
+  const accepted = []
+  const options = Array.from({ length: 200 }, (_, index) => `测试款式 ${index + 1}`)
+  const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })
+  const row = (editor, value) => editor.data.fields[1].conditionParentValueRows.find(item => item.value === value)
+  try {
+    assert.equal(row(page, 'S1').optionCount, 0)
+    assert.equal(row(page, 'S2').optionCount, 1)
+    page.onFieldOptionsInput({ currentTarget: { dataset: { index: 1 } },
+      detail: { value: options.concat('Black').join(',') } })
+    const input = options.join('\n') + '，' + options[0]
+    conditionalOptionInput(page, input)
+    assert.equal(row(page, 'S1').optionCount, 200)
+    page.onFieldDescriptionInput({ currentTarget: { dataset: { index: 1 } }, detail: { value: '说明' } })
+    assert.equal(row(page, 'S1').optionText, input)
+    assert.equal(row(page, 'S1').optionCount, 200)
+    assert.equal(row(page, 'S2').optionCount, 1)
+    await page.submit()
+    assert.equal(accepted.length, 1)
+    assert.deepEqual(accepted[0].fields[1].condition.optionsByParentValue, { S1: options, S2: ['Black'] })
+    const reopened = createNodeEditor({ users: [], flowSchemaVersion: 2, node: accepted[0] })
+    assert.equal(row(reopened, 'S1').optionCount, 200)
+    assert.equal(row(reopened, 'S2').optionCount, 1)
+    conditionalOptionInput(reopened, '')
+    assert.equal(row(reopened, 'S1').optionCount, 0)
+    assert.match(reopened.conditionalOptionsError(), /S1/)
+  } finally {
+    delete global.getApp
+    delete global.getCurrentPages
+    delete global.wx
+  }
+})
+
 test('saving removes obsolete parent conditions without destroying in-progress option edits', async () => {
   const accepted = []
   const page = conditionalOptionEditor({ acceptNodeFromEditor: (index, node) => accepted.push(node) })

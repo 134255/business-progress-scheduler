@@ -49,6 +49,21 @@ async function find(repository, keyword) {
     digestInput: keyword, pageSize: 20 })
 }
 
+test('linked model and attribute selections remain searchable without indexing hidden options or matrices', async () => {
+  const data=seed()
+  const fields=Array.from({length:8},(_,index)=>({fieldKey:`f${index}`,sequence:index,name:`字段${index}`,
+    type:'single_select',required:true,constraints:{options:['selected-sentinel','unused-sentinel']}}))
+  fields[0].optionLinkage={schemaVersion:1,fieldKeys:fields.map(field=>field.fieldKey),
+    rows:[[0,0,0,0,null,null,null,null],[1,1,1,null,null,null,null,null]]}
+  data.business_nodes[0].fieldDefinitions=fields
+  data.node_feedback[0].fieldValues=validateFieldValues(fields,[0,1,2,3].map(index=>({fieldKey:`f${index}`,value:'selected-sentinel'})))
+  const {repository,fake}=harness(data)
+  await publish(repository)
+  assert.equal((await find(repository,'selected-sentinel')).items.length,1)
+  assert.equal((await find(repository,'unused-sentinel')).items.length,0)
+  assert.equal(JSON.stringify(fake.documents('business_search_documents')).includes('optionLinkage'),false)
+})
+
 test('valid omitted optional values do not prevent the complete current generation from publishing', async () => {
   const data = seed()
   const types = ['short_text', 'long_text', 'number', 'boolean', 'date', 'single_select', 'multi_select']

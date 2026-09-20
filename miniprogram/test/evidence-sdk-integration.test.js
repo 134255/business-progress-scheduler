@@ -3,18 +3,20 @@ const assert = require('node:assert/strict')
 
 // Exercise the page's real COS factory and the shipped SDK. Only the WeChat
 // filesystem/network and cloud service boundary are replaced; no real I/O occurs.
-async function uploadThroughPage(size) {
+async function uploadThroughPage(size, fixture = {}) {
   const pagePath = require.resolve('../pages/node-feedback/index')
   const servicePath = require.resolve('../services/business')
   const sdkPath = require.resolve('../vendor/cos-wx-sdk-v5')
   const previousModules = new Map([pagePath, servicePath, sdkPath].map(key => [key, require.cache[key]]))
   const previousGlobals = new Map(['wx', 'Page', 'window'].map(key => [key, Object.getOwnPropertyDescriptor(global, key)]))
   const bytes = Buffer.alloc(size, 0xa5)
-  Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes)
-  const filePath = '/synthetic/upload.png'
-  const key = 'evidence-uploads/test-line/test-node/evidence-test.png'
+  Buffer.from(fixture.header || '89504e470d0a1a0a', 'hex').copy(bytes)
+  const name = fixture.name || 'synthetic.png'
+  const filePath = '/synthetic/' + name
+  const key = 'evidence-uploads/test-line/test-node/evidence-test.' + (fixture.extension || 'png')
   const calls = []
   const parts = []
+  const reads = []
   const now = Math.floor(Date.now() / 1000)
   const task = () => ({ abort() {}, onProgressUpdate() {}, onHeadersReceived() {} })
   const respond = (options, data, statusCode = 200) => {
@@ -27,7 +29,7 @@ async function uploadThroughPage(size) {
   try {
     global.wx = {
       getSystemInfoSync: () => ({ SDKVersion: '3.17.1' }),
-      getDeviceInfo: () => ({ platform: 'ios', system: 'iOS synthetic' }),
+      getDeviceInfo: () => ({ platform: fixture.platform || 'ios' }),
       getAppBaseInfo: () => ({ SDKVersion: '3.17.1' }),
       canIUse: () => true,
       getStorageSync: () => '',
@@ -40,6 +42,7 @@ async function uploadThroughPage(size) {
         },
         readFile(options) {
           assert.equal(options.filePath, filePath)
+          reads.push({ position: options.position, length: options.length, encoding: options.encoding })
           const start = options.position || 0
           const end = options.length === undefined ? bytes.length : start + options.length
           const data = Uint8Array.from(bytes.subarray(start, end)).buffer
@@ -78,6 +81,9 @@ async function uploadThroughPage(size) {
       exports: {
         async beginEvidenceUpload(input) {
           beginInput = input
+          if (fixture.reservationAllowedTypes && !fixture.reservationAllowedTypes.includes(input.fileName.split('.').pop().toLowerCase())) {
+            throw Object.assign(new Error('Unsupported reservation format'), { code: 'UNSUPPORTED_FILE_TYPE' })
+          }
           return {
             evidenceId: 'evidence-test', uploadSessionToken: 'synthetic-session',
             bucket: 'synthetic-1234567890', region: 'ap-shanghai', objectKey: key,
@@ -88,7 +94,11 @@ async function uploadThroughPage(size) {
         async refreshEvidenceUploadAuthorization() { assert.fail('Fresh authorization must not refresh') },
         async finalizeEvidenceUpload(input) {
           finalizeInput = input
-          return { evidenceId: 'evidence-test', fileName: 'synthetic.png', size, storageStatus: 'available' }
+          const uploaded = Buffer.concat(parts.slice().sort((a, b) => a.number - b.number).map(part => part.bytes))
+          const { classifyHeader } = require('../../cloudfunctions/businessApi/lib/evidence-policy')
+          const classified = classifyHeader({ fileName: beginInput.fileName, declaredSize: uploaded.length,
+            bytes: uploaded.subarray(0, 64), allowedTypes: fixture.allowedTypes || ['png', 'jpg', 'jpeg'] })
+          return { evidenceId: 'evidence-test', fileName: beginInput.fileName, ...classified, storageStatus: 'available' }
         }
       }
     }
@@ -101,10 +111,10 @@ async function uploadThroughPage(size) {
     try {
       result = await uploader.upload({
         businessLineId: 'test-line', nodeId: 'test-node', expectedNodeVersion: 4,
-        file: { path: filePath, name: 'synthetic.png', size }
+        file: { path: filePath, name, size }
       })
     } catch (caught) { error = caught }
-    return { result, error, calls, parts, bytes, beginInput, finalizeInput }
+    return { result, error, calls, parts, bytes, reads, beginInput, finalizeInput }
   } finally {
     for (const [key, previous] of previousModules) {
       if (previous) require.cache[key] = previous
@@ -148,4 +158,43 @@ test('page keeps multipart transfer and binary ordering above the SDK simple-upl
   assert.deepEqual(actual.parts.map(part => part.bytes.length), [1048576, 1])
   assert.ok(actual.calls.some(call => call.method === 'POST' && call.query.includes('uploads')))
   assert.ok(actual.calls.some(call => call.method === 'POST' && call.query.includes('uploadId=synthetic-upload')))
+})
+
+test('Mac image named JPG with PNG bytes is named by content before authorization and passes the real server policy', async () => {
+  const actual = await uploadThroughPage(56125, { name: 'local-photo.jpg', platform: 'mac' })
+  assert.equal(actual.error, undefined)
+  assert.equal(actual.beginInput.fileName, 'local-photo.png')
+  assert.equal(actual.result.storageStatus, 'available')
+  assert.equal(actual.result.extension, 'png')
+  assert.deepEqual(Buffer.concat(actual.parts.map(part => part.bytes)), actual.bytes, 'No transcoding or file rewrite')
+  assert.deepEqual(actual.reads[0], { position: 0, length: 64, encoding: undefined })
+})
+
+test('Mac genuine JPG keeps its name and exact bytes through upload and server verification', async () => {
+  const actual = await uploadThroughPage(56125, { name: 'local-photo.JPG', platform: 'mac',
+    header: 'ffd8ffe000104a4649460001', extension: 'JPG' })
+  assert.equal(actual.error, undefined)
+  assert.equal(actual.beginInput.fileName, 'local-photo.JPG')
+  assert.equal(actual.result.extension, 'jpg')
+  assert.deepEqual(Buffer.concat(actual.parts.map(part => part.bytes)), actual.bytes)
+})
+
+test('normalizing a mislabeled image does not bypass the actual-format node allowlist', async () => {
+  const actual = await uploadThroughPage(56125, { name: 'local-photo.jpg', platform: 'mac', allowedTypes: ['jpg'] })
+  assert.equal(actual.beginInput.fileName, 'local-photo.png')
+  assert.equal(actual.error.code, 'UNSUPPORTED_FILE_TYPE')
+  assert.equal(actual.result, undefined)
+})
+
+test('authorization rejection of normalized PNG stops before all COS requests and finalization', async () => {
+  const actual = await uploadThroughPage(56125, {
+    name: 'local-photo.jpg', platform: 'mac', reservationAllowedTypes: ['jpg']
+  })
+  assert.equal(actual.beginInput.fileName, 'local-photo.png')
+  assert.equal(actual.error.code, 'UNSUPPORTED_FILE_TYPE')
+  assert.equal(actual.error.uploadStage, 'authorize')
+  assert.deepEqual(actual.calls, [])
+  assert.deepEqual(actual.parts, [])
+  assert.equal(actual.finalizeInput, undefined)
+  assert.equal(actual.result, undefined)
 })

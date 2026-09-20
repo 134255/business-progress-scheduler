@@ -8,7 +8,7 @@
       <picker range="{{['全部状态', '草稿', '已启用', '已停用']}}" value="{{status === 'draft' ? 1 : status === 'enabled' ? 2 : status === 'disabled' ? 3 : 0}}" bindchange="onStatusChange">
         <view class="filter">状态：{{status === 'draft' ? '草稿' : status === 'enabled' ? '已启用' : status === 'disabled' ? '已停用' : '全部'}}</view>
       </picker>
-      <button class="secondary-button create-button" bindtap="openCreate">新建模板</button>
+      <button class="secondary-button create-button" bindtap="openCreate" disabled="{{!!copyingId}}">新建模板</button>
     </view>
   </view>
   <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
@@ -20,9 +20,10 @@
       </view>
       <view class="meta">节点 {{item.nodeCount || 0}} 个 · 版本 {{item.version}}</view>
       <view class="actions">
-        <button size="mini" data-id="{{item._id}}" bindtap="openEdit">{{item.status === 'enabled' ? '查看' : '编辑'}}</button>
-        <button size="mini" class="secondary-button" data-id="{{item._id}}" bindtap="changeStatus">{{item.status === 'enabled' ? '停用' : '启用'}}</button>
-        <button wx:if="{{item.status !== 'enabled'}}" size="mini" class="danger-button" data-id="{{item._id}}" bindtap="deleteTemplate">删除</button>
+        <button size="mini" data-id="{{item._id}}" bindtap="openEdit" disabled="{{!!copyingId}}">{{item.status === 'enabled' ? '查看' : '编辑'}}</button>
+        <button size="mini" class="secondary-button" data-id="{{item._id}}" bindtap="copyTemplate" loading="{{copyingId === item._id}}" disabled="{{loading || !!copyingId}}">{{copyingId === item._id ? '复制中' : '复制'}}</button>
+        <button size="mini" class="secondary-button" data-id="{{item._id}}" bindtap="changeStatus" disabled="{{!!copyingId}}">{{item.status === 'enabled' ? '停用' : '启用'}}</button>
+        <button wx:if="{{item.status !== 'enabled'}}" size="mini" class="danger-button" data-id="{{item._id}}" bindtap="deleteTemplate" disabled="{{!!copyingId}}">删除</button>
       </view>
     </view>
   </view>

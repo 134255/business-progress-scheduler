@@ -44,6 +44,7 @@
       </view>
     </view>
 
+    <text wx:if="{{hasProductOptionLinkage}}" class="muted field-description">请依次选择分类、品牌、型号及适用属性，后续选项将逐级显示。</text>
     <view class="field dynamic-field" wx:for="{{visibleFields}}" wx:key="fieldKey">
       <text class="field-label">{{item.name}}{{item.required ? ' *' : ''}}</text>
       <text wx:if="{{item.description}}" class="muted field-description">{{item.description}}</text>

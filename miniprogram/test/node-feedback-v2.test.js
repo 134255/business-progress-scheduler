@@ -647,6 +647,29 @@ async function loadDesktopPickerPage(overrides = {}) {
   return page
 }
 
+test('strict product rules remain private while setData receives only effective field choices', async () => {
+  global.getApp=()=>({globalData:{currentUser:activeUser()}})
+  global.wx={setNavigationBarTitle(){},showToast(){},reLaunch(){assert.fail('unexpected redirect')},showModal(o){o.success({confirm:true})}}
+  try {
+    const fields=Array.from({length:8},(_,index)=>({fieldKey:`f${index}`,sequence:index,name:`字段${index}`,
+      type:'single_select',required:true,constraints:{options:['A','B']}}))
+    fields[0].optionLinkage={schemaVersion:1,fieldKeys:fields.map(field=>field.fieldKey),
+      rows:[[0,0,0,0,0,null,null,null],[1,1,1,null,0,null,null,null]]}
+    const page=loadPage({getBusinessLine:async()=>businessFixture(nodeFixture({workflowMode:'review',fieldDefinitions:fields})),
+      getNodeHistory:async()=>({canSubmit:true,history:[]})})
+    const original=page.setData
+    page.setData=function(update){assert.equal(JSON.stringify(update).includes('optionLinkage'),false);original.call(this,update)}
+    await page.onLoad({lineId:'line-1',nodeId:'node-1'})
+    assert.deepEqual(page.data.visibleFields.map(field=>field.fieldKey),['f0'])
+    await page.onSingleSelectChange({currentTarget:{dataset:{fieldkey:'f0'}},detail:{value:0}})
+    assert.deepEqual(page.data.visibleFields.map(field=>field.fieldKey),['f0','f1'])
+    assert.deepEqual(page.data.visibleFields[1].constraints.options,['A'])
+    assert.ok(page.fieldDefinitions[0].optionLinkage)
+    page.onUnload()
+    assert.equal(page.fieldDefinitions,null)
+  } finally {delete global.wx;delete global.getApp}
+})
+
 for (const platform of ['mac', 'windows']) {
   test(`${platform} 本机图片分流使用 chooseImage 原图来源，不调用会话选择（非真机窗口验收）`, async () => {
     let imagePicker
@@ -690,6 +713,92 @@ test('桌面视频分流调用不压缩的 chooseVideo，并保持 120 MiB 合�
   picker.success({ tempFilePath: 'wxfile://extra.mp4', size: 1, duration: 1, width: 1, height: 1 })
   assert.equal(page.data.files.length, 1)
   assert.match(toasts.at(-1), /合计.*120 MB/)
+})
+
+test('Mac 本机视频优先使用受支持的 chooseMedia 原始视频路径并保留 MOV 后缀', async () => {
+  let picker
+  const page = await loadDesktopPickerPage({
+    showActionSheet: options => options.success({ tapIndex: 1 }),
+    getAppBaseInfo: () => ({ SDKVersion: '3.17.1' }),
+    canIUse: () => true,
+    chooseMedia: options => { picker = options },
+    chooseVideo: () => assert.fail('支持新本机媒体接口时不能固定选择旧接口')
+  })
+  page.chooseMediaEvidence()
+  assert.ok(picker, 'Mac must reach the supported local media picker')
+  assert.deepEqual(picker.mediaType, ['video'])
+  assert.deepEqual(picker.sourceType, ['album'])
+  assert.deepEqual(picker.sizeType, ['original'])
+  assert.equal(picker.count, 1)
+  picker.success({ type: 'video', tempFiles: [{ tempFilePath: 'wxfile://local-video.MOV',
+    size: 1024, fileType: 'video', duration: 10, width: 1920, height: 1080 }] })
+  assert.deepEqual(page.data.files.map(file => [file.name, file.path, file.extension]), [
+    ['local-video.MOV', 'wxfile://local-video.MOV', 'mov']
+  ])
+})
+
+for (const SDKVersion of ['2.25.0', '3.17.1']) {
+  test(`Mac ${SDKVersion} 新视频选择器取消、失败、迟到结果均不改草稿或转聊天`, async () => {
+    let picker
+    const toasts = []
+    const page = await loadDesktopPickerPage({
+      getAppBaseInfo: () => ({ SDKVersion }),
+      canIUse: () => true,
+      showActionSheet: options => options.success({ tapIndex: 1 }),
+      chooseMedia: options => { picker = options },
+      showToast: options => toasts.push(options.title)
+    })
+    page.setData({ comment: '保留草稿' })
+    page.chooseMediaEvidence()
+    let refreshes = 0
+    page.loadData = async () => { refreshes += 1 }
+    await page.onShow()
+    assert.equal(refreshes, 0)
+    picker.fail({ errMsg: 'chooseMedia:fail cancel' })
+    assert.equal(page.data.comment, '保留草稿')
+    assert.equal(toasts.length, 0)
+    page.chooseMediaEvidence()
+    picker.fail({ errMsg: 'chooseMedia:fail private-path' })
+    assert.equal(toasts.length, 1)
+    assert.doesNotMatch(toasts[0], /private-path/)
+    page.chooseMediaEvidence()
+    page.onUnload()
+    picker.success({ tempFiles: [{ tempFilePath: 'wxfile://late.MOV', size: 1024, fileType: 'video' }] })
+    assert.equal(page.data.files.length, 0)
+  })
+}
+
+for (const fixture of [
+  { platform: 'mac', SDKVersion: '2.24.9', capable: true },
+  { platform: 'mac', SDKVersion: '3.17.1', capable: false },
+  { platform: 'windows', SDKVersion: '3.17.1', capable: true }
+]) {
+  test(`existing local picker remains for ${JSON.stringify(fixture)} without a chat fallback`, async () => {
+    let picker
+    const page = await loadDesktopPickerPage({
+      getDeviceInfo: () => ({ platform: fixture.platform }),
+      getAppBaseInfo: () => ({ SDKVersion: fixture.SDKVersion }),
+      canIUse: name => name !== 'chooseMedia' || fixture.capable,
+      showActionSheet: options => options.success({ tapIndex: 1 }),
+      chooseMedia: () => assert.fail('original-video requirement or platform scope is not satisfied'),
+      chooseVideo: options => { picker = options }
+    })
+    page.chooseMediaEvidence()
+    assert.equal(picker.compressed, false)
+    assert.deepEqual(picker.sourceType, ['album'])
+  })
+}
+
+test('Mac new video picker does not invent an MP4 suffix for an unknown temporary filename', async () => {
+  let picker
+  const page = await loadDesktopPickerPage({
+    getAppBaseInfo: () => ({ SDKVersion: '3.17.1' }),
+    showActionSheet: options => options.success({ tapIndex: 1 }),
+    chooseMedia: options => { picker = options }
+  })
+  page.chooseMediaEvidence()
+  picker.success({ tempFiles: [{ tempFilePath: 'wxfile://unknown-file', size: 1024, fileType: 'video' }] })
+  assert.equal(page.data.files.length, 0)
 })
 
 test('本机图片选择取消保持草稿，非取消失败显示安全提示且不转聊天', async () => {
@@ -844,6 +953,37 @@ test('凭证最多三个并发上传，失败重试不重复上传成功项且�
   ])
   assert.deepEqual(feedbackInput.evidenceIds, ['evidence-a', 'evidence-b', 'evidence-c', 'evidence-d'])
   assert.equal(Object.prototype.hasOwnProperty.call(feedbackInput, 'evidences'), false)
+})
+
+test('登记后使用服务端规范化文件名和扩展名，不改变本机路径', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle() {},
+    reLaunch: () => assert.fail('有效账号不应被重定向'),
+    showToast() {}
+  }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], allowedEvidenceTypes: ['jpg', 'png'] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({ files: [{
+    localKey: 'one', name: 'local-photo.jpg', extension: 'jpg', category: 'image',
+    path: 'wxfile://local-photo.jpg', size: 56125, status: 'pending'
+  }] })
+  page.createEvidenceUploader = () => ({ upload: async () => ({
+    evidenceId: 'evidence-one', fileName: 'local-photo.png', storageStatus: 'available'
+  }) })
+  const result = await page.uploadAndRegisterEvidence({
+    actorId: 'account-1', lineId: 'line-1', nodeId: 'node-1',
+    nodeVersion: page.data.expectedNodeVersion, sequence: page.writeSequence
+  })
+  assert.deepEqual(result, ['evidence-one'])
+  assert.equal(page.data.files[0].name, 'local-photo.png')
+  assert.equal(page.data.files[0].extension, 'png')
+  assert.equal(page.data.files[0].path, 'wxfile://local-photo.jpg')
+  assert.equal(page.data.files[0].size, 56125)
+  assert.equal(page.data.files[0].status, 'registered')
 })
 
 test('可选空白名单允许全部十种受支持格式，有限名单仍在本地拒绝未允许格式', async () => {

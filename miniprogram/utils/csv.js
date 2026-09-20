@@ -1,7 +1,7 @@
 function safeCell(value) {
   let text = value === null || value === undefined ? '' : String(value)
   text = text.replace(/\r\n|\r|\n/g, '\r\n')
-  if (/^[=+\-@]/.test(text)) text = `'${text}`
+  if (/^[\s\u0000-\u001f]*[=+\-@]/.test(text)) text = `'${text}`
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 

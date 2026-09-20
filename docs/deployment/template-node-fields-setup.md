@@ -84,6 +84,7 @@
 | `public_node_share_chunks` | 每块最多 40 条的公开凭证快照 |
 | `operations_analytics_facts` | 完成业务与节点的确定性统计事实、权限受控下钻样本 |
 | `operations_analytics_daily` | 按上海自然日、模板、稳定节点和匿名参与人维度维护的每日汇总 |
+| `operations_field_snapshots` | 独立节点级最终单选/多选派生；不保存其他类型字段内容，不作为授权依据 |
 | `business_search_documents` | 当前内容代际的安全检索条目和 HMAC 倒排令牌 |
 | `business_search_requests` | `businessApi` 调用检索工作器的短效一次性票据摘要 |
 | `node_text_parse_requests` | `businessApi` 调用 AI 解析工作器的五分钟单次票据摘要，不保存原文或候选值 |
@@ -123,6 +124,14 @@
 | 集合 | 字段顺序 | 唯一 | 用途 |
 |---|---|---:|---|
 | `templates` | `name` 升序、`_id` 升序 | 否 | 运营统计模板筛选目录 |
+| `business_lines` | `sourceTemplateId` 升序、`_id` 升序 | 否 | 字段统计模板范围候选 |
+| `business_lines` | `memberUserIds` 升序、`_id` 升序 | 否 | 字段统计先授权的成员候选 |
+| `business_lines` | `managerUserIds` 升序、`_id` 升序 | 否 | 字段统计先授权的管理员候选 |
+| `business_lines` | `sourceTemplateId` 升序、`memberUserIds` 升序、`_id` 升序 | 否 | 指定模板的成员字段统计 |
+| `business_lines` | `sourceTemplateId` 升序、`managerUserIds` 升序、`_id` 升序 | 否 | 指定模板的管理员字段统计 |
+| `business_nodes` | `businessLineId` 升序、`status` 升序、`_id` 升序 | 否 | 字段完成候选；范围内权威完成日期再核验 |
+| `business_nodes` | `businessLineId` 升序、`_id` 升序 | 否 | 完整报告基础记录的有界批读与来源复核 |
+| `node_review_votes` | `reviewRoundId` 升序、`_id` 升序 | 否 | 字段最终轮次投票有界读取 |
 | `business_lines` | `code` 升序 | 是 | 业务编号最终防重 |
 | `business_lines` | `status` 升序、`updatedAt` 降序 | 否 | 状态筛选与后台检索 |
 | `business_lines` | `memberUserIds` 升序、`updatedAt` 降序 | 否 | 新账号成员业务列表 |
@@ -362,7 +371,7 @@
 
 | 验收项 | 操作 | 通过标准 | 初始状态 |
 |---|---|---|---|
-| 图片 | 分别上传 JPG/JPEG/PNG/WebP/HEIC/HEIF，包含 iPhone HEIC 和 Android/HarmonyOS 常见图片 | 合法签名可登记；改扩展名、损坏头部或不在节点白名单的文件被拒绝 | 未验证 |
+| 图片 | 分别上传 JPG/JPEG/PNG/WebP/HEIC/HEIF，包含 iPhone HEIC 和 Android/HarmonyOS 常见图片 | 合法签名可登记；JPG/JPEG 名称但真实 PNG 仅规范化上传名称，字节不变；非图片伪装、损坏头部或真实格式不在节点白名单的文件仍被拒绝 | 未验证 |
 | PDF | 上传小型与大型 PDF，并用改扩展名伪造 PDF | 合法 PDF 可登记、预览或下载；伪造格式被拒绝 | 未验证 |
 | 视频 | 分别上传 MP4/MOV/M4V，覆盖 H.264 与 H.265/HEVC 容器品牌 | 支持品牌可登记；未知或伪造容器失败关闭 | 未验证 |
 | 120 MiB 合计 | 在同一处理轮分多批选择多个文件，验证 120 MiB 前后边界 | 当前有效凭证合计不超过 120 MiB 可上传；超过时在上传前或服务端预约时拒绝；不另设业务层文件数量上限 | 未验证 |
@@ -374,7 +383,16 @@
 | 会话与孤立清理 | 制造一个过期 `uploading` 会话和一个活动会话后运行经批准的一次性保留 Timer | 仅过期孤立对象被清理且元数据保留；活动会话和所有 `available` 凭证不变 | 未验证 |
 | 保存并提交幂等 | 修改字段并直接提交审核，制造一次响应丢失后用同一请求重试 | 服务端一次调用原子保存并提交；只产生一个反馈和一个审核轮次，页面以权威成功为准且不清空字段 | 未验证 |
 
-### 11.3.1 响应时间与内存 A/B
+### 11.3.1 Mac 本机上传专项验收
+
+2026-09-11 Mac 本机上传修复的专项验收（当前尚未真机验收）：
+
+- 本次上传修复仅修改小程序客户端，无须为此重新部署 `businessApi` 或调整 COS/CAM 权限、环境变量、Timer。需要重新编译/上传客户端，并确认目标 Mac 打开的确是新版本；“代码上传成功”不等于上传功能成功。
+- 在原 Mac、原微信和同一 MOV 上，从原“选择图片或视频 → 选择本机视频”入口测试。基础库 >=2.25.0 且 `chooseMedia` 可用时使用原始视频模式。记录实际基础库版本、MOV 是否可选、是否传输并登记；缺少任一项都不能标为完成，不用 Windows/模拟器结果替代，不转聊天、不要求用户改名或预转码。
+- 测试真正 JPEG 和“JPG 名称但 PNG 内容”的两类图片：前者保留 JPG/JPEG 名称；后者只把上传名称改为 PNG，上传前后的内容一致，登记后显示权威名称。单独用仅允许 JPG 的隔离节点确认真实 PNG 仍被拒绝，不修改现有客户节点配置用于验收。
+- 本地读取失败、选择取消、账号/页面变化时不覆盖草稿；失败对象保留原孤立清理协议，不手工删除或把 `uploading` 改成 `available`。
+
+### 11.3.2 响应时间与内存 A/B
 
 1. 用同一无敏感隔离账号、同一网络和同一批数据分别记录概览、节点处理页、保存并提交、详情返回的冷启动与热调用样本。新版预期调用数为：概览 1 次、节点工作区 1 次、无新文件的保存并提交 1 次；检索投影失败不得把权威保存或提交包装成失败。
 2. 先以 `businessApi` 256 MB 采集至少 20 个热样本和 5 个冷样本，再在保留全部环境变量和代码版本不变的情况下用 512 MB 重复同样样本。分别记录 P50/P95、超时率、冷启动时间和平台账单单位，不记录账号、正文、文件名或对象键。
@@ -452,7 +470,21 @@ businessApi 256/512 MB A/B：保留 256 / 保留 512 / 未验证
 回退版本：已记录在受控运维记录 / 未记录
 ```
 
-## 十四、官方参考
+## 十四、节点字段统计与完整 CSV 增量升级
+
+### 已运行环境增量升级：节点字段统计与完整 CSV
+
+本节适用于已有正式 Timer 的增量升级，优先于前面首次隔离安装的“空触发器”步骤：保留线上现有权限、环境变量和定时配置，不为此功能停用、重建或提高 Timer 频率。以下均为待授权操作，不表示已执行。
+
+1. 核对目标环境与两个函数，先下载可回退源码/配置并读回；已有 operations_field_snapshots 需备份，缺集合明确记录“未创建、无历史数据”，获许可后创建为仅云函数/服务端读写。不开放客户端读取字段派生集合。
+2. 确认第五节新增 business_lines 的模板/成员/管理员及 _id 组合、business_nodes 的 businessLineId/status/_id、最终投票的 reviewRoundId/_id 索引。后台恢复与快照固定读取复用 _id 索引，不另建无查询用途的快照内容索引；基础批读依赖 business_nodes(businessLineId ASC,_id ASC)。索引生效及真实查询计划需回读核对。
+3. 确认 businessApi 原 BUSINESS_SEARCH_HMAC_SECRET 存在且至少32字节，仅检查存在性/长度，不回显内容；新报告从它派生独立用途密钥。不改密钥、不把值复制给客户端或统计工作器。缺失时停止新报告发布并报告依赖，不能用默认值替代。
+4. 运行 node tools/sync-operations-field-domain.mjs --check，核对3个域模块随 operationsAnalytics 独立打包，不上传 node_modules。按当次授权更新 businessApi 和 operationsAnalytics，部署后下载回读与本地哈希比较；保留其原权限、变量、内存/超时和 Timer。如现有超时不足以容纳附加阶段，先报告并另行确认，不能擅自更改。
+5. 新字段阶段只在原工时成功后执行，每轮扫描最多40条原始候选，独立5秒协作预算。返回仅 fieldExamined/fieldGenerated/fieldFailed/fieldHasMore 等安全计数；hasMore不是“所有数据已经完整”的标志。system_settings/operations-field-snapshot-cursor 只保存cursorId/version/updatedAt，不得手工伪造、删除或覆盖。
+6. 先验证服务端三个新接口及缺集合/来源变更/普通账号拒绝导出，再上传新小程序。看板仅显示选项次数，文件追加字段明细与同源选项统计；原运营基础行仍按创建日期/状态，字段行按完成日期及当前全字段筛选。已验收的一个生成/发送按钮继续使用，不增加文件入口。
+7. 使用 docs/deployment/node-field-frequency-acceptance.md 的隔离合成样本和实际授权账号验收，测量真实统计、恢复阶段和分页时长。回滚只恢复精确代码版本，不删除派生集合、历史来源或恢复游标；旧导出接口仍保留。云端执行/客户端上传/真机验收目前均 unverified。
+
+## 十五、官方参考
 
 - [腾讯云 CloudBase 云函数](https://cloud.tencent.com/document/product/876/46899)
 - [腾讯云定时触发器说明](https://cloud.tencent.com/document/product/583/9708)

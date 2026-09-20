@@ -225,6 +225,20 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.deepEqual(fake.transactionQueries, [])
 })
 
+test('business snapshot and authorized detail preserve complete product linkage for actual feedback rendering', async () => {
+  const fields=Array.from({length:8},(_,index)=>({fieldKey:`f${index}`,sequence:index,name:`字段${index}`,
+    type:'single_select',required:true,constraints:{options:['A','B']}}))
+  fields[0].optionLinkage={schemaVersion:1,fieldKeys:fields.map(field=>field.fieldKey),
+    rows:[[0,0,0,0,null,null,null,null],[1,1,1,null,0,null,null,null]]}
+  const {repository,fake}=createRepositoryHarness(seedDefinition({nodes:[sourceNode({fields})]}))
+  await repository.createBusinessSnapshot({actor:{_id:'user-1'},input:input(),definition:await definition(repository)})
+  const line=fake.documents('business_lines')[0]
+  const detail=await repository.getBusinessLine({actor:{_id:'user-1',status:'active'},lineId:line._id})
+  assert.deepEqual(detail.nodes[0].fieldDefinitions[0].optionLinkage,fields[0].optionLinkage)
+  detail.nodes[0].fieldDefinitions[0].optionLinkage.rows[0][0]=1
+  assert.equal(fake.documents('business_nodes')[0].fieldDefinitions[0].optionLinkage.rows[0][0],0)
+})
+
 test('version 2 creation freezes graph edges by snapshot id and activates only the declared entry node', async () => {
   const nodes = [
     sourceNode({

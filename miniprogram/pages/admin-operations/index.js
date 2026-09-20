@@ -1,7 +1,9 @@
 const businessService = require('../../services/business')
 const { toCsv } = require('../../utils/csv')
+const { FIELD_CSV_COLUMNS,formatFieldSummary,mergeFieldFilters,fieldErrorMessage,validReportPage,reportCsvRows,utf8Bytes } = require('../../utils/operations-field-report')
 
 const DAY_MS = 24 * 60 * 60 * 1000
+const settle = promise => Promise.resolve(promise).then(value=>({status:'fulfilled',value}),reason=>({status:'rejected',reason}))
 const CSV_COLUMNS = Object.freeze([
   ['businessCode', '售后编号'], ['businessName', '售后名称'], ['businessStatus', '售后状态'],
   ['nodeCode', '节点编号'], ['nodeName', '节点名称'], ['nodeStatus', '节点状态'],
@@ -13,7 +15,7 @@ const CSV_COLUMNS = Object.freeze([
   ['processingElapsedWorkMinutes', '处理累计工作分钟'], ['reviewDueStatus', '审核截止状态'],
   ['reviewDueAt', '审核截止时间'], ['reviewOverdueWorkMinutes', '审核逾期工作分钟'],
   ['reviewElapsedWorkMinutes', '审核累计工作分钟'], ['businessCreatedAt', '售后创建时间'],
-  ['nodeCompletedAt', '节点完成时间']
+  ['nodeCompletedAt', '节点完成时间'], ...FIELD_CSV_COLUMNS
 ])
 
 function currentActiveUser() {
@@ -78,7 +80,20 @@ function option(label, value) { return { label, value } }
 
 function writeFile(filePath, data) {
   return new Promise((resolve, reject) => {
-    wx.getFileSystemManager().writeFile({ filePath, data, encoding: 'utf8', success: resolve, fail: reject })
+    let settled = false
+    const finish = error => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) reject(error)
+      else resolve()
+    }
+    const timer = setTimeout(() => finish(new Error('EXPORT_WRITE_TIMEOUT')), 30000)
+    try {
+      wx.getFileSystemManager().writeFile({
+        filePath, data, encoding: 'utf8', success: () => finish(), fail: error => finish(error || new Error('EXPORT_WRITE_FAILED'))
+      })
+    } catch (error) { finish(error) }
   })
 }
 
@@ -87,7 +102,17 @@ Page({
     isAdmin: false,
     currentStats: null,
     exporting: false,
+    exportSending: false,
+    exportReady: false,
+    exportNotice: '',
+    exportErrorMessage: '',
     loading: false,
+    fieldGroups: [],
+    fieldLoading: false,
+    fieldIncomplete: false,
+    fieldNotice: '',
+    fieldScopeNotice: '',
+    fieldErrorMessage: '',
     errorMessage: '',
     startDate: '',
     endDate: '',
@@ -122,7 +147,9 @@ Page({
   },
 
   onShow() {
+    this.invalidateFields()
     const user = currentActiveUser()
+    if (this.csvExport && !this.isCurrentCsvExport(this.csvExport)) this.resetCsvExport()
     if (!user) {
       wx.reLaunch({ url: '/pages/login/index' })
       return
@@ -137,8 +164,18 @@ Page({
   },
 
   onHide() {
+    this.invalidateFields()
     this.requestSequence = (this.requestSequence || 0) + 1
     this.sampleSequence = (this.sampleSequence || 0) + 1
+    // A native file-send window can hide this page before its result callback.
+    if (!this.csvExport || this.csvExport.stage !== 'sending') this.resetCsvExport()
+  },
+
+  onUnload() {
+    this.invalidateFields()
+    this.requestSequence = (this.requestSequence || 0) + 1
+    this.sampleSequence = (this.sampleSequence || 0) + 1
+    this.resetCsvExport()
   },
 
   selected(options, index) {
@@ -180,22 +217,25 @@ Page({
           this.setData({ currentStats: null })
         }
       }
-      const first = await businessService.getOperationsAnalyticsFilters({
+      const first = await this.loadMergedFilters({
         startDate: this.data.startDate, endDate: this.data.endDate, grain: 'week'
       })
       if (!this.isCurrentRequest(sequence, userId)) return
-      const templates = (first.templates || []).map(item => option(item.templateName, item.templateId))
+      const templates = (first.templates || []).map(item => option(item.templateName || `历史模板 ${item.templateId}`, item.templateId))
       this.setData({ templateOptions: templates, templateIndex: 0 })
       if (!templates.length) {
         this.setData({ loading: false, summary: null, nodeSeries: [], trendSeries: [] })
+        await this.loadFieldSummary(sequence,userId)
         return
       }
-      await this.loadTemplateFilters(sequence, userId)
-      await this.loadSummary(sequence, userId)
+      if (!await this.loadTemplateFilters(sequence, userId)) return
+      await this.loadCharts(sequence, userId)
     } catch (error) {
       if (this.isCurrentRequest(sequence, userId)) {
         this.setData({ loading: false, errorMessage: '历史统计加载失败，请稍后重试' })
       }
+    } finally {
+      if (this.isCurrentRequest(sequence,userId)) this.setData({loading:false})
     }
   },
 
@@ -204,10 +244,14 @@ Page({
     return sequence === this.requestSequence && user && user._id === userId
   },
 
-  async loadTemplateFilters(sequence = this.requestSequence, userId = currentActiveUser() && currentActiveUser()._id) {
-    const result = await businessService.getOperationsAnalyticsFilters(this.query())
-    if (!this.isCurrentRequest(sequence, userId)) return
-    this.setData({
+  async loadTemplateFilters(sequence = this.requestSequence, userId = currentActiveUser() && currentActiveUser()._id, preserve = false) {
+    if (!this.isCurrentRequest(sequence,userId)) return false
+    const user=currentActiveUser(),queryKey=JSON.stringify(this.query()),fieldSequence=this.fieldSequence
+    const result = await this.loadMergedFilters(this.query())
+    if (!this.isCurrentRequest(sequence,userId) || currentActiveUser()!==user ||
+        JSON.stringify(this.query())!==queryKey || fieldSequence!==this.fieldSequence) return false
+    const selected=this.query()
+    const update={
       versionOptions: [option('合并全部版本', ''), ...(result.templateVersions || []).map(value => option(`第 ${value} 版`, String(value)))],
       versionIndex: 0,
       nodeOptions: [option('全部节点', ''), ...(result.stableNodes || []).map(item => option(item.nodeName, item.stableNodeId))],
@@ -220,7 +264,78 @@ Page({
       reviewerIndex: 0,
       advancedFilterCount: 0,
       advancedFilterLabel: ''
-    })
+    }
+    if(preserve) {
+      for(const [optionsKey,indexKey,queryKey] of [
+        ['versionOptions','versionIndex','templateVersion'],['nodeOptions','nodeIndex','stableNodeId'],
+        ['businessOptions','businessIndex','businessLineId'],['processorOptions','processorIndex','processorToken'],
+        ['reviewerOptions','reviewerIndex','reviewerToken']]) {
+        update[indexKey]=Math.max(0,update[optionsKey].findIndex(item=>String(item.value)===String(selected[queryKey] || '')))
+      }
+      update.advancedFilterCount=[update.versionIndex,this.data.statusIndex,update.nodeIndex,update.businessIndex,
+        update.processorIndex,update.reviewerIndex].filter(Boolean).length
+      update.advancedFilterLabel=update.advancedFilterCount ? `（已启用 ${update.advancedFilterCount} 项）` : ''
+    }
+    this.setData(update)
+    return true
+  },
+
+  async refreshFilterOptions(sequence,userId) {
+    if(!this.isCurrentRequest(sequence,userId)) return false
+    const user=currentActiveUser(),before=this.query(),queryKey=JSON.stringify(before),fieldSequence=this.fieldSequence
+    const first=await this.loadMergedFilters({startDate:before.startDate,endDate:before.endDate,grain:before.grain})
+    if(!this.isCurrentRequest(sequence,userId) || currentActiveUser()!==user ||
+        JSON.stringify(this.query())!==queryKey || fieldSequence!==this.fieldSequence) return false
+    const templates=(first.templates||[]).map(item=>option(item.templateName || `历史模板 ${item.templateId}`,item.templateId))
+    const index=Math.max(0,templates.findIndex(item=>item.value===before.templateId))
+    this.setData({templateOptions:templates,templateIndex:index})
+    const preserve=templates[index] && templates[index].value===before.templateId
+    const refreshed=await this.loadTemplateFilters(sequence,userId,preserve)
+    if(refreshed && this.csvExport && !this.isCurrentCsvExport(this.csvExport)) this.resetCsvExport()
+    return refreshed
+  },
+
+  async loadMergedFilters(query) {
+    const user=currentActiveUser()
+    const queryKey=JSON.stringify(this.query())
+    const [timing,fields]=await Promise.all([
+      Promise.resolve().then(()=>businessService.getOperationsAnalyticsFilters(query)),
+      Promise.resolve().then(()=>businessService.getOperationsFieldFilters(query))
+    ].map(settle))
+    if(timing.status==='rejected' && fields.status==='rejected') throw timing.reason
+    return mergeFieldFilters(timing.status==='fulfilled'?timing.value:{},
+      fields.status==='fulfilled' && currentActiveUser()===user && JSON.stringify(this.query())===queryKey ? fields.value : {})
+  },
+
+  invalidateFields() {
+    this.fieldSequence=(this.fieldSequence||0)+1
+    this.setData({fieldGroups:[],fieldLoading:false,fieldIncomplete:false,fieldNotice:'',fieldScopeNotice:'',fieldErrorMessage:''})
+  },
+
+  async loadFieldSummary(sequence,userId) {
+    if (!this.isCurrentRequest(sequence,userId)) return
+    const user=currentActiveUser()
+    const query=this.query(), queryKey=JSON.stringify(query)
+    const fieldSequence=(this.fieldSequence||0)+1
+    this.fieldSequence=fieldSequence
+    const current=()=>this.isCurrentRequest(sequence,userId) && currentActiveUser()===user &&
+      fieldSequence===this.fieldSequence && JSON.stringify(this.query())===queryKey
+    this.setData({fieldLoading:true,fieldErrorMessage:'',fieldGroups:[],fieldNotice:'',fieldIncomplete:false})
+    try {
+      const result=await businessService.getOperationsFieldSummary(query)
+      if(current()) this.setData(formatFieldSummary(result,this.data.templateOptions))
+    } catch(error) {
+      if(current()) this.setData({fieldErrorMessage:fieldErrorMessage(error,'字段统计加载失败，请稍后重试。')})
+    } finally {
+      if(current()) this.setData({fieldLoading:false})
+      else if(fieldSequence===this.fieldSequence && currentActiveUser()!==user) this.invalidateFields()
+    }
+  },
+
+  async loadCharts(sequence,userId) {
+    if (!this.isCurrentRequest(sequence,userId)) return
+    const [timing]=await Promise.all([this.loadSummary(sequence,userId),this.loadFieldSummary(sequence,userId)].map(settle))
+    if(timing.status==='rejected') throw timing.reason
   },
 
   formatSeries(summary) {
@@ -291,14 +406,26 @@ Page({
     const sequence = (this.requestSequence || 0) + 1
     this.requestSequence = sequence
     this.setData({ loading: true, errorMessage: '' })
-    try { await this.loadSummary(sequence, user._id) } catch (error) {
+    try {
+      if(!await this.refreshFilterOptions(sequence,user._id)) return
+      if(!this.data.templateOptions.length) {
+        this.setData({summary:null,nodeSeries:[],trendSeries:[]})
+        await this.loadFieldSummary(sequence,user._id)
+        return
+      }
+      await this.loadCharts(sequence, user._id)
+    } catch (error) {
       if (this.isCurrentRequest(sequence, user._id)) {
         this.setData({ loading: false, errorMessage: '历史统计加载失败，请稍后重试' })
       }
+    } finally {
+      if(this.isCurrentRequest(sequence,user._id)) this.setData({loading:false})
     }
   },
 
   async onTemplateChange(event) {
+    this.invalidateFields()
+    this.resetCsvExport()
     this.setData({ templateIndex: Number(event.detail.value) || 0 })
     const user = currentActiveUser()
     if (!user) return
@@ -306,19 +433,23 @@ Page({
     this.requestSequence = sequence
     this.setData({ loading: true })
     try {
-      await this.loadTemplateFilters(sequence, user._id)
-      await this.loadSummary(sequence, user._id)
+      if (!await this.loadTemplateFilters(sequence, user._id)) return
+      await this.loadCharts(sequence, user._id)
     } catch (error) {
       if (this.isCurrentRequest(sequence, user._id)) {
         this.setData({ loading: false, errorMessage: '模板统计加载失败，请稍后重试' })
       }
+    } finally {
+      if (this.isCurrentRequest(sequence,user._id)) this.setData({loading:false})
     }
   },
 
-  onStartDateChange(event) { this.setData({ startDate: event.detail.value }) },
-  onEndDateChange(event) { this.setData({ endDate: event.detail.value }) },
-  onGrainChange(event) { this.setData({ grainIndex: Number(event.detail.value) || 0 }) },
+  onStartDateChange(event) { this.invalidateFields(); this.resetCsvExport(); this.setData({ startDate: event.detail.value }) },
+  onEndDateChange(event) { this.invalidateFields(); this.resetCsvExport(); this.setData({ endDate: event.detail.value }) },
+  onGrainChange(event) { this.invalidateFields(); this.resetCsvExport(); this.setData({ grainIndex: Number(event.detail.value) || 0 }) },
   updateAdvancedCount() {
+    this.invalidateFields()
+    this.resetCsvExport()
     const count = [
       this.data.versionIndex, this.data.statusIndex, this.data.nodeIndex,
       this.data.businessIndex, this.data.processorIndex, this.data.reviewerIndex
@@ -335,43 +466,128 @@ Page({
 
   currentStatus() { return this.selected(this.data.statusOptions, this.data.statusIndex) },
 
+  csvQuery() {
+    return this.query()
+  },
+
+  isCurrentCsvExport(task) {
+    const user = currentActiveUser()
+    return this.csvExport === task && user === task.user && user.role === 'super_admin' &&
+      JSON.stringify(this.csvQuery()) === task.queryKey
+  },
+
+  resetCsvExport() {
+    if (this.csvExport && this.csvExport.attempt) clearTimeout(this.csvExport.attempt.timer)
+    this.csvExport = null
+    this.setData({ exporting: false, exportSending: false, exportReady: false, exportNotice: '', exportErrorMessage: '' })
+  },
+
+  setCsvExportStage(task, stage, notice, errorMessage = '') {
+    task.stage = stage
+    this.setData({
+      exporting: stage === 'preparing', exportSending: stage === 'sending',
+      exportReady: stage === 'ready' || stage === 'sending',
+      exportNotice: notice, exportErrorMessage: errorMessage
+    })
+  },
+
+  sendCsvExport(task) {
+    const attempt = {}
+    task.attempt = attempt
+    this.setCsvExportStage(task, 'sending', '正在打开文件发送窗口…')
+    const finish = (ok, result) => {
+      if (attempt.finished) return
+      attempt.finished = true
+      clearTimeout(attempt.timer)
+      if (!this.isCurrentCsvExport(task)) {
+        if (this.csvExport === task) this.resetCsvExport()
+        return
+      }
+      if (task.attempt !== attempt) return
+      const message = String(result && result.errMsg || '')
+      if (!ok && /no such file|not exist|not found|ENOENT/i.test(message)) {
+        this.resetCsvExport()
+        this.setData({ exportErrorMessage: '导出文件已失效，请重新导出。' })
+        return
+      }
+      const cancelled = !ok && /cancel/i.test(message)
+      this.setCsvExportStage(task, 'ready', ok ? 'CSV 文件已发送，可再次点击发送。' :
+        cancelled ? '已取消发送，文件已生成，可再次点击发送。' : '文件已生成，可再次点击发送。',
+      ok || cancelled ? '' : '文件发送失败，请点击“发送 CSV”重试。')
+    }
+    attempt.timer = setTimeout(() => {
+      if (attempt.finished || task.attempt !== attempt) return
+      if (!this.isCurrentCsvExport(task)) {
+        if (this.csvExport === task) this.resetCsvExport()
+        return
+      }
+      // A slow native picker is not a terminal result; keep accepting its callbacks.
+      this.setCsvExportStage(task, 'ready', '文件已生成。',
+        '暂未收到发送结果，请先确认文件是否已发送；如未发送可点击“发送 CSV”重试。')
+    }, 30000)
+    try {
+      // Must be called in the button's tap stack, before any await/file/network work.
+      const result = wx.shareFileMessage({
+        filePath: task.filePath, fileName: task.fileName,
+        success: value => finish(true, value), fail: value => finish(false, value)
+      })
+      if (result && typeof result.then === 'function') result.then(value => finish(true, value), value => finish(false, value))
+    } catch (error) { finish(false, error) }
+  },
+
   async exportCsv() {
     const user = currentActiveUser()
-    if (!user || user.role !== 'super_admin' || this.data.exporting) return
-    const adminId = user._id
-    this.setData({ exporting: true, errorMessage: '' })
+    if (this.csvExport && !this.isCurrentCsvExport(this.csvExport)) this.resetCsvExport()
+    if (!user || user.role !== 'super_admin') {
+      this.resetCsvExport()
+      this.setData({ exportErrorMessage: '当前账号无权导出运营文件。' })
+      return
+    }
+    if (this.data.exporting || this.data.exportSending) return
+    if (this.csvExport && this.csvExport.filePath) {
+      this.sendCsvExport(this.csvExport)
+      return
+    }
+    const query = this.csvQuery()
+    const task = { user, query, queryKey: JSON.stringify(query) }
+    this.csvExport = task
+    this.setCsvExportStage(task, 'preparing', '正在读取导出数据…')
     try {
       const rows = []
+      const cursors=new Set()
       let cursor = ''
-      for (let page = 0; page < 100; page += 1) {
-        const result = await businessService.exportOperationsRows({
-          startDate: this.data.startDate,
-          endDate: this.data.endDate,
-          status: this.currentStatus(),
-          cursor,
-          pageSize: 50
+      for (let page = 0; page < 1000; page += 1) {
+        const result = await businessService.exportOperationsReportRows({
+          ...query, cursor, pageSize: 50
         })
-        const current = currentActiveUser()
-        if (!current || current._id !== adminId || current.role !== 'super_admin') return
-        rows.push(...(result.items || []))
+        if (!this.isCurrentCsvExport(task)) return
+        if (!validReportPage(result)) throw new Error('INVALID_EXPORT_ROWS')
+        rows.push(...result.items)
+        if(rows.length>50000) throw Object.assign(new Error('RANGE_TOO_LARGE'),{code:'RANGE_TOO_LARGE'})
+        this.setCsvExportStage(task, 'preparing', `正在读取导出数据（已读取 ${rows.length} 条）…`)
         if (!result.hasMore) break
-        if (!result.nextCursor || result.nextCursor === cursor) throw new Error('INVALID_CURSOR')
+        if (cursors.has(result.nextCursor)) throw new Error('INVALID_CURSOR')
+        cursors.add(result.nextCursor)
         cursor = result.nextCursor
-        if (page === 99) throw new Error('RANGE_TOO_LARGE')
+        if (page === 999) throw Object.assign(new Error('RANGE_TOO_LARGE'),{code:'RANGE_TOO_LARGE'})
       }
-      const fileName = `运营数据-${this.data.startDate}-${this.data.endDate}.csv`
-      const filePath = `${wx.env.USER_DATA_PATH}/${fileName}`
-      await writeFile(filePath, toCsv(rows, CSV_COLUMNS))
-      const current = currentActiveUser()
-      if (current && current._id === adminId && current.role === 'super_admin') {
-        wx.shareFileMessage({ filePath, fileName })
-      }
+      task.fileName = `运营数据-${query.startDate}-${query.endDate}.csv`
+      task.writing = true
+      this.setCsvExportStage(task, 'preparing', `正在生成 CSV（${rows.length} 条）…`)
+      const filePath = `${wx.env.USER_DATA_PATH}/operations-${Date.now()}-${Math.random().toString(36).slice(2)}.csv`
+      const csv=toCsv(reportCsvRows(rows),CSV_COLUMNS)
+      if(utf8Bytes(csv)>12*1024*1024) throw Object.assign(new Error('RANGE_TOO_LARGE'),{code:'RANGE_TOO_LARGE'})
+      await writeFile(filePath, csv)
+      if (!this.isCurrentCsvExport(task)) return
+      task.filePath = filePath
+      this.setCsvExportStage(task, 'ready', `CSV 已生成（${rows.length} 条），请点击“发送 CSV”取得文件。`)
     } catch (error) {
-      const current = currentActiveUser()
-      if (current && current._id === adminId) this.setData({ errorMessage: '运营数据导出失败，请稍后重试' })
+      if (this.isCurrentCsvExport(task)) {
+        this.resetCsvExport()
+        this.setData({ exportErrorMessage: fieldErrorMessage(error,task.writing ? 'CSV 文件生成失败，请重新导出。' : '导出数据读取失败，请重试或缩小日期范围。') })
+      }
     } finally {
-      const current = currentActiveUser()
-      if (current && current._id === adminId) this.setData({ exporting: false })
+      if (this.csvExport === task && !this.isCurrentCsvExport(task)) this.resetCsvExport()
     }
   },
 

@@ -33,3 +33,9 @@
 .round-list { margin-top: 12rpx; padding: 12rpx; background: #f8fafc; border-radius: 12rpx; }
 .round-row { padding: 10rpx 0; border-bottom: 1rpx solid #e5e7eb; font-size: 22rpx; line-height: 1.6; }
 .round-row:last-child { border-bottom: 0; }
+.field-card { margin-top: 20rpx; }
+.field-option { margin-top: 20rpx; }
+.field-option-heading { display: flex; justify-content: space-between; gap: 20rpx; word-break: break-all; }
+.field-option-count { flex-shrink: 0; color: #087f77; font-weight: 600; }
+.field-bar-track { margin-top: 8rpx; height: 12rpx; }
+.export-basis { margin-top: 14rpx; line-height: 1.6; }

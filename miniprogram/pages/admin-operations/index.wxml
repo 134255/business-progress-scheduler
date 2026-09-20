@@ -26,11 +26,30 @@
       <view class="filter-row"><text>实际处理人</text><picker mode="selector" range="{{processorOptions}}" range-key="label" value="{{processorIndex}}" bindchange="onProcessorChange"><text>{{processorOptions[processorIndex].label}}</text></picker></view>
       <view class="filter-row"><text>实际审核人</text><picker mode="selector" range="{{reviewerOptions}}" range-key="label" value="{{reviewerIndex}}" bindchange="onReviewerChange"><text>{{reviewerOptions[reviewerIndex].label}}</text></picker></view>
     </view>
-    <button class="primary-button" bindtap="applyFilters" loading="{{loading}}" disabled="{{loading || !templateOptions.length}}">生成统计图表</button>
-    <button wx:if="{{isAdmin}}" class="secondary-button" bindtap="exportCsv" loading="{{exporting}}" disabled="{{exporting}}">导出 CSV</button>
+    <button class="primary-button" bindtap="applyFilters" loading="{{loading}}" disabled="{{loading}}">生成统计图表</button>
+    <button wx:if="{{isAdmin}}" class="secondary-button" bindtap="exportCsv" loading="{{exporting || exportSending}}" disabled="{{exporting || exportSending}}">{{exporting ? '生成中…' : (exportSending ? '发送中…' : (exportReady ? '发送 CSV' : '导出 CSV'))}}</button>
+    <view wx:if="{{isAdmin && exportNotice}}" class="notice">{{exportNotice}}</view>
+    <view wx:if="{{isAdmin && exportErrorMessage}}" class="error">{{exportErrorMessage}}</view>
+    <view wx:if="{{isAdmin}}" class="sample-note export-basis">同一 CSV 包含运营基础、全字段明细和选项统计。基础按售后创建日期；字段按节点完成日期和当前字段筛选。其他字段仅在 CSV 中展示。</view>
   </view>
 
   <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view class="section-title">节点字段选项统计</view>
+  <view class="sample-note">按节点完成日期统计最终有效结果，只展示单选和多选。</view>
+  <view wx:if="{{fieldScopeNotice}}" class="notice">{{fieldScopeNotice}}</view>
+  <view wx:if="{{fieldLoading}}" class="empty">正在统计字段选项…</view>
+  <view wx:if="{{fieldErrorMessage}}" class="error">{{fieldErrorMessage}}</view>
+  <view wx:if="{{fieldNotice}}" class="{{fieldIncomplete ? 'error' : 'sample-note'}}">{{fieldNotice}}</view>
+  <view wx:if="{{!fieldLoading && !fieldErrorMessage && !fieldGroups.length}}" class="empty">暂无已核实的单选/多选样本</view>
+  <view class="card field-card" wx:for="{{fieldGroups}}" wx:for-item="group" wx:key="id">
+    <view class="node-title">{{group.nodeName}} · {{group.fieldName}}</view>
+    <view class="sample-note">{{group.templateName}} · 版本 {{group.versionLabel}} · {{group.fieldType === 'multi_select' ? '多选' : '单选'}}</view>
+    <view class="sample-note">填写 {{group.filledSampleCount}} · 未填写 {{group.emptySampleCount}}</view>
+    <view class="field-option" wx:for="{{group.options}}" wx:for-item="option" wx:key="label">
+      <view class="field-option-heading"><text>{{option.label}}</text><text class="field-option-count">{{option.count}} 次</text></view>
+      <view class="bar-track field-bar-track"><view class="bar processing-bar" style="width: {{option.width}}"></view></view>
+    </view>
+  </view>
   <view wx:if="{{summary}}">
     <view class="notice">{{summary.scopeNotice}}</view>
     <view class="metric-grid">

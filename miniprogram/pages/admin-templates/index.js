@@ -6,12 +6,35 @@ function errorMessage(error) {
   return error && error.message ? error.message : '网络异常，请稍后重试'
 }
 
+function copyErrorMessage(error) {
+  const messages = {
+    PROCESSOR_INACTIVE: '原模板中有已停用的处理人，请调整后再复制',
+    REVIEWER_INACTIVE: '原模板中有已停用的审核人，请调整后再复制',
+    ASSIGNEE_INACTIVE: '原模板中有已停用的负责人，请调整后再复制',
+    PARTICIPANT_INACTIVE: '模板参与人状态已变化，请核对后再复制',
+    TEMPLATE_LIMIT_EXCEEDED: '模板节点或参与人过多，超出安全复制上限，请先调整模板',
+    TEMPLATE_INVALID: '原模板配置不完整，请检查节点、字段及流程后再复制',
+    CARD_DISPLAY_INVALID: '原模板卡片展示配置不完整，请调整后再复制',
+    ROLE_OVERLAP: '原模板处理人与审核人存在冲突，请调整后再复制',
+    NOT_FOUND: '原模板不存在或已删除，请刷新列表',
+    FORBIDDEN: '当前账号无权复制模板，请重新登录后重试',
+    VERSION_CONFLICT: '模板或展示配置已更新，已刷新列表，请核对后重新复制'
+  }
+  return error && Object.prototype.hasOwnProperty.call(messages, error.code)
+    ? messages[error.code] : '复制结果未确认，请刷新列表检查是否已有副本，再决定是否重试'
+}
+
 Page({
-  data: { loading: false, keyword: '', status: 'all', items: [], errorMessage: '' },
+  data: { loading: false, copyingId: '', keyword: '', status: 'all', items: [], errorMessage: '' },
 
   onShow() {
     if (!this.requireSuperAdmin()) return
     return this.loadTemplates()
+  },
+
+  onUnload() {
+    this._copyDisposed = true
+    this._copyOperation = null
   },
 
   requireSuperAdmin() {
@@ -32,39 +55,48 @@ Page({
   search() { return this.loadTemplates() },
 
   async loadTemplates() {
-    if (!this.requireSuperAdmin() || this.data.loading) return
+    if (!this.requireSuperAdmin() || this._copyDisposed || this.data.loading) return false
+    const ownerId = getApp().globalData.currentUser._id
+    const current = () => !this._copyDisposed && this.requireSuperAdmin() &&
+      getApp().globalData.currentUser._id === ownerId
     this.setData({ loading: true, errorMessage: '' })
     try {
       const query = { keyword: this.data.keyword.trim() }
       if (this.data.status !== 'all') query.status = this.data.status
-      const result = await templates.listTemplates(query)
-      if (!this.requireSuperAdmin()) return
+      const result = await templates.listTemplates(query, { silent: true })
+      if (!current()) return
       this.setData({ items: result.items || [] })
+      return true
     } catch (error) {
-      if (!this.requireSuperAdmin()) return
+      if (!current()) return
       if (error && error.code === 'FORBIDDEN') {
         wx.reLaunch({ url: '/pages/dashboard/index' })
         return
       }
       this.setData({ errorMessage: errorMessage(error) })
+      return false
     } finally {
-      if (this.requireSuperAdmin()) this.setData({ loading: false })
+      if (!this._copyDisposed) {
+        const actor = getApp().globalData.currentUser
+        const sameAccount = actor && actor._id === ownerId
+        this.setData({ loading: false, ...(sameAccount ? {} : { items: [] }) })
+      }
     }
   },
 
   openCreate() {
-    if (!this.requireSuperAdmin()) return
+    if (!this.requireSuperAdmin() || this.data.copyingId) return
     wx.navigateTo({ url: '/pages/admin-template-edit/index' })
   },
 
   openEdit(event) {
-    if (!this.requireSuperAdmin()) return
+    if (!this.requireSuperAdmin() || this.data.copyingId) return
     const templateId = event.currentTarget.dataset.id
     if (templateId) wx.navigateTo({ url: `/pages/admin-template-edit/index?id=${encodeURIComponent(templateId)}` })
   },
 
   async runConfirmed(options, action) {
-    if (!this.requireSuperAdmin()) return false
+    if (!this.requireSuperAdmin() || this.data.copyingId) return false
     const confirmation = await wx.showModal(options)
     if (!confirmation.confirm) return false
     if (!this.requireSuperAdmin()) return false
@@ -85,6 +117,50 @@ Page({
         this.setData({ errorMessage: message })
       } else this.setData({ errorMessage: message })
       return false
+    }
+  },
+
+  async copyTemplate(event) {
+    if (!this.requireSuperAdmin() || this._copyDisposed || this.data.loading || this.data.copyingId) return
+    const item = this.data.items.find(candidate => candidate._id === event.currentTarget.dataset.id)
+    if (!item || item.status === 'deleted') return
+    const ownerId = getApp().globalData.currentUser._id
+    const operation = {}
+    this._copyOperation = operation
+    const current = () => !this._copyDisposed && this._copyOperation === operation &&
+      this.requireSuperAdmin() && getApp().globalData.currentUser._id === ownerId
+    this.setData({ copyingId: item._id, errorMessage: '' })
+    let created = false
+    try {
+      const confirmation = await wx.showModal({
+        title: '复制模板',
+        content: `将“${item.name}”已保存的节点、字段联动、流程和卡片展示复制为独立草稿；不复制已有售后，也不提交未保存的编辑。是否继续？`,
+        confirmText: '复制'
+      })
+      if (!confirmation.confirm || !current()) return
+      const result = await templates.copyTemplate(item._id, item.version)
+      if (!current()) return
+      const templateId = result && result.template && result.template._id
+      if (typeof templateId !== 'string' || !templateId) throw new Error('COPY_RESULT_INVALID')
+      created = true
+      wx.showToast({ title: '副本已创建', icon: 'success' })
+      await wx.navigateTo({ url: `/pages/admin-template-edit/index?id=${encodeURIComponent(templateId)}` })
+    } catch (error) {
+      if (!current()) return
+      if (error && error.code === 'VERSION_CONFLICT') {
+        const refreshed = await this.loadTemplates()
+        if (!current()) return
+        if (!refreshed) {
+          this.setData({ errorMessage: '模板或展示配置已更新，但列表刷新未成功，请点击搜索刷新后再复制' })
+          return
+        }
+      }
+      this.setData({ errorMessage: created ? '副本已创建，但打开失败；请刷新列表后进入副本编辑' : copyErrorMessage(error) })
+    } finally {
+      if (this._copyOperation === operation) {
+        this._copyOperation = null
+        if (!this._copyDisposed) this.setData({ copyingId: '' })
+      }
     }
   },
 

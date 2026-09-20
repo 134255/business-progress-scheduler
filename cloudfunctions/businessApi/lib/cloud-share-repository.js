@@ -3,12 +3,15 @@ const { resolveEvidenceFileId } = require('./evidence-file-reference')
 
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { ownDataValue, ownExactAccountIds } = require('./account-relationship-schema')
+const { buildOptionLinkageContext } = require('./option-linkage-domain')
+const { validateFieldValues } = require('./field-domain')
+const { copyOwnData } = require('./business-card-summary')
 
 const CHUNK_SIZE = 40
 const RELATION_PAGE_SIZE = 100
 const TEMP_URL_SECONDS = 300
 const CLOUD_FILE_ID = /^cloud:\/\/[A-Za-z0-9._:/-]{1,1000}$/
-const SAFE_KEY = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+const SAFE_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
 const SHA256 = /^[a-f0-9]{64}$/
 
 function createError(code) {
@@ -174,7 +177,7 @@ function displayNames(round, key) {
 function headerSnapshot({
   line, node, source, reviewed, shareId, actorId, createdAt, expiresAt, evidenceCount, requestKeyHash, inputHash
 }) {
-  const definitions = safeDefinitions(node.fieldDefinitions || [])
+  const definitions = shareDefinitions(node.fieldDefinitions || [], source.fieldValues)
   return {
     publishState: 'reserved',
     businessLineId: line._id,
@@ -201,6 +204,21 @@ function headerSnapshot({
     processorDisplayNames: displayNames(source, 'processorDisplayNames'),
     reviewerDisplayNames: displayNames(source, 'reviewerDisplayNames')
   }
+}
+
+function shareDefinitions(rawDefinitions, rawValues) {
+  try {
+    const linkage = buildOptionLinkageContext(rawDefinitions)
+    if (!linkage.members.size) return safeDefinitions(rawDefinitions)
+    const stored = copyOwnData(rawValues)
+    if (!Array.isArray(stored)) throw createError('FORBIDDEN')
+    const submitted = stored.filter(field => field.value !== null)
+      .map(field => ({fieldKey:field.fieldKey, value:field.value}))
+    const values = validateFieldValues(rawDefinitions, submitted)
+    const visible = new Set(values.map(field => field.fieldKey))
+    // safeFieldValues below still checks exact labels, types, cardinality and hidden injection.
+    return safeDefinitions(rawDefinitions.filter(field => visible.has(field.fieldKey)))
+  } catch (_) { throw createError('FORBIDDEN') }
 }
 
 function chunkDocumentId(shareId, index) {

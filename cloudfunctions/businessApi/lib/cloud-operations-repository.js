@@ -1,6 +1,7 @@
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { safeOperationsRow, safeTimingDetail } = require('./operations-domain')
 const { ownExactAccountIds } = require('./account-relationship-schema')
+const crypto = require('node:crypto')
 
 const PAGE_SIZE = 100
 const MAX_ROWS = 5000
@@ -120,7 +121,7 @@ function createCloudOperationsRepository({ db }) {
   }
 
   function relationshipIds(node, key) {
-    const ids = ownExactAccountIds(node, key, { nonEmpty: true })
+    const ids = ownExactAccountIds(node, key, { nonEmpty: key !== 'reviewerUserIds' })
     if (!ids) throw createError('VALIDATION_ERROR')
     return ids
   }
@@ -181,7 +182,7 @@ function createCloudOperationsRepository({ db }) {
     return belongsToActualPath && ['active', 'completed', 'awaiting_manual_decision'].includes(node.routeState)
   }
 
-  async function dataset(actor, range) {
+  async function dataset(actor, range, batchNodes = false) {
     await requireCurrentAdmin(actor)
     const scannedLines = await readAll(() => db.collection('business_lines')
       .where({ createdAt: db.command.and(db.command.gte(range.startAt), db.command.lt(range.endAt)) })
@@ -191,7 +192,15 @@ function createCloudOperationsRepository({ db }) {
     const lineIds = new Set(lines.map(line => line._id))
     const lineMap = new Map(lines.map(line => [line._id, line]))
     const nodes = []
-    for (const line of lines) {
+    if (batchNodes) {
+      for (let offset=0;offset<lines.length;offset+=20) {
+        const ids=lines.slice(offset,offset+20).map(line=>line._id)
+        const page=await readAll(()=>db.collection('business_nodes').where({businessLineId:db.command.in(ids)})
+          .orderBy('_id','asc'),50001-nodes.length)
+        nodes.push(...page.filter(node=>isActualRouteNode(lineMap.get(node.businessLineId),node)))
+        if(nodes.length>50000) throw createError('RANGE_TOO_LARGE')
+      }
+    } else for (const line of lines) {
       const page = await readAll(() => db.collection('business_nodes')
         .where({ businessLineId: line._id }).orderBy('sequence', 'asc').orderBy('_id', 'asc'), 100)
       nodes.push(...page.filter(node => isActualRouteNode(lineMap.get(node.businessLineId), node)))
@@ -265,6 +274,34 @@ function createCloudOperationsRepository({ db }) {
       nextCursor: page.length ? cursorFor(page[page.length - 1]) : '',
       hasMore: start + page.length < entries.length
     }
+  }
+
+  const canonical = value => value instanceof Date ? value.toISOString() : Array.isArray(value) ? value.map(canonical) :
+    value && typeof value==='object' ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])) : value
+  const stamp = value => crypto.createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex')
+
+  // Internal complete-report adapter. Public exportRows pagination is unchanged.
+  async function reportBaseSnapshot({actor,range}, includeRows) {
+    const data=await dataset(actor,range,true)
+    const lines=new Map(data.lines.map(line=>[line._id,line]))
+    const entries=data.nodes.map(entry=>({...entry,line:lines.get(entry.node.businessLineId)}))
+      .sort((a,b)=>String(b.line.createdAt||'').localeCompare(String(a.line.createdAt||'')) ||
+        a.line._id.localeCompare(b.line._id) || Number(a.node.sequence)-Number(b.node.sequence) || a.node._id.localeCompare(b.node._id))
+    const manifest={
+      lines:data.lines.map(line=>({id:line._id,stamp:stamp(line)})).sort((a,b)=>a.id.localeCompare(b.id)),
+      nodes:entries.map(entry=>({id:entry.node._id,stamp:stamp(entry.node),
+        namesStamp:stamp([entry.processorDisplayNames,entry.reviewerDisplayNames])})).sort((a,b)=>a.id.localeCompare(b.id))
+    }
+    return {items:includeRows ? entries.map(safeOperationsRow) : [],manifest}
+  }
+
+  const collectReportBase = input => reportBaseSnapshot(input,true)
+
+  async function validateReportBase({actor,range,manifest}) {
+    // Query in line batches, not once per exported page/line. This also discovers
+    // added or removed matching records, which checking only cached IDs would miss.
+    const current=await reportBaseSnapshot({actor,range},false)
+    if(stamp(current.manifest)!==stamp(manifest)) throw createError('REPORT_CHANGED')
   }
 
   function sameDate(left, right) {
@@ -820,6 +857,8 @@ function createCloudOperationsRepository({ db }) {
   return {
     getDashboard,
     exportRows,
+    collectReportBase,
+    validateReportBase,
     listTimingDetails,
     getAnalyticsFilters,
     getAnalyticsSummary,

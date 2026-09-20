@@ -18,6 +18,8 @@ const {
 } = require('./cloud-business-repository')
 
 const TEMPLATE_STATUSES = new Set(['draft', 'enabled', 'disabled', 'deleted'])
+const { copyTemplateDefinition } = require('./template-copy-domain')
+const { normalizeOptionLinkageInput } = require('./option-linkage-domain')
 
 function createError(code, message = code) {
   const error = new Error(message)
@@ -169,7 +171,7 @@ function assignCreateKeys(inputNodes, keyFactory) {
       ...safeOwnDataRecord(field),
       fieldKey: uniqueKey(keyFactory, 'field', fieldKeys)
     }))
-    return normalizeNodeInput({ ...safeNode, fields: keyedFields }, sequence, nodeKey)
+    return normalizeNodeInput({ ...safeNode, fields: remapFieldReferences(fields, keyedFields) }, sequence, nodeKey)
   })
 }
 
@@ -210,10 +212,53 @@ function assignUpdateKeys(current, inputNodes, keyFactory) {
       return { ...safeField, fieldKey }
     })
     return {
-      ...normalizeNodeInput({ ...safeNode, fields }, sequence, nodeKey),
+      ...normalizeNodeInput({ ...safeNode, fields: remapFieldReferences(safeNode.fields, fields) }, sequence, nodeKey),
       ...(existingNode && existingNode._id ? { _id: existingNode._id } : {})
     }
   })
+}
+
+function remapFieldReferences(original, assigned) {
+  const mapping = new Map()
+  original.forEach((raw, index) => {
+    const field = safeOwnDataRecord(raw)
+    for (const source of [field.fieldKey, field.clientFieldKey].filter(Boolean)) {
+      const key = requireText(source)
+      if (mapping.has(key) && mapping.get(key) !== assigned[index].fieldKey) throw createError('TEMPLATE_INVALID')
+      mapping.set(key, assigned[index].fieldKey)
+    }
+  })
+  return assigned.map(field => {
+    const { clientFieldKey, ...result } = field
+    if (result.optionLinkage) {
+      let rule
+      try { rule = normalizeOptionLinkageInput(result.optionLinkage) }
+      catch (_) { throw createError('TEMPLATE_INVALID') }
+      result.optionLinkage = { ...rule, fieldKeys:rule.fieldKeys.map(key => {
+        if (!mapping.has(key)) throw createError('TEMPLATE_INVALID')
+        return mapping.get(key)
+      }) }
+    }
+    if (result.condition && mapping.has(result.condition.parentFieldKey)) {
+      result.condition = { ...result.condition, parentFieldKey:mapping.get(result.condition.parentFieldKey) }
+    }
+    return result
+  })
+}
+
+function hasLinkage(nodes) {
+  return safeArrayValues(nodes || []).some(node => safeArrayValues(safeOwnDataRecord(node).fields || [])
+    .some(field => Object.prototype.hasOwnProperty.call(safeOwnDataRecord(field), 'optionLinkage')))
+}
+
+function assertLinkageSaveIntent(input, current = null) {
+  if (!hasLinkage(input.nodes) && !(current && hasLinkage(current.nodes))) return
+  const intent = safeOwnDataRecord(input.optionLinkageEdit)
+  if (intent.schemaVersion !== 1 || Object.keys(intent).some(key => !['schemaVersion','expectedDefinitionDigest'].includes(key))) {
+    throw createError('TEMPLATE_INVALID')
+  }
+  const expected = current ? digestForDefinition(current.template, current.nodes) : null
+  if (intent.expectedDefinitionDigest !== expected) throw createError('VERSION_CONFLICT')
 }
 
 function allParticipantUserIds(nodes) {
@@ -295,6 +340,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
   async function createTemplate({ actor, input }) {
     requireSuperAdmin(actor)
     const safeInput = safeOwnDataRecord(input)
+    assertLinkageSaveIntent(safeInput)
     const metadata = normalizeMetadata(safeInput)
     const version2 = safeInput.flowSchemaVersion === 2
       ? normalizeVersion2Input(safeInput)
@@ -330,12 +376,36 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     })
   }
 
+  async function copyTemplate({ actor, templateId, expectedVersion }) {
+    requireSuperAdmin(actor)
+    const current = requireCurrent(await repository.getTemplateDefinition(requireText(templateId)))
+    assertExpectedVersion(current, expectedVersion)
+    requireNodeBudget(current.nodes)
+    const metadata = normalizeMetadata(current.template)
+    const copied = callTemplateDomain(() => copyTemplateDefinition(current, keyFactory))
+    const participantUserIds = await assertActiveParticipants(repository, copied.nodes)
+    const at = clock()
+    return repository.createTemplateDefinition({
+      actor, participantUserIds, copySource: current,
+      definition: {
+        template: {
+          ...metadata, ...copied.template, name: `${metadata.name}－副本`,
+          status: 'draft', nodeCount: copied.nodes.length,
+          createdBy: actor._id, createdAt: at, updatedBy: actor._id, updatedAt: at
+        },
+        nodes: copied.nodes
+      },
+      audit: { action: 'COPY_TEMPLATE', resultCode: 'TEMPLATE_COPIED', sourceTemplateId: current.template._id }
+    })
+  }
+
   async function updateTemplate({ actor, templateId, expectedVersion, input }) {
     requireSuperAdmin(actor)
     const current = requireCurrent(await repository.getTemplateDefinition(requireText(templateId)))
     assertExpectedVersion(current, expectedVersion)
     callTemplateDomain(() => assertTemplateEditable(current.template))
     const safeInput = safeOwnDataRecord(input)
+    assertLinkageSaveIntent(safeInput, current)
     const metadata = normalizeMetadata(safeInput)
     const isVersion2 = current.template.flowSchemaVersion === 2 || safeInput.flowSchemaVersion === 2
     if (isVersion2 && (current.template.flowSchemaVersion !== 2 || safeInput.flowSchemaVersion !== 2)) {
@@ -501,6 +571,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     listTemplates,
     getTemplate,
     createTemplate,
+    copyTemplate,
     updateTemplate,
     changeTemplateStatus,
     deleteTemplate,

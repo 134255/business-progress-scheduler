@@ -82,6 +82,16 @@ function exportOperationsRows(query) {
   return callProtected('exportOperationsRows', query || {}, '运营数据导出失败，请稍后重试')
 }
 
+function getOperationsFieldSummary(query) {
+  return callProtected('getOperationsFieldSummary',query || {},'字段统计加载失败，请稍后重试')
+}
+function getOperationsFieldFilters(query) {
+  return callProtected('getOperationsFieldFilters',query || {},'字段筛选项加载失败，请稍后重试')
+}
+function exportOperationsReportRows(query) {
+  return callProtected('exportOperationsReportRows',query || {},'完整运营报告导出失败，请稍后重试')
+}
+
 function listOperationsTimingDetails(query) {
   return callProtected('listOperationsTimingDetails', query || {}, '个人工时明细加载失败，请稍后重试')
 }
@@ -237,6 +247,9 @@ module.exports = {
   listMyPendingProcessing,
   getOperationsDashboard,
   exportOperationsRows,
+  getOperationsFieldSummary,
+  getOperationsFieldFilters,
+  exportOperationsReportRows,
   listOperationsTimingDetails,
   getOperationsAnalyticsFilters,
   getOperationsAnalyticsSummary,

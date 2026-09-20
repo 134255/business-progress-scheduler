@@ -60,6 +60,35 @@ function session(number = 1) {
   }
 }
 
+test('account/page invalidation while reading the file prevents authorization and transfer', async () => {
+  let current = true
+  const uploader = createEvidenceUploader({
+    prepareFile: async file => { current = false; return { ...file, name: 'proof.png' } },
+    beginUpload: async () => assert.fail('stale file cannot request authorization'),
+    refreshUpload: async () => assert.fail('must not refresh'),
+    finalizeUpload: async () => assert.fail('must not finalize'),
+    cosFactory: () => assert.fail('must not transfer')
+  })
+  await assert.rejects(uploader.upload({ file: { name: 'proof.jpg', path: 'wxfile://proof', size: 64 },
+    isCurrent: () => current }), { code: 'UPLOAD_CANCELLED' })
+})
+
+test('local read failure is identified before cloud authorization and omits filesystem details', async () => {
+  const uploader = createEvidenceUploader({
+    prepareFile: async () => { throw Object.assign(new Error('private-file-path'), { code: 'EVIDENCE_FILE_READ_FAILED' }) },
+    beginUpload: async () => assert.fail('unreadable file cannot request authorization'),
+    refreshUpload: async () => assert.fail('must not refresh'),
+    finalizeUpload: async () => assert.fail('must not finalize'),
+    cosFactory: () => assert.fail('must not transfer')
+  })
+  await assert.rejects(uploader.upload({ file: { name: 'proof.jpg' } }), error => {
+    assert.equal(error.uploadStage, 'prepare')
+    assert.equal(error.code, 'EVIDENCE_FILE_READ_FAILED')
+    assert.doesNotMatch(error.message, /private-file-path/)
+    return true
+  })
+})
+
 function refreshedSession(number = 1) {
   return {
     evidenceId: `evidence-${number}`,

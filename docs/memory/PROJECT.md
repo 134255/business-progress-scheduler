@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact update: 2026-09-10 (Asia/Shanghai; card-summary architecture and enabled-template display configuration)
+Last stable-fact update: 2026-09-18 (Asia/Shanghai; strict product option linkage)
 
 ## Product
 
@@ -12,6 +12,7 @@ Approved V1 rules include:
 - Account/password login with first-login password change, one-to-one WeChat identity binding, lockout, administrator reset, and at least one active super administrator.
 - Template snapshots, sequential nodes, multiple responsible accounts with first-completion-wins (`OR` signing), logical deletion, audit history, and optimistic/concurrent flow protection.
 - Templates contain stable node and dynamic-field identifiers. Enabled workflow definitions are read-only and must be disabled before editing; the independent card display configuration remains editable by an active super administrator without disabling the workflow. New business lines receive server-generated globally unique codes, and instance nodes receive immutable codes derived from the business code.
+- 活动超级管理员可复制已保存模板为独立草稿，启用中的源模板无需停用。副本生成全新文档/节点/字段标识并同步重建联动、流程和卡片展示引用，不复制历史售后、凭证或统计；同一事务校验当前源定义、展示配置、账号和参与人，超出现有100次操作预算时明确拒绝。未保存编辑不纳入复制；详见 ADR-0020 与发布验收文档 `docs/deployment/template-copy-acceptance.md`，实际部署状态以 STATUS 为准。
 - 普通用户从模板创建售后时，售后线名称由服务端在编号分配事务中固定生成为“模板名称-售后线编号”，客户端名称与计划日期输入均不参与创建；普通元数据编辑只允许修改说明。历史售后已有名称和计划日期保持原值并只读展示，不做迁移或清空；售后列表的日期筛选统一按售后创建日期解释。
 - Node feedback is revisioned and immutable. New review-workflow nodes separate non-overlapping processors and reviewers: processors save progress or submit for review, while independent reviewers use OR/ALL votes to approve or reject; new nodes cannot use the legacy direct-complete or legacy-reject path. Old business nodes retain controlled feedback-read compatibility and never receive fabricated review history.
 - 新版模板的任意节点都可明确配置为空审核人；空审核节点仍属于 `review` 工作流，但由当前处理人在完成字段与凭证校验后直接完成，不创建审核轮次或投票。至少包含两个节点的模板最多有一个位于末尾的 `optional_tail` 节点；它在售后创建时完整固化为 `awaiting_decision`，但售后头保持 `optionalTailState: none`，最后必经节点完成后才由候选处理人以首个成功事务进入待决定并选择开启或跳过。待决定阶段以短生命周期 `decisionReminderStatus: pending` 与休眠追加节点隔离，决定成功即移除；待决定耗时与节点处理耗时分离，只有开启时才启动处理计时，只有真正跳过或完成追加节点时才冻结售后并开始 60 天凭证保留。决定统计使用独立 `decisionAnalytics*` 来源，不等待追加节点处理终态；待办、通知、工作小时提醒、日历补算、检索和固定分享均复用同一完成分类，详细决策见 `docs/memory/decisions/ADR-0015-optional-tail-and-reviewerless-node-transitions.md`。
@@ -22,11 +23,14 @@ Approved V1 rules include:
 - In-app notifications as the fallback channel and a future Enterprise WeChat self-built application as the strong-reminder channel. Unfinished nodes are reminded every accumulated work hour during working time.
 - 需要持久化的处理与审核累计工作时长采用“已经完整经过的工作分钟”：权威工作区间的秒级结果向下取整，保留精确时间戳但不通过四舍五入提前累计分钟或判定逾期；提醒工作器继续使用精确秒级阈值。
 - 同一处理轮的当前有效凭证合计上限为 120 MiB，不另设业务层文件数量上限；单个文件仍受该合计上限的物理约束。系统支持 JPG/JPEG/PNG/WebP/HEIC/HEIF、PDF、MP4/MOV/M4V，并按真实对象大小、文件签名和 ISO-BMFF 容器品牌失败关闭，不信任客户端 MIME、扩展名或声明大小。可选凭证的严格空白名单表示允许全部十种系统格式；必填凭证仍要求非空白名单，任何损坏、继承、访问器、重复或不支持的策略值失败关闭。
-- 节点凭证在 iOS/Android/HarmonyOS 继续使用 `chooseMedia` 相册/相机媒体选择；Mac/Windows 桌面媒体入口按图片/视频分别调用 `chooseImage` / `chooseVideo` 的 album 来源，不再把 `chooseMessageFile` 当作本机媒体选择器或自动回退到聊天。PDF 仍使用会话文件选择，不能宣称已支持所有端本机 PDF。媒体 API 平台支持与实际系统目录窗口是两个验证层级，Mac/Windows 真机选择及上传须独立验收；各端选中后进入同一 120 MiB 合计、签名、容器和节点白名单校验。客户端通过服务端生成的精确对象键和 15 分钟单对象 STS 临时凭证直传 COS，高级 SDK 自动选择简单或分块上传，页面最多并发 3 个文件并仅重试可恢复网络错误。慢速上传接近凭据到期或收到凭据过期错误时，只能在重新校验当前账号、节点、版本、角色和原预约令牌后刷新原 `evidenceId` 与原对象键的短期授权；并发刷新单飞，进度不倒退，不另建凭证。服务端 `headObject` 与有界头部核验成功后才把隐藏的 `uploading` 预约转换为 `available`。长期 COS Secret 只存在于云函数环境变量，客户端、日志、Git 和项目记忆均不得出现。
+- 节点凭证在 iOS/Android/HarmonyOS 继续使用 `chooseMedia` 相册/相机媒体选择；Mac/Windows 图片入口保留 `chooseImage` 原图 album 来源。Mac 本机视频在运行时支持 `chooseMedia` 且基础库不低于 2.25.0 时，使用该接口的 video、album、original 选项；Windows 及未满足能力条件的旧 Mac 保留不压缩的 `chooseVideo`。不得新增或自动回退到聊天媒体来源，不能把 `chooseMessageFile` 当作本机媒体选择器。PDF 仍使用原会话文件入口，不能宣称已支持所有端本机 PDF。媒体 API 平台支持与实际系统目录窗口是两个验证层级，Mac/Windows 真机选择及上传须独立验收；各端选中后进入同一 120 MiB 合计、签名、容器和节点白名单校验。客户端通过服务端生成的精确对象键和 15 分钟单对象 STS 临时凭证直传 COS，高级 SDK 自动选择简单或分块上传，页面最多并发 3 个文件并仅重试可恢复网络错误。慢速上传接近凭据到期或收到凭据过期错误时，只能在重新校验当前账号、节点、版本、角色和原预约令牌后刷新原 `evidenceId` 与原对象键的短期授权；并发刷新单飞，进度不倒退，不另建凭证。服务端 `headObject` 与有界头部核验成功后才把隐藏的 `uploading` 预约转换为 `available`。长期 COS Secret 只存在于云函数环境变量，客户端、日志、Git 和项目记忆均不得出现。
+- JPG/JPEG 上传预约前只读最多 64 字节；仅确认完整 PNG 签名时把上传名称规范化为同名 `.png`，不修改本机文件、文件路径或内容，也不重编码。真正 JPEG 保持名称，其他签名不做格式伪装；最终仍由服务端按真实格式、节点白名单与原权限核验。登记后页面使用服务端权威文件名。不能允许仅准入 JPG 的节点通过这条路径接收 PNG。
 - Evidence objects remain available for 60 calendar days after a business line is completed, cancelled, or closed. A scheduled idempotent cleanup then removes only the cloud file object while preserving metadata, hashes, feedback revisions, and audit history.
 - 第二批次采用短期能力令牌分享已完成节点的固定结果快照：发送者通过微信原生分享面板选择好友或群，接收者无需登录或业务成员权限，快照最长有效七个二十四小时；公开投影只含固化字段、处理说明和短期凭证地址，不暴露永久文件编号、身份值或内部预约数据。详细决策见 `docs/memory/decisions/ADR-0008-public-node-share-capabilities.md`。
 - 概览页的“待我处理”由服务端权威查询提供；新版审核节点按当前处理账号关系查询，纯旧节点只在没有任何新账号关系标记时兼容 OpenID。结果返回前重新校验活动账号、业务、当前节点和处理关系；超过 2,000 条安全扫描边界时只返回诚实下界。
-- 活动超级管理员可使用受保护运营看板和安全 CSV 导出。统计按上海自然日和权威状态计算；导出只含业务/节点编号、名称、固化参与人显示名、工作流、轮次、截止时间和累计/逾期分钟，并阻断电子表格公式注入。
+- 原运营基础 CSV 继续由活动超级管理员导出，保留业务/节点编号、名称、参与人显示名、工作流、轮次、截止时间和累计/逾期分钟等23列；按售后创建日期与状态筛选，电子表格公式前缀（包括前导空白之后）作为文本保护。
+- 新增独立最终节点字段统计：活动超级管理员看全部匹配售后，普通活动账号只聚合当前有权售后；完成节点最终有效结果按上海完成日期统计，单选/多选分别计选项次数，0与false不是空值。仅选项结果进入 operations_field_snapshots，看板不加载其他字段内容；管理员完整报告读取权威来源，单一 CSV 追加字段明细与选项统计，保留旧运营基础行及其日期口径。已完成结果必须有精确反馈/审核轮次和实际路线证明，缺口不能当0或导出完整文件。operationsAnalytics 独立40候选/5秒协作预算恢复，原工时阶段和Timer不变；流程成功后的派生失败不能反转业务成功。详见 ADR-0019；发布及真机结果以 STATUS 为准。
+- CSV 客户端使用同一个按钮完成两阶段操作：先“导出 CSV”生成本地文件，再“发送 CSV”在新的点击栈内调用微信文件分享；生成进度、失败、取消及结果等待超时分别反馈，完整筛选或登录会话失效后不复用旧文件引用。新增字段列采用独立完整报告接口，旧基础导出接口保持兼容。
 - 每个新版模板节点可分别选择固定候选账号或“业务发起人作为本节点唯一处理人/唯一审核人”。发起人模式不保存占位账号，业务创建事务把当前活动发起人和安全显示名固化为该节点唯一角色快照；同一节点解析后的处理人与审核人不得重叠，固定处理人恰为实际发起人时也拒绝创建，不自动改写模板。模板头以 SHA-256 `definitionDigest` 和按节点顺序排列的 `definitionNodeIds` 共同绑定已发布定义；发起人审核模板读取和业务创建必须验证两者。CloudBase 事务只支持固定文档读取，因此创建预约事务严格比较服务预读与当前模板头的权威节点编号清单，再逐个固定读取清单节点并重算摘要；模板服务的增删、改写会原子更新模板头并使在途创建失败关闭，未进入头清单的旁路额外文档只视为未发布孤立记录且不会进入业务快照，普通定义读取仍会报告集合损坏。业务创建预算按“源节点读取 + 业务节点写入 + 去重参与账号读取 + 固定操作”计算并保持不超过 100 次。创建预约、发布和已发布幂等返回均重新校验当前活动创建人及严格业务关系。业务节点的参与人显示名是创建时不可变快照，审核轮次与历史详情不得回查当前账号姓名覆盖历史；旧业务缺快照只使用固定安全占位。旧模板缺审核人来源时按固定账号兼容，旧业务不迁移；跨节点参与不受影响。每个处理轮只把工时归属实际提交审核账号，每张审核票只把响应工时归属实际投票账号；未提交者和未投票者不产生个人工时。日历缺失时保存不可变区间并由独立游标补算，旧记录缺字段只显示“历史未记录”。活动超级管理员可在运营看板查看这些逐轮安全快照；不提供人员排名，CSV 结构保持不变。详细决策见 `docs/memory/decisions/ADR-0009-initiator-processor-and-personal-worktime-snapshots.md` 与 `docs/memory/decisions/ADR-0011-initiator-reviewer-assignment.md`。
 - 运营历史统计按模板及稳定节点比较处理/审核工作分钟，并提供日、周、月趋势、模板版本、业务状态、业务、稳定节点和匿名参与人筛选。所有活动账号可查看不含业务明细的全局汇总；普通账号下钻时逐条复核当前业务关系，超级管理员可查看全部明细并保留原当前指标和安全 CSV。节点处理累计全部处理轮，节点审核累计全部终态审核轮，个人投票响应只进入轮次明细；待日历补算和历史未记录不会伪装成零值。派生事实与每日汇总由只信任平台 Timer 的 `operationsAnalytics` 幂等生成，详见 `docs/memory/decisions/ADR-0010-operations-analytics-materialized-facts.md`。
 - 售后列表支持对当前有效最新快照执行授权全文检索：覆盖售后和节点元数据、动态字段名称与值、处理说明、当前审核意见及凭证文件名，不索引旧驳回轮、被替换修订、永久云路径或内部身份/预约数据。检索使用独立 `businessSearch`、完整版本代际和 HMAC 倒排令牌；活动超级管理员可检索全部非创建中、非已删除售后，普通活动账号只限原有关系范围，每条候选返回前再次授权。历史回填、失败恢复和旧代清理共享单轮最多 40 条原始扫描预算并使用独立持久 keyset 游标；默认触发器保持空。详细决策见 `docs/memory/decisions/ADR-0012-authorized-after-sales-content-search.md`。
@@ -35,6 +39,8 @@ Approved V1 rules include:
 The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-business-progress-v1-design.md`. The approved template, node, field, rejection, freeze, numbering, and evidence-retention refinement is in `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`. Account-administration execution steps are in `docs/superpowers/plans/2026-08-05-account-admin.md`.
 
 ## Architecture
+
+- 商品严格联动采用模板首字段内置八列索引组合表及共享纯解析器，保留原单父条件兼容；新规则按整组保存、复制和校验，旧客户端不得无声移除。规则只保存于模板和历史实例自己的定义，当前有效值继续供统计/CSV/检索/卡片/分享消费；矩阵不进入公开投影或重复 setData。预算、语义摘要和发布顺序见 ADR-0021，实际完成状态以 STATUS 为准。
 
 - 首页和售后列表共用 `miniprogram/utils/business-card.js` 与 `miniprogram/templates/business-card.wxml/.wxss`，保留编号、状态、进度/路径和检索命中交互。模板编辑页的展示配置使用独立已保存定义快照、修订及请求状态，不隐式提交流程草稿；新定义须保存后再配置。字段缓存仅在内存保留，账号/角色变更与权限失效清除旧字段；返回列表刷新已提交条件，不自动提交未确认检索输入。
 

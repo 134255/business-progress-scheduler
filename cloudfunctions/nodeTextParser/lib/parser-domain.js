@@ -1,6 +1,8 @@
 'use strict'
 
 const MAX_TEXT_LENGTH = 8000
+const MAX_SCHEMA_OPTIONS = 5000
+const MAX_SCHEMA_BYTES = 256 * 1024
 const MAX_SOURCE_EXCERPT_LENGTH = 160
 const FIELD_TYPES = new Set(['short_text', 'long_text', 'number', 'boolean', 'date', 'single_select', 'multi_select'])
 const LABEL_ALIAS_GROUPS = [
@@ -137,7 +139,7 @@ function normalizeConstraints(type, input) {
     result.pattern = pattern
   }
   if (isOwnData(input, 'options')) {
-    if (!denseArray(input.options) || !input.options.length || input.options.length > 100) fail('schema')
+    if (!denseArray(input.options) || !input.options.length || input.options.length > MAX_SCHEMA_OPTIONS) fail('schema')
     const options = input.options.map(option => safeText(option, 100))
     if (options.some(option => !option) || new Set(options).size !== options.length) fail('schema')
     result.options = options
@@ -162,6 +164,7 @@ function normalizeParserSchema(definitions) {
     }
   })
   if (new Set(normalized.map(item => item.fieldKey)).size !== normalized.length) fail('schema')
+  if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > MAX_SCHEMA_BYTES) fail('schema')
   return normalized
 }
 

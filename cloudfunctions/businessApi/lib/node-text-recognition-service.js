@@ -4,8 +4,11 @@ const crypto = require('node:crypto')
 const { APPLICATION_ERROR_MARKER } = require('./cloud-template-repository')
 const { isSafeRegularExpression } = require('./field-domain')
 const { resolveConditionalFields } = require('./conditional-field-domain')
+const { optionLinkageSemanticProjection } = require('./option-linkage-domain')
 
 const MAX_TEXT_LENGTH = 8000
+const MAX_SCHEMA_OPTIONS = 5000
+const MAX_SCHEMA_BYTES = 256 * 1024
 const FIELD_TYPES = new Set(['short_text', 'long_text', 'number', 'boolean', 'date', 'single_select', 'multi_select'])
 
 function createError(code, message = code) {
@@ -71,7 +74,7 @@ function normalizeConstraints(type, value) {
   }
   const options = ownData(value, 'options')
   if (options.valid) {
-    if (!denseArray(options.value) || !options.value.length || options.value.length > 100 ||
+    if (!denseArray(options.value) || !options.value.length || options.value.length > MAX_SCHEMA_OPTIONS ||
         options.value.some(option => typeof option !== 'string' || !option.trim() || option.length > 100) ||
         new Set(options.value).size !== options.value.length) throw createError('NODE_TEXT_STALE', '当前节点字段已变化，请刷新后重试')
     result.options = options.value.slice()
@@ -114,6 +117,9 @@ function normalizeSchema(definitions) {
     }
   })
   if (new Set(schema.map(item => item.fieldKey)).size !== schema.length) throw createError('NODE_TEXT_STALE', '当前节点字段已变化，请刷新后重试')
+  if (Buffer.byteLength(JSON.stringify(schema), 'utf8') > MAX_SCHEMA_BYTES) {
+    throw createError('NODE_TEXT_STALE', '当前节点字段已变化，请刷新后重试')
+  }
   return schema
 }
 
@@ -147,7 +153,8 @@ function normalizeRecognitionValues(value) {
 
 function visibleSchema(definitions, fieldValues) {
   try {
-    if (!definitions.some(definition => definition && definition.condition !== undefined)) {
+    if (!definitions.some(definition => definition &&
+        (definition.condition !== undefined || Object.prototype.hasOwnProperty.call(definition, 'optionLinkage')))) {
       return normalizeSchema(definitions)
     }
     return normalizeSchema(resolveConditionalFields(definitions, fieldValues).visibleDefinitions)
@@ -155,6 +162,13 @@ function visibleSchema(definitions, fieldValues) {
     if (error && ['NODE_TEXT_STALE', 'VALIDATION_ERROR'].includes(error.code)) throw error
     throw createError('NODE_TEXT_STALE', '当前节点字段已变化，请刷新后重试')
   }
+}
+
+function linkageFingerprint(definitions) {
+  const anchor = definitions.find(field => Object.prototype.hasOwnProperty.call(field, 'optionLinkage'))
+  if (!anchor) return null
+  try { return digest(JSON.stringify(optionLinkageSemanticProjection(definitions, anchor.fieldKey))) }
+  catch (_) { throw createError('NODE_TEXT_STALE', '当前节点字段已变化，请刷新后重试') }
 }
 
 function validDate(value) {
@@ -231,6 +245,7 @@ function createNodeTextRecognitionService({ repository, parserClient, dailyLimit
       })
       const schema = visibleSchema(before.fieldDefinitions, formValues)
       const schemaDigest = digest(JSON.stringify(schema))
+      const linkageDigest = linkageFingerprint(before.fieldDefinitions)
       const claim = await repository.claimUsageAndCreateTicket({
         actorId: actor._id,
         businessLineId: input.businessLineId,
@@ -256,7 +271,8 @@ function createNodeTextRecognitionService({ repository, parserClient, dailyLimit
         const after = await repository.authorizeRecognition({
           actorId: actor._id, businessLineId: input.businessLineId, nodeId: input.nodeId, expectedNodeVersion
         })
-        if (digest(JSON.stringify(visibleSchema(after.fieldDefinitions, formValues))) !== schemaDigest) {
+        if (digest(JSON.stringify(visibleSchema(after.fieldDefinitions, formValues))) !== schemaDigest ||
+            linkageFingerprint(after.fieldDefinitions) !== linkageDigest) {
           throw createError('NODE_TEXT_STALE', '当前节点字段已变化，请刷新后重试')
         }
         return { candidates: validateReturnedCandidates(schema, result.candidates), nodeVersion: expectedNodeVersion, schemaDigest }

@@ -4,6 +4,7 @@ const { createKeyAllocator } = require('../../utils/template-editor-keys')
 const { templateDefinitionIssue } = require('../../utils/template-definition-diagnostics')
 const { presentBusinessCard } = require('../../utils/business-card')
 const { isAccountAccessError } = require('../../utils/safe-error')
+const { validateLinkedNode, detachNodeLinkage, attachNodeLinkage } = require('../../utils/option-linkage-import')
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -34,13 +35,15 @@ function withNodeUiKeys(nodes) {
 function cleanField(field, sequence) {
   return {
     ...(field.fieldKey ? { fieldKey: field.fieldKey } : {}),
+    ...(field.clientFieldKey ? { clientFieldKey: field.clientFieldKey } : {}),
     sequence,
     name: field.name,
     description: field.description || '',
     type: field.type,
     required: Boolean(field.required),
     constraints: clone(field.constraints || {}),
-    ...(field.condition ? { condition: clone(field.condition) } : {})
+    ...(field.condition ? { condition: clone(field.condition) } : {}),
+    ...(hasOwn(field, 'optionLinkage') ? { optionLinkage: clone(field.optionLinkage) } : {})
   }
 }
 
@@ -227,6 +230,7 @@ Page({
           return true
         })) throw Object.assign(new Error('CARD_DISPLAY_INVALID'), { code: 'CARD_DISPLAY_INVALID' })
     this.setCardFields(config.fields, config.revision)
+    this._savedCardFields = clone(config.fields)
     this.setData({ cardRevision: config.revision, cardLoaded: true })
   },
 
@@ -358,6 +362,12 @@ Page({
     if (!this.requireSuperAdmin()) return null
     const template = definition.template
     const readOnly = template.status === 'enabled'
+    const nodes = withNodeUiKeys(orderedNodes(clone(definition.nodes || [])))
+    nodes.forEach(validateLinkedNode)
+    this._nodeOptionLinkages = new Map()
+    this._loadedDefinitionDigest = template.definitionDigest
+    this._loadedHadOptionLinkage = nodes.some(node => node.fields.some(field => hasOwn(field, 'optionLinkage')))
+    const renderedNodes = nodes.map(node => this.storeNodeLinkage(node))
     this.setData({
       name: template.name,
       description: template.description || '',
@@ -365,7 +375,7 @@ Page({
       version: template.version,
       flowSchemaVersion: template.flowSchemaVersion === 2 ? 2 : 1,
       entryNodeKey: template.flowSchemaVersion === 2 ? template.entryNodeKey : '',
-      nodes: withNodeUiKeys(orderedNodes(clone(definition.nodes || []))),
+      nodes: renderedNodes,
       readOnly
     })
     return definition
@@ -380,11 +390,13 @@ Page({
   },
 
   getNodeEditorContext(index) {
+    if (!this.requireSuperAdmin()) return { readOnly: true, node: null, assigneeOptions: [], nodeOptions: [] }
     const node = Number.isInteger(index) && index >= 0 ? this.data.nodes[index] : null
     return {
       readOnly: this.data.readOnly,
       assigneeOptions: clone(this.data.assigneeOptions),
-      node: node ? clone(node) : null,
+      node: node ? clone(this.restoreNodeLinkage(node)) : null,
+      cardFields: clone(this._savedCardFields || []),
       flowSchemaVersion: this.data.flowSchemaVersion,
       nodeOptions: this.data.nodes.map(item => ({ nodeKey: item.nodeKey || item._uiKey, _uiKey: item._uiKey, name: item.name || '未命名节点' })),
       optionalTailExistsOutsideCurrentNode: this.data.nodes.some((item, itemIndex) =>
@@ -417,8 +429,12 @@ Page({
       this.setData({ errorMessage: '每个模板只能设置一个可选追加节点' })
       return
     }
-    if (Number.isInteger(index) && index >= 0 && index < nodes.length) nodes[index] = clone(node)
-    else nodes.push(clone(node))
+    validateLinkedNode(node)
+    const allocateKey = createKeyAllocator(nodes.flatMap(item => [item.nodeKey, item._uiKey]))
+    const renderedNode = this.storeNodeLinkage({ ...clone(node),
+      _uiKey: node._uiKey || node.nodeKey || allocateKey('node') })
+    if (Number.isInteger(index) && index >= 0 && index < nodes.length) nodes[index] = renderedNode
+    else nodes.push(renderedNode)
     const ordered = orderedNodes(nodes)
     const optionalIndex = this.data.flowSchemaVersion === 2 ? -1 : ordered.findIndex(item => item.activationMode === 'optional_tail')
     if (optionalIndex >= 0 && optionalIndex !== ordered.length - 1) {
@@ -475,13 +491,36 @@ Page({
     const definition = {
       name: this.data.name.trim(),
       description: this.data.description.trim(),
-      nodes: this.data.nodes.map(cleanNode)
+      nodes: this.data.nodes.map((node, sequence) => {
+        const restored = this.restoreNodeLinkage(node)
+        const clean = cleanNode(restored, sequence)
+        validateLinkedNode(clean)
+        return clean
+      })
     }
     if (this.data.flowSchemaVersion === 2) {
       definition.flowSchemaVersion = 2
       definition.entryNodeKey = this.data.entryNodeKey
     }
+    if (this._loadedHadOptionLinkage || definition.nodes.some(node => node.fields.some(field => hasOwn(field, 'optionLinkage')))) {
+      if (this.data.editMode && !this._loadedDefinitionDigest) throw new Error('商品联动保存缺少已加载的定义摘要，请重新打开模板')
+      definition.optionLinkageEdit = { schemaVersion: 1,
+        expectedDefinitionDigest: this.data.editMode ? this._loadedDefinitionDigest : null }
+    }
     return definition
+  },
+
+  storeNodeLinkage(node) {
+    if (!this._nodeOptionLinkages) this._nodeOptionLinkages = new Map()
+    const detached = detachNodeLinkage(node)
+    const key = node.nodeKey || node._uiKey
+    if (detached.rule) this._nodeOptionLinkages.set(key, detached.rule)
+    else this._nodeOptionLinkages.delete(key)
+    return detached.node
+  },
+
+  restoreNodeLinkage(node) {
+    return attachNodeLinkage(node, this._nodeOptionLinkages && this._nodeOptionLinkages.get(node.nodeKey || node._uiKey))
   },
 
   onEntryNodeChange(event) {
@@ -497,7 +536,11 @@ Page({
 
   async submit() {
     if (!this.requireSuperAdmin() || this.unavailable || this.data.loading || this.data.submitting || this.data.readOnly) return
-    const definition = this.definition()
+    let definition
+    try { definition = this.definition() } catch (error) {
+      this.setData({ errorMessage: error.message })
+      return
+    }
     if (!definition.name) {
       this.setData({ errorMessage: '请填写模板名称' })
       return
@@ -526,6 +569,10 @@ Page({
     } catch (error) {
       if (!this.requireSuperAdmin()) return
       const message = messageFor(error)
+      if (error && error.code === 'VERSION_CONFLICT' && definition.optionLinkageEdit) {
+        this.setData({ errorMessage: '模板已被其他管理员更新；已保留本地草稿，请另行核对最新版本后重试' })
+        return
+      }
       if (error && error.code === 'VERSION_CONFLICT' && this.data.editMode) {
         try { await this.loadTemplate() } catch (reloadError) { this.unavailable = true }
         if (!this.requireSuperAdmin()) return

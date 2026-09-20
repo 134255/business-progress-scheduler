@@ -1,6 +1,7 @@
 const businessService = require('../../services/business')
 const { safeErrorMessage } = require('../../utils/safe-error')
 const { createEvidenceUploader } = require('../../utils/evidence-upload')
+const { prepareEvidenceFile } = require('../../utils/evidence-file')
 const {
   buildRecognitionPreview,
   applyRecognitionPreview,
@@ -25,7 +26,7 @@ const ALL_EVIDENCE_TYPES = Object.freeze([
 const UPLOAD_CONCURRENCY = 3
 const SAFE_UPLOAD_ERROR_CODES = new Set([
   'UNSUPPORTED_FILE_TYPE', 'EVIDENCE_TOTAL_LIMIT_EXCEEDED', 'EVIDENCE_UPLOAD_EXPIRED',
-  'EVIDENCE_UPLOAD_MISMATCH', 'EVIDENCE_UPLOAD_NOT_FOUND', 'EVIDENCE_UPLOAD_CANCELLED'
+  'EVIDENCE_UPLOAD_MISMATCH', 'EVIDENCE_UPLOAD_NOT_FOUND', 'EVIDENCE_UPLOAD_CANCELLED', 'EVIDENCE_FILE_READ_FAILED'
 ])
 const UPLOAD_DIAGNOSTIC_CODES = new Set([
   ...SAFE_UPLOAD_ERROR_CODES, 'EVIDENCE_UPLOAD_FAILED', 'EVIDENCE_UPLOAD_UNAVAILABLE',
@@ -34,7 +35,7 @@ const UPLOAD_DIAGNOSTIC_CODES = new Set([
   'RequestError', 'NetworkError', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'UPLOAD_FAILED',
   'ExpiredToken', 'ExpiredTokenException', 'InvalidSecurityToken', 'RequestTimeTooSkewed'
 ])
-const UPLOAD_STAGE_LABELS = Object.freeze({ authorize: '申请上传授权', transfer: '文件传输', finalize: '文件核验' })
+const UPLOAD_STAGE_LABELS = Object.freeze({ prepare: '文件读取', authorize: '申请上传授权', transfer: '文件传输', finalize: '文件核验' })
 
 function safeUploadError(error) {
   const code = error && UPLOAD_DIAGNOSTIC_CODES.has(error.code) ? error.code : 'EVIDENCE_UPLOAD_FAILED'
@@ -93,7 +94,8 @@ function schemaFingerprint(fields) {
     type: field.type,
     required: field.required,
     constraints: field.constraints,
-    condition: field.condition || null
+    condition: field.condition || null,
+    ...(field.optionLinkage ? { optionLinkage:field.optionLinkage } : {})
   })))
 }
 
@@ -183,16 +185,25 @@ function formatBytes(bytes) {
   return `${bytes} B`
 }
 
-function isDesktopPlatform() {
+function devicePlatform() {
   try {
     const info = typeof wx.getDeviceInfo === 'function'
       ? wx.getDeviceInfo()
       : typeof wx.getSystemInfoSync === 'function' ? wx.getSystemInfoSync() : {}
     const platform = typeof info.platform === 'string' ? info.platform.toLowerCase() : ''
-    return platform === 'mac' || platform === 'windows'
+    return platform
   } catch (error) {
-    return false
+    return ''
   }
+}
+
+function supportsOriginalMediaVideo() {
+  try {
+    if (typeof wx.chooseMedia !== 'function' || typeof wx.canIUse === 'function' && !wx.canIUse('chooseMedia')) return false
+    const info = typeof wx.getAppBaseInfo === 'function' ? wx.getAppBaseInfo() : wx.getSystemInfoSync()
+    const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(info.SDKVersion || '')
+    return Boolean(version && (Number(version[1]) > 2 || Number(version[1]) === 2 && Number(version[2]) >= 25))
+  } catch (error) { return false }
 }
 
 Page({
@@ -224,6 +235,7 @@ Page({
     draftDirty: false,
     frozen: false,
     fields: [],
+    hasProductOptionLinkage: false,
     visibleFields: [],
     fieldValues: {},
     history: [],
@@ -277,6 +289,8 @@ Page({
 
   onUnload() {
     this.pageAlive = false
+    this.fieldDefinitions = null
+    this.definitionSchemaFingerprint = null
     this.loadSequence += 1
     this.recognitionSequence += 1
   },
@@ -325,6 +339,8 @@ Page({
         latestValues.has(field.fieldKey) ? latestValues.get(field.fieldKey) : initialValue(field)
       ]))
       const conditionalForm = deriveConditionalForm(fields, fieldValues)
+      this.fieldDefinitions = fields
+      this.definitionSchemaFingerprint = schemaFingerprint(fields)
       const frozen = FROZEN_STATUSES.has(workspace.line && workspace.line.status)
       const canSubmit = Boolean(workspace.canSubmit) && !frozen
       const requiresReview = legacyMode ? true : node.requiresReview !== false
@@ -335,7 +351,8 @@ Page({
         nodeCode: node.nodeCode || '',
         expectedNodeVersion: node.version,
         lineVersion: workspace.line.version,
-        fields,
+        fields: fields.map(({ optionLinkage, ...field }) => field),
+        hasProductOptionLinkage: fields.some(field => Boolean(field.optionLinkage)),
         visibleFields: conditionalForm.visibleFields,
         fieldValues: conditionalForm.fieldValues,
         requiresEvidence,
@@ -417,7 +434,7 @@ Page({
       lineId: this.data.lineId,
       nodeId: this.data.nodeId,
       nodeVersion: this.data.expectedNodeVersion,
-      schemaDigest: schemaFingerprint(this.data.visibleFields),
+      schemaDigest: `${this.definitionSchemaFingerprint || ''}\n${schemaFingerprint(this.data.visibleFields)}`,
       formRevision: this.formRevision
     }
   },
@@ -534,7 +551,7 @@ Page({
   },
 
   applyConditionalValues(values, extraUpdate = {}, onApplied) {
-    const derived = deriveConditionalForm(this.data.fields, values)
+    const derived = deriveConditionalForm(this.fieldDefinitions || this.data.fields, values)
     const commit = () => {
       if (!this.markDraftDirty({
         fieldValues: derived.fieldValues,
@@ -676,7 +693,8 @@ Page({
 
   chooseMediaEvidence() {
     if (this.data.readOnly || this.data.reviewDraftLocked || this.data.submitting) return
-    if (isDesktopPlatform()) {
+    const platform = devicePlatform()
+    if (platform === 'mac' || platform === 'windows') {
       // chooseMessageFile selects chat attachments, not local media.
       this.invokeEvidencePicker('showActionSheet', {
         itemList: ['选择本机图片', '选择本机视频'],
@@ -694,6 +712,15 @@ Page({
               })))
             })
           } else if (result.tapIndex === 1) {
+            if (platform === 'mac' && supportsOriginalMediaVideo()) {
+              this.invokeEvidencePicker('chooseMedia', {
+                count: 1, mediaType: ['video'], sourceType: ['album'], sizeType: ['original'],
+                success: selected => this.addSelectedFiles((selected.tempFiles || []).map(file => ({
+                  name: displayName(file, ''), path: file.tempFilePath, size: file.size, category: 'video'
+                })))
+              })
+              return
+            }
             this.invokeEvidencePicker('chooseVideo', {
               sourceType: ['album'],
               compressed: false,
@@ -767,6 +794,7 @@ Page({
 
   createEvidenceUploader() {
     return createEvidenceUploader({
+      prepareFile: prepareEvidenceFile,
       beginUpload: input => businessService.beginEvidenceUpload(input),
       refreshUpload: input => businessService.refreshEvidenceUploadAuthorization(input),
       finalizeUpload: input => businessService.finalizeEvidenceUpload(input),
@@ -821,6 +849,7 @@ Page({
             nodeId: operation.nodeId,
             expectedNodeVersion: operation.nodeVersion,
             file,
+            isCurrent: () => this.writeStillCurrent(operation),
             onProgress: progressPercent => {
               if (this.writeStillCurrent(operation)) this.updateLocalFile(index, {
                 progressPercent,
@@ -830,6 +859,8 @@ Page({
           })
           if (!this.writeStillCurrent(operation)) throw new Error('页面状态已变化')
           this.updateLocalFile(index, {
+            name: registered.fileName || file.name,
+            extension: extensionOf(registered.fileName || file.name),
             status: 'registered', statusLabel: '已登记', progressPercent: 100,
             evidenceId: registered.evidenceId, errorMessage: '', errorCode: '', canRetry: false
           })

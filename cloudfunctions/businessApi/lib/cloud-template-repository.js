@@ -227,6 +227,7 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
       resultCode: audit.resultCode,
       targetType: 'template',
       targetId,
+      ...(audit.sourceTemplateId === undefined ? {} : { sourceTemplateId: audit.sourceTemplateId }),
       ...(audit.configRevision === undefined ? {} : { configRevision: audit.configRevision }),
       createdAt: db.serverDate()
     }
@@ -345,16 +346,30 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     })
   }
 
-  async function createTemplateDefinition({ actor, participantUserIds = [], definition, audit }) {
+  async function createTemplateDefinition({ actor, participantUserIds = [], definition, audit, copySource }) {
     const participantIds = [...new Set(participantUserIds)].sort()
+    const copyReadOperations = copySource ? copySource.nodes.length + 2 : 0
     if (definition.nodes.length > MAX_TEMPLATE_NODES ||
-        definition.nodes.length + participantIds.length + 2 > MAX_TRANSACTION_OPERATIONS) {
+        definition.nodes.length + participantIds.length + 2 + copyReadOperations > MAX_TRANSACTION_OPERATIONS) {
       throw createTemplateLimitError()
     }
     const templateId = idFactory('template')
     const preparedNodes = definition.nodes.map(node => ({ id: idFactory('template_node'), node }))
     const auditId = idFactory('audit')
     return db.runTransaction(async transaction => {
+      if (copySource) {
+        // Recheck actor, source definition and independent display revision in
+        // the same transaction that creates the entire isolated draft.
+        const current = await readCardTemplate(transaction, actor, copySource.template._id)
+        if (!isDeepStrictEqual(current, copySource.template)) throw createError('VERSION_CONFLICT')
+        for (const node of copySource.nodes) {
+          const checked = await readDocument(transaction, COLLECTIONS.nodes, node._id)
+          if (!checked || checked.templateId !== current._id || !isDeepStrictEqual(checked, node)) {
+            throw createError('VERSION_CONFLICT')
+          }
+        }
+        assertCardDisplayReferences(readCardDisplay(definition.template), definition.nodes)
+      }
       await assertActiveParticipantDocuments(transaction, participantIds)
       const template = {
         ...timestampedTemplate(definition.template, { create: true }),

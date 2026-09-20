@@ -13,14 +13,14 @@ function isStableId(value) {
 
 // Stored JSON is data, never executable behavior. Check descriptors before
 // handing definitions to the existing domain helpers (which use object spread).
-function copyOwnData(value, depth = 0, budget = { remaining: 20000 }) {
+function copyOwnData(value, depth = 0, budget = { remaining: 20000, arrayLimit:1000 }) {
   if (depth > 16 || --budget.remaining < 0) throw invalidSummary()
   if (value === null || value === undefined || ['string', 'boolean', 'number'].includes(typeof value)) return value
   if (typeof value !== 'object') throw invalidSummary()
   const array = Array.isArray(value)
   if (array ? Object.getPrototypeOf(value) !== Array.prototype :
     ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw invalidSummary()
-  if (array && (value.length > 1000 || Reflect.ownKeys(value).length !== value.length + 1)) throw invalidSummary()
+  if (array && (value.length > budget.arrayLimit || Reflect.ownKeys(value).length !== value.length + 1)) throw invalidSummary()
   const result = array ? [] : {}
   const keys = array ? Array.from({ length: value.length }, (_, i) => String(i)) : Reflect.ownKeys(value)
   for (const key of keys) {
@@ -78,11 +78,13 @@ function formatNormalizedValue(definition, value) {
 }
 
 function formatCardValue(definition, value) {
-  return formatNormalizedValue(normalizeFieldDefinition(copyOwnData(definition)), copyOwnData(value))
+  return formatNormalizedValue(normalizeFieldDefinition(copyOwnData(definition, 0,
+    { remaining:100000, arrayLimit:5000 })), copyOwnData(value))
 }
 
 function summarizeNodeFields({ definitions, values, selections, fallbackDefinitions = [] }) {
-  const normalized = normalizeConditionalFields(copyOwnData(definitions).map(normalizeFieldDefinition))
+  const normalized = normalizeConditionalFields(copyOwnData(definitions, 0,
+    { remaining:100000, arrayLimit:5000 }).map(normalizeFieldDefinition))
   const byKey = new Map(normalized.map(field => [field.fieldKey, field]))
   const submitted = new Map()
   for (const item of copyOwnData(values)) {
@@ -104,7 +106,7 @@ function summarizeNodeFields({ definitions, values, selections, fallbackDefiniti
   }
   const resolved = resolveConditionalFields(normalized, current)
   const visible = new Map(resolved.visibleDefinitions.map(field => [field.fieldKey, field]))
-  const fallback = new Map(copyOwnData(fallbackDefinitions).map(field => {
+  const fallback = new Map(copyOwnData(fallbackDefinitions, 0, { remaining:100000, arrayLimit:5000 }).map(field => {
     const normalizedField = normalizeFieldDefinition(field)
     return [normalizedField.fieldKey, normalizedField]
   }))

@@ -87,6 +87,7 @@ function createRouteHarness({
   feedbackService,
   reviewService,
   operationsService,
+  operationsFieldService,
   shareService,
   recognitionService,
   dashboardWorkspaceService,
@@ -148,6 +149,7 @@ function createRouteHarness({
     feedbackService,
     reviewService,
     operationsService,
+    operationsFieldService,
     shareService,
     recognitionService,
     dashboardWorkspaceService,
@@ -483,6 +485,31 @@ test('default template routes pass trusted actors and exact payload contracts to
   ])
 })
 
+test('copy template route accepts only source identity/version and uses the authenticated actor', async () => {
+  const calls = []
+  const harness = createRouteHarness({ templateService: {
+    copyTemplate: async input => { calls.push(input); return { template: { _id: 'copy', status: 'draft' } } }
+  } })
+  const result = await harness.api.main({ action: 'copyTemplate', payload: {
+    templateId: 'source', expectedVersion: 7, actor: { _id: 'forged' }, role: 'super_admin'
+  } })
+  assert.equal(result.ok, true)
+  assert.equal(result.data.template._id, 'copy')
+  assert.equal(calls[0].actor._id, 'actor-1')
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['actor', 'expectedVersion', 'templateId'])
+  assert.equal(calls[0].templateId, 'source')
+  assert.equal(calls[0].expectedVersion, 7)
+  const rejected = await harness.api.main({ action: 'copyTemplate', payload: {
+    templateId: 'source', expectedVersion: 7, definition: { name: 'injected' }
+  } })
+  assert.equal(rejected.code, 'VALIDATION_ERROR')
+  assert.equal(calls.length, 1)
+  const anonymous = createRouteHarness({ user: null, templateService: {
+    copyTemplate: async () => { throw new Error('must not run') }
+  } })
+  assert.equal((await anonymous.api.main({ action: 'copyTemplate', payload: {} })).code, 'UNAUTHORIZED')
+})
+
 test('the template-backed business route delegates generated creation to the trusted service boundary', async () => {
   const calls = []
   const businessService = {
@@ -680,6 +707,44 @@ test('运营看板与导出路由只传递受信管理员及白名单日期分�
     ['listOperationsTimingDetails', { actor, query: { startDate: '2026-08-01', endDate: '2026-08-17', cursor: '', pageSize: 20 } }],
     ['getOperationsAnalyticsSummary', { actor, query: { templateId: 'template-1', grain: 'week', processorToken: 'a'.repeat(64) } }]
   ])
+})
+
+test('字段统计与完整报告路由复用登录边界和精确筛选白名单', async () => {
+  const calls = []
+  const operationsFieldService = Object.fromEntries(['getSummary','getFilters','exportReportRows'].map(method =>
+    [method, async input => { calls.push([method,input]); return { groups: [],items: [] } }]))
+  const harness = createRouteHarness({ operationsFieldService })
+  for (const action of ['getOperationsFieldSummary','getOperationsFieldFilters','exportOperationsReportRows']) {
+    assert.equal(isPublicAction(action),false)
+    const result = await harness.api.main({action,payload:{templateId:'template-1',stableNodeId:'node-key',pageSize:50,actorId:'forged'}})
+    assert.equal(result.ok,true)
+  }
+  assert.deepEqual(calls.map(([method,input])=>[method,input.actor._id,input.query]),[
+    ['getSummary','actor-1',{templateId:'template-1',stableNodeId:'node-key',pageSize:50}],
+    ['getFilters','actor-1',{templateId:'template-1',stableNodeId:'node-key',pageSize:50}],
+    ['exportReportRows','actor-1',{templateId:'template-1',stableNodeId:'node-key',pageSize:50}]
+  ])
+  const anonymous = createRouteHarness({user:null,operationsFieldService})
+  assert.equal((await anonymous.api.main({action:'getOperationsFieldSummary',payload:{}})).ok,false)
+  assert.equal(calls.length,3)
+  const invalid = await harness.api.main({action:'getOperationsFieldSummary',payload:{metric:'forged'}})
+  assert.equal(invalid.ok,false)
+  assert.equal(calls.length,3)
+})
+
+test('最终字段派生刷新仅跟随已成功业务操作，派生故障不反转业务成功', async () => {
+  const calls = []
+  const harness = createRouteHarness({
+    protectedRoutes:{submitFeedback:async()=>({saved:true}),getOperationsFieldSummary:async()=>({groups:[]})},
+    operationsFieldService:{async refreshAfterMutation(input){ calls.push(input); throw new Error('synthetic snapshot failure') }}
+  })
+  const saved = await harness.api.main({action:'submitFeedback',payload:{nodeId:'node-1',businessLineId:'line-1'}})
+  assert.deepEqual(saved,{ok:true,data:{saved:true}})
+  assert.equal(calls.length,1)
+  assert.equal(calls[0].actor._id,'actor-1')
+  assert.equal(calls[0].action,'submitFeedback')
+  await harness.api.main({action:'getOperationsFieldSummary',payload:{}})
+  assert.equal(calls.length,1)
 })
 
 test('business metadata update route delegates a trusted actor and exact optimistic payload', async () => {

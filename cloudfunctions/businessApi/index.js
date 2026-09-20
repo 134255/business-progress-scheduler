@@ -46,6 +46,8 @@ const { hashPassword } = require('./lib/password')
 const { createCalendarAdminService } = require('./lib/calendar-admin-service')
 const { createOperationsService } = require('./lib/operations-service')
 const { createCloudOperationsRepository } = require('./lib/cloud-operations-repository')
+const { createOperationsFieldService } = require('./lib/operations-field-service')
+const { createCloudOperationsFieldRepository } = require('./lib/cloud-operations-field-repository')
 const { createShareService } = require('./lib/share-service')
 const { createCloudShareRepository } = require('./lib/cloud-share-repository')
 const { createBusinessSearchClient } = require('./lib/business-search-client')
@@ -102,6 +104,9 @@ const ADMIN_TARGET_ACTIONS = new Set([
   'unlockUser',
   'unbindWechat'
 ])
+
+const FIELD_RESULT_MUTATIONS = new Set(['submitFeedback','saveAndSubmitNodeForReview','submitNodeForReview',
+  'submitReviewVote','decideNodeRoute'])
 
 const BUSINESS_CARD_MUTATIONS = new Set([
   'createBusinessFromTemplate', 'updateBusinessMetadata', 'submitFeedback',
@@ -233,6 +238,10 @@ function createTemplateRoutes(templateService) {
     listTemplates: ({ actor, payload }) => templateService.listTemplates({ actor, query: payload }),
     getTemplate: ({ actor, payload }) => templateService.getTemplate({ actor, templateId: payload.templateId }),
     createTemplate: ({ actor, payload }) => templateService.createTemplate({ actor, input: payload }),
+    copyTemplate: ({ actor, payload }) => {
+      const input = selectProtectedPayload(payload, new Set(['templateId', 'expectedVersion']))
+      return templateService.copyTemplate({ actor, templateId: input.templateId, expectedVersion: input.expectedVersion })
+    },
     updateTemplate: ({ actor, payload }) => templateService.updateTemplate({
       actor,
       templateId: payload.templateId,
@@ -434,6 +443,17 @@ function createOperationsRoutes(operationsService) {
   }
 }
 
+function createOperationsFieldRoutes(service) {
+  if (!service) return null
+  const keys = new Set(['startDate','endDate','grain','templateId','templateVersion','status',
+    'businessLineId','stableNodeId','processorToken','reviewerToken','cursor','pageSize'])
+  return Object.fromEntries([
+    ['getOperationsFieldSummary','getSummary'],
+    ['getOperationsFieldFilters','getFilters'],
+    ['exportOperationsReportRows','exportReportRows']
+  ].map(([action,method]) => [action,({actor,payload}) => service[method]({actor,query:selectProtectedPayload(payload,keys)})]))
+}
+
 function createShareRoutes(shareService) {
   if (!shareService) return null
   return {
@@ -552,6 +572,7 @@ function createBusinessApi({
   reviewService,
   calendarAdminService,
   operationsService,
+  operationsFieldService,
   shareService,
   recognitionService,
   dashboardWorkspaceService,
@@ -582,6 +603,7 @@ function createBusinessApi({
     createReviewRoutes(reviewService),
     createCalendarAdminRoutes(calendarAdminService),
     createOperationsRoutes(operationsService),
+    createOperationsFieldRoutes(operationsFieldService),
     createShareRoutes(shareService),
     createNodeTextRecognitionRoutes(recognitionService),
     protectedRoutes
@@ -652,6 +674,11 @@ function createBusinessApi({
         : knownProtectedAction
           ? await domainRoutes[action]({ actor, payload })
           : await legacyRoutes[action](actor.openid, payload)
+      if (knownProtectedAction && FIELD_RESULT_MUTATIONS.has(action) && operationsFieldService &&
+          typeof operationsFieldService.refreshAfterMutation === 'function') {
+        // A derived snapshot is retryable; it must never undo an authoritative business success.
+        try { await operationsFieldService.refreshAfterMutation({actor,action,payload}) } catch (_) {}
+      }
       return ok(knownProtectedAction
         ? await withBusinessCards({ actor, action, payload, result: data })
         : data)
@@ -1096,9 +1123,15 @@ function createDefaultBusinessApi() {
     clock: () => new Date(),
     requestIdFactory: () => crypto.randomBytes(24).toString('hex')
   })
+  const operationsRepository = createCloudOperationsRepository({ db })
   const operationsService = createOperationsService({
-    repository: createCloudOperationsRepository({ db }),
+    repository: operationsRepository,
     clock: () => new Date()
+  })
+  const operationsFieldService = createOperationsFieldService({
+    repository: createCloudOperationsFieldRepository({db,operationsRepository,
+      secret:process.env.BUSINESS_SEARCH_HMAC_SECRET,clock:()=>new Date()}),
+    clock:()=>new Date()
   })
   const shareService = createShareService({
     repository: createCloudShareRepository({ db, cloud, clock: () => new Date(), fileReferenceContext }),
@@ -1125,6 +1158,7 @@ function createDefaultBusinessApi() {
     reviewService,
     calendarAdminService,
     operationsService,
+    operationsFieldService,
     shareService,
     recognitionService,
     dashboardWorkspaceService,

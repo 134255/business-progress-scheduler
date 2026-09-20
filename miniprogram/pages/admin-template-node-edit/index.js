@@ -1,4 +1,8 @@
 const { createKeyAllocator } = require('../../utils/template-editor-keys')
+const { fieldReference, validateLinkedNode, linkageSummary, parseOptionLinkageImport,
+  applyOptionLinkageImport, detachNodeLinkage } = require('../../utils/option-linkage-import')
+const { buildOptionLinkageContext } = require('../../utils/option-linkage-domain')
+const CONDITIONAL_PAGE_SIZE = 20
 
 const FIELD_TYPE_OPTIONS = Object.freeze([
   ['short_text', '短文本'], ['long_text', '长文本'], ['number', '数字'],
@@ -75,10 +79,25 @@ Page({
     fieldTypeLabels: FIELD_TYPE_OPTIONS.map(item => item[1]),
     evidenceTypeOptions: EVIDENCE_TYPE_OPTIONS.map(item => ({ value: item[0], label: item[1], selected: false })),
     errorMessage: '',
+    linkageSummary: null,
+    linkageImportOpen: false,
+    linkageImportPreview: null,
+    linkageImportError: '',
+    linkageTrialOpen: false,
+    linkageTrialFields: [],
+    linkageTrialSource: '',
+    linkageTrialComplete: false,
     submitting: false
   },
 
   decorateField(field, sequence, allFields) {
+    const linked = this.isLinkedField(field)
+    if (linked) {
+      const { optionLinkage, condition, ...ordinary } = field
+      return { ...ordinary, _uiKey: field._uiKey || fieldReference(field) || this.allocateKey('field'),
+        sequence, linked: true, optionText: '', optionCount: field.constraints.options.length,
+        conditionEnabled: false, conditionParentOptions: [], conditionParentValueRows: [] }
+    }
     const condition = field.condition ? clone(field.condition) : null
     const conditionParentOptions = (allFields || []).slice(0, sequence)
       .filter(item => item.type === 'single_select' && item.fieldKey)
@@ -87,34 +106,68 @@ Page({
     const parentValues = parent && parent.constraints && Array.isArray(parent.constraints.options)
       ? parent.constraints.options : []
     const childOptions = field.constraints && Array.isArray(field.constraints.options) ? field.constraints.options : []
+    const optionText = field.optionText !== undefined ? field.optionText : childOptions.join(', ')
+    const uiKey = field._uiKey || field.fieldKey || this.allocateKey('field')
+    if (condition && this.isLinkedField(parent)) {
+      if (!this._conditionalDrafts) this._conditionalDrafts = new Map()
+      if (!this._conditionalWindows) this._conditionalWindows = new Map()
+      this._conditionalDrafts.set(uiKey, { ...field, _uiKey: uiKey, sequence })
+      const window = this._conditionalWindows.get(uiKey) || { page: 0, editingValue: null }
+      const pageCount = Math.max(1, Math.ceil(parentValues.length / CONDITIONAL_PAGE_SIZE))
+      const page = Math.min(window.page, pageCount - 1)
+      this._conditionalWindows.set(uiKey, { ...window, page })
+      const { conditionalOptionTexts, ...ordinary } = field
+      return { ...ordinary, _uiKey: uiKey, sequence, lazyConditional: true, optionText,
+        optionCount: uniqueTexts(optionText).length, conditionEnabled: true,
+        condition: { parentFieldKey: condition.parentFieldKey, visibleWhen: condition.visibleWhen.slice() },
+        conditionParentOptions,
+        conditionParentIndex: Math.max(0, conditionParentOptions.findIndex(item => item.fieldKey === condition.parentFieldKey)),
+        conditionalPage: page, conditionalPageCount: pageCount,
+        conditionParentValueRows: parentValues.slice(page * CONDITIONAL_PAGE_SIZE, (page + 1) * CONDITIONAL_PAGE_SIZE).map(value => {
+          const visible = condition.visibleWhen.includes(value)
+          const editing = visible && window.editingValue === value
+          const row = { fieldIndex: sequence, value, visible, editing }
+          if (editing) {
+            row.optionText = conditionalOptionTexts && hasOwn(conditionalOptionTexts, value) ? conditionalOptionTexts[value]
+              : condition.optionsByParentValue && condition.optionsByParentValue[value]
+                ? condition.optionsByParentValue[value].join(', ') : childOptions.join(', ')
+            row.optionCount = uniqueTexts(row.optionText).length
+          }
+          return row
+        }) }
+    }
     return {
       ...field,
       _uiKey: field._uiKey || field.fieldKey || this.allocateKey('field'),
       sequence,
-      optionText: field.optionText !== undefined
-        ? field.optionText
-        : field.constraints && Array.isArray(field.constraints.options) ? field.constraints.options.join(', ') : '',
+      optionText,
+      optionCount: uniqueTexts(optionText).length,
       conditionEnabled: Boolean(condition),
       condition: condition || null,
       conditionParentOptions,
       conditionParentIndex: Math.max(0, conditionParentOptions.findIndex(item =>
         condition && item.fieldKey === condition.parentFieldKey)),
-      conditionParentValueRows: parentValues.map(value => ({
-        fieldIndex: sequence,
-        value,
-        visible: Boolean(condition && condition.visibleWhen && condition.visibleWhen.includes(value)),
-        optionText: field.conditionalOptionTexts && hasOwn(field.conditionalOptionTexts, value)
+      conditionParentValueRows: parentValues.map(value => {
+        const conditionalOptionText = field.conditionalOptionTexts && hasOwn(field.conditionalOptionTexts, value)
           ? field.conditionalOptionTexts[value]
           : condition && condition.optionsByParentValue && condition.optionsByParentValue[value]
             ? condition.optionsByParentValue[value].join(', ') : childOptions.join(', ')
-      }))
+        return {
+          fieldIndex: sequence,
+          value,
+          visible: Boolean(condition && condition.visibleWhen && condition.visibleWhen.includes(value)),
+          optionText: conditionalOptionText,
+          optionCount: uniqueTexts(conditionalOptionText).length
+        }
+      })
     }
   },
 
   refreshFields(fields, extra = {}) {
+    fields = fields.map(field => this.draftField(field))
     const decorated = fields.map((field, sequence) => this.decorateField(field, sequence, fields))
     const routingFieldOptions = decorated
-      .filter(field => field.type === 'single_select' && field.required && !field.condition)
+      .filter(field => field.type === 'single_select' && field.required && !field.condition && !field.linked)
       .map(field => ({ fieldKey: field.fieldKey, name: field.name || `字段 ${field.sequence + 1}` }))
     const routingFieldKey = routingFieldOptions.some(item => item.fieldKey === this.data.routingFieldKey)
       ? this.data.routingFieldKey : (routingFieldOptions[0] && routingFieldOptions[0].fieldKey) || ''
@@ -130,7 +183,48 @@ Page({
         targetIndex: Math.max(0, this.data.targetOptions.findIndex(item => item.nodeKey === target))
       }
     })
-    this.setData({ fields: decorated, routingFieldOptions, routingFieldKey, routeOptionRows, ...extra })
+    const update = { routingFieldOptions, routingFieldKey, routeOptionRows,
+      linkageSummary: linkageSummary(decorated, this._optionLinkage), ...extra }
+    // Send only changed properties when identity/order are stable. A rename must
+    // not retransmit every option dictionary or even the current mapping window.
+    if (decorated.length !== this.data.fields.length || decorated.some((field, index) =>
+      field._uiKey !== this.data.fields[index]._uiKey || Object.keys(this.data.fields[index]).some(key => !hasOwn(field, key)))) {
+      update.fields = decorated
+    } else {
+      decorated.forEach((field, index) => Object.keys(field).forEach(key => {
+        if (JSON.stringify(field[key]) !== JSON.stringify(this.data.fields[index][key])) update[`fields[${index}].${key}`] = field[key]
+      }))
+    }
+    for (const key of Object.keys(update)) {
+      if (!key.startsWith('fields[') && JSON.stringify(update[key]) === JSON.stringify(this.data[key])) delete update[key]
+    }
+    if (Object.keys(update).length) this.setData(update)
+  },
+
+  draftField(field) {
+    return field && field.lazyConditional && this._conditionalDrafts && this._conditionalDrafts.get(field._uiKey) || field
+  },
+
+  draftFields() { return this.data.fields.map(field => this.draftField(field)) },
+
+  onConditionalParentPageChange(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
+    const field = this.data.fields[Number(event.currentTarget.dataset.index)]
+    const direction = Number(event.currentTarget.dataset.direction)
+    if (!field || !field.lazyConditional || ![-1, 1].includes(direction)) return
+    const page = field.conditionalPage + direction
+    if (page < 0 || page >= field.conditionalPageCount) return
+    this._conditionalWindows.set(field._uiKey, { page, editingValue: null })
+    this.refreshFields(this.draftFields())
+  },
+
+  onConditionalEditorOpen(event) {
+    if (!this.requireSuperAdmin() || this.data.readOnly) return
+    const field = this.data.fields[Number(event.currentTarget.dataset.index)]
+    const value = event.currentTarget.dataset.parentValue
+    if (!field || !field.lazyConditional || !field.conditionParentValueRows.some(row => row.value === value && row.visible)) return
+    this._conditionalWindows.set(field._uiKey, { page: field.conditionalPage, editingValue: value })
+    this.refreshFields(this.draftFields())
   },
 
   onLoad(options = {}) {
@@ -150,9 +244,18 @@ Page({
     this.allocateKey = createKeyAllocator([
       ...(context.nodeOptions || []).flatMap(item => [item.nodeKey, item._uiKey]),
       existing.nodeKey, existing._uiKey,
-      ...(existing.fields || []).flatMap(field => [field.fieldKey, field._uiKey])
+      ...(existing.fields || []).flatMap(field => [field.fieldKey, field.clientFieldKey, field._uiKey])
     ])
-    const node = context.node || newNode(versionTwo, this.allocateKey)
+    const originalNode = context.node || newNode(versionTwo, this.allocateKey)
+    try { validateLinkedNode(originalNode) } catch (error) {
+      this.unavailable = true
+      this.setData({ readOnly: true, errorMessage: error.message })
+      return
+    }
+    const detached = detachNodeLinkage(originalNode)
+    this._optionLinkage = detached.rule
+    this._cardFields = clone(context.cardFields || [])
+    const node = detached.node
     const isLegacyNode = !hasOwn(node, 'workflowMode')
     const processorUserIds = clone(isLegacyNode ? (node.assigneeUserIds || []) : (node.processorUserIds || []))
     const reviewerUserIds = clone(isLegacyNode ? [] : (node.reviewerUserIds || []))
@@ -169,7 +272,7 @@ Page({
     const targetOptions = [{ nodeKey: 'end', name: '结束售后' }, ...nodeOptions.filter(item => item.nodeKey !== node.nodeKey)]
     const fields = clone(node.fields || []).map((field, sequence) => this.decorateField(field, sequence, node.fields || []))
     const next = versionTwo && node.next ? clone(node.next) : { mode: 'end' }
-    const routingFieldOptions = fields.filter(field => field.type === 'single_select' && field.required && !field.condition)
+    const routingFieldOptions = fields.filter(field => field.type === 'single_select' && field.required && !field.condition && !field.linked)
       .map(field => ({ fieldKey: field.fieldKey, name: field.name }))
     const routingFieldKey = next.mode === 'single_select' ? next.fieldKey : (routingFieldOptions[0] && routingFieldOptions[0].fieldKey) || ''
     const routeField = fields.find(field => field.fieldKey === routingFieldKey)
@@ -208,6 +311,7 @@ Page({
         value: item[0], label: item[1], selected: (node.allowedEvidenceTypes || []).includes(item[0])
       })),
       fields,
+      linkageSummary: linkageSummary(fields, this._optionLinkage),
       nodeOptions,
       targetOptions,
       nodeTargetOptions: targetOptions.filter(item => item.nodeKey !== 'end'),
@@ -232,6 +336,127 @@ Page({
     this.unavailable = true
     wx.reLaunch({ url: currentUser ? '/pages/dashboard/index' : '/pages/login/index' })
     return false
+  },
+
+  isLinkedField(field) {
+    return Boolean(field && this._optionLinkage && this._optionLinkage.fieldKeys.includes(fieldReference(field)))
+  },
+
+  blockLinkedField(index) {
+    if (!this.isLinkedField(this.data.fields[index])) return false
+    this.setData({ errorMessage: '商品联动成员不能单独修改、删除或重排，请使用结构化导入整体更新' })
+    return true
+  },
+
+  canImportLinkage() {
+    return this.requireSuperAdmin() && !this.data.readOnly && !this.committed && !this.data.submitting &&
+      !(this.ownerPage && this.ownerPage.data && this.ownerPage.data.readOnly)
+  },
+
+  openLinkageImport() {
+    if (this.canImportLinkage()) this.setData({ linkageImportOpen: true, linkageImportError: '' })
+  },
+
+  onLinkageImportInput(event) {
+    if (!this.canImportLinkage()) return
+    this._linkageImportText = event.detail.value
+    this._validatedLinkageImport = null
+    this._linkageTrial = null
+    this.setData({ linkageImportPreview: null, linkageImportError: '',
+      linkageTrialOpen: false, linkageTrialFields: [], linkageTrialComplete: false })
+  },
+
+  buildImportedNode(imported) {
+    const context = this.ownerPage && typeof this.ownerPage.getNodeEditorContext === 'function'
+      ? this.ownerPage.getNodeEditorContext(this.data.index) : null
+    return applyOptionLinkageImport(this.buildNodeForSave(), imported, {
+      versionTwo: this.data.flowSchemaVersion === 2, allocateKey: this.allocateKey,
+      cardFields: context && context.cardFields || this._cardFields || []
+    })
+  },
+
+  validateLinkageImport() {
+    if (!this.canImportLinkage()) return
+    this._validatedLinkageImport = null
+    try {
+      const imported = parseOptionLinkageImport(this._linkageImportText || '')
+      this.buildImportedNode(imported)
+      this._validatedLinkageImport = imported
+      this.setData({ linkageImportPreview: imported.summary, linkageImportError: '' })
+    } catch (error) {
+      this.setData({ linkageImportPreview: null, linkageImportError: error.message })
+    }
+  },
+
+  applyLinkageImport() {
+    if (!this.canImportLinkage() || !this._validatedLinkageImport) return
+    try {
+      const importedNode = this.buildImportedNode(this._validatedLinkageImport)
+      const detached = detachNodeLinkage(importedNode)
+      const previousFields = new Map(this.draftFields().map(field => [field._uiKey, field]))
+      this._optionLinkage = detached.rule
+      this._validatedLinkageImport = null
+      this._linkageImportText = ''
+      this._linkageTrial = null
+      // Import is not an ordinary field save: keep unrelated IME/delimiter drafts verbatim.
+      const fields = detached.node.fields.map(field => !this.isLinkedField(field) && previousFields.has(field._uiKey)
+        ? { ...previousFields.get(field._uiKey), sequence: field.sequence } : field)
+      this.refreshFields(fields, { linkageImportOpen: false, linkageImportPreview: null,
+        linkageTrialOpen: false, linkageTrialFields: [], linkageTrialComplete: false,
+        linkageImportError: '', errorMessage: '商品联动已应用到节点草稿；保存节点后，还需保存模板才会生效' })
+    } catch (error) { this.setData({ linkageImportError: error.message }) }
+  },
+
+  openLinkageTrial() {
+    if (!this.requireSuperAdmin()) return
+    const imported = this._validatedLinkageImport
+    const rule = imported ? imported.optionLinkage : this._optionLinkage
+    if (!rule) return
+    const sourceFields = imported ? imported.fields : this.draftFields()
+    // Trial definitions and selections are intentionally separate from both
+    // the editable fields and the imported draft; never feed them to save.
+    const fields = rule.fieldKeys.map((key, sequence) => {
+      const field = sourceFields.find(item => fieldReference(item) === key)
+      return { fieldKey: key, sequence, name: field.name, type: 'single_select', required: field.required,
+        constraints: clone(field.constraints), ...(sequence === 0 ? { optionLinkage: clone(rule) } : {}) }
+    })
+    this._linkageTrial = { fields, context: buildOptionLinkageContext(fields), values: new Map() }
+    this.refreshLinkageTrial({ linkageTrialOpen: true,
+      linkageTrialSource: imported ? '已校验的待导入配置' : '当前节点商品联动' })
+  },
+
+  refreshLinkageTrial(extra = {}) {
+    const trial = this._linkageTrial
+    if (!trial) return
+    const fields = []
+    for (const field of trial.fields) {
+      const effective = trial.context.project(field, trial.values)
+      if (!effective) { trial.values.delete(field.fieldKey); continue }
+      const options = effective.constraints.options
+      if (!options.includes(trial.values.get(field.fieldKey))) trial.values.delete(field.fieldKey)
+      const value = trial.values.get(field.fieldKey)
+      fields.push({ fieldKey: field.fieldKey, name: field.name, options, choiceLabels: ['请选择', ...options],
+        value: value === undefined ? '' : value, valueIndex: value === undefined ? -1 : options.indexOf(value) })
+    }
+    this.setData({ linkageTrialFields: fields,
+      linkageTrialComplete: fields.length > 0 && fields.every(field => field.valueIndex >= 0), ...extra })
+  },
+
+  onLinkageTrialChange(event) {
+    if (!this.requireSuperAdmin() || !this._linkageTrial || !this.data.linkageTrialOpen) return
+    const trial = this._linkageTrial
+    const field = trial.fields.find(item => item.fieldKey === event.currentTarget.dataset.fieldKey)
+    const effective = field && trial.context.project(field, trial.values)
+    const index = Number(event.detail.value) - 1
+    if (!effective || !Number.isSafeInteger(index) || index < 0 || index >= effective.constraints.options.length) return
+    trial.values.set(field.fieldKey, effective.constraints.options[index])
+    this.refreshLinkageTrial()
+  },
+
+  resetLinkageTrial() {
+    if (!this.requireSuperAdmin() || !this._linkageTrial || !this.data.linkageTrialOpen) return
+    this._linkageTrial.values.clear()
+    this.refreshLinkageTrial()
   },
 
   onNameInput(event) {
@@ -391,7 +616,8 @@ Page({
 
   updateField(index, changes) {
     if (!this.requireSuperAdmin() || this.data.readOnly || !this.data.fields[index]) return
-    const fields = this.data.fields.slice()
+    if (this.blockLinkedField(index)) return
+    const fields = this.draftFields()
     fields[index] = { ...fields[index], ...changes }
     this.refreshFields(fields)
   },
@@ -407,6 +633,7 @@ Page({
   onFieldConditionChange(event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     const index = Number(event.currentTarget.dataset.index)
+    if (this.blockLinkedField(index)) return
     const field = this.data.fields[index]
     if (!field) return
     if (!event.detail.value) {
@@ -421,12 +648,12 @@ Page({
     this.setFieldParent(index, parent.fieldKey)
   },
   setFieldParent(index, parentFieldKey) {
-    const parent = this.data.fields.find(item => item.fieldKey === parentFieldKey)
+    const parent = this.draftFields().find(item => item.fieldKey === parentFieldKey)
     const values = parent && parent.constraints && Array.isArray(parent.constraints.options)
       ? parent.constraints.options.slice() : []
-    const field = this.data.fields[index]
+    const field = this.draftField(this.data.fields[index])
     const condition = { parentFieldKey, visibleWhen: values }
-    if (field && field.type === 'single_select') {
+    if (field && field.type === 'single_select' && !this.isLinkedField(parent)) {
       const options = field.constraints && Array.isArray(field.constraints.options) ? field.constraints.options.slice() : []
       condition.optionsByParentValue = Object.fromEntries(values.map(value => [value, options.slice()]))
     }
@@ -440,9 +667,13 @@ Page({
   },
   onFieldVisibleWhenChange(event) {
     const index = Number(event.currentTarget.dataset.index)
-    const field = this.data.fields[index]
+    const rendered = this.data.fields[index]
+    const field = this.draftField(rendered)
     if (!field || !field.condition) return
-    const visibleWhen = event.detail.value.slice()
+    const pageValues = rendered.lazyConditional ? rendered.conditionParentValueRows.map(row => row.value) : []
+    const visibleWhen = rendered.lazyConditional
+      ? [...field.condition.visibleWhen.filter(value => !pageValues.includes(value)), ...event.detail.value.filter(value => pageValues.includes(value))]
+      : event.detail.value.slice()
     const condition = { ...field.condition, visibleWhen }
     if (condition.optionsByParentValue) {
       condition.optionsByParentValue = Object.fromEntries(visibleWhen.map(value => [
@@ -456,9 +687,10 @@ Page({
   onFieldConditionalOptionsInput(event) {
     const index = Number(event.currentTarget.dataset.index)
     const parentValue = event.currentTarget.dataset.parentValue
-    const field = this.data.fields[index]
+    const rendered = this.data.fields[index]
+    const field = this.draftField(rendered)
     if (!field || !field.condition || field.type !== 'single_select') return
-    if (!field.conditionParentValueRows.some(row => row.value === parentValue && row.visible)) return
+    if (!rendered.conditionParentValueRows.some(row => row.value === parentValue && row.visible && (!rendered.lazyConditional || row.editing))) return
     this.updateField(index, {
       // Keep the editing buffer separate from canonical options: incomplete words,
       // IME text and delimiters must not be replaced by filtered values on input.
@@ -467,7 +699,7 @@ Page({
   },
   onFieldOptionsInput(event) {
     const index = Number(event.currentTarget.dataset.index)
-    const field = this.data.fields[index]
+    const field = this.draftField(this.data.fields[index])
     if (field) this.updateField(index, {
       optionText: event.detail.value,
       constraints: { ...field.constraints, options: uniqueTexts(event.detail.value) }
@@ -482,7 +714,7 @@ Page({
 
   updateRawConstraint(event, name) {
     const index = Number(event.currentTarget.dataset.index)
-    const field = this.data.fields[index]
+    const field = this.draftField(this.data.fields[index])
     if (field) this.updateField(index, { constraints: { ...field.constraints, [name]: event.detail.value } })
   },
   updateTextConstraint(event, name) { this.updateRawConstraint(event, name) },
@@ -498,6 +730,7 @@ Page({
     if (!this.requireSuperAdmin() || this.data.readOnly) return
     const index = Number(event.currentTarget.dataset.index)
     if (!Number.isInteger(index) || index < 0 || index >= this.data.fields.length) return
+    if (this.blockLinkedField(index)) return
     const key = this.data.fields[index].fieldKey
     if (key && this.data.fields.some((field, fieldIndex) =>
       fieldIndex !== index && field.condition && field.condition.parentFieldKey === key)) {
@@ -514,6 +747,7 @@ Page({
     const direction = Number(event.currentTarget.dataset.direction)
     const target = index + direction
     if (!Number.isInteger(index) || ![-1, 1].includes(direction) || target < 0 || target >= this.data.fields.length) return
+    if (this.blockLinkedField(index) || this.blockLinkedField(target)) return
     const fields = this.data.fields.slice()
     ;[fields[index], fields[target]] = [fields[target], fields[index]]
     const moved = fields.map((field, sequence) => ({ ...field, sequence }))
@@ -528,7 +762,7 @@ Page({
   fieldsForSave() {
     // Reconcile only at the save boundary: partial parent-option input must not
     // erase dependent configuration that may become valid again while typing.
-    return this.data.fields.map((field, index, fields) => {
+    return this.draftFields().map((field, index, fields) => {
       if (!field.condition) return field
       const parents = fields.filter(item => item.fieldKey === field.condition.parentFieldKey)
       const parent = parents.length === 1 ? parents[0] : null
@@ -550,9 +784,11 @@ Page({
   },
 
   normalizedField(field, sequence) {
+    field = this.draftField(field)
     const normalized = {
       _uiKey: field._uiKey || this.allocateKey('field'),
       ...(field.fieldKey ? { fieldKey: field.fieldKey } : {}),
+      ...(field.clientFieldKey ? { clientFieldKey: field.clientFieldKey } : {}),
       sequence,
       name: String(field.name || '').trim(),
       description: String(field.description || '').trim(),
@@ -571,10 +807,12 @@ Page({
         if (constraints[key] !== '' && constraints[key] !== undefined) normalized.constraints[key] = Number(constraints[key])
       }
     } else if (field.type === 'single_select' || field.type === 'multi_select') {
-      normalized.constraints.options = uniqueTexts(constraints.options && constraints.options.join
-        ? constraints.options.join(',') : constraints.options)
+      normalized.constraints.options = this.isLinkedField(field) ? constraints.options.slice()
+        : uniqueTexts(constraints.options && constraints.options.join ? constraints.options.join(',') : constraints.options)
     }
-    if (field.condition) {
+    if (this.isLinkedField(field)) {
+      if (fieldReference(field) === this._optionLinkage.fieldKeys[0]) normalized.optionLinkage = clone(this._optionLinkage)
+    } else if (field.condition) {
       normalized.condition = clone(field.condition)
       if (field.type === 'single_select' && field.conditionalOptionTexts &&
           field.condition.visibleWhen.some(value => hasOwn(field.conditionalOptionTexts, value))) {
@@ -670,12 +908,17 @@ Page({
       node.activationMode = 'required'
       node.processorAssignmentMode = 'fixed_accounts'
     }
+    validateLinkedNode(node)
     return node
   },
 
   async submit() {
     if (!this.requireSuperAdmin() || this.unavailable || this.data.readOnly || this.committed || this.data.submitting) return
-    const node = this.buildNodeForSave()
+    let node
+    try { node = this.buildNodeForSave() } catch (error) {
+      this.setData({ errorMessage: error.message })
+      return
+    }
     if (!node.name) {
       this.setData({ errorMessage: '请填写节点名称' })
       return
