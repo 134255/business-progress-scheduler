@@ -1,5 +1,7 @@
 # Current Status
 
+- 2026-09-20 GitHub 归档已经回读确认：功能归档提交 `394d743`（99文件）已普通快进推送至既有 `origin/main`，同时同步了此前本地主分支领先的25个提交；`git ls-remote --heads origin refs/heads/main` 与本地 `HEAD` 完整SHA一致，`git rev-list --left-right --count origin/main...HEAD` 返回 `0 0`。下方提交前验证记录保留为证据。本轮不做部署、不变更线上功能；剩余本地项仅为操作员 `project.config.json`、部署压缩包、生成的Word文档和Python缓存，未删除或上传。下一步恢复用户的CloudBase续费/备案操作；新增功能应在验证后同步记录提交及推送状态，不能将上传小程序等同GitHub归档。
+
 - 2026-09-20 用户明确要求补齐 GitHub 提交。本轮归档当前 `main` 中自 `165d97c` 后积累的源码、测试、部署说明、ADR 和首次使用说明源文件，覆盖字段统计/完整 CSV、Mac 媒体兼容、模板复制及严格商品联动；不新增产品行为，不重新发布云函数/小程序，不修改真实记录、权限或 Timer。`project.config.json` 操作员改动、`outputs/` 部署包/生成文档和 `tools/__pycache__/` 均保留本机且排除暂存；真实商品表及导入 JSON 继续留在 ignored `qa/`。
 
   新鲜验证：`npm.cmd test --prefix cloudfunctions/<name>` 七套分别为 businessApi 1333/1333、businessSearch 119/119、nodeTextParser 38/38、calendarSync 61/61、workflowReminder 39/39、evidenceRetention 43/43、operationsAnalytics 65/65；客户端 `node --test --test-reporter=spec miniprogram/test/*.test.js` 485/485，WXML 4/4，合计 2187 项通过、0失败。bundled Python 执行 `tools/test_product_option_linkage.py` 为24项中22通过、2项私有源表验收显式跳过，不把历史真实源表证据算作本轮新验证。两份共享域同步 `--check`、71个候选 JS/MJS 语法检查、项目记忆验证及 `git diff --check` 通过。候选文件与待推送历史差异的高置信度密钥模式扫描均无命中；独立只读发布复核另行核验。没有重做线上/真机验收，先前标记的 unverified 边界保持。
