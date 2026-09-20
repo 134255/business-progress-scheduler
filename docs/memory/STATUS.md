@@ -1,5 +1,15 @@
 # Current Status
 
+- 2026-09-20 用户要求将已发布的批量照片登记修复提交GitHub。本轮只归档 `cloud-evidence-upload-repository.js`、对应仓储测试和本状态文档，不纳入操作员配置、部署压缩包、生成文档及缓存；不再次部署或改变生产数据。提交前重新执行API1338/1338、客户端485/485、WXML4/4，全部通过；检查源码/测试完整差异，沿用前轮独立复核结论，未增加新生产改动。远端 `main` 回读仍为本地基点 `a75f02f`，只允许普通快进推送；此条为提交前记录，实际推送以随后远端SHA回读为准。手机批量上传仍待用户验收。
+
+- 2026-09-20 修复批量照片上传后的凭证登记并发冲突，已按用户明确授权仅发布 `businessApi`，未改小程序、权限、环境变量、Timer、模板或业务数据。截图故障为多文件已选入但部分在文件核验阶段失败；线上同时间日志确认 `finalizeEvidenceUpload` 返回 `INTERNAL_ERROR`，未记录底层数据库错误，因此不能将线上根因宣称为直接取证确定。使用锁定的 `wx-server-sdk@4.0.2` / `@cloudbase/database@1.4.3`，仅替换数据库网络请求边界，复现事务冲突经 `document.update` 包装后丢失 `code`、变为 `errCode=-501001`，导致 SDK 原有冲突重试仅执行一次写尝试。
+
+  `cloud-evidence-upload-repository.js` 仅对最终登记事务增加明确冲突识别与80/160/320ms有限退避；每次重新开启事务并读取当前账号权限、节点版本、凭证状态及字节计数。不重试通用系统/网络/业务错误，不改变COS授权、文件头/大小核验及120MiB限制；对象HEAD和文件头读取保留在重试外，成功凭证幂等返回不重复计数。测试先红后绿，新增真实SDK错误包装、三文件并发、重复登记、重试时撤权/版本变化/容量变化及重试上限覆盖；独立只读复核无Critical/Important发现。
+
+  新鲜验证：`npm.cmd test --prefix cloudfunctions/businessApi` 1338/1338、`node --test miniprogram/test/*.test.js` 485/485、WXML4/4，0失败/跳过；聚焦仓储测试18/18。发布后 bundled Python 项目记忆验证及 `git diff --check` 通过（仅LF/CRLF提示）。通过 `npm.cmd ci --ignore-scripts --offline --prefix cloudfunctions/businessApi` 使用既有锁文件安装本地依赖，锁文件未修改。本机生成独立发布包（包含生产源码和锁定依赖、不包含测试或客户数据），6374条目、8728169字节、SHA-256 `eb407422f968e6aed38f85977a2dc9392bc7bce733909b28a196b5381c779b8b`；包内修复文件与受测源码一致。
+
+  CloudBase正常上传代码入口部署到当前 `businessApi` 的 `$LATEST`，页面回读上次部署 `09-20 17:58:26`；随后使用控制台默认无action测试事件，云函数正常启动并按预期返回 `UNKNOWN_ACTION`，运行36ms，不触发业务写入。该启动冒烟不等于真实多图上传验收；手机批量上传及原生产底层错误确认仍为unverified。下一步用户在原页面再次保存以重试失败项（已登记项自动跳过），或一次选择至少3张照片验收。本轮未提交/推送Git；保留预存的 `project.config.json`、原部署包、生成文档及Python缓存。备案任务暂停且草稿未提交，不在本轮修复中处理。
+
 - 2026-09-20 GitHub 归档已经回读确认：功能归档提交 `394d743`（99文件）已普通快进推送至既有 `origin/main`，同时同步了此前本地主分支领先的25个提交；`git ls-remote --heads origin refs/heads/main` 与本地 `HEAD` 完整SHA一致，`git rev-list --left-right --count origin/main...HEAD` 返回 `0 0`。下方提交前验证记录保留为证据。本轮不做部署、不变更线上功能；剩余本地项仅为操作员 `project.config.json`、部署压缩包、生成的Word文档和Python缓存，未删除或上传。下一步恢复用户的CloudBase续费/备案操作；新增功能应在验证后同步记录提交及推送状态，不能将上传小程序等同GitHub归档。
 
 - 2026-09-20 用户明确要求补齐 GitHub 提交。本轮归档当前 `main` 中自 `165d97c` 后积累的源码、测试、部署说明、ADR 和首次使用说明源文件，覆盖字段统计/完整 CSV、Mac 媒体兼容、模板复制及严格商品联动；不新增产品行为，不重新发布云函数/小程序，不修改真实记录、权限或 Timer。`project.config.json` 操作员改动、`outputs/` 部署包/生成文档和 `tools/__pycache__/` 均保留本机且排除暂存；真实商品表及导入 JSON 继续留在 ignored `qa/`。

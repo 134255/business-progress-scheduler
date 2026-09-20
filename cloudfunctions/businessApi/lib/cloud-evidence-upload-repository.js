@@ -18,6 +18,7 @@ const OBJECT_KEY = /^evidence-uploads\/([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,
 const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const QUERY_PAGE_SIZE = 100
 const HEADER_BYTES = 64
+const FINALIZE_CONFLICT_DELAYS_MS = Object.freeze([80, 160, 320])
 const COS_UPLOAD_ACTIONS = Object.freeze([
   'name/cos:PutObject',
   'name/cos:InitiateMultipartUpload',
@@ -81,12 +82,37 @@ function isProcessor(node, actor, accountSchema) {
   return Boolean(actor.openid) && memberships(node.assigneeIds).includes(actor.openid)
 }
 
-function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Date(), cloudFilePrefix }) {
+function isTransactionConflict(error) {
+  if (!error || error[APPLICATION_ERROR_MARKER] === true) return false
+  if (error.code === 'DATABASE_TRANSACTION_CONFLICT') return true
+  // wx-server-sdk 4.0.2 converts document-operation conflicts to -501001,
+  // dropping code before the underlying SDK's automatic retry can see it.
+  // Do not retry other system errors, permission denials or version changes.
+  return !error.code && error.errCode === -501001 &&
+    /^document\.(?:get|update|set):fail -501001 resource system error\. database transaction conflict\.?$/i
+      .test(error.errMsg || error.message || '')
+}
+
+function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Date(), cloudFilePrefix,
+  delay = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   if (!db || !storage || typeof storage.headObject !== 'function' || typeof storage.readObjectHeader !== 'function') {
     throw new TypeError('db and storage are required')
   }
   if (typeof cloudFilePrefix !== 'string' || !/^cloud:\/\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(cloudFilePrefix)) {
     throw new TypeError('cloudFilePrefix is invalid')
+  }
+
+  async function commitFinalization(callback) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        // The callback re-reads authorization, current evidence and the shared
+        // node byte counter inside a fresh transaction on every attempt.
+        return await db.runTransaction(callback)
+      } catch (error) {
+        if (!isTransactionConflict(error) || attempt >= FINALIZE_CONFLICT_DELAYS_MS.length) throw error
+        await delay(FINALIZE_CONFLICT_DELAYS_MS[attempt])
+      }
+    }
   }
 
   async function readDocument(database, collectionName, id) {
@@ -310,7 +336,7 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
       evidence.businessLineId, evidence.nodeId, evidence.processingRoundNumber, evidenceId
     )
     if (classified.size > FEEDBACK_TOTAL_LIMIT - baseline) throw createError('FEEDBACK_TOTAL_TOO_LARGE')
-    return db.runTransaction(async transaction => {
+    return commitFinalization(async transaction => {
       const current = await readDocument(transaction, COLLECTIONS.evidences, evidenceId)
       if (!current || current.uploadedBy !== actor._id ||
           current.nodeVersionAtUpload !== expectedNodeVersion ||

@@ -8,6 +8,7 @@ const {
   createScopedCosCredentialProvider
 } = require('../lib/cloud-evidence-upload-repository')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
+const { APPLICATION_ERROR_MARKER } = require('../lib/cloud-template-repository')
 
 const NOW = new Date('2026-08-28T02:00:00.000Z')
 const TOKEN_HASH = 'a'.repeat(64)
@@ -54,6 +55,7 @@ function harness(documents = seed(), overrides = {}) {
       db: fake.db,
       storage,
       clock: () => new Date(NOW),
+      delay: overrides.delay || (async () => {}),
       cloudFilePrefix: 'cloud://test-env'
     })
   }
@@ -180,6 +182,140 @@ test('finalization is idempotent for the same actor, token, node version and evi
   const second = await repository.finalizeUpload(input)
   assert.deepEqual(second, first)
   assert.equal(calls.filter(call => call[0] === 'headObject').length, 1)
+})
+
+function wrappedWriteConflict() {
+  return Object.assign(new Error('document.update:fail -501001 resource system error. database transaction conflict'), {
+    errCode: -501001
+  })
+}
+
+function finalizeInput(evidenceId = EVIDENCE_ID) {
+  return { actor: { _id: 'account-1', status: 'active' }, evidenceId,
+    uploadSessionTokenHash: TOKEN_HASH, expectedNodeVersion: 4 }
+}
+
+async function conflictFromLockedWxSdk() {
+  const cloud = require('wx-server-sdk')
+  const { Db } = require('@cloudbase/database')
+  cloud.init({ env: 'local-upload-repro' })
+  const database = cloud.database()
+  const originalRequest = Db.reqClass
+  let updates = 0
+  // Replace only the network boundary. The real SDK document adapter and
+  // transaction retry logic must remain in this regression.
+  Db.reqClass = class {
+    async send(action) {
+      if (action === 'database.startTransaction') return { transactionId: 'local-tx' }
+      if (action === 'database.modifyDocument') {
+        updates += 1
+        return { code: 'DATABASE_TRANSACTION_CONFLICT', message: 'database transaction conflict' }
+      }
+      if (action === 'database.abortTransaction') return {}
+      assert.fail(`unexpected SDK action: ${action}`)
+    }
+  }
+  try {
+    await database.runTransaction(transaction => transaction.collection('test').doc('node').update({ data: { bytes: 100 } }))
+    assert.fail('the locked SDK must surface the wrapped conflict')
+  } catch (error) {
+    assert.equal(updates, 1)
+    assert.equal(error.errCode, -501001)
+    assert.equal(error.code, undefined)
+    return error
+  } finally {
+    Db.reqClass = originalRequest
+  }
+}
+
+test('finalization recovers a wx SDK wrapped write conflict without reuploading or double counting', async () => {
+  const waits = []
+  const { fake, repository, calls } = harness(seed(), { delay: async ms => { waits.push(ms) } })
+  await reserve(repository)
+  fake.failNextWrite({ collection: 'business_nodes', operation: 'update', error: await conflictFromLockedWxSdk() })
+
+  const result = await repository.finalizeUpload(finalizeInput())
+  assert.equal(result.storageStatus, 'available')
+  assert.equal(fake.documents('business_nodes')[0].evidenceUploadAvailableBytes, 100)
+  assert.equal(fake.documents('evidences').length, 1)
+  assert.deepEqual(waits, [80])
+  assert.equal(calls.filter(call => call[0] === 'headObject').length, 1)
+  assert.deepEqual(await repository.finalizeUpload(finalizeInput()), result)
+  assert.equal(fake.documents('business_nodes')[0].evidenceUploadAvailableBytes, 100)
+})
+
+test('finalization conflict retry rereads the counter and current permission instead of replaying stale writes', async () => {
+  for (const revoked of [false, true]) {
+    let fake
+    const built = harness(seed(), { delay: async () => {
+      if (revoked) fake.replace('users', 'account-1', { status: 'disabled' })
+      else fake.replace('business_nodes', 'node-1', { ...fake.documents('business_nodes')[0],
+        evidenceUploadRoundNumber: 2, evidenceUploadAvailableBytes: 200 })
+    } })
+    fake = built.fake
+    await reserve(built.repository)
+    fake.failNextWrite({ collection: 'business_nodes', operation: 'update', error: wrappedWriteConflict() })
+    if (revoked) {
+      await assert.rejects(built.repository.finalizeUpload(finalizeInput()), { code: 'FORBIDDEN' })
+      assert.equal(fake.documents('evidences')[0].storageStatus, 'uploading')
+    } else {
+      await built.repository.finalizeUpload(finalizeInput())
+      assert.equal(fake.documents('business_nodes')[0].evidenceUploadAvailableBytes, 300)
+    }
+  }
+})
+
+test('only explicit transaction conflicts are retried, with a finite backoff budget', async () => {
+  const cases = [
+    { error: wrappedWriteConflict(), waits: [80, 160, 320] },
+    { error: Object.assign(new Error('conflict'), { code: 'DATABASE_TRANSACTION_CONFLICT' }), waits: [80, 160, 320] },
+    { error: Object.assign(new Error('document.update:fail -501001 resource system error. permission denied'), { errCode: -501001 }), waits: [] },
+    { error: Object.assign(new Error('database transaction conflict'), { code: 'VERSION_CONFLICT', [APPLICATION_ERROR_MARKER]: true }), waits: [] },
+    { error: Object.assign(wrappedWriteConflict(), { [APPLICATION_ERROR_MARKER]: true }), waits: [] },
+    { error: Object.assign(new Error('network failure'), { code: 'ETIMEDOUT' }), waits: [] }
+  ]
+  for (const { error, waits: expectedWaits } of cases) {
+    const waits = []
+    const { fake, repository } = harness(seed(), { delay: async ms => { waits.push(ms) } })
+    await reserve(repository)
+    for (let i = 0; i < 5; i += 1) {
+      fake.failNextWrite({ collection: 'business_nodes', operation: 'update', error })
+    }
+    await assert.rejects(repository.finalizeUpload(finalizeInput()), error)
+    assert.deepEqual(waits, expectedWaits)
+    assert.equal(fake.documents('evidences')[0].storageStatus, 'uploading')
+    assert.equal(fake.documents('business_nodes')[0].evidenceUploadAvailableBytes, undefined)
+  }
+})
+
+test('three concurrent image registrations each publish once and preserve the authoritative total', async () => {
+  const { fake, repository } = harness()
+  const ids = ['1', '2', '3'].map(character => `evidence-${character.repeat(64)}`)
+  for (const evidenceId of ids) {
+    await reserve(repository, { evidenceId,
+      objectKey: `evidence-uploads/business-1/node-1/${evidenceId}.heic` })
+  }
+  const results = await Promise.all(ids.map(id => repository.finalizeUpload(finalizeInput(id))))
+  assert.deepEqual(results.map(result => result.evidenceId).sort(), ids)
+  assert.equal(fake.documents('evidences').filter(item => item.storageStatus === 'available').length, 3)
+  assert.equal(fake.documents('business_nodes')[0].evidenceUploadAvailableBytes, 300)
+})
+
+test('conflict retry cannot overrun capacity or bypass a changed node version', async () => {
+  for (const code of ['FEEDBACK_TOTAL_TOO_LARGE', 'VERSION_CONFLICT']) {
+    let fake
+    const built = harness(seed(), { delay: async () => {
+      fake.replace('business_nodes', 'node-1', { ...fake.documents('business_nodes')[0],
+        ...(code === 'VERSION_CONFLICT' ? { version: 5 } : {
+          evidenceUploadRoundNumber: 2, evidenceUploadAvailableBytes: 120 * 1024 * 1024 - 50
+        }) })
+    } })
+    fake = built.fake
+    await reserve(built.repository)
+    fake.failNextWrite({ collection: 'business_nodes', operation: 'update', error: wrappedWriteConflict() })
+    await assert.rejects(built.repository.finalizeUpload(finalizeInput()), { code })
+    assert.equal(fake.documents('evidences')[0].storageStatus, 'uploading')
+  }
 })
 
 test('authorization refresh reauthorizes and extends one uploading reservation without changing its key', async () => {
