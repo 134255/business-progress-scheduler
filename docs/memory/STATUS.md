@@ -1,5 +1,7 @@
 # Current Status
 
+- 2026-09-21 已完成修复归档并普通快进推送至GitHub `origin/main`：功能提交 `05c179bf133e8091df55d783ad92906ee8b2cd7c`（23文件），远端 `git ls-remote --heads origin refs/heads/main` 回读完整SHA与本地一致，`git rev-list --left-right --count origin/main...HEAD` 为0/0。仅剩操作员project.config.json、部署包/生成文档和Python缓存留在工作区，不删除、不提交。下方本轮回归、精确范围、敏感信息扫描和独立复核证据保持；本轮没有重新部署、提交小程序审核或改线上数据。下一步仍为用户确认体验版1.2.2及Mac微信实际验收，不能把Git归档等同真机问题已验收。
+
 - 2026-09-21 用户要求提交GitHub，本轮仅归档上一轮已发布的修复，不新增产品行为、不重新部署或写入云端数据。提交范围为卡片大联动表读取预算、首页完成节点计数、审批意见与各轮只读历史、填写页冲突恢复联动，以及对应测试、部署说明、PROJECT/STATUS和ADR-0005；共23个候选文件。操作员project.config.json、outputs/、qa/及tools/__pycache__/均保留本机且排除提交。
 
   本轮新鲜回归：`npm.cmd test --prefix cloudfunctions/businessApi` 1362/1362、`node --test miniprogram/test/*.test.js` 536/536、`node tools/test-wxml-structure.mjs` 4/4，全通过、0失败/跳过。发布前已完成的独立功能复核证据保留，本轮提交范围只读复核也已通过，105处相对模块引用未发现缺失，无有证据的提交阻断。精确23文件暂存检查、15个JS语法检查、记忆验证及差异空白检查通过；高置信度凭据模式扫描0命中。本轮不重做Mac微信或线上业务验收。通过git fetch origin main确认远端与本地基线7afd76b一致，无领先/落后；仅计划普通快进推送，禁止force。本条为提交前验证记录，实际提交/推送结果以随后远端SHA回读为准。
