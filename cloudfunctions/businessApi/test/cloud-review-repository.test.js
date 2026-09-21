@@ -7,6 +7,174 @@ const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 
 const NOW = new Date('2026-08-11T03:00:00.000Z')
 
+function historySeed() {
+  const data = votingSeed()
+  data.business_nodes[0] = { ...data.business_nodes[0], status: 'completed',
+    processingRoundNumber: 3, reviewRoundNumber: 3, activeReviewRoundId: null,
+    lastReviewRoundId: 'round-3' }
+  const base = data.node_review_rounds[0]
+  data.node_review_rounds = [1, 2, 3].map(number => ({ ...base, _id: `round-${number}`,
+    processingRoundNumber: number, reviewRoundNumber: number,
+    status: number === 3 ? 'approved' : 'rejected', voteCount: 1 }))
+  data.node_review_votes = data.node_review_rounds.map(round => ({
+    _id: `vote-${round._id}`, reviewRoundId: round._id, businessLineId: 'line-1', nodeId: 'node-1',
+    reviewerUserId: 'reviewer-1', reviewerDisplayName: '审核人一', decision: round.status,
+    comment: `第${round.reviewRoundNumber}轮意见\n第二行`, createdAt: NOW,
+    inputHash: 'private-hash', openid: 'private-openid'
+  }))
+  return data
+}
+
+const HISTORY_QUERY = { businessLineId: 'line-1', nodeId: 'node-1', pageSize: 2 }
+const HISTORY_ACTOR = { _id: 'processor-1', status: 'active' }
+
+test('审核历史向售后成员按轮次分页只读展示旧意见且不泄漏内部字段', async () => {
+  const { repository, fake } = harness({ seed: historySeed() })
+  const first = await repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY })
+  assert.deepEqual(first.items.map(item => item.reviewRoundNumber), [3, 2])
+  assert.equal(first.hasMore, true)
+  assert.equal(first.nextBeforeRoundNumber, 2)
+  assert.deepEqual(first.items[0], { reviewRoundId: 'round-3', reviewRoundNumber: 3,
+    processingRoundNumber: 3, status: 'approved', submittedAt: NOW, votes: [{
+      reviewerDisplayName: '审核人一', decision: 'approved', comment: '第3轮意见\n第二行', createdAt: NOW
+    }] })
+  const second = await repository.listNodeReviewHistory({ actor: HISTORY_ACTOR,
+    ...HISTORY_QUERY, beforeRoundNumber: first.nextBeforeRoundNumber })
+  assert.deepEqual(second.items.map(item => item.reviewRoundNumber), [1])
+  assert.equal(second.hasMore, false)
+  assert.equal(second.nextBeforeRoundNumber, null)
+  assert.doesNotMatch(JSON.stringify(first), /private-|reviewerUserId|canApprove|canReject|fieldValues/)
+  assert.equal(fake.writeCalls.length, 0)
+  assert.equal(fake.transactionQueries.length, 0)
+  assert.ok(fake.transactionRuns.every(run => run.operations <= 14))
+  assert.ok(fake.queryCalls.every(call => call.limit <= 3))
+  await assert.rejects(repository.getReviewDetail({ actor: HISTORY_ACTOR, reviewRoundId: 'round-3' }),
+    error => error.code === 'FORBIDDEN', '历史只读不放宽原审核详情/操作权限')
+})
+
+test('审核历史在返工及售后结束后仍可读，并兼容旧的空意见', async () => {
+  for (const status of ['active', 'completed', 'cancelled', 'closed']) {
+    const data = historySeed()
+    data.business_lines[0].status = status
+    data.business_nodes[0].status = 'in_progress'
+    data.business_nodes[0].processingRoundNumber = 4
+    data.node_review_rounds[2].status = 'rejected'
+    data.node_review_votes[2].decision = 'rejected'
+    delete data.node_review_votes[2].comment
+    const { repository } = harness({ seed: data })
+    const result = await repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY })
+    assert.equal(result.items[0].votes[0].comment, '')
+  }
+})
+
+test('审核历史拒绝无权、禁用、已删除或跨售后的读取', async () => {
+  for (const mutate of [
+    data => { data.business_lines[0].memberUserIds = ['reviewer-1'] },
+    data => { data.users[0].status = 'disabled' },
+    data => { data.business_lines[0].status = 'deleted' },
+    data => { data.business_nodes[0].businessLineId = 'other-line' },
+    data => { data.node_review_rounds[2].businessLineId = 'other-line' },
+    data => { data.node_review_votes[2].businessLineId = 'other-line' },
+    data => { data.node_review_votes[2].nodeId = 'other-node' },
+    data => { data.node_review_votes[2].comment = { text: 'invalid' } },
+    data => { data.node_review_votes[2].comment = 'x'.repeat(1001) },
+    data => { data.node_review_votes.push({ ...data.node_review_votes[2], _id: 'duplicate' }) }
+  ]) {
+    const data = historySeed()
+    mutate(data)
+    const { repository, fake } = harness({ seed: data })
+    await assert.rejects(repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY }),
+      error => error.code === 'FORBIDDEN')
+    assert.equal(fake.writeCalls.length, 0)
+  }
+})
+
+test('读取审核历史过程中权限被撤销或轮次变化时不返回旧结果', async () => {
+  for (const target of ['membership', 'account', 'round']) {
+    let changed = false
+    let fake
+    const setup = harness({ seed: historySeed(), transformRead({ collection, data }) {
+      if (collection === 'node_review_votes' && !changed) {
+        changed = true
+        if (target === 'membership') {
+          const line = fake.documents('business_lines')[0]
+          fake.replace('business_lines', line._id, { ...line, memberUserIds: ['reviewer-1'] })
+        } else if (target === 'account') {
+          fake.replace('users', 'processor-1', { _id: 'processor-1', status: 'disabled' })
+        } else {
+          const round = fake.documents('node_review_rounds').find(item => item._id === 'round-3')
+          fake.replace('node_review_rounds', round._id, { ...round, version: round.version + 1 })
+        }
+      }
+      return data
+    } })
+    fake = setup.fake
+    await assert.rejects(setup.repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY }),
+      error => error.code === (target === 'round' ? 'VERSION_CONFLICT' : 'FORBIDDEN'))
+  }
+})
+
+test('审核历史游标允许读取第100轮之前，页大小仍有上限', async () => {
+  const data = historySeed()
+  data.business_nodes[0].reviewRoundNumber = 101
+  data.business_nodes[0].processingRoundNumber = 101
+  const { repository } = harness({ seed: data })
+  const result = await repository.listNodeReviewHistory({ actor: HISTORY_ACTOR,
+    ...HISTORY_QUERY, beforeRoundNumber: 101 })
+  assert.deepEqual(result.items.map(item => item.reviewRoundNumber), [3, 2])
+  for (const query of [{ pageSize: 11 }, { pageSize: 0 }, { beforeRoundNumber: 0 }, { beforeRoundNumber: '2' }]) {
+    await assert.rejects(repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY, ...query }),
+      error => error.code === 'INVALID_PAGINATION')
+  }
+})
+
+test('无审核轮次时返回明确空列表，负责人可读但伪造管理员不能越权', async () => {
+  const data = seed()
+  data.business_nodes[0].reviewerUserIds = []
+  const { repository, fake } = harness({ seed: data })
+  assert.deepEqual(await repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY }),
+    { items: [], hasMore: false, nextBeforeRoundNumber: null })
+  assert.deepEqual(await repository.listNodeReviewHistory({ actor: { _id: 'manager-1' }, ...HISTORY_QUERY }),
+    { items: [], hasMore: false, nextBeforeRoundNumber: null })
+  fake.replace('users', 'outsider', { _id: 'outsider', status: 'active' })
+  await assert.rejects(repository.listNodeReviewHistory({ actor: { _id: 'outsider', role: 'super_admin' }, ...HISTORY_QUERY }),
+    error => error.code === 'FORBIDDEN')
+  fake.replace('users', 'outsider', { _id: 'outsider', status: 'active', role: 'super_admin' })
+  assert.deepEqual(await repository.listNodeReviewHistory({ actor: { _id: 'outsider' }, ...HISTORY_QUERY }),
+    { items: [], hasMore: false, nextBeforeRoundNumber: null })
+})
+
+test('审核历史拒绝意见访问器和继承值且不执行取值代码', async () => {
+  let getterCalls = 0
+  for (const inherited of [false, true]) {
+    const { repository } = harness({ seed: historySeed(), transformRead({ collection, data }) {
+      if (collection === 'node_review_votes') {
+        delete data.comment
+        if (inherited) Object.setPrototypeOf(data, { comment: 'inherited' })
+        else Object.defineProperty(data, 'comment', { get() { getterCalls += 1; return 'getter' } })
+      }
+      return data
+    } })
+    await assert.rejects(repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY }),
+      error => error.code === 'FORBIDDEN')
+  }
+  assert.equal(getterCalls, 0)
+})
+
+test('售后审核中取消或关闭仅冻结售后头，仍可只读查看已有投票', async () => {
+  for (const status of ['cancelled', 'closed']) {
+    const data = votingSeed()
+    data.business_lines[0].status = status
+    data.node_review_votes = [{ ...historySeed().node_review_votes[0],
+      reviewRoundId: 'review-feedback-current', decision: 'approved', comment: '保留原审核意见' }]
+    const { repository } = harness({ seed: data })
+    const result = await repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY })
+    assert.equal(result.items[0].votes[0].comment, '保留原审核意见')
+    await assert.rejects(repository.getReviewDetail({ actor: { _id: 'reviewer-2' }, reviewRoundId: 'review-feedback-current' }),
+      error => error.code === 'FORBIDDEN')
+  }
+})
+
 function seed(overrides = {}) {
   return {
     users: overrides.users || [
@@ -431,7 +599,7 @@ test('审核详情只允许当前审核人、业务管理员或超级管理员�
   assert.equal(detail.processingComment, '处理说明快照')
   assert.deepEqual(detail.evidences, [{ evidenceId: 'evidence-a' }])
   assert.deepEqual(detail.votes, [{
-    reviewerDisplayName: '审核人二', decision: 'approved', createdAt: NOW
+    reviewerDisplayName: '审核人二', decision: 'approved', comment: '同意', createdAt: NOW
   }])
   assert.equal(detail.canApprove, true)
   assert.equal(detail.canReject, true)
@@ -906,6 +1074,12 @@ test('驳回后审核人仍可读取已固化轮次但处理人不能借历史�
   })
   assert.equal(detail.status, 'rejected')
   assert.equal(detail.canApprove, false)
+  assert.equal(detail.votes[0].comment, '字段需返工')
+  const beforeRead = fake.documents('node_review_votes')
+  const history = await repository.listNodeReviewHistory({ actor: HISTORY_ACTOR, ...HISTORY_QUERY })
+  assert.equal(history.items[0].votes[0].comment, '字段需返工')
+  assert.equal(history.items[0].status, 'rejected')
+  assert.deepEqual(fake.documents('node_review_votes'), beforeRead)
   await assert.rejects(repository.getReviewDetail({
     actor: { _id: 'processor-1', status: 'active' }, reviewRoundId: 'review-feedback-current'
   }), error => error.code === 'FORBIDDEN')

@@ -106,6 +106,27 @@
     <text class="muted">你可以查看节点记录与凭证，但当前账号不能提交此节点。</text>
   </view>
 
+  <view wx:if="{{workflowMode === 'review'}}" class="review-history-section">
+    <view class="section-title">审核历史</view>
+    <view class="card" wx:for="{{reviewHistory}}" wx:for-item="round" wx:key="reviewRoundId">
+      <view class="row-between"><text class="history-status">第 {{round.reviewRoundNumber}} 轮审核</text><text>{{round.statusLabel}}</text></view>
+      <text class="muted block">处理轮次：{{round.processingRoundNumber}} · 提交时间：{{round.submittedAtText || '待记录'}}</text>
+      <view class="review-history-vote" wx:for="{{round.votes}}" wx:for-item="vote" wx:key="voteKey">
+        <view class="row-between"><text>{{vote.reviewerDisplayName}}</text><text>{{vote.decisionLabel}}</text></view>
+        <text class="muted block">{{vote.createdAtText || '待记录'}}</text>
+        <text class="block vote-comment">{{vote.commentText}}</text>
+      </view>
+      <text wx:if="{{!round.votes.length}}" class="muted block">本轮暂无审核意见</text>
+    </view>
+    <view wx:if="{{reviewHistoryLoading}}" class="empty">正在加载审核历史…</view>
+    <view wx:elif="{{reviewHistoryError}}" class="card">
+      <text class="error-text">{{reviewHistoryError}}</text>
+      <button class="secondary-button" bindtap="onRetryReviewHistory">重试加载审核历史</button>
+    </view>
+    <view wx:elif="{{reviewHistoryLoaded && !reviewHistory.length}}" class="empty">暂无审核记录</view>
+    <button wx:if="{{reviewHistoryHasMore && !reviewHistoryError}}" class="secondary-button" loading="{{reviewHistoryLoading}}" disabled="{{reviewHistoryLoading}}" bindtap="onLoadMoreReviewHistory">加载更多审核历史</button>
+  </view>
+
   <view class="section-title">反馈历史</view>
   <view class="card history" wx:for="{{history}}" wx:key="feedbackId">
     <view class="row-between">

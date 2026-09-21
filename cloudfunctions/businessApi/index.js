@@ -509,6 +509,10 @@ function createReviewRoutes(reviewService) {
       actor,
       reviewRoundId: selectProtectedPayload(payload, new Set(['reviewRoundId'])).reviewRoundId
     }),
+    listNodeReviewHistory: ({ actor, payload }) => reviewService.listNodeReviewHistory({
+      actor,
+      query: selectProtectedPayload(payload, new Set(['businessLineId', 'nodeId', 'beforeRoundNumber', 'pageSize']))
+    }),
     listMyNotifications: ({ actor, payload }) => reviewService.listMyNotifications({
       actor,
       query: selectProtectedPayload(payload, new Set(['page', 'pageSize']))

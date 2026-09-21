@@ -5,6 +5,8 @@
 .boolean-options, .multi-options { display: flex; flex-wrap: wrap; gap: 20rpx; }
 .history-status { color: #0f766e; font-weight: 650; }
 .history-comment { display: block; margin-top: 16rpx; line-height: 1.6; }
+.vote-comment { white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; line-height: 1.6; }
+.review-history-vote { margin-top: 20rpx; padding-top: 16rpx; border-top: 1rpx solid #e5e7eb; }
 .history-fields { margin-top: 18rpx; padding: 14rpx; border-radius: 12rpx; background: #f8fafc; }
 .history-field { display: flex; justify-content: space-between; gap: 24rpx; padding: 8rpx 0; }
 .history-evidence { display: flex; justify-content: space-between; gap: 20rpx; margin-top: 14rpx; padding-top: 14rpx; border-top: 1rpx solid #e5e7eb; }

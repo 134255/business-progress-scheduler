@@ -232,6 +232,10 @@ function getReviewDetail(reviewRoundId) {
   return callProtected('getReviewDetail', { reviewRoundId }, '审核详情加载失败，请稍后重试')
 }
 
+function listNodeReviewHistory(query) {
+  return callProtected('listNodeReviewHistory', query, '审核历史加载失败，请稍后重试')
+}
+
 function listMyNotifications(query) {
   return callProtected('listMyNotifications', query, '消息通知加载失败，请稍后重试')
 }
@@ -284,6 +288,7 @@ module.exports = {
   decideNodeRoute,
   listMyPendingReviews,
   getReviewDetail,
+  listNodeReviewHistory,
   listMyNotifications,
   markNotificationRead
 }

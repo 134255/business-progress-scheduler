@@ -49,6 +49,12 @@ function pick(document, keys) {
     // legacy discriminator, without copying dates or server-date sentinels.
     if (['processingStartedAt', 'reviewStartedAt', 'processingDueAt', 'reviewDueAt',
       'feedbackClaimExpiresAt'].includes(key)) result[key] = true
+    // Match the summarizer's bounded definition budget for strict product
+    // linkage tables. Keep unrelated arrays and feedback values on the
+    // smaller default budget, including during transaction revalidation.
+    else if (key === 'fieldDefinitions' || key === 'fields') {
+      result[key] = copyOwnData(property.value, 0, { remaining: 100000, arrayLimit: 5000 })
+    }
     else result[key] = copyOwnData(property.value)
   }
   return result

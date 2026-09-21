@@ -80,6 +80,46 @@ function sourceNode(overrides = {}) {
   }
 }
 
+for (const scenario of [
+  { name: '新建首节点', status: 'active', path: [], current: 'entry', completed: 0, traversed: 0 },
+  { name: '已完成首节点进入后续', status: 'active', path: ['entry'], current: 'next', completed: 1, traversed: 1 },
+  { name: '分支跳转不按节点序号或模板总数计数', status: 'active', path: ['entry', 'branch'], current: 'finish', completed: 2, traversed: 2 },
+  { name: '待人工决定不提前计为完成', status: 'active', path: ['entry', 'manual'], current: 'manual', awaiting: true, completed: 1, traversed: 2 },
+  { name: '首节点待人工决定为零', status: 'active', path: ['entry'], current: 'entry', awaiting: true, completed: 0, traversed: 1 },
+  { name: '人工决定后继续', status: 'active', path: ['entry', 'manual'], current: 'finish', awaiting: false, completed: 2, traversed: 2 },
+  { name: '售后结束包含最后完成节点', status: 'completed', path: ['entry', 'finish'], current: 'finish', completed: 2, traversed: 2 },
+  { name: '关闭待决定售后不虚增完成数', status: 'closed', path: ['entry', 'manual'], current: 'manual', awaiting: true, completed: 1, traversed: 2 }
+]) {
+  test(`首页与普通列表返回真实路线节点数：${scenario.name}`, async () => {
+    const line = {
+      _id: 'line-count', code: 'BL-COUNT', name: '节点计数售后', status: scenario.status,
+      version: 7, flowSchemaVersion: 2, entryNodeId: 'entry', currentNodeId: scenario.current,
+      currentNodeName: '当前节点', currentNodeIndex: 12, nodeCount: 16, progress: 0,
+      managerUserIds: ['reader'], memberUserIds: ['reader'],
+      traversedNodeIds: scenario.path, routeDecisionVersion: 3,
+      // Stale derived values must not override the authoritative route ledger.
+      completedNodeCount: 0, traversedNodeCount: 0,
+      updatedAt: new Date('2026-09-20T10:00:00Z'),
+      ...(scenario.awaiting === undefined ? {} : { awaitingManualDecision: scenario.awaiting })
+    }
+    const { fake, repository } = createRepositoryHarness({
+      users: [{ _id: 'reader', status: 'active', role: 'user' }], business_lines: [line]
+    })
+    const actor = { _id: 'reader' }
+    const dashboard = await repository.getMyBusinessSummary({ actor })
+    const list = await repository.listBusinessLines({ actor })
+    for (const item of [dashboard.recent[0], list.items[0]]) {
+      assert.equal(item.completedNodeCount, scenario.completed)
+      assert.equal(item.traversedNodeCount, scenario.traversed)
+      assert.equal(item.currentNodeName, '当前节点')
+      assert.equal(item.version, 7)
+      assert.deepEqual(item.traversedNodeIds, scenario.path)
+    }
+    assert.deepEqual(fake.documents('business_lines'), [line])
+    assert.equal(fake.writeCalls.length, 0)
+  })
+}
+
 function seedDefinition(overrides = {}) {
   const nodes = overrides.nodes || [
     sourceNode(),
@@ -401,6 +441,12 @@ test('version 2 detail exposes only the actual route and authorizes manual decis
   assert.equal(detail.line.completedNodeCount, 1)
   assert.equal(detail.line.traversedNodeCount, 2)
   assert.equal(detail.line.awaitingManualDecision, true)
+  const dashboard = await repository.getMyBusinessSummary({ actor: { _id: 'user-2' } })
+  const list = await repository.listBusinessLines({ actor: { _id: 'user-2' } })
+  for (const item of [dashboard.recent[0], list.items[0]]) {
+    assert.equal(item.completedNodeCount, detail.line.completedNodeCount)
+    assert.equal(item.traversedNodeCount, detail.line.traversedNodeCount)
+  }
   assert.equal(detail.nodes[1].canDecideNodeRoute, true)
   assert.equal(detail.nodes[1].routeActivateTargetName, '可选节点')
   assert.equal(detail.nodes[1].routeSkipTargetName, '跳过目标')

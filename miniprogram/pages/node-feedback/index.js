@@ -1,5 +1,5 @@
 const businessService = require('../../services/business')
-const { safeErrorMessage } = require('../../utils/safe-error')
+const { safeErrorMessage, isAccountAccessError } = require('../../utils/safe-error')
 const { createEvidenceUploader } = require('../../utils/evidence-upload')
 const { prepareEvidenceFile } = require('../../utils/evidence-file')
 const {
@@ -197,6 +197,24 @@ function devicePlatform() {
   }
 }
 
+function formattedReviewHistory(items) {
+  const statusLabels = { pending: '审核中', approved: '已通过', rejected: '已驳回' }
+  return items.map(round => ({
+    reviewRoundId: round.reviewRoundId,
+    reviewRoundNumber: round.reviewRoundNumber,
+    processingRoundNumber: round.processingRoundNumber,
+    statusLabel: statusLabels[round.status] || '未知状态',
+    submittedAtText: dateTimeText(round.submittedAt),
+    votes: round.votes.map((vote, index) => ({
+      voteKey: `${index}-${vote.createdAt || ''}`,
+      reviewerDisplayName: vote.reviewerDisplayName,
+      decisionLabel: vote.decision === 'approved' ? '通过' : '驳回',
+      commentText: typeof vote.comment === 'string' && vote.comment.trim() ? vote.comment : '未填写审核意见',
+      createdAtText: dateTimeText(vote.createdAt)
+    }))
+  }))
+}
+
 function supportsOriginalMediaVideo() {
   try {
     if (typeof wx.chooseMedia !== 'function' || typeof wx.canIUse === 'function' && !wx.canIUse('chooseMedia')) return false
@@ -240,6 +258,12 @@ Page({
     fieldValues: {},
     history: [],
     loadingHistory: true,
+    reviewHistory: [],
+    reviewHistoryLoading: false,
+    reviewHistoryLoaded: false,
+    reviewHistoryError: '',
+    reviewHistoryHasMore: false,
+    reviewHistoryBeforeRoundNumber: null,
     errorMessage: '',
     statusOptions: STATUS_OPTIONS,
     statusIndex: 0,
@@ -265,8 +289,10 @@ Page({
       return
     }
     this.loadActorId = actorId
+    this.identityInvalidated = false
     this.pageAlive = true
     this.loadSequence = 0
+    this.reviewHistorySequence = 0
     this.writeSequence = 0
     this.recognitionSequence = 0
     this.formRevision = 0
@@ -277,8 +303,9 @@ Page({
   },
 
   onShow() {
-    if (!this.data.lineId || !this.hasLoaded || this.evidencePickerPending > 0 || this.data.draftDirty ||
-        this.data.submitting || this.data.reviewDraftLocked) return
+    if (!this.actorStillCurrent()) return
+    if (!this.data.lineId || !this.hasLoaded || this.evidencePickerPending > 0 || this.data.submitting) return
+    if (this.data.draftDirty || this.data.reviewDraftLocked) return this.loadReviewHistory()
     return this.loadData()
   },
 
@@ -289,6 +316,7 @@ Page({
 
   onUnload() {
     this.pageAlive = false
+    this.clearReviewHistory()
     this.fieldDefinitions = null
     this.definitionSchemaFingerprint = null
     this.loadSequence += 1
@@ -296,18 +324,24 @@ Page({
   },
 
   actorStillCurrent() {
+    if (this.identityInvalidated) return false
     if (this.loadActorId && currentUserId() === this.loadActorId) return true
+    this.identityInvalidated = true
+    this.clearReviewHistory()
+    this.loadSequence += 1
+    this.setData({ canSubmit: false, readOnly: true })
     wx.reLaunch({ url: '/pages/login/index' })
     return false
   },
 
   async loadData() {
+    if (!this.pageAlive || !this.actorStillCurrent()) return
     const requestSequence = ++this.loadSequence
     const requestedActorId = this.loadActorId || currentUserId()
     this.setData({ loadingHistory: true, errorMessage: '' })
     try {
       const workspace = await businessService.getNodeWorkspace(this.data.lineId, this.data.nodeId)
-      if (!this.pageAlive || requestSequence !== this.loadSequence || currentUserId() !== requestedActorId) return
+      if (!this.pageAlive || requestSequence !== this.loadSequence || !this.actorStillCurrent() || currentUserId() !== requestedActorId) return
       const node = workspace && workspace.node
       if (!node) throw new Error('未找到节点')
       const requiresEvidenceField = ownDataValue(node, 'requiresEvidence')
@@ -386,8 +420,12 @@ Page({
       this.formRevision += 1
       this.hasLoaded = true
       wx.setNavigationBarTitle({ title: node.name || '节点反馈' })
+      // History has its own read lifecycle; it must never delay or overwrite the progress form.
+      if (!legacyMode) this.loadReviewHistory()
+      else this.clearReviewHistory()
     } catch (error) {
       if (this.pageAlive && requestSequence === this.loadSequence && this.actorStillCurrent()) {
+        this.clearReviewHistoryOnAccessError(error)
         this.setData({
           errorMessage: safeErrorMessage(error, '节点信息加载失败，请稍后重试'),
           canSubmit: false,
@@ -404,6 +442,74 @@ Page({
   async loadHistory() {
     return this.loadData()
   },
+
+  clearReviewHistory(errorMessage = '') {
+    this.reviewHistorySequence = (this.reviewHistorySequence || 0) + 1
+    this.reviewHistoryRetryAppend = false
+    this.setData({
+      reviewHistory: [], reviewHistoryLoading: false, reviewHistoryLoaded: false,
+      reviewHistoryError: errorMessage, reviewHistoryHasMore: false, reviewHistoryBeforeRoundNumber: null
+    })
+  },
+
+  clearReviewHistoryOnAccessError(error, operation) {
+    if (operation && (this.data.lineId !== operation.lineId || this.data.nodeId !== operation.nodeId)) return
+    if (isAccountAccessError(error) && this.pageAlive && this.actorStillCurrent()) {
+      this.clearReviewHistory('审核历史暂时无法查看，请重试')
+      this.loadSequence += 1
+      this.setData({ canSubmit: false, readOnly: true, loadingHistory: false })
+    }
+  },
+
+  reviewHistoryRequestCurrent(sequence, actorId, lineId, nodeId) {
+    return this.pageAlive && sequence === this.reviewHistorySequence && this.actorStillCurrent() &&
+      currentUserId() === actorId && this.data.lineId === lineId && this.data.nodeId === nodeId
+  },
+
+  async loadReviewHistory(append = false) {
+    if (!this.pageAlive || !this.actorStillCurrent() || this.data.workflowMode !== 'review') return
+    if (append && (this.data.reviewHistoryLoading || !this.data.reviewHistoryHasMore)) return
+    const sequence = (this.reviewHistorySequence || 0) + 1
+    this.reviewHistorySequence = sequence
+    const actorId = this.loadActorId
+    const { lineId, nodeId } = this.data
+    const query = { businessLineId: lineId, nodeId, pageSize: 5 }
+    if (append) query.beforeRoundNumber = this.data.reviewHistoryBeforeRoundNumber
+    const isCurrent = () => this.reviewHistoryRequestCurrent(sequence, actorId, lineId, nodeId)
+    this.setData({ reviewHistoryLoading: true, reviewHistoryError: '' })
+    try {
+      const result = await businessService.listNodeReviewHistory(query)
+      if (!isCurrent()) return
+      if (!result || !Array.isArray(result.items) || typeof result.hasMore !== 'boolean' ||
+          result.hasMore && (!Number.isSafeInteger(result.nextBeforeRoundNumber) || result.nextBeforeRoundNumber < 1)) {
+        throw new Error('Invalid review history response')
+      }
+      const items = formattedReviewHistory(result.items)
+      this.reviewHistoryRetryAppend = false
+      this.setData({
+        reviewHistory: append ? this.data.reviewHistory.concat(items) : items,
+        reviewHistoryLoaded: true,
+        reviewHistoryHasMore: result.hasMore,
+        reviewHistoryBeforeRoundNumber: result.hasMore ? result.nextBeforeRoundNumber : null
+      })
+    } catch (error) {
+      if (!isCurrent()) return
+      const message = safeErrorMessage(error, '审核历史加载失败，请稍后重试')
+      if (isAccountAccessError(error)) this.clearReviewHistoryOnAccessError(error)
+      else {
+        this.reviewHistoryRetryAppend = append
+        this.setData({ reviewHistoryError: message })
+      }
+    } finally {
+      if (isCurrent()) this.setData({ reviewHistoryLoading: false })
+    }
+  },
+
+  onRetryReviewHistory() {
+    if (!this.data.reviewHistoryLoading) return this.loadReviewHistory(Boolean(this.reviewHistoryRetryAppend))
+  },
+
+  onLoadMoreReviewHistory() { return this.loadReviewHistory(true) },
 
   onStatus(event) {
     if (this.data.submitting || this.data.readOnly) return
@@ -468,6 +574,7 @@ Page({
       wx.showToast({ title: candidates.length ? '识别完成，请确认结果' : '未识别到可填写内容', icon: 'none' })
     } catch (error) {
       if (this.pageAlive && sequence === this.recognitionSequence && this.actorStillCurrent()) {
+        this.clearReviewHistoryOnAccessError(error)
         wx.showToast({ title: safeErrorMessage(error, '文本识别失败，请稍后重试'), icon: 'none' })
       }
     } finally {
@@ -816,13 +923,13 @@ Page({
   },
 
   writeStillCurrent(operation) {
-    return Boolean(operation) && this.pageAlive && currentUserId() === operation.actorId &&
+    return Boolean(operation) && this.pageAlive && this.actorStillCurrent() && currentUserId() === operation.actorId &&
       this.writeSequence === operation.sequence && this.data.lineId === operation.lineId &&
       this.data.nodeId === operation.nodeId && this.data.expectedNodeVersion === operation.nodeVersion
   },
 
   operationStillOwnsPage(operation) {
-    return Boolean(operation) && this.pageAlive && currentUserId() === operation.actorId &&
+    return Boolean(operation) && this.pageAlive && this.actorStillCurrent() && currentUserId() === operation.actorId &&
       this.writeSequence === operation.sequence && this.data.lineId === operation.lineId &&
       this.data.nodeId === operation.nodeId
   },
@@ -865,6 +972,7 @@ Page({
             evidenceId: registered.evidenceId, errorMessage: '', errorCode: '', canRetry: false
           })
         } catch (error) {
+          this.clearReviewHistoryOnAccessError(error, operation)
           const safeError = safeUploadError(error)
           if (this.writeStillCurrent(operation)) this.updateLocalFile(index, {
             status: 'failed', statusLabel: '上传失败',
@@ -902,6 +1010,7 @@ Page({
         await wx.openDocument({ filePath: downloaded.tempFilePath, fileType: 'pdf', showMenu: true })
       }
     } catch (error) {
+      this.clearReviewHistoryOnAccessError(error)
       wx.showToast({ title: error.code === 'EVIDENCE_EXPIRED' ? '凭证已到期或已清理' : '凭证暂时无法打开', icon: 'none' })
     } finally {
       wx.hideLoading()
@@ -931,6 +1040,7 @@ Page({
       }
       wx.showToast({ title: `已完成 ${completed} 个文件`, icon: 'success' })
     } catch (error) {
+      this.clearReviewHistoryOnAccessError(error)
       wx.showToast({ title: `已下载 ${completed} 个，后续失败`, icon: 'none' })
     } finally {
       wx.hideLoading()
@@ -939,7 +1049,8 @@ Page({
   },
 
   canWriteReviewNode() {
-    return this.data.workflowMode === 'review' && this.data.canSubmit && !this.data.frozen && !this.data.readOnly
+    return this.pageAlive && this.actorStillCurrent() && this.data.workflowMode === 'review' &&
+      this.data.canSubmit && !this.data.frozen && !this.data.readOnly
   },
 
   primaryActionLabel() {
@@ -960,8 +1071,13 @@ Page({
     const selectedTotalText = this.data.selectedTotalText
     await this.loadData()
     if (!this.operationStillOwnsPage(operation)) return
+    // Restore the draft and its dependent choices together, not the server draft's choices.
+    const restoredForm = deriveConditionalForm(this.fieldDefinitions || this.data.fields, fieldValues)
     this.formRevision += 1
-    this.setData({ fieldValues, comment, files, selectedTotalBytes, selectedTotalText, draftDirty: true })
+    this.setData({
+      fieldValues: restoredForm.fieldValues, visibleFields: restoredForm.visibleFields,
+      comment, files, selectedTotalBytes, selectedTotalText, draftDirty: true
+    })
   },
 
   async progressPayload(operation) {
@@ -1057,6 +1173,7 @@ Page({
       await this.loadData()
       return true
     } catch (error) {
+      this.clearReviewHistoryOnAccessError(error, operation)
       if (this.writeStillCurrent(operation)) {
         if (error.code === 'VERSION_CONFLICT') await this.refreshPreservingDraft(operation)
         wx.showToast({ title: safeErrorMessage(error, action === 'complete_node' ? '完成节点失败，请重试' : '处理进度保存失败，请重试'), icon: 'none' })
@@ -1095,7 +1212,8 @@ Page({
       if (!this.operationStillOwnsPage(operation)) return false
       const node = workspace && workspace.node
       return Boolean(node && node._id === operation.nodeId && node.status === 'pending_review')
-    } catch (_) {
+    } catch (error) {
+      this.clearReviewHistoryOnAccessError(error, operation)
       return false
     }
   },
@@ -1194,6 +1312,7 @@ Page({
       }
       this.finishReviewSubmission(operation)
     } catch (error) {
+      this.clearReviewHistoryOnAccessError(error, operation)
       if (this.writeStillCurrent(operation)) {
         // Upload failure cannot have submitted a new review. Keep the local
         // draft editable; only an already-dispatched write needs replay locks.

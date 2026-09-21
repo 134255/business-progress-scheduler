@@ -11,6 +11,7 @@ const VOTE_INPUT_KEYS = new Set([
   'reviewRoundId', 'expectedRoundVersion', 'decision', 'comment', 'requestKey'
 ])
 const QUERY_KEYS = new Set(['page', 'pageSize'])
+const HISTORY_QUERY_KEYS = new Set(['businessLineId', 'nodeId', 'beforeRoundNumber', 'pageSize'])
 const DEFAULT_PAGE = 1
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 50
@@ -62,6 +63,23 @@ function normalizeQuery(query) {
     throw createError('INVALID_PAGINATION')
   }
   return { page, pageSize }
+}
+
+function normalizeHistoryQuery(query) {
+  if (!isPlainOwnObject(query) || Reflect.ownKeys(query).some(key =>
+    typeof key !== 'string' || !HISTORY_QUERY_KEYS.has(key) ||
+    !Object.prototype.hasOwnProperty.call(Object.getOwnPropertyDescriptor(query, key), 'value'))) {
+    throw createError('INVALID_QUERY')
+  }
+  const businessLineId = normalizeDocumentId(query.businessLineId)
+  const nodeId = normalizeDocumentId(query.nodeId)
+  const pageSize = query.pageSize === undefined ? 5 : query.pageSize
+  const beforeRoundNumber = query.beforeRoundNumber === undefined ? null : query.beforeRoundNumber
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 10 ||
+      beforeRoundNumber !== null && (!Number.isSafeInteger(beforeRoundNumber) || beforeRoundNumber < 1)) {
+    throw createError('INVALID_PAGINATION')
+  }
+  return { businessLineId, nodeId, pageSize, beforeRoundNumber }
 }
 
 function normalizeInput(input) {
@@ -437,6 +455,11 @@ function createReviewService({
     })
   }
 
+  async function listNodeReviewHistory({ actor, query }) {
+    requireActiveActor(actor)
+    return reviewRepository.listNodeReviewHistory({ actor, ...normalizeHistoryQuery(query) })
+  }
+
   async function listMyNotifications({ actor, query }) {
     requireActiveActor(actor)
     return reviewRepository.listNotifications({ actor, query: normalizeQuery(query) })
@@ -469,6 +492,7 @@ function createReviewService({
     submitReviewVote,
     listMyPendingReviews,
     getReviewDetail,
+    listNodeReviewHistory,
     listMyNotifications,
     getDashboardReviewCounts,
     markNotificationRead

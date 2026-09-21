@@ -1811,13 +1811,18 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
 
   function safeVoteProjection(vote, round) {
     if (!vote || vote.reviewRoundId !== round._id ||
+        vote.businessLineId !== round.businessLineId || vote.nodeId !== round.nodeId ||
         !round.reviewerUserIds.includes(vote.reviewerUserId) ||
         !['approved', 'rejected'].includes(vote.decision)) return null
     const displayName = validDisplayName(vote.reviewerDisplayName, 100)
     if (!displayName || !validDate(vote.createdAt)) return null
+    const comment = Object.getOwnPropertyDescriptor(vote, 'comment')
+    if (comment ? !Object.prototype.hasOwnProperty.call(comment, 'value') ||
+        typeof comment.value !== 'string' || comment.value.length > 1000 : 'comment' in vote) return null
     return {
       reviewerDisplayName: displayName,
       decision: vote.decision,
+      comment: comment ? comment.value : '',
       createdAt: new Date(vote.createdAt)
     }
   }
@@ -1912,6 +1917,111 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
       canApprove: canAct,
       canReject: canAct
     }
+  }
+
+  // Historical reads deliberately have their own authorization: allowing a line
+  // member to read audit comments must not grant review-detail/voting privileges.
+  function authorizeReviewHistory(account, role, line, node) {
+    if (!line || !node || !['active', 'completed', 'cancelled', 'closed'].includes(line.status) ||
+        node.businessLineId !== line._id || node.workflowMode !== 'review' ||
+        !safeInteger(line.version, 1) || !safeInteger(node.version, 1) ||
+        !safeInteger(node.processingRoundNumber, 1) || !safeInteger(node.reviewRoundNumber)) {
+      throw createError('FORBIDDEN')
+    }
+    const { managers, members } = safeLineRelationships(line)
+    if (!members.includes(account._id) && !managers.includes(account._id) && role !== 'super_admin') {
+      throw createError('FORBIDDEN')
+    }
+  }
+
+  function validateHistoricalRound(line, node, round) {
+    const reviewers = ownExactAccountIds(round, 'reviewerUserIds', { nonEmpty: true })
+    const nodeReviewers = ownExactAccountIds(node, 'reviewerUserIds', { nonEmpty: true })
+    if (!round || typeof round._id !== 'string' || !DOCUMENT_ID.test(round._id) ||
+        round.businessLineId !== line._id || round.nodeId !== node._id ||
+        !reviewers || !nodeReviewers || !fitsIndexedAccountArray(reviewers) ||
+        !sameIds(reviewers, nodeReviewers) || !REVIEW_MODES.has(round.reviewMode) ||
+        round.reviewMode !== node.reviewMode || !safeInteger(round.version, 1) ||
+        !safeInteger(round.reviewRoundNumber, 1) || round.reviewRoundNumber > node.reviewRoundNumber ||
+        !safeInteger(round.processingRoundNumber, 1) ||
+        round.processingRoundNumber > node.processingRoundNumber ||
+        !['pending', 'approved', 'rejected'].includes(round.status) ||
+        !validDate(round.reviewStartedAt)) throw createError('FORBIDDEN')
+    // Closing/cancelling freezes the line header, not its pending round/votes.
+    // These are still readable here; currentPendingRound remains strict for voting.
+    const attachedPending = ['active', 'cancelled', 'closed'].includes(line.status) &&
+      isCurrentNode(line, node) && node.status === 'pending_review' &&
+      node.activeReviewRoundId === round._id && node.version === round.lockedNodeVersion
+    if (round.status === 'pending' && (!attachedPending ||
+        round.reviewRoundNumber !== node.reviewRoundNumber ||
+        round.processingRoundNumber !== node.processingRoundNumber)) throw createError('FORBIDDEN')
+  }
+
+  async function readHistorySnapshot(actor, businessLineId, nodeId, roundIds = []) {
+    return db.runTransaction(async transaction => {
+      const { account, role } = await requireCurrentAccount(transaction, actor)
+      const line = await readDocument(transaction, 'business_lines', businessLineId)
+      const node = await readDocument(transaction, 'business_nodes', nodeId)
+      authorizeReviewHistory(account, role, line, node)
+      const rounds = []
+      for (const id of roundIds) {
+        const round = await readDocument(transaction, 'node_review_rounds', id)
+        validateHistoricalRound(line, node, round)
+        rounds.push(round)
+      }
+      return { line, node, rounds }
+    })
+  }
+
+  async function listNodeReviewHistory({ actor, businessLineId, nodeId, beforeRoundNumber = null, pageSize = 5 }) {
+    if (typeof businessLineId !== 'string' || !DOCUMENT_ID.test(businessLineId) ||
+        typeof nodeId !== 'string' || !DOCUMENT_ID.test(nodeId)) throw createError('VALIDATION_ERROR')
+    if (!safeInteger(pageSize, 1) || pageSize > 10 ||
+        beforeRoundNumber !== null && !safeInteger(beforeRoundNumber, 1)) {
+      throw createError('INVALID_PAGINATION')
+    }
+    const first = await readHistorySnapshot(actor, businessLineId, nodeId)
+    // Uses the existing (nodeId, reviewRoundNumber) index; keyset paging has no
+    // arbitrary total-history cap and never scans votes inside a transaction.
+    const criteria = { nodeId }
+    if (beforeRoundNumber !== null) criteria.reviewRoundNumber = db.command.lt(beforeRoundNumber)
+    const response = await db.collection('node_review_rounds').where(criteria)
+      .orderBy('reviewRoundNumber', 'desc').limit(pageSize + 1).get()
+    const candidates = response && response.data
+    if (!Array.isArray(candidates) || candidates.length > pageSize + 1) throw createError('FORBIDDEN')
+    let previousNumber = beforeRoundNumber
+    for (const round of candidates) {
+      validateHistoricalRound(first.line, first.node, round)
+      if (previousNumber !== null && round.reviewRoundNumber >= previousNumber) throw createError('FORBIDDEN')
+      previousNumber = round.reviewRoundNumber
+    }
+    const rounds = candidates.slice(0, pageSize)
+    const items = []
+    for (const round of rounds) {
+      const voteResponse = await db.collection('node_review_votes').where({ reviewRoundId: round._id })
+        .orderBy('createdAt', 'asc').orderBy('_id', 'asc').limit(round.reviewerUserIds.length + 1).get()
+      const rawVotes = voteResponse && voteResponse.data
+      if (!Array.isArray(rawVotes) || rawVotes.length > round.reviewerUserIds.length) {
+        throw createError('FORBIDDEN')
+      }
+      const votes = rawVotes.map(vote => safeVoteProjection(vote, round))
+      if (votes.some(vote => !vote) || new Set(rawVotes.map(vote => vote.reviewerUserId)).size !== rawVotes.length) {
+        throw createError('FORBIDDEN')
+      }
+      items.push({ reviewRoundId: round._id, reviewRoundNumber: round.reviewRoundNumber,
+        processingRoundNumber: round.processingRoundNumber, status: round.status,
+        submittedAt: new Date(round.reviewStartedAt), votes })
+    }
+    // Membership/account revocation and a vote arriving during the queries must
+    // invalidate the entire response rather than exposing a stale partial page.
+    const last = await readHistorySnapshot(actor, businessLineId, nodeId, rounds.map(round => round._id))
+    if (first.line.version !== last.line.version || first.line.status !== last.line.status ||
+        first.node.version !== last.node.version || first.node.reviewRoundNumber !== last.node.reviewRoundNumber ||
+        rounds.some((round, index) => round.version !== last.rounds[index].version ||
+          round.status !== last.rounds[index].status ||
+          round.reviewRoundNumber !== last.rounds[index].reviewRoundNumber)) throw createError('VERSION_CONFLICT')
+    const hasMore = candidates.length > pageSize
+    return { items, hasMore, nextBeforeRoundNumber: hasMore ? rounds[rounds.length - 1].reviewRoundNumber : null }
   }
 
   async function validatedNotification(notificationId, actor) {
@@ -2027,6 +2137,7 @@ function createCloudReviewRepository({ db, clock = () => new Date() }) {
     submitReviewVote,
     listPendingReviews,
     getReviewDetail,
+    listNodeReviewHistory,
     listNotifications,
     markNotificationRead
   }

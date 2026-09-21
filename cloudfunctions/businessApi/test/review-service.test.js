@@ -102,6 +102,10 @@ function harness(overrides = {}) {
       calls.push(['review-detail', structuredClone(value)])
       return overrides.detailResult || { reviewRoundId: value.reviewRoundId }
     },
+    async listNodeReviewHistory(value) {
+      calls.push(['review-history', structuredClone(value)])
+      return { items: [], hasMore: false, nextBeforeRoundNumber: null }
+    },
     async listNotifications(value) {
       calls.push(['list-notifications', structuredClone(value)])
       return overrides.notificationResult || { items: [], page: value.query.page, pageSize: value.query.pageSize, hasMore: false }
@@ -136,6 +140,27 @@ function harness(overrides = {}) {
     })
   }
 }
+
+test('节点审核历史只接受受限游标参数和活动账号', async () => {
+  const { service, calls } = harness()
+  const query = { businessLineId: 'line-1', nodeId: 'node-1' }
+  assert.deepEqual(await service.listNodeReviewHistory({ actor: ACTOR, query }),
+    { items: [], hasMore: false, nextBeforeRoundNumber: null })
+  assert.deepEqual(calls[0], ['review-history', { actor: ACTOR, ...query, pageSize: 5, beforeRoundNumber: null }])
+  await service.listNodeReviewHistory({ actor: ACTOR, query: { ...query, pageSize: 10, beforeRoundNumber: 501 } })
+  assert.equal(calls[1][1].beforeRoundNumber, 501)
+  for (const invalid of [
+    { ...query, pageSize: 11 }, { ...query, pageSize: 0 }, { ...query, beforeRoundNumber: '3' },
+    { ...query, beforeRoundNumber: 0 }, { ...query, nodeId: '../node' }, { ...query, actorId: 'spoof' },
+    Object.create(query), { ...query, get pageSize() { throw new Error('must not evaluate') } }
+  ]) {
+    await assert.rejects(service.listNodeReviewHistory({ actor: ACTOR, query: invalid }),
+      error => ['INVALID_QUERY', 'INVALID_PAGINATION', 'VALIDATION_ERROR'].includes(error.code))
+  }
+  await assert.rejects(service.listNodeReviewHistory({ actor: { ...ACTOR, status: 'disabled' }, query }),
+    error => error.code === 'FORBIDDEN')
+  assert.equal(calls.length, 2)
+})
 
 test('提交审核同步检索索引并剥离内部信封', async () => {
   const publicResult = {

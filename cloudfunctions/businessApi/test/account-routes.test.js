@@ -197,7 +197,7 @@ test('审核与通知路由只传递解析后的当前账号和白名单输入',
   const calls = []
   const reviewService = Object.fromEntries([
     'submitNodeForReview', 'submitReviewVote', 'listMyPendingReviews',
-    'getReviewDetail', 'listMyNotifications', 'markNotificationRead'
+    'getReviewDetail', 'listNodeReviewHistory', 'listMyNotifications', 'markNotificationRead'
   ].map(name => [name, async input => {
     calls.push([name, input])
     return { action: name }
@@ -216,6 +216,7 @@ test('审核与通知路由只传递解析后的当前账号和白名单输入',
     }],
     ['listMyPendingReviews', { page: 1, pageSize: 20, ...identity }],
     ['getReviewDetail', { reviewRoundId: 'round-1', ...identity }],
+    ['listNodeReviewHistory', { businessLineId: 'line-1', nodeId: 'node-1', pageSize: 5, beforeRoundNumber: 12, ...identity }],
     ['listMyNotifications', { page: 2, pageSize: 10, ...identity }],
     ['markNotificationRead', { notificationId: 'notification-1', ...identity }]
   ]) {
@@ -236,6 +237,7 @@ test('审核与通知路由只传递解析后的当前账号和白名单输入',
     } }],
     ['listMyPendingReviews', { actor, query: { page: 1, pageSize: 20 } }],
     ['getReviewDetail', { actor, reviewRoundId: 'round-1' }],
+    ['listNodeReviewHistory', { actor, query: { businessLineId: 'line-1', nodeId: 'node-1', pageSize: 5, beforeRoundNumber: 12 } }],
     ['listMyNotifications', { actor, query: { page: 2, pageSize: 10 } }],
     ['markNotificationRead', { actor, notificationId: 'notification-1' }]
   ])

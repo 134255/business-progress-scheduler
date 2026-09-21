@@ -34,6 +34,7 @@
     <view class="card vote-row" wx:for="{{votes}}" wx:key="voteKey">
       <view class="row-between"><text>{{item.reviewerDisplayName}}</text><text>{{item.decisionLabel}}</text></view>
       <text class="muted block">{{item.createdAtText}}</text>
+      <text class="block vote-comment">{{item.commentText}}</text>
     </view>
 
     <view wx:if="{{status === 'pending' && (canApprove || canReject)}}" class="card operation-card">

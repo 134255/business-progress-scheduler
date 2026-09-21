@@ -1,5 +1,5 @@
 const businessService = require('../../services/business')
-const { safeErrorMessage } = require('../../utils/safe-error')
+const { safeErrorMessage, isAccountAccessError } = require('../../utils/safe-error')
 
 function activeUserId() {
   const user = getApp().globalData.currentUser
@@ -47,12 +47,14 @@ Page({
     }
     this.pageAlive = true
     this.actorId = actorId
+    this.identityInvalidated = false
     this.requestSequence = 0
     this.setData({ reviewRoundId: String(query.reviewRoundId || '') })
     await this.loadDetail()
   },
 
   onShow() {
+    if (!this.actorStillCurrent()) return
     if (this.data.reviewRoundId && this.hasLoaded) return this.loadDetail()
   },
 
@@ -60,21 +62,41 @@ Page({
     this.pageAlive = false
     this.requestSequence += 1
     this.voteSequence = (this.voteSequence || 0) + 1
+    this.setData({ votes: [] })
+  },
+
+  actorStillCurrent() {
+    if (this.identityInvalidated) return false
+    if (this.actorId && activeUserId() === this.actorId) return true
+    this.identityInvalidated = true
+    this.requestSequence += 1
+    this.voteSequence = (this.voteSequence || 0) + 1
+    this.setData({ votes: [], canApprove: false, canReject: false, comment: '', loading: false })
+    wx.reLaunch({ url: '/pages/login/index' })
+    return false
+  },
+
+  clearVotesOnAccessError(error) {
+    if (isAccountAccessError(error) && this.pageAlive && this.actorStillCurrent()) {
+      this.requestSequence += 1
+      this.setData({ votes: [], canApprove: false, canReject: false, loading: false })
+    }
   },
 
   async loadDetail() {
-    if (!this.data.reviewRoundId) return
+    if (!this.pageAlive || !this.actorStillCurrent() || !this.data.reviewRoundId) return
     const requestedActorId = this.actorId
     const requestSequence = ++this.requestSequence
     this.setData({ loading: true, errorMessage: '' })
     try {
       const detail = await businessService.getReviewDetail(this.data.reviewRoundId)
-      if (!this.pageAlive || activeUserId() !== requestedActorId || requestSequence !== this.requestSequence) return
+      if (!this.pageAlive || requestSequence !== this.requestSequence || !this.actorStillCurrent() || this.actorId !== requestedActorId) return
       const reviewers = Array.isArray(detail.reviewerDisplayNames) ? detail.reviewerDisplayNames : []
       const votes = (detail.votes || []).map((vote, index) => ({
         ...vote,
         voteKey: `${index}-${vote.createdAt || ''}`,
         decisionLabel: vote.decision === 'approved' ? '通过' : '驳回',
+        commentText: typeof vote.comment === 'string' && vote.comment.trim() ? vote.comment : '未填写审核意见',
         createdAtText: vote.createdAt ? new Date(vote.createdAt).toLocaleString('zh-CN') : ''
       }))
       this.setData({
@@ -102,7 +124,8 @@ Page({
       this.hasLoaded = true
       wx.setNavigationBarTitle({ title: detail.nodeName || '审核详情' })
     } catch (error) {
-      if (this.pageAlive && activeUserId() === requestedActorId && requestSequence === this.requestSequence) {
+      if (this.pageAlive && requestSequence === this.requestSequence && this.actorStillCurrent()) {
+        this.clearVotesOnAccessError(error)
         this.setData({
           errorMessage: safeErrorMessage(error, '审核详情加载失败，请稍后重试'),
           canApprove: false,
@@ -132,6 +155,7 @@ Page({
   },
 
   async submitVote(decision) {
+    if (!this.pageAlive || !this.actorStillCurrent()) return
     const allowed = decision === 'approve' ? this.data.canApprove : this.data.canReject
     if (!allowed || this.data.submitting || this.data.status !== 'pending') return
     const requestedActorId = this.actorId
@@ -153,11 +177,13 @@ Page({
         comment,
         requestKey: this.voteRequestKey
       })
-      if (!this.pageAlive || activeUserId() !== requestedActorId || this.data.roundVersion !== requestedRoundVersion) return
+      if (!this.pageAlive || !this.actorStillCurrent() || activeUserId() !== requestedActorId || this.data.roundVersion !== requestedRoundVersion) return
       this.voteIntent = ''
       this.voteRequestKey = ''
       await this.loadDetail()
     } catch (error) {
+      if (!this.pageAlive || !this.actorStillCurrent()) return
+      this.clearVotesOnAccessError(error)
       if (this.pageAlive && activeUserId() === requestedActorId && this.data.roundVersion === requestedRoundVersion) {
         this.setData({ errorMessage: safeErrorMessage(error, '审核意见提交失败，请稍后重试') })
       }
@@ -182,6 +208,7 @@ Page({
         await wx.openDocument({ filePath: downloaded.tempFilePath, fileType: 'pdf', showMenu: true })
       }
     } catch (error) {
+      this.clearVotesOnAccessError(error)
       wx.showToast({ title: '凭证暂时无法打开', icon: 'none' })
     }
   },

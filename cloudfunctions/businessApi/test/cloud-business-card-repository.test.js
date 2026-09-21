@@ -35,6 +35,86 @@ function setup(data = seed(), options) {
 }
 const pairs = summary => summary.fields.map(f => [f.label, f.value])
 const read = repository => repository.getSummary({ actor, businessLineId: 'line-1' })
+
+function largeLinkedSeed(count = 2495) {
+  const data = seed()
+  const linked = Array.from({ length: 8 }, (_, column) => ({
+    fieldKey: `f${column}`, name: `字段${column}`, sequence: column, type: 'single_select', required: true,
+    constraints: { options: column === 2 ? Array.from({ length: count }, (_, i) => `型号${i}`) : ['A'] }
+  }))
+  linked[0].optionLinkage = { schemaVersion: 1, fieldKeys: linked.map(field => field.fieldKey),
+    rows: Array.from({ length: count }, (_, i) => [0, 0, i, 0, 0, null, null, null]) }
+  const all = [...linked, ...definitions.map(field => ({ ...field, sequence: field.sequence + 8 }))]
+  data.business_nodes[0].fieldDefinitions = structuredClone(all)
+  data.template_nodes[0].fields = structuredClone(all)
+  data.node_feedback[0].fieldValues = [...linked.slice(0, 5).map(field => ({
+    fieldKey: field.fieldKey, name: field.name, type: field.type, value: field.constraints.options[0]
+  })), ...values]
+  data.templates[0].cardDisplay.fields = ['quantity', 'f2', 'f5'].map(fieldKey => ({ nodeKey: 'node-key', fieldKey }))
+  return data
+}
+
+for (const state of ['ready', 'progress', 'approved']) {
+  test(`repository cards read large linked ${state} snapshots without exposing the catalog`, async () => {
+    const data = largeLinkedSeed()
+    if (state === 'ready') {
+      data.business_nodes[0].status = 'ready'
+      delete data.business_nodes[0].latestFeedbackId
+      delete data.business_nodes[0].latestFeedbackRevision
+    }
+    if (state === 'approved') {
+      round(data, 'approved')
+      data.node_review_rounds[0].fieldValues = structuredClone(data.node_feedback[0].fieldValues)
+    }
+    const { repository, fake } = setup(data)
+    const before = fake.documents('business_lines')[0]
+    const summary = await read(repository)
+    assert.equal(summary.state, 'ready')
+    assert.deepEqual(pairs(summary), state === 'ready' ? [['数量', '未填写']] : [['数量', '0'], ['字段2', '型号0']])
+    assert.ok(summary.fields.every(field => Object.keys(field).sort().join(',') === 'id,label,value'))
+    const after = fake.documents('business_lines')[0]
+    assert.deepEqual({ ...after, cardSummary: undefined }, { ...before, cardSummary: undefined })
+    assert.deepEqual(await read(repository), summary)
+  })
+}
+
+test('historical cards can find missing field labels in large current template definitions', async () => {
+  const data = largeLinkedSeed()
+  data.business_nodes[0].fieldDefinitions = [definitions[0]]
+  data.node_feedback[0].fieldValues = [values[0]]
+  const { repository } = setup(data)
+  assert.deepEqual(pairs(await read(repository)), [['数量', '0'], ['字段2', '历史无此字段'], ['字段5', '历史无此字段']])
+})
+
+test('repository cards accept the validated 5000-row linkage boundary', async () => {
+  const data = largeLinkedSeed(5000)
+  const { validateFieldValues } = require('../lib/field-domain')
+  const submitted = data.node_feedback[0].fieldValues.map(({ fieldKey, value }) => ({ fieldKey, value }))
+  assert.doesNotThrow(() => validateFieldValues(data.business_nodes[0].fieldDefinitions, submitted))
+  const { repository } = setup(data)
+  assert.deepEqual(pairs(await read(repository)), [['数量', '0'], ['字段2', '型号0']])
+})
+
+test('large definition source changes are still revalidated before publishing the card', async () => {
+  const { repository, fake } = setup(largeLinkedSeed())
+  fake.beforeNextTransaction(() => {
+    const node = fake.documents('business_nodes')[0]
+    node.fieldDefinitions.find(field => field.fieldKey === 'quantity').name = '新数量'
+    fake.replace('business_nodes', node._id, node)
+  })
+  assert.deepEqual(pairs(await read(repository)), [['新数量', '0'], ['字段2', '型号0']])
+})
+
+test('linked definition limits do not widen unrelated node arrays or admit over-limit matrices', async () => {
+  for (const kind of ['node-array', 'matrix']) {
+    const data = largeLinkedSeed(kind === 'matrix' ? 5001 : 2495)
+    if (kind === 'node-array') data.business_nodes[0].latestEvidenceIds = Array.from({ length: 1001 }, (_, i) => `evidence-${i}`)
+    const { repository, fake } = setup(data)
+    assert.equal((await read(repository)).state, 'unavailable')
+    assert.equal(fake.writeCalls.length, 0)
+  }
+})
+
 function round(data, status) {
   const node = data.business_nodes[0]
   node.status = status === 'pending' ? 'pending_review' : 'completed'

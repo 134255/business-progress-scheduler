@@ -484,6 +484,11 @@ function createCloudBusinessRepository({
         flowSchemaVersion: 2,
         entryNodeId: entryNodeId.value,
         traversedNodeIds: clone(traversedNodeIds.value),
+        traversedNodeCount: traversedNodeIds.value.length,
+        // Completion commits append to this ledger atomically. A manual-route
+        // source is already appended but stays incomplete until its decision.
+        completedNodeCount: traversedNodeIds.value.filter(id =>
+          !(awaitingManualDecision.value === true && id === line.currentNodeId)).length,
         routeDecisionVersion: routeDecisionVersion.value,
         awaitingManualDecision: awaitingManualDecision.present ? awaitingManualDecision.value : false
       }
