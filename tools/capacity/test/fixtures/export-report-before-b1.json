@@ -1,0 +1,301 @@
+{
+  "runtimeHashes": {
+    "cloudfunctions/businessApi/lib/cloud-operations-field-repository.js": "214028ad0521f9f968628b809fdbdd2e0cf13a7c397d57f1f8fa6ef9b3c91f40",
+    "cloudfunctions/businessApi/lib/cloud-operations-repository.js": "cacc0ec7f25462fcf8f25cd292ce1911ffcf994488deeb65d5d9639e637d8b6a"
+  },
+  "cases": [
+    {
+      "caseId": "none-v1",
+      "result": {
+        "rowsDigest": "6655a266a92da2df6b08546fafab594436c510ba274e6627ee2f7a09f8639e1a",
+        "rowCount": 13,
+        "firstCursorBody": {
+          "actorId": "root",
+          "queryDigest": "41abb73c0b31952adf3e4e9ea339600a75199051056fc114074c0500e0a0f8ff",
+          "reportDigest": "e71fffbe0d699f9bebc4cac0f903b3986295371f4b4bc880a200baf4f9e992fb",
+          "offset": 2,
+          "expiresAt": 1790223600000
+        },
+        "firstPageReads": 29,
+        "warmPageReads": 29,
+        "coldPageReads": 29,
+        "firstPageTransactions": 6,
+        "warmPageTransactions": 6,
+        "coldPageTransactions": 6,
+        "maxTransactionOperations": 4
+      }
+    },
+    {
+      "caseId": "none-v2",
+      "result": {
+        "rowsDigest": "da7c0d086027137ff1cea14cbccaca53977e8ce4bbde83e5faa3582ebbe7812d",
+        "rowCount": 11,
+        "firstCursorBody": {
+          "actorId": "root",
+          "queryDigest": "3a614f6e7947a15d67ef30afd0191d4921cf17395dc1219160fd6fcd50af7a03",
+          "reportDigest": "14ed0754f092100ff3ca1b5827b8eaac1931d1ca59d18c4a273bd117a252d764",
+          "offset": 2,
+          "expiresAt": 1790223600000
+        },
+        "firstPageReads": 29,
+        "warmPageReads": 29,
+        "coldPageReads": 29,
+        "firstPageTransactions": 6,
+        "warmPageTransactions": 6,
+        "coldPageTransactions": 6,
+        "maxTransactionOperations": 4
+      }
+    },
+    {
+      "caseId": "any-v1",
+      "result": {
+        "rowsDigest": "efad4222103fc948e60178fc4e8ae7b82ab6d136aa06e56ca726b2fe7586895e",
+        "rowCount": 13,
+        "firstCursorBody": {
+          "actorId": "root",
+          "queryDigest": "41abb73c0b31952adf3e4e9ea339600a75199051056fc114074c0500e0a0f8ff",
+          "reportDigest": "eac91d41625c9195a018607cab8d4d70d9626c02b640aee264ba3da494b7cd1c",
+          "offset": 2,
+          "expiresAt": 1790223600000
+        },
+        "firstPageReads": 37,
+        "warmPageReads": 37,
+        "coldPageReads": 37,
+        "firstPageTransactions": 6,
+        "warmPageTransactions": 6,
+        "coldPageTransactions": 6,
+        "maxTransactionOperations": 6
+      }
+    },
+    {
+      "caseId": "any-v2",
+      "result": {
+        "rowsDigest": "5fee827afbc2721a362b412c6d52ea6a79e3bbfb77de28f1ac01d81e4b7af0e0",
+        "rowCount": 11,
+        "firstCursorBody": {
+          "actorId": "root",
+          "queryDigest": "3a614f6e7947a15d67ef30afd0191d4921cf17395dc1219160fd6fcd50af7a03",
+          "reportDigest": "d3cd1c2c3ee3551abab7b85cbe9c4b2a98b379c5601141b506002b1ef1dbd757",
+          "offset": 2,
+          "expiresAt": 1790223600000
+        },
+        "firstPageReads": 37,
+        "warmPageReads": 37,
+        "coldPageReads": 37,
+        "firstPageTransactions": 6,
+        "warmPageTransactions": 6,
+        "coldPageTransactions": 6,
+        "maxTransactionOperations": 6
+      }
+    },
+    {
+      "caseId": "all-v1",
+      "result": {
+        "rowsDigest": "90abe7bcc4987bc9be13deedd281ff1b06772c059aef3f976f7d772c8ad535f3",
+        "rowCount": 13,
+        "firstCursorBody": {
+          "actorId": "root",
+          "queryDigest": "41abb73c0b31952adf3e4e9ea339600a75199051056fc114074c0500e0a0f8ff",
+          "reportDigest": "b7316b87b62605954e415bf87b16b079f41c07f66b44e7a7ac4ec0422b403125",
+          "offset": 2,
+          "expiresAt": 1790223600000
+        },
+        "firstPageReads": 39,
+        "warmPageReads": 39,
+        "coldPageReads": 39,
+        "firstPageTransactions": 6,
+        "warmPageTransactions": 6,
+        "coldPageTransactions": 6,
+        "maxTransactionOperations": 7
+      }
+    },
+    {
+      "caseId": "all-v2",
+      "result": {
+        "rowsDigest": "b1c840235aed731f4fbf7a4fce1785253b40bb11429ced43126783ea4a1472b5",
+        "rowCount": 11,
+        "firstCursorBody": {
+          "actorId": "root",
+          "queryDigest": "3a614f6e7947a15d67ef30afd0191d4921cf17395dc1219160fd6fcd50af7a03",
+          "reportDigest": "a464cded541b9109e9c62206bc475dbbe40837811b5a08307eb353bb17d6e545",
+          "offset": 2,
+          "expiresAt": 1790223600000
+        },
+        "firstPageReads": 39,
+        "warmPageReads": 39,
+        "coldPageReads": 39,
+        "firstPageTransactions": 6,
+        "warmPageTransactions": 6,
+        "coldPageTransactions": 6,
+        "maxTransactionOperations": 7
+      }
+    },
+    {
+      "caseId": "product-2495-v2",
+      "result": {
+        "rowsDigest": "b3c9bdb16adc950b5af4d021246d30b7d06e0bb89a726dbfdf3be3e6f3b7d01b",
+        "rowCount": 9,
+        "firstCursorBody": {
+          "actorId": "root",
+          "queryDigest": "3a614f6e7947a15d67ef30afd0191d4921cf17395dc1219160fd6fcd50af7a03",
+          "reportDigest": "d29ccb4fed26b4e9f6564e153fcae375754a0c898658a46dcdbe2b3e3b758e26",
+          "offset": 2,
+          "expiresAt": 1790223600000
+        },
+        "firstPageReads": 29,
+        "warmPageReads": 29,
+        "coldPageReads": 29,
+        "firstPageTransactions": 6,
+        "warmPageTransactions": 6,
+        "coldPageTransactions": 6,
+        "maxTransactionOperations": 4
+      }
+    }
+  ],
+  "nonReport": [
+    {
+      "mode": "none",
+      "method": "getSummary",
+      "resultDigest": "df98c6e223d97b32cb8387bdbd6fc4723cf4b6a2a6d3532c76497f3208abb7ad",
+      "traceDigest": "ae5e552a2c8c72625bd7a2c4dc1f28200a1e2ea9b3a51872fe99d28d36f935d8",
+      "metrics": {
+        "reads": 14,
+        "queryReads": 3,
+        "documentReads": 11,
+        "returnedRows": 12,
+        "transactions": 2,
+        "maxTransactionOperations": 4,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    },
+    {
+      "mode": "none",
+      "method": "getFilters",
+      "resultDigest": "53240b6270d87f847aac784eed8a473d8fbf310c58e509f627b3780cb6b219a4",
+      "traceDigest": "ae5e552a2c8c72625bd7a2c4dc1f28200a1e2ea9b3a51872fe99d28d36f935d8",
+      "metrics": {
+        "reads": 14,
+        "queryReads": 3,
+        "documentReads": 11,
+        "returnedRows": 12,
+        "transactions": 2,
+        "maxTransactionOperations": 4,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    },
+    {
+      "mode": "none",
+      "method": "getAnalysis",
+      "resultDigest": "cb4454e0bbf3ce48917501ac772071fcbf215a334e2f1b25efcde038de12437f",
+      "traceDigest": "f626234efa32e0c7268c7a5474384cf0172f4fe4719fc023b439ce409d99f2ef",
+      "metrics": {
+        "reads": 21,
+        "queryReads": 3,
+        "documentReads": 18,
+        "returnedRows": 19,
+        "transactions": 4,
+        "maxTransactionOperations": 4,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    },
+    {
+      "mode": "any",
+      "method": "getSummary",
+      "resultDigest": "df98c6e223d97b32cb8387bdbd6fc4723cf4b6a2a6d3532c76497f3208abb7ad",
+      "traceDigest": "1972356465eb519249c28a4d81468ba4bd91f33b667c538a741576ede7c024d7",
+      "metrics": {
+        "reads": 18,
+        "queryReads": 4,
+        "documentReads": 14,
+        "returnedRows": 16,
+        "transactions": 2,
+        "maxTransactionOperations": 6,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    },
+    {
+      "mode": "any",
+      "method": "getFilters",
+      "resultDigest": "59d0be85a97f75c013d502d642610f95c2e4ed0e12b959eabc0d879644fa97a6",
+      "traceDigest": "1972356465eb519249c28a4d81468ba4bd91f33b667c538a741576ede7c024d7",
+      "metrics": {
+        "reads": 18,
+        "queryReads": 4,
+        "documentReads": 14,
+        "returnedRows": 16,
+        "transactions": 2,
+        "maxTransactionOperations": 6,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    },
+    {
+      "mode": "any",
+      "method": "getAnalysis",
+      "resultDigest": "cb4454e0bbf3ce48917501ac772071fcbf215a334e2f1b25efcde038de12437f",
+      "traceDigest": "1edef5a51dbdaa69a6bf79ecb9a02f2cb010fe84282e1aacc39d4e85470c3d9e",
+      "metrics": {
+        "reads": 25,
+        "queryReads": 4,
+        "documentReads": 21,
+        "returnedRows": 23,
+        "transactions": 4,
+        "maxTransactionOperations": 6,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    },
+    {
+      "mode": "all",
+      "method": "getSummary",
+      "resultDigest": "df98c6e223d97b32cb8387bdbd6fc4723cf4b6a2a6d3532c76497f3208abb7ad",
+      "traceDigest": "8eb23d3412498285792421f1bf8eab8096abc031c7f188c04ddd4c723d2e543c",
+      "metrics": {
+        "reads": 19,
+        "queryReads": 4,
+        "documentReads": 15,
+        "returnedRows": 18,
+        "transactions": 2,
+        "maxTransactionOperations": 7,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    },
+    {
+      "mode": "all",
+      "method": "getFilters",
+      "resultDigest": "71885df1af9a9b69cfd75d21886cbb2e52d36768b18a05646c1f8378cf55ae81",
+      "traceDigest": "8eb23d3412498285792421f1bf8eab8096abc031c7f188c04ddd4c723d2e543c",
+      "metrics": {
+        "reads": 19,
+        "queryReads": 4,
+        "documentReads": 15,
+        "returnedRows": 18,
+        "transactions": 2,
+        "maxTransactionOperations": 7,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    },
+    {
+      "mode": "all",
+      "method": "getAnalysis",
+      "resultDigest": "cb4454e0bbf3ce48917501ac772071fcbf215a334e2f1b25efcde038de12437f",
+      "traceDigest": "65bb2aad013b4c04709917bdd019ba81d251a6a65e9553059c10544361d28214",
+      "metrics": {
+        "reads": 26,
+        "queryReads": 4,
+        "documentReads": 22,
+        "returnedRows": 25,
+        "transactions": 4,
+        "maxTransactionOperations": 7,
+        "peakActiveReads": 1,
+        "writeAttempts": 0
+      }
+    }
+  ]
+}

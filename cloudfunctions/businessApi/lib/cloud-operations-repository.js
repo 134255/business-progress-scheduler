@@ -182,7 +182,7 @@ function createCloudOperationsRepository({ db }) {
     return belongsToActualPath && ['active', 'completed', 'awaiting_manual_decision'].includes(node.routeState)
   }
 
-  async function dataset(actor, range, batchNodes = false) {
+  async function dataset(actor, range, batchNodes = false, { includePendingRounds = true } = {}) {
     await requireCurrentAdmin(actor)
     const scannedLines = await readAll(() => db.collection('business_lines')
       .where({ createdAt: db.command.and(db.command.gte(range.startAt), db.command.lt(range.endAt)) })
@@ -205,8 +205,10 @@ function createCloudOperationsRepository({ db }) {
         .where({ businessLineId: line._id }).orderBy('sequence', 'asc').orderBy('_id', 'asc'), 100)
       nodes.push(...page.filter(node => isActualRouteNode(lineMap.get(node.businessLineId), node)))
     }
-    const rounds = await readAll(() => db.collection('node_review_rounds')
-      .where({ status: 'pending' }).orderBy('createdAt', 'desc').orderBy('_id', 'asc'))
+    const rounds = includePendingRounds
+      ? await readAll(() => db.collection('node_review_rounds')
+        .where({ status: 'pending' }).orderBy('createdAt', 'desc').orderBy('_id', 'asc'))
+      : []
     const names = await participantNames(nodes)
     await requireCurrentAdmin(actor)
     return {
@@ -282,7 +284,7 @@ function createCloudOperationsRepository({ db }) {
 
   // Internal complete-report adapter. Public exportRows pagination is unchanged.
   async function reportBaseSnapshot({actor,range}, includeRows) {
-    const data=await dataset(actor,range,true)
+    const data=await dataset(actor,range,true,{includePendingRounds:false})
     const lines=new Map(data.lines.map(line=>[line._id,line]))
     const entries=data.nodes.map(entry=>({...entry,line:lines.get(entry.node.businessLineId)}))
       .sort((a,b)=>String(b.line.createdAt||'').localeCompare(String(a.line.createdAt||'')) ||

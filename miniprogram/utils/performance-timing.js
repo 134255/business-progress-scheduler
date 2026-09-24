@@ -3,7 +3,11 @@ const ACTIONS = new Set([
   'createBusinessFromTemplate', 'submitFeedback', 'submitNodeFeedback', 'updateBusinessMetadata',
   'submitNodeForReview', 'saveAndSubmitNodeForReview', 'submitReviewVote',
   'beginEvidenceUpload', 'refreshEvidenceUploadAuthorization', 'finalizeEvidenceUpload',
-  'evidenceUpload'
+  'evidenceUpload',
+  'getOperationsDashboard', 'exportOperationsRows',
+  'getOperationsAnalyticsFilters', 'getOperationsAnalyticsSummary',
+  'getOperationsFieldSummary', 'getOperationsFieldFilters',
+  'getOperationsFieldAnalysis', 'exportOperationsReportRows'
 ])
 const STAGES = new Set(['authorize', 'transfer', 'finalize'])
 

@@ -4,6 +4,20 @@ const assert = require('node:assert/strict')
 const { createCloudOperationsRepository } = require('../lib/cloud-operations-repository')
 const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 
+test('complete-report projection omits unused pending rounds without changing legacy paths',async()=>{
+  const {fake,repository}=harness()
+  const actor={_id:'root',role:'super_admin',status:'active'}
+  const range={startAt:new Date('2026-08-01T16:00:00Z'),endAt:new Date('2026-08-18T16:00:00Z'),cursor:'',pageSize:50}
+  const base=await repository.collectReportBase({actor,range})
+  await repository.validateReportBase({actor,range,manifest:base.manifest})
+  assert.equal(fake.queryCalls.filter(q=>q.collection==='node_review_rounds').length,0)
+  assert.equal((await repository.getDashboard({actor,range})).stats.pendingReview,1)
+  const legacy=await repository.exportRows({actor,range})
+  assert.deepEqual(base.items,legacy.items)
+  assert.equal(fake.queryCalls.filter(q=>q.collection==='node_review_rounds').length,2)
+  assert.deepEqual(fake.writeCalls,[])
+})
+
 function harness() {
   const fake = createFakeCloudDatabase({
     users: [

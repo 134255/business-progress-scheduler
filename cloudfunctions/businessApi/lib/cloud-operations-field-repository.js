@@ -160,7 +160,7 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     const result = domain.buildFinalFieldResult(source)
     if (result) await finalResult(actor,source,result,false,true)
   }
-  async function collect(actor, range, { full = false, filters = false, analysis = false } = {}) {
+  async function collect(actor, range, { full = false, filters = false, analysis = false, reportSourceRefs = null } = {}) {
     const selected = await authorizedLines(actor,range)
     const lines = selected.lines.filter(line => !['deleted','creating'].includes(line.status) &&
       (!range.templateId || line.sourceTemplateId === range.templateId) &&
@@ -200,6 +200,12 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
         if (!filters && (range.processorToken && result.processorToken !== range.processorToken ||
             range.reviewerToken && !result.reviewerTokens.includes(range.reviewerToken))) return null
         const fresh = cached || await finalResult(actor,source,result,full,false,analysis)
+        if (full && reportSourceRefs) {
+          reportSourceRefs.set(node._id,Object.freeze({
+            businessLineId:source.line._id,nodeId:source.node._id,
+            feedbackId:source.feedback._id,reviewRoundId:source.round ? source.round._id : null
+          }))
+        }
         if (analysis) return {...fresh,result:full ? fresh.result : domain.selectionSnapshot(fresh.result)}
         return full ? fresh : domain.selectionSnapshot(fresh)
       } catch (error) {
@@ -302,7 +308,8 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     const continuation = range.cursor ? codec.decode(range.cursor,{actorId:actor._id,queryDigest}) : null
     const version2=range.reportVersion===2
     const {analysis,reportVersion,...baseRange}=range
-    const data = await collect(actor,range,{full:true,analysis:version2})
+    const reportSourceRefs = new Map()
+    const data = await collect(actor,range,{full:true,analysis:version2,reportSourceRefs})
     if (data.incomplete) throw fieldError('INCOMPLETE_FIELD_DATA')
     const sourceManifest = {
       nodes:data.results.map(result=>({nodeId:result.nodeId,sourceDigest:result.sourceDigest,
@@ -332,11 +339,16 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     }
     // Base collection/verification can yield while a node's final source changes.
     // Recheck full authoritative source identity and values before releasing any page.
-    const lineMap=new Map(data.lines.map(line=>[line._id,line]))
     await boundedMap(data.results,async result=>{
-      const node=await read(db,'business_nodes',result.nodeId)
-      if(!node) throw fieldError('REPORT_CHANGED')
-      const source=await readSource(lineMap.get(result.businessLineId),node)
+      // Request-local addresses only: authoritative data and the vote set are read again.
+      const ref=reportSourceRefs.get(result.nodeId)
+      if(!ref || ref.nodeId!==result.nodeId || ref.businessLineId!==result.businessLineId ||
+          !idValid(ref.feedbackId) || ref.reviewRoundId!==null && !idValid(ref.reviewRoundId)) {
+        throw fieldError('REPORT_CHANGED')
+      }
+      const votes=ref.reviewRoundId ? await scan('node_review_votes',{reviewRoundId:ref.reviewRoundId},50) : []
+      const source={line:{_id:ref.businessLineId},node:{_id:ref.nodeId},feedback:{_id:ref.feedbackId},
+        round:ref.reviewRoundId ? {_id:ref.reviewRoundId} : null,votes}
       try { await finalResult(actor,source,result,true) } catch(error) {
         if(error && error.code==='FIELD_SOURCE_INVALID') throw fieldError('REPORT_CHANGED')
         throw error

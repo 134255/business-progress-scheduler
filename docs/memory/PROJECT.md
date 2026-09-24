@@ -1,10 +1,14 @@
 # Project Memory
 
-Last stable-fact update: 2026-09-20 (Asia/Shanghai; read-only review comment history)
+Last stable-fact update: 2026-09-24 (Asia/Shanghai; user-confirmed capacity planning inputs)
 
 ## Product
 
 This is an internal business-progress management WeChat Mini Program. Super administrators control accounts, templates, node ownership, and system rules. Authorized users create business lines from enabled templates, responsible users submit node progress and evidence, and associated users inspect progress and evidence history.
+
+Capacity planning inputs confirmed 2026-09-24: approximately 50 staff accounts, 30 new after-sales lines per day, and **100 MB of image/video attachments per line on average**, superseding the earlier 50 MB estimate. These are planning inputs, not verified concurrent capacity or a new upload limit. They imply about 3 GB/day and 90 GB per 30 days of new media; the completed-line 60-day retention portion is about 180 GB at steady throughput, excluding still-active lines and other retained objects. The approved direction is incremental capacity/reliability improvement within CloudBase; implementation specifications, live load testing, resource purchases, production changes and deployment require their respective review/authorization. The existing per-processing-round 120 MiB limit and retention rules remain unchanged.
+
+Capacity/reliability optimization has an explicit user-approved compatibility gate (2026-09-24): all existing frontend functions must remain unaffected across Android, HarmonyOS, iOS, macOS and Windows. Any proposed or detected functional/interaction impact requires the user's approval before retaining that behavior change or deploying it; stop the affected change, explain the before/after behavior and alternatives, and preserve the current baseline. Backend response, permission, pagination and error-semantics changes count as frontend impacts even without editing page files. Automated regression is not a substitute for unperformed native-device acceptance.
 
 Approved V1 rules include:
 
@@ -19,6 +23,7 @@ Approved V1 rules include:
 - 已接受下一代流程模式版本 2 设计：模板改用唯一入口的单线有向无环路由，任意节点可选择结束、默认后续、单选分支或人工决定；分支可继续嵌套并在互斥路线后重新汇合，但同一售后始终只有一个活动节点。单选字段支持单一父字段、多层级联的显示条件与候选项切换；发起人通过独立标记加入固定处理人而不再强制唯一，解析后的处理人与审核人仍不得重叠。隔离验收后将受控重置旧模板与全部业务数据，同时保留账号、安全配置、编号连续性和脱敏审计；任何不可恢复删除仍须单独核对并确认。完整设计见 `docs/superpowers/specs/2026-09-03-branching-workflow-and-conditional-fields-design.md` 与 `docs/memory/decisions/ADR-0016-general-branch-routing-and-conditional-fields.md`。
 - 新审核轮次会把当前处理轮最新已发布反馈的处理说明保存为不可变 `processingComment` 快照，并把该快照纳入审核草稿摘要和幂等校验；审核详情只读取轮次快照，不回查可变化的反馈。修复前的旧轮次缺少该字段时仅显示固定占位“暂无处理说明”，损坏、访问器或继承值均失败关闭。
 - 审核意见来自不可变 `node_review_votes.comment`，审核详情和节点记录页展示安全显示名、决定、时间及原意见。节点审核历史使用独立受保护的轮次游标接口，当前售后成员、负责人及既有超级管理员可只读追溯返工前后与已结束的各轮记录，不增加审批操作权限、不补写历史；原票缺失或空意见明确标记“未填写审核意见”。详见 ADR-0005，实际部署与真机验收状态以 STATUS 为准。
+- 处理页与审核页通过共享 `previous-node-records` 组件按需只读查看前序已完成节点；V2采用实际流转顺序，不显示跳过分支。`getPreviousNodeResult` 复用最终来源校验，默认读取最终通过快照或无需审核节点的完成反馈；历史保存和各轮审核单独展开。每次返回最终结果前重新验证成员字段权限及来源，不增加审批权限或回写旧记录，不把草稿标为最终结果；当前表单不与查看组件共享状态。详见 ADR-0005 和 `docs/deployment/previous-node-records-acceptance.md`，发布/五端验收以 STATUS 为准。
 - Completed, cancelled, and closed business lines freeze their structured data. Only a super administrator may append a reasoned correction with before/after values; ordinary update paths remain blocked.
 - China workday calculations from a locally cached holiday adapter; default working hours are 09:00–20:00 without lunch break. Default node SLA is two workdays (22 work hours), and template nodes may override it.
 - In-app notifications as the fallback channel and a future Enterprise WeChat self-built application as the strong-reminder channel. Unfinished nodes are reminded every accumulated work hour during working time.
@@ -39,13 +44,18 @@ Approved V1 rules include:
 
 The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-business-progress-v1-design.md`. The approved template, node, field, rejection, freeze, numbering, and evidence-retention refinement is in `docs/superpowers/specs/2026-08-07-template-node-fields-design.md`. Account-administration execution steps are in `docs/superpowers/plans/2026-08-05-account-admin.md`.
 
+- 节点凭证选择阶段只展示固定错误分类、接口/阶段和有界数字原生错误码，不保存或输出原始错误文本、路径或媒体内容。受支持的移动端媒体选择使用原文件参数；`chooseMedia` 返回媒体处理、文件读取或未知原生失败后，仅允许用户手动通过本机 `chooseVideo` 不压缩重选。取消、权限拒绝和隐私授权问题不触发兼容重试。重试仍校验账号、节点、版本和编辑锁并经过原 120 MiB/格式白名单，不自动切换聊天来源。原生真机失败根因与修复验收必须分别核实，不能用分类推断代替设备证据。
+- 批量凭证传输最多3路，核验登记在单次页面上传操作内串行；传输、登记各最多3次应用层尝试，仅恢复明确暂态错误。登记重试保持同一预约，不重复传输/计容量；权限、状态、格式、容量及未知内部错误不自动重试。该逻辑只在既有上传工具和上传仓储内，页面仅展示阶段/次数，不能扩展成业务提交或审批的通用重试。部署与五端验收状态见 STATUS。
+
 ## Architecture
+
+- 运营字段关联分析使用独立只读接口与前端组件，历史实例规则决定维度及严格联动身份；正计数选项按节点折叠、商品逐层和同节点双字段分析。CSV reportVersion=2 追加精确维度、条件与关联行，旧基础日期口径/列及旧客户端协议不变。完整来源清单、尾部授权、预算和生命周期绑定见 ADR-0022；不改变快照格式/摘要或 worker 写流程。
 
 - 商品严格联动采用模板首字段内置八列索引组合表及共享纯解析器，保留原单父条件兼容；新规则按整组保存、复制和校验，旧客户端不得无声移除。规则只保存于模板和历史实例自己的定义，当前有效值继续供统计/CSV/检索/卡片/分享消费；矩阵不进入公开投影或重复 setData。预算、语义摘要和发布顺序见 ADR-0021，实际完成状态以 STATUS 为准。
 
-- 首页和售后列表共用 `miniprogram/utils/business-card.js` 与 `miniprogram/templates/business-card.wxml/.wxss`，保留编号、状态、进度/路径和检索命中交互。模板编辑页的展示配置使用独立已保存定义快照、修订及请求状态，不隐式提交流程草稿；新定义须保存后再配置。字段缓存仅在内存保留，账号/角色变更与权限失效清除旧字段；返回列表刷新已提交条件，不自动提交未确认检索输入。
+- 首页、售后列表、待我处理和待我审核共用 `miniprogram/utils/business-card.js` 与 `miniprogram/templates/business-card.wxml/.wxss`，保留编号、状态、进度/路径和检索命中交互。待办保留节点、轮次、截止、会签/或签及原操作入口；审核轮的 `pending` 仅在卡片状态展示映射为“待审核”，不改变审核状态。模板编辑页的展示配置使用独立已保存定义快照、修订及请求状态，不隐式提交流程草稿；新定义须保存后再配置。字段缓存仅在内存保留，账号/角色变更与权限失效清除旧字段；返回列表刷新已提交条件，不自动提交未确认检索输入。
 
-- 售后卡片后端使用独立的模板 `cardDisplay` 修订与售后头 `cardSummary` 派生缓存：按稳定节点/字段标识选择最多4项当前有效字段，已有实例沿用自身字段类型/标签，输出每项最多80个Unicode码点；展示修订不改变流程定义版本，摘要不改变业务版本、更新时间、排序或检索状态。三个首页/列表读入口在筛选、授权、分页后统一装配；十一种现有业务写入口成功后有界刷新，派生失败不反转权威成功。每次请求独立会话去重、最多4路并发，缓存命中仍重验当前账号和业务关系；超级管理员全局列表非成员保持固定信息可见但不获得详情字段权限。决策与发布边界见 `docs/memory/decisions/ADR-0018-template-configurable-card-summary.md`，当前部署/客户端状态见 `docs/memory/STATUS.md`。
+- 售后卡片后端使用独立的模板 `cardDisplay` 修订与售后头 `cardSummary` 派生缓存：按稳定节点/字段标识选择最多4项当前有效字段，已有实例沿用自身字段类型/标签，输出每项最多80个Unicode码点；展示修订不改变流程定义版本，摘要不改变业务版本、更新时间、排序或检索状态。五个首页/列表/待办读入口在筛选、授权、分页后统一装配；待办明确使用 `businessLineId` 读取所属售后，不能把节点或轮次 `_id` 当作售后ID。十一种现有业务写入口成功后有界刷新，派生失败不反转权威成功。每次请求独立会话去重、最多4路并发，缓存命中仍重验当前账号和业务关系；超级管理员全局列表非成员保持固定信息可见但不获得详情字段权限。决策与发布边界见 `docs/memory/decisions/ADR-0018-template-configurable-card-summary.md`，当前部署/客户端状态见 `docs/memory/STATUS.md`。
 
 - 检索漏索引恢复同时支持正常关键词请求驱动：每次最多扫描40条售后头、重建2条当前用户有权且符合筛选的售后；加密认证游标绑定账号、角色、条件和有效期，客户端每批最多20次请求后只允许显式继续。`searchSchemaVersion: 2` 区分完整当前格式与需重新生成的旧代；恢复不改变业务版本/完成状态，不执行清理或开启Timer，失败结果明确标为不完整。规则见 `docs/memory/decisions/ADR-0017-request-driven-search-recovery.md`。
 
