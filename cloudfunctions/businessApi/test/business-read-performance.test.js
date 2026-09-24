@@ -143,7 +143,11 @@ test('history reads all 101 revisions with at most four attachment queries and s
   assert.equal(h.fake.queryCalls.filter(call => call.collection === 'node_feedback').length, 2)
   assert.equal(h.fake.queryCalls.filter(call => call.collection === 'evidences').length, 101)
   assert.equal(h.metrics().peak, 4)
-  assert.equal(h.metrics().rounds, 31)
+  assert.equal(h.metrics().rounds, 34) // Final actor/line/node reauthorization adds three fixed reads.
+  for (const collection of ['users', 'business_lines', 'business_nodes']) {
+    assert.equal(h.reads.filter(read => read.collection === collection && read.id).length, 2)
+  }
+  assert.equal(h.metrics().transactions, 2)
   t.diagnostic(JSON.stringify(h.metrics()))
   h.assertReadOnly()
 })

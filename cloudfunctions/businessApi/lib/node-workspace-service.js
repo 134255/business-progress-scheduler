@@ -7,7 +7,7 @@ function createError(code) {
   return error
 }
 
-function createNodeWorkspaceService({ businessService, feedbackService }) {
+function createNodeWorkspaceService({ businessService, feedbackService, previousNodeResultRepository }) {
   if (!businessService || typeof businessService.getBusinessLine !== 'function') {
     throw new TypeError('businessService.getBusinessLine is required')
   }
@@ -34,7 +34,8 @@ function createNodeWorkspaceService({ businessService, feedbackService }) {
     }
   }
 
-  return { getNodeWorkspace }
+  return { getNodeWorkspace,
+    ...(previousNodeResultRepository ? { getPreviousNodeResult: input => previousNodeResultRepository.getPreviousNodeResult(input) } : {}) }
 }
 
 module.exports = { createNodeWorkspaceService }

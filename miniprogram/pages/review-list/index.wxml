@@ -1,9 +1,9 @@
+<import src="../../templates/business-card.wxml" />
 <view class="page">
-  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}<button size="mini" bindtap="retryCards" disabled="{{loading || loadingMore}}">重试</button></view>
   <view class="card review-card" wx:for="{{items}}" wx:key="reviewRoundId" data-id="{{item.reviewRoundId}}" bindtap="openDetail">
-    <view class="row-between"><text class="item-title">{{item.businessName}}</text><text class="mode">{{item.reviewModeLabel}}</text></view>
-    <text class="muted block">售后编号：{{item.businessCode || '未编号'}}</text>
-    <text class="block">{{item.nodeName}} · 第 {{item.reviewRoundNumber}} 轮审核</text>
+    <template is="business-card" data="{{item}}" />
+    <view class="block">{{item.nodeName}} · 第 {{item.reviewRoundNumber}} 轮审核 <text class="mode">{{item.reviewModeLabel}}</text></view>
     <text class="muted block">{{item.nodeCode}}</text>
     <text class="due block">{{item.dueText}}</text>
     <text class="action block">查看并审核 →</text>

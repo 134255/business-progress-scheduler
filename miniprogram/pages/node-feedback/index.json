@@ -1,4 +1,4 @@
 {
-  "navigationBarTitleText": "节点反馈"
+  "navigationBarTitleText": "节点反馈",
+  "usingComponents": { "previous-node-records": "/components/previous-node-records/index" }
 }
-

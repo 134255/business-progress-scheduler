@@ -2,6 +2,7 @@ const businessService = require('../../services/business')
 const { safeErrorMessage, isAccountAccessError } = require('../../utils/safe-error')
 const { createEvidenceUploader } = require('../../utils/evidence-upload')
 const { prepareEvidenceFile } = require('../../utils/evidence-file')
+const { evidencePickerError, filterEvidencePickerResult } = require('../../utils/evidence-picker-error')
 const {
   buildRecognitionPreview,
   applyRecognitionPreview,
@@ -29,7 +30,7 @@ const SAFE_UPLOAD_ERROR_CODES = new Set([
   'EVIDENCE_UPLOAD_MISMATCH', 'EVIDENCE_UPLOAD_NOT_FOUND', 'EVIDENCE_UPLOAD_CANCELLED', 'EVIDENCE_FILE_READ_FAILED'
 ])
 const UPLOAD_DIAGNOSTIC_CODES = new Set([
-  ...SAFE_UPLOAD_ERROR_CODES, 'EVIDENCE_UPLOAD_FAILED', 'EVIDENCE_UPLOAD_UNAVAILABLE',
+  ...SAFE_UPLOAD_ERROR_CODES, 'EVIDENCE_UPLOAD_FAILED', 'EVIDENCE_UPLOAD_UNAVAILABLE', 'EVIDENCE_UPLOAD_RETRYABLE',
   'FORBIDDEN', 'VERSION_CONFLICT', 'NODE_VERSION_CONFLICT', 'BUSINESS_NOT_ACTIVE',
   'FEEDBACK_TOTAL_TOO_LARGE', 'AccessDenied', 'SignatureDoesNotMatch',
   'RequestError', 'NetworkError', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'UPLOAD_FAILED',
@@ -47,7 +48,8 @@ function safeUploadError(error) {
   const status = error && error.statusCode
   const httpStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? ` · HTTP ${status}` : ''
   const detail = stage ? `（${stage} · ${code}${httpStatus}）` : ''
-  return Object.assign(new Error(message + detail), { code })
+  const exhausted = error && error.attempts === 3 ? '已尝试3次仍未成功，请重试此文件' : message
+  return Object.assign(new Error(exhausted + detail), { code })
 }
 
 function effectiveClientEvidenceTypes(requiresEvidence, allowedTypes) {
@@ -262,6 +264,7 @@ Page({
     reviewHistoryLoading: false,
     reviewHistoryLoaded: false,
     reviewHistoryError: '',
+    previousRecordsEnabled: false,
     reviewHistoryHasMore: false,
     reviewHistoryBeforeRoundNumber: null,
     errorMessage: '',
@@ -274,6 +277,7 @@ Page({
     uploadProgressPercent: 0,
     requiresEvidence: false,
     allowedEvidenceTypes: [],
+    pickerError: null,
     videoPreview: null,
     downloading: false,
     submitting: false,
@@ -316,11 +320,17 @@ Page({
 
   onUnload() {
     this.pageAlive = false
+    this.retryVideoContext = null
     this.clearReviewHistory()
     this.fieldDefinitions = null
     this.definitionSchemaFingerprint = null
     this.loadSequence += 1
     this.recognitionSequence += 1
+  },
+
+  returnToCurrentForm() {
+    if (!this.pageAlive || !this.actorStillCurrent() || !this.data.previousRecordsEnabled) return
+    wx.pageScrollTo({ selector: '#current-node-form', duration: 200 })
   },
 
   actorStillCurrent() {
@@ -329,7 +339,8 @@ Page({
     this.identityInvalidated = true
     this.clearReviewHistory()
     this.loadSequence += 1
-    this.setData({ canSubmit: false, readOnly: true })
+    this.retryVideoContext = null
+    this.setData({ canSubmit: false, readOnly: true, pickerError: null, previousRecordsEnabled: false })
     wx.reLaunch({ url: '/pages/login/index' })
     return false
   },
@@ -380,8 +391,13 @@ Page({
       const requiresReview = legacyMode ? true : node.requiresReview !== false
       const readOnlyStatuses = new Set(['pending_review', 'awaiting_decision', 'skipped', 'completed'])
       const readOnly = frozen || !canSubmit || !legacyMode && readOnlyStatuses.has(node.status)
+      if (this.retryVideoContext && (this.retryVideoContext.expectedNodeVersion !== node.version || readOnly)) {
+        this.retryVideoContext = null
+        this.setData({ pickerError: null })
+      }
       this.setData({
         nodeName: node.name || '',
+        previousRecordsEnabled: true,
         nodeCode: node.nodeCode || '',
         expectedNodeVersion: node.version,
         lineVersion: workspace.line.version,
@@ -457,7 +473,7 @@ Page({
     if (isAccountAccessError(error) && this.pageAlive && this.actorStillCurrent()) {
       this.clearReviewHistory('审核历史暂时无法查看，请重试')
       this.loadSequence += 1
-      this.setData({ canSubmit: false, readOnly: true, loadingHistory: false })
+      this.setData({ canSubmit: false, readOnly: true, loadingHistory: false, previousRecordsEnabled: false })
     }
   },
 
@@ -766,9 +782,11 @@ Page({
   },
 
   invokeEvidencePicker(api, options) {
+    if (this.evidencePickerPending > 0) return
     const actorId = currentUserId()
     const { lineId, nodeId, expectedNodeVersion } = this.data
     let pending = false
+    let settled = false
     const release = () => {
       if (!pending) return
       pending = false
@@ -778,24 +796,66 @@ Page({
       lineId === this.data.lineId && nodeId === this.data.nodeId && expectedNodeVersion === this.data.expectedNodeVersion &&
       !this.data.readOnly && !this.data.reviewDraftLocked && !this.data.submitting
     if (!stillCurrent()) return
-    const fail = error => {
-      release()
+    this.retryVideoContext = null
+    this.setData({ pickerError: null })
+    const reportFailure = (error, stage) => {
       if (!stillCurrent()) return
-      const message = error && typeof error.errMsg === 'string' ? error.errMsg : ''
-      if (/\bcancel(?:led)?\b/i.test(message)) return
-      wx.showToast({ title: '无法完成文件选择，请检查微信版本及系统授权后重试', icon: 'none' })
+      const pickerError = evidencePickerError(api, error, stage)
+      if (!pickerError) return
+      this.retryVideoContext = pickerError.canRetryVideo ? { actorId, lineId, nodeId, expectedNodeVersion } : null
+      this.setData({ pickerError })
+      wx.showToast({ title: stage === 'partial' ? '部分文件未能选取，请查看提示' : '文件选择失败，请查看下方提示', icon: 'none' })
+    }
+    const fail = (error, stage = 'native') => {
+      if (settled) return
+      settled = true
+      release()
+      reportFailure(error, stage)
     }
     try {
       if (typeof wx[api] !== 'function' || typeof wx.canIUse === 'function' && !wx.canIUse(api)) {
-        fail()
+        fail(null, 'unavailable')
         return
       }
       this.evidencePickerPending = (this.evidencePickerPending || 0) + 1
       pending = true
-      wx[api]({ ...options, success: result => { release(); if (stillCurrent()) options.success(result) }, fail })
+      wx[api]({ ...options, success: result => {
+        if (settled) return
+        settled = true
+        release()
+        if (!stillCurrent()) return
+        try {
+          const filtered = filterEvidencePickerResult(api, result)
+          if (!filtered) {
+            reportFailure(null, 'result')
+            return
+          }
+          options.success(filtered.result)
+          if (filtered.partial) reportFailure(null, 'partial')
+        } catch (error) { reportFailure(null, 'result') }
+      }, fail: error => fail(error) })
     } catch (error) {
-      fail()
+      fail(null, 'invoke')
     }
+  },
+
+  retryVideoSelection() {
+    const context = this.retryVideoContext
+    if (!context || !this.pageAlive || context.actorId !== currentUserId() ||
+        context.lineId !== this.data.lineId || context.nodeId !== this.data.nodeId ||
+        context.expectedNodeVersion !== this.data.expectedNodeVersion) {
+      this.retryVideoContext = null
+      if (this.pageAlive) this.setData({ pickerError: null })
+      return
+    }
+    this.invokeEvidencePicker('chooseVideo', {
+      sourceType: ['album'],
+      compressed: false,
+      success: selected => this.addSelectedFiles([{
+        name: displayName(selected, 'video.mp4'), path: selected.tempFilePath,
+        size: selected.size, category: 'video'
+      }])
+    })
   },
 
   chooseMediaEvidence() {
@@ -847,6 +907,7 @@ Page({
       count: 9,
       mediaType: ['image', 'video'],
       sourceType: ['album', 'camera'],
+      ...(supportsOriginalMediaVideo() ? { sizeType: ['original'] } : {}),
       success: result => this.addSelectedFiles((result.tempFiles || []).map((file, index) => {
         let name = displayName(file, `${file.fileType || 'media'}-${index + 1}`)
         if (!extensionOf(name)) name += file.fileType === 'image' ? '.jpg' : '.mp4'
@@ -951,16 +1012,25 @@ Page({
           errorMessage: '', errorCode: '', canRetry: false
         })
         try {
+          let transferAttemptLabel = ''
           const registered = await uploader.upload({
             businessLineId: operation.lineId,
             nodeId: operation.nodeId,
             expectedNodeVersion: operation.nodeVersion,
             file,
             isCurrent: () => this.writeStillCurrent(operation),
+            onStatus: ({ stage, attempt, maxAttempts }) => {
+              if (!this.writeStillCurrent(operation)) return
+              const attemptLabel = `（第 ${attempt}/${maxAttempts} 次）`
+              if (stage === 'transfer') transferAttemptLabel = attemptLabel
+              this.updateLocalFile(index, { statusLabel: stage === 'transfer'
+                ? `上传中${attemptLabel}`
+                : attempt === 0 ? '等待核验登记' : `核验登记中${attemptLabel}` })
+            },
             onProgress: progressPercent => {
               if (this.writeStillCurrent(operation)) this.updateLocalFile(index, {
                 progressPercent,
-                statusLabel: `上传中 ${progressPercent}%`
+                statusLabel: `上传中 ${progressPercent}%${transferAttemptLabel}`
               })
             }
           })

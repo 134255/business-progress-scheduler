@@ -1,13 +1,14 @@
 const RETRY_DELAYS_MS = Object.freeze([250, 500])
+const MAX_STAGE_ATTEMPTS = RETRY_DELAYS_MS.length + 1
 const { recordPerformanceTiming, readTimingClock, notifyTiming } = require('./performance-timing')
 const RETRYABLE_CODES = new Set([
-  'RequestError', 'NetworkError', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'UPLOAD_FAILED'
+  'RequestError', 'NetworkError', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'UPLOAD_FAILED',
+  'SlowDown', 'InternalError'
 ])
 const AUTHORIZATION_EXPIRED_CODES = new Set([
   'ExpiredToken', 'ExpiredTokenException', 'InvalidSecurityToken', 'RequestTimeTooSkewed'
 ])
 const AUTHORIZATION_REFRESH_WINDOW_SECONDS = 120
-const MAX_AUTHORIZATION_REFRESHES = 8
 
 function uploadError(code, message) {
   const error = new Error(message || code)
@@ -19,11 +20,8 @@ async function atUploadStage(stage, action) {
   try {
     return await action()
   } catch (error) {
-    const source = error && typeof error.error === 'object' && error.error ? error.error : error
-    const failure = uploadError(source && (source.code || source.Code) || error && error.code || 'EVIDENCE_UPLOAD_FAILED', '上传失败，请重试')
+    const failure = attemptFailure(error, error && error.attempts)
     failure.uploadStage = stage
-    const status = Number(error && error.statusCode || source && source.statusCode)
-    if (Number.isInteger(status) && status >= 100 && status <= 599) failure.statusCode = status
     throw failure
   }
 }
@@ -33,14 +31,29 @@ function assertNotCancelled(signal) {
 }
 
 function isRetryable(error) {
-  if (!error || error.code === 'UPLOAD_CANCELLED') return false
+  if (!error || !RETRYABLE_CODES.has(error.code) &&
+      !['EVIDENCE_UPLOAD_RETRYABLE', 'EVIDENCE_UPLOAD_FAILED'].includes(error.code)) return false
   const status = Number(error.statusCode)
-  return RETRYABLE_CODES.has(error.code) || status === 408 || status === 429 || status >= 500
+  if (status >= 400 && status < 500 && status !== 408 && status !== 429) return false
+  return RETRYABLE_CODES.has(error.code) || error.code === 'EVIDENCE_UPLOAD_RETRYABLE' ||
+    status === 408 || status === 429 || (status >= 500 && status <= 599)
+}
+
+function attemptFailure(error, attempts) {
+  // Preserve only upload error fields, never a provider's body, path or credentials.
+  const source = error && typeof error.error === 'object' && error.error ? error.error : error
+  const failure = uploadError(source && (source.code || source.Code) || error && error.code || 'EVIDENCE_UPLOAD_FAILED', '上传失败，请重试')
+  const status = Number(error && error.statusCode || source && source.statusCode)
+  if (Number.isInteger(status) && status >= 100 && status <= 599) failure.statusCode = status
+  if (Number.isInteger(attempts) && attempts >= 1 && attempts <= MAX_STAGE_ATTEMPTS) failure.attempts = attempts
+  return failure
 }
 
 function isAuthorizationExpired(error) {
   if (!error) return false
-  if (AUTHORIZATION_EXPIRED_CODES.has(error.code) || AUTHORIZATION_EXPIRED_CODES.has(error.Code)) return true
+  const code = attemptFailure(error).code
+  if (AUTHORIZATION_EXPIRED_CODES.has(code)) return true
+  if (code !== 'EVIDENCE_UPLOAD_FAILED' && !RETRYABLE_CODES.has(code)) return false
   const status = Number(error.statusCode || error.status)
   const text = `${error.message || ''} ${error.error || ''} ${error.errMsg || ''}`.toLowerCase()
   return status === 403 && (text.includes('expired') || text.includes('security token'))
@@ -99,6 +112,9 @@ function createEvidenceUploader({
       typeof refreshUpload !== 'function' || typeof finalizeUpload !== 'function') {
     throw new TypeError('cosFactory, beginUpload, refreshUpload and finalizeUpload are required')
   }
+  // One uploader belongs to one page operation. Transfer stays parallel; only
+  // registration is queued. A rejected file must never poison the next one.
+  let finalizeTail = Promise.resolve()
 
   async function timedUploadStage(stage, action) {
     const startedAt = readTimingClock(clock)
@@ -117,7 +133,7 @@ function createEvidenceUploader({
     }
   }
 
-  async function uploadOnce({ session, file, onProgress, signal }) {
+  async function uploadOnce({ session, file, onProgress, assertCurrent, reportStatus }) {
     let currentSession = session
     let refreshPromise = null
     let authorizationError = null
@@ -128,11 +144,13 @@ function createEvidenceUploader({
       expectedNodeVersion: session.expectedNodeVersion
     }
     const refreshSession = async force => {
+      assertCurrent()
       const nearExpiry = currentSession.expiredTime <= nowSeconds() + AUTHORIZATION_REFRESH_WINDOW_SECONDS
       if (!force && !nearExpiry) return currentSession
       if (!refreshPromise) {
         refreshPromise = Promise.resolve(refreshUpload(refreshInput))
           .then(next => {
+            assertCurrent()
             currentSession = mergeRefreshedSession(currentSession, next)
             authorizationError = null
             return currentSession
@@ -145,11 +163,9 @@ function createEvidenceUploader({
       getAuthorization: async () => authorizationOf(await refreshSession(false)),
       onAuthorizationError: error => { authorizationError = error }
     })
-    let lastError
-    let transportRetries = 0
-    let authorizationRefreshes = 0
-    while (true) {
-      assertNotCancelled(signal)
+    for (let attempt = 1; attempt <= MAX_STAGE_ATTEMPTS; attempt += 1) {
+      assertCurrent()
+      reportStatus('transfer', attempt)
       try {
         const result = await callUpload(client, {
           Bucket: currentSession.bucket,
@@ -167,16 +183,16 @@ function createEvidenceUploader({
         })
         return { result, refreshSession }
       } catch (error) {
-        lastError = authorizationError || error
+        const lastError = authorizationError || error
         authorizationError = null
-        if (isAuthorizationExpired(lastError) && authorizationRefreshes < MAX_AUTHORIZATION_REFRESHES) {
-          authorizationRefreshes += 1
+        const failure = attemptFailure(lastError, attempt)
+        if (attempt === MAX_STAGE_ATTEMPTS) throw failure
+        if (isAuthorizationExpired(lastError)) {
           await refreshSession(true)
           continue
         }
-        if (!isRetryable(lastError) || transportRetries >= RETRY_DELAYS_MS.length) throw lastError
-        await delay(RETRY_DELAYS_MS[transportRetries])
-        transportRetries += 1
+        if (!isRetryable(failure)) throw failure
+        await delay(RETRY_DELAYS_MS[attempt - 1])
       }
     }
   }
@@ -186,6 +202,11 @@ function createEvidenceUploader({
     const assertCurrent = () => {
       assertNotCancelled(input && input.signal)
       if (typeof input.isCurrent === 'function' && !input.isCurrent()) throw uploadError('UPLOAD_CANCELLED', '上传已取消')
+    }
+    const reportStatus = (stage, attempt) => {
+      try {
+        if (typeof input.onStatus === 'function') input.onStatus({ stage, attempt, maxAttempts: MAX_STAGE_ATTEMPTS })
+      } catch (_) { /* Display observers cannot alter upload outcomes. */ }
     }
     assertCurrent()
     const file = typeof prepareFile === 'function'
@@ -202,26 +223,38 @@ function createEvidenceUploader({
       ...(await timedUploadStage('authorize', () => beginUpload(beginInput))),
       expectedNodeVersion: input.expectedNodeVersion
     }
+    assertCurrent()
     const uploadState = await timedUploadStage('transfer', () => uploadOnce({
-      session, file, onProgress: input.onProgress, signal: input.signal
+      session, file, onProgress: input.onProgress, assertCurrent, reportStatus
     }))
-    for (let finalizeAttempt = 0; finalizeAttempt < 2; finalizeAttempt += 1) {
-      assertNotCancelled(input.signal)
-      try {
-        return await timedUploadStage('finalize', () => finalizeUpload({
-          evidenceId: session.evidenceId,
-          uploadSessionToken: session.uploadSessionToken,
-          expectedNodeVersion: input.expectedNodeVersion
-        }))
-      } catch (error) {
-        if (error && error.code === 'EVIDENCE_UPLOAD_EXPIRED' && finalizeAttempt === 0) {
-          await uploadState.refreshSession(true)
-          continue
+    assertCurrent()
+    reportStatus('finalize', 0)
+    const registration = finalizeTail.then(() => timedUploadStage('finalize', async () => {
+      let refreshed = false
+      for (let attempt = 1; attempt <= MAX_STAGE_ATTEMPTS; attempt += 1) {
+        assertCurrent()
+        reportStatus('finalize', attempt)
+        try {
+          return await finalizeUpload({
+            evidenceId: session.evidenceId,
+            uploadSessionToken: session.uploadSessionToken,
+            expectedNodeVersion: input.expectedNodeVersion
+          })
+        } catch (error) {
+          const failure = attemptFailure(error, attempt)
+          if (attempt === MAX_STAGE_ATTEMPTS) throw failure
+          if (error && error.code === 'EVIDENCE_UPLOAD_EXPIRED' && !refreshed) {
+            refreshed = true
+            await uploadState.refreshSession(true)
+            continue
+          }
+          if (!isRetryable(failure)) throw failure
+          await delay(RETRY_DELAYS_MS[attempt - 1])
         }
-        throw error
       }
-    }
-    throw uploadError('EVIDENCE_UPLOAD_EXPIRED', '上传授权已过期')
+    }))
+    finalizeTail = registration.catch(() => {})
+    return registration
   }
 
   return { upload }

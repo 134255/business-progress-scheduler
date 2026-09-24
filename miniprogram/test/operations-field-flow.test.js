@@ -3,15 +3,18 @@ const assert=require('node:assert/strict')
 const path=require('node:path')
 const domain=require('../../cloudfunctions/businessApi/lib/operations-field-domain')
 const {fieldSource}=require('../../cloudfunctions/businessApi/test/helpers/field-fixtures')
+const {record,selection}=require('../../cloudfunctions/businessApi/test/helpers/field-analysis-fixtures')
+const {fieldAnalysisExportRows}=require('../../cloudfunctions/businessApi/lib/operations-field-analysis')
 
-const results=['A','A','B'].map((value,index)=>domain.buildFinalFieldResult(fieldSource({nodeId:`node-${index}`,
+const records=['A','A','B'].map((value,index)=>record(fieldSource({nodeId:`node-${index}`,
   values:[{fieldKey:'choice',value},{fieldKey:'tags',value:index===0?['X','Y']:index===1?['Y']:[]},
     {fieldKey:'amount',value:0},{fieldKey:'confirmed',value:false},{fieldKey:'note',value:'完整文字,含"引号"\n下一行'}]})))
+const results=records.map(r=>r.result)
 const summary={scope:'authorized',groups:domain.aggregateFieldResults(results),sampledNodeCount:3,incomplete:false}
 const filters={templates:[{templateId:'template-1',templateName:'合成模板'}],templateVersions:[1],
   stableNodes:[{stableNodeId:'stable-node-1',nodeName:'节点',sequence:0}]}
 const basic={businessCode:'BL-SYNTHETIC',businessName:'基本记录',recordType:'运营基础',dateBasis:'售后创建日期'}
-const reportRows=[basic,...domain.fieldExportRows(results)]
+const reportRows=[basic,...fieldAnalysisExportRows(records,selection(records,'catalog')).rows]
 function harness(overrides={},role='super_admin') {
   const app={globalData:{currentUser:{_id:'actor',role,status:'active'}}}
   global.getApp=()=>app
@@ -51,10 +54,10 @@ test('obsolete template filter continuation cannot clear or invalidate the newer
   oldFilters.resolve(filters)
   await new Promise(resolve=>setImmediate(resolve))
   assert.equal(h.page.fieldSequence,sequence)
-  assert.equal(h.calls.filter(c=>c.action==='getOperationsFieldSummary').length,1)
+  assert.equal(h.calls.filter(c=>c.action==='getOperationsFieldSummary').length,0)
   newSummary.resolve(summary);await Promise.all([old,latest])
-  assert.equal(h.page.data.fieldLoading,false)
-  assert.equal(h.page.data.fieldGroups.length,2)
+  assert.equal(h.page.data.fieldAnalysisEnabled,true)
+  assert.equal(h.page.data.fieldAnalysisQuery.templateId,'B')
 })
 
 test('typed incomplete or invalid new report rows cannot become sendable files',async()=>{
@@ -85,7 +88,7 @@ test('changing date during template filters discards the continuation and releas
   h.page.onEndDateChange({detail:{value:'2026-09-10'}})
   pending.resolve(filters);await work
   assert.equal(h.calls.filter(c=>c.action==='getOperationsFieldSummary').length,0)
-  assert.equal(h.page.data.fieldLoading,false)
+  assert.equal(h.page.data.fieldAnalysisEnabled,false)
   assert.equal(h.page.data.loading,false)
 })
 
@@ -97,7 +100,8 @@ test('encoded CSV preserves reversible field and option originals including form
   }
   source.feedback.fieldValues=require('../../cloudfunctions/businessApi/lib/field-domain').validateFieldValues(
     source.node.fieldDefinitions,[{fieldKey:'choice',value:labels[0]},{fieldKey:'tags',value:labels}])
-  const rows=domain.fieldExportRows([domain.buildFinalFieldResult(source)])
+  const records=[record(source)]
+  const rows=fieldAnalysisExportRows(records,selection(records,'catalog')).rows
   const h=harness({exportOperationsReportRows:()=>({items:rows,hasMore:false,nextCursor:''})})
   await h.page.exportCsv();assert.equal(h.writes.length,1,h.page.data.exportErrorMessage)
   const [header,...cells]=parseCsv(h.writes[0].data)
@@ -117,31 +121,29 @@ test('encoded CSV preserves reversible field and option originals including form
   }
 })
 
-test('real client service loads authorized option counts but no other field values into dashboard state',async()=>{
+test('page supplies only committed filters to the independent authorized analysis component',async()=>{
   const h=harness({},'user');await h.page.onShow()
-  const group=h.page.data.fieldGroups.find(g=>g.fieldKey==='choice')
-  assert.deepEqual(group.options.map(o=>o.count),[2,1])
-  assert.match(h.page.data.fieldScopeNotice,/权限/)
-  assert.equal(h.page.data.fieldLoading,false)
+  assert.equal(h.page.data.fieldAnalysisEnabled,true)
+  assert.equal(h.page.data.fieldAnalysisQuery.templateId,'template-1')
   assert.doesNotMatch(JSON.stringify(h.page.data),/完整文字/)
-  assert.ok(h.calls.some(c=>c.action==='getOperationsFieldSummary'))
+  assert.ok(!h.calls.some(c=>c.action==='getOperationsFieldSummary'))
   assert.ok(h.calls.every(c=>c.options.silent===true))
 })
 
-test('field summary failures do not erase successfully loaded timing charts',async()=>{
+test('independent analysis access failure clears field visibility but preserves timing charts',async()=>{
   const h=harness({getOperationsFieldSummary(){throw Object.assign(new Error('private detail'),{code:'RANGE_TOO_LARGE'})}})
   await h.page.onShow()
   assert.equal(h.page.data.nodeSeries.length,1)
-  assert.match(h.page.data.fieldErrorMessage,/范围/)
-  assert.doesNotMatch(h.page.data.fieldErrorMessage,/private/)
-  assert.equal(h.page.data.fieldLoading,false)
+  h.page.onFieldAnalysisAccessInvalid()
+  assert.equal(h.page.data.fieldAnalysisEnabled,false)
+  assert.equal(h.page.data.nodeSeries.length,1)
 })
 
 test('historical instance field templates are available even without timing template candidates',async()=>{
   const h=harness({getOperationsAnalyticsFilters:()=>({templates:[]})})
   await h.page.onShow()
   assert.equal(h.page.data.templateOptions[0].value,'template-1')
-  assert.equal(h.page.data.fieldGroups.length,2)
+  assert.equal(h.page.data.fieldAnalysisEnabled,true)
 })
 
 test('field-only business and participant candidates are merged into the actual selectors',async()=>{
@@ -189,24 +191,23 @@ test('an initially empty date range can discover history, and vanished selection
   assert.equal(h.page.query().stableNodeId,'');assert.equal(h.page.data.loading,false)
 })
 
-for(const change of ['account','filter','hide']) test(`late field response is discarded on ${change}`,async()=>{
+for(const change of ['account','filter','hide']) test(`late field-filter response cannot activate analysis on ${change}`,async()=>{
   const wait=deferred()
-  const h=harness({getOperationsFieldSummary:()=>wait.promise})
+  const h=harness({getOperationsFieldFilters:()=>wait.promise})
   h.page.setData({templateOptions:[{value:'template-1'}]})
   const loading=h.page.applyFilters()
   await new Promise(resolve=>setImmediate(resolve))
   if(change==='account') h.app.globalData.currentUser={...h.app.globalData.currentUser}
   if(change==='filter') h.page.onEndDateChange({detail:{value:'2026-09-10'}})
   if(change==='hide') h.page.onHide()
-  wait.resolve(summary);await loading
-  assert.deepEqual(h.page.data.fieldGroups,[])
+  wait.resolve(filters);await loading
+  assert.equal(h.page.data.fieldAnalysisEnabled,false)
 })
 
-test('incomplete authorized statistics carry an explicit gap notice rather than pretending complete zero',async()=>{
-  const h=harness({getOperationsFieldSummary:()=>({...summary,incomplete:true})})
-  await h.page.onShow()
-  assert.equal(h.page.data.fieldIncomplete,true)
-  assert.match(h.page.data.fieldNotice,/补齐|不完整/)
+test('legacy statistics formatter keeps the old incomplete protocol available for old clients',()=>{
+  const result=require('../utils/operations-field-report').formatFieldSummary({...summary,incomplete:true})
+  assert.equal(result.fieldIncomplete,true)
+  assert.match(result.fieldNotice,/补齐|不完整/)
 })
 
 test('combined CSV keeps original columns and actual typed detail/count rows in the existing two-tap flow',async()=>{
@@ -255,7 +256,7 @@ test('a report row without its record type cannot become a sendable supposedly c
 test('field and timing loading do not require Promise.allSettled on a mini-program runtime',async()=>{
   const saved=Promise.allSettled
   Promise.allSettled=undefined
-  try {const h=harness();await h.page.onShow();assert.equal(h.page.data.fieldGroups.length,2);assert.equal(h.page.data.nodeSeries.length,1)}
+  try {const h=harness();await h.page.onShow();assert.equal(h.page.data.fieldAnalysisEnabled,true);assert.equal(h.page.data.nodeSeries.length,1)}
   finally {Promise.allSettled=saved}
 })
 
@@ -308,5 +309,6 @@ test('real field repository and service feed client CSV whose select detail exac
   for(const row of totals) assert.equal(Number(row[col('出现次数')]),counted.get(row[col('字段兼容组')]+'|'+row[col('选项内容')])||0)
   assert.ok(rows.some(row=>row[col('字段标识')]==='amount' && row[col('字段内容')]==='0'))
   assert.ok(rows.some(row=>row[col('字段标识')]==='confirmed' && row[col('字段内容')]==='否'))
-  assert.equal(h.page.data.fieldGroups.find(g=>g.fieldKey==='choice').options.find(o=>o.label==='A').count,2)
+  const legacy=await service.getSummary({actor,query:h.page.query()})
+  assert.equal(legacy.groups.find(g=>g.fieldKey==='choice').options.find(o=>o.label==='A').count,2)
 })

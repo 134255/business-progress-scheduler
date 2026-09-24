@@ -88,6 +88,9 @@ function getOperationsFieldSummary(query) {
 function getOperationsFieldFilters(query) {
   return callProtected('getOperationsFieldFilters',query || {},'字段筛选项加载失败，请稍后重试')
 }
+function getOperationsFieldAnalysis(query) {
+  return callProtected('getOperationsFieldAnalysis',query || {},'字段关联分析加载失败，请稍后重试')
+}
 function exportOperationsReportRows(query) {
   return callProtected('exportOperationsReportRows',query || {},'完整运营报告导出失败，请稍后重试')
 }
@@ -232,6 +235,10 @@ function getReviewDetail(reviewRoundId) {
   return callProtected('getReviewDetail', { reviewRoundId }, '审核详情加载失败，请稍后重试')
 }
 
+function getPreviousNodeResult(input) {
+  return callProtected('getPreviousNodeResult', input, '最终结果暂时无法查看，请重试或查看历史记录')
+}
+
 function listNodeReviewHistory(query) {
   return callProtected('listNodeReviewHistory', query, '审核历史加载失败，请稍后重试')
 }
@@ -253,6 +260,7 @@ module.exports = {
   exportOperationsRows,
   getOperationsFieldSummary,
   getOperationsFieldFilters,
+  getOperationsFieldAnalysis,
   exportOperationsReportRows,
   listOperationsTimingDetails,
   getOperationsAnalyticsFilters,
@@ -269,6 +277,7 @@ module.exports = {
   submitNodeFeedback,
   getNodeHistory,
   getNodeWorkspace,
+  getPreviousNodeResult,
   registerEvidenceUpload,
   beginEvidenceUpload,
   refreshEvidenceUploadAuthorization,

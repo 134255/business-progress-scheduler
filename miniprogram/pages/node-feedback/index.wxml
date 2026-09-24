@@ -15,6 +15,9 @@
     </view>
   </view>
 
+  <previous-node-records business-line-id="{{lineId}}" node-id="{{nodeId}}" enabled="{{previousRecordsEnabled}}" return-label="返回当前填写" bindreturntocurrent="returnToCurrentForm" />
+  <view id="current-node-form" />
+
   <view wx:if="{{canSubmit || workflowMode === 'review'}}" class="card">
     <view wx:if="{{legacyMode}}" class="field">
       <text class="field-label">节点状态</text>
@@ -80,6 +83,11 @@
       <view class="evidence-actions">
         <button size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked || submitting}}" bindtap="chooseMediaEvidence">选择图片或视频</button>
         <button size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked || submitting}}" bindtap="choosePdfEvidence">选择 PDF</button>
+      </view>
+      <view wx:if="{{pickerError}}" class="picker-error" role="alert">
+        <text class="error-text">{{pickerError.message}}</text>
+        <text class="muted block picker-diagnostic" user-select="true">诊断码：{{pickerError.diagnostic}}</text>
+        <button wx:if="{{pickerError.canRetryVideo}}" size="mini" class="secondary-button" disabled="{{readOnly || reviewDraftLocked || submitting}}" bindtap="retryVideoSelection">单独选择本机视频重试</button>
       </view>
       <view wx:if="{{submitting && files.length}}" class="muted">本轮上传进度 {{uploadProgressPercent}}%</view>
       <view class="local-file" wx:for="{{files}}" wx:key="localKey">

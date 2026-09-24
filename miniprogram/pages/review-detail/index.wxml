@@ -13,6 +13,9 @@
       <text class="due block">审核截止：{{dueText}}</text>
     </view>
 
+    <previous-node-records business-line-id="{{businessLineId}}" node-id="{{nodeId}}" enabled="{{previousRecordsEnabled}}" return-label="返回当前审核" bindreturntocurrent="returnToCurrentForm" />
+    <view id="current-node-form" />
+
     <view class="section-title">处理说明</view>
     <view class="card">
       <text class="block">{{processingCommentText}}</text>

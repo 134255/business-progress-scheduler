@@ -1,0 +1,76 @@
+<template name="fields">
+  <view class="field" wx:for="{{items}}" wx:key="fieldKey"><text class="field-name muted">{{item.name}}</text><text class="field-value content">{{item.valueText}}</text></view>
+</template>
+<template name="evidences">
+  <button class="record-button evidence" wx:for="{{items}}" wx:key="evidenceId" disabled="{{item.unavailable}}" data-id="{{item.evidenceId}}" bindtap="previewEvidence">
+    <text class="evidence-name">{{item.fileName || '节点凭证'}}</text><text class="evidence-state">{{item.stateText}}</text>
+  </button>
+</template>
+<template name="votes">
+  <view class="record" wx:for="{{items}}" wx:key="key">
+    <text class="block">{{item.reviewerDisplayName}} · {{item.decisionText}}</text>
+    <text class="muted block">{{item.timeText}}</text><text class="content">{{item.commentText}}</text>
+  </view>
+</template>
+<view wx:if="{{enabled}}" class="panel">
+  <button class="record-button heading" bindtap="toggleSection"><text class="heading-title">前序节点记录 · 只读</text><text class="chevron">{{opened ? '收起 ▴' : '展开 ▾'}}</text></button>
+  <view wx:if="{{opened}}">
+    <text class="muted block">按实际流转顺序查看，不影响当前填写内容。</text>
+    <text wx:if="{{listLoading}}" class="muted block">正在加载前序节点…</text>
+    <view wx:elif="{{listError}}"><text class="error">{{listError}}</text><button class="record-button" bindtap="loadNodes">重试</button></view>
+    <text wx:elif="{{!nodes.length}}" class="muted block">暂无已完成的前序节点</text>
+    <view class="node" wx:for="{{nodes}}" wx:key="_id" wx:for-item="node">
+      <button class="record-button node-heading" data-id="{{node._id}}" bindtap="toggleNode"><view class="heading-title">{{node.name}}<text class="muted block">{{node.nodeCode}}</text></view><text class="chevron">{{selectedId === node._id ? '▴' : '▾'}}</text></button>
+      <view wx:if="{{selectedId === node._id}}">
+        <text wx:if="{{resultLoading}}" class="muted block">正在加载最终结果…</text>
+        <view wx:elif="{{resultError}}"><text class="error block">{{resultError}}</text><button class="record-button" bindtap="loadResult">重试最终结果</button></view>
+        <view wx:elif="{{result}}" class="result">
+          <text class="label block">最终有效结果 · 第 {{result.processingRoundNumber}} 轮处理</text>
+          <text class="block">处理人：{{result.processorDisplayName}}</text>
+          <text class="muted block">提交：{{result.submittedAtText}}</text><text class="muted block">完成：{{result.completedAtText}}</text>
+          <template is="fields" data="{{items: result.fields}}" />
+          <text class="label block">处理说明</text><text class="content">{{result.processingComment || '暂无处理说明'}}</text>
+          <text class="label block">节点凭证（{{result.evidences.length}}）</text><template is="evidences" data="{{items: result.evidences}}" />
+          <text wx:if="{{!result.evidences.length}}" class="muted block">无凭证</text>
+          <text class="label block">最终审核</text><template is="votes" data="{{items: result.votes}}" />
+          <text wx:if="{{!result.reviewRequired}}" class="muted block">本节点无需审核</text>
+        </view>
+        <button class="record-button history-toggle" bindtap="toggleHistory"><text class="heading-title">历史处理记录{{historyLoaded ? '（' + history.length + '）' : ''}}</text><text class="chevron">{{historyOpen ? '收起 ▴' : '展开 ▾'}}</text></button>
+        <view wx:if="{{historyOpen}}">
+          <text class="muted block">按条展开查看原始保存内容，不代表最终有效结果。</text>
+          <text wx:if="{{historyLoading}}" class="muted block">正在加载处理记录…</text>
+          <view wx:if="{{historyError}}"><text class="error block">{{historyError}}</text><button class="record-button" bindtap="loadHistory">重试处理记录</button></view>
+          <view class="record" wx:for="{{history}}" wx:key="feedbackId" wx:for-item="entry">
+            <button class="record-button entry-heading" data-id="{{entry.feedbackId}}" bindtap="toggleEntry"><view class="heading-title">{{entry.statusText}} · {{entry.submittedByLabel}}<text class="muted block">{{entry.timeText}} · 凭证 {{entry.evidences.length}}</text></view><text class="chevron">{{entry.opened ? '▴' : '▾'}}</text></button>
+            <view wx:if="{{entry.opened}}">
+              <template is="fields" data="{{items: entry.fields}}" /><text class="label block">处理说明</text><text class="content">{{entry.comment}}</text>
+              <template is="evidences" data="{{items: entry.evidences}}" />
+            </view>
+          </view>
+          <text wx:if="{{historyLoaded && !history.length}}" class="muted block">暂无处理记录</text>
+        </view>
+        <button wx:if="{{node.workflowMode === 'review'}}" class="record-button history-toggle" bindtap="toggleReviews"><text class="heading-title">各轮审核记录（含返工）</text><text class="chevron">{{reviewsOpen ? '收起 ▴' : '展开 ▾'}}</text></button>
+        <view wx:if="{{reviewsOpen}}">
+          <text class="muted block">按轮查看审核结论与原始意见；未留存的信息不会推测补齐。</text>
+          <view class="record" wx:for="{{rounds}}" wx:key="reviewRoundId" wx:for-item="round">
+            <button class="record-button entry-heading" data-id="{{round.reviewRoundId}}" bindtap="toggleRound"><view class="heading-title">第 {{round.processingRoundNumber}} 轮处理 / 第 {{round.reviewRoundNumber}} 轮审核 · {{round.statusText}}<text class="muted block">{{round.timeText}} · 意见 {{round.votes.length}}</text></view><text class="chevron">{{round.opened ? '▴' : '▾'}}</text></button>
+            <view wx:if="{{round.opened}}"><template is="votes" data="{{items: round.votes}}" /><text wx:if="{{!round.votes.length}}" class="muted block">暂无审核意见</text></view>
+          </view>
+          <text wx:if="{{reviewsLoading}}" class="muted block">正在加载审核记录…</text>
+          <view wx:if="{{reviewsError}}"><text class="error block">{{reviewsError}}</text><button class="record-button" bindtap="loadReviews">重试审核记录</button></view>
+          <text wx:if="{{reviewsLoaded && !rounds.length}}" class="muted block">暂无审核记录</text>
+          <button wx:if="{{hasMore && !reviewsError}}" class="record-button" disabled="{{reviewsLoading}}" bindtap="loadMoreReviews">加载更多审核记录</button>
+        </view>
+      </view>
+    </view>
+    <view class="return-bar"><button class="record-button return-button" bindtap="returnToCurrent">{{returnLabel}} ↓</button></view>
+  </view>
+  <view wx:if="{{previewLoading || videoPreview}}" class="video-mask" catchtouchmove="stopTouchMove">
+    <view class="video-panel">
+      <text wx:if="{{previewLoading}}" class="block">正在打开凭证…</text>
+      <text wx:if="{{videoPreview}}" class="preview-name block">{{videoPreview.fileName || '节点视频'}}</text>
+      <video wx:if="{{videoPreview}}" class="video-player" src="{{videoPreview.url}}" controls binderror="onVideoError" />
+      <button class="record-button" bindtap="closeVideo">{{previewLoading ? '取消打开' : '关闭预览'}}</button>
+    </view>
+  </view>
+</view>

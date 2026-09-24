@@ -1,7 +1,7 @@
 <template name="business-card">
   <view class="business-card-heading">
     <text class="business-card-title">{{item.cardTitle}}</text>
-    <status-pill status="{{item.status}}" />
+    <status-pill status="{{item.cardStatus || item.status}}" />
   </view>
   <view wx:if="{{item.cardRows.length}}" class="business-card-fields">
     <view wx:for="{{item.cardRows}}" wx:for-item="row" wx:key="id" class="business-card-field {{row.long ? 'business-card-field-long' : ''}}">

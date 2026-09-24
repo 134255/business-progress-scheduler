@@ -1,8 +1,10 @@
 const businessService = require('../../services/business')
+const { presentBusinessCard } = require('../../utils/business-card')
+const { isAccountAccessError, safeErrorMessage } = require('../../utils/safe-error')
 
-function activeUserId() {
+function activeUserKey() {
   const user = getApp().globalData.currentUser
-  return user && user.status === 'active' ? user._id : ''
+  return user && user._id && user.status === 'active' ? JSON.stringify([user._id, user.role || '']) : ''
 }
 
 function dueText(item) {
@@ -19,7 +21,10 @@ function present(item) {
   const actionKind = ['optional_tail_decision', 'node_route_decision'].includes(item.actionKind)
     ? item.actionKind
     : 'process_node'
-  return {
+  return presentBusinessCard({
+    code: item.businessCode,
+    name: item.businessName,
+    cardSummary: item.cardSummary,
     nodeId: item.nodeId,
     businessLineId: item.businessLineId,
     businessCode: item.businessCode || '',
@@ -35,7 +40,7 @@ function present(item) {
         : '继续处理 →',
     processingRoundNumber: Number(item.processingRoundNumber || 0),
     dueText: dueText(item)
-  }
+  })
 }
 
 Page({
@@ -49,48 +54,79 @@ Page({
   onUnload() {
     this.pageAlive = false
     this.requestSequence = (this.requestSequence || 0) + 1
+    this.clearCards()
+  },
+
+  clearCards() {
+    this.loadActorKey = ''
+    this.setData({ items: [], cursor: '', hasMore: false, loading: false, loadingMore: false })
+  },
+
+  requireCardActor() {
+    const actorKey = activeUserKey()
+    if (this.loadActorKey !== actorKey) this.clearCards()
+    if (!actorKey) {
+      this.clearCards()
+      wx.reLaunch({ url: '/pages/login/index' })
+      return ''
+    }
+    this.loadActorKey = actorKey
+    return actorKey
+  },
+
+  acceptResponse(sequence, actorKey) {
+    if (!this.pageAlive || sequence !== this.requestSequence) return false
+    if (activeUserKey() !== actorKey) {
+      this.clearCards()
+      return false
+    }
+    return true
+  },
+
+  retryCards() {
+    if (this.data.loading || this.data.loadingMore) return
+    return this.refresh()
   },
 
   async refresh() {
-    const actorId = activeUserId()
-    if (!actorId) {
-      wx.reLaunch({ url: '/pages/login/index' })
-      return
-    }
+    const actorKey = this.requireCardActor()
+    if (!actorKey) return
     const sequence = (this.requestSequence || 0) + 1
     this.requestSequence = sequence
-    this.setData({ loading: true, errorMessage: '', cursor: '' })
+    this.setData({ loading: true, loadingMore: false, errorMessage: '' })
     try {
       const result = await businessService.listMyPendingProcessing({ cursor: '', pageSize: 20 })
-      if (!this.pageAlive || sequence !== this.requestSequence || activeUserId() !== actorId) return
+      if (!this.acceptResponse(sequence, actorKey)) return
       this.setData({
         items: (result.items || []).map(present),
         cursor: result.cursor || '',
         hasMore: Boolean(result.hasMore)
       })
     } catch (error) {
-      if (this.pageAlive && sequence === this.requestSequence && activeUserId() === actorId) {
-        this.setData({ errorMessage: error.message || '待处理任务加载失败，请稍后重试' })
+      if (this.acceptResponse(sequence, actorKey)) {
+        if (isAccountAccessError(error)) this.clearCards()
+        this.setData({ errorMessage: safeErrorMessage(error, '待处理任务加载失败，请稍后重试') })
       }
     } finally {
-      if (this.pageAlive && sequence === this.requestSequence && activeUserId() === actorId) {
+      if (this.acceptResponse(sequence, actorKey)) {
         this.setData({ loading: false })
       }
     }
   },
 
   async loadMore() {
+    const actorKey = this.requireCardActor()
+    if (!actorKey) return
     if (this.data.loading || this.data.loadingMore || !this.data.hasMore) return
-    const actorId = activeUserId()
     const sequence = (this.requestSequence || 0) + 1
     this.requestSequence = sequence
-    this.setData({ loadingMore: true })
+    this.setData({ loadingMore: true, errorMessage: '' })
     try {
       const result = await businessService.listMyPendingProcessing({
         cursor: this.data.cursor,
         pageSize: 20
       })
-      if (!this.pageAlive || sequence !== this.requestSequence || activeUserId() !== actorId) return
+      if (!this.acceptResponse(sequence, actorKey)) return
       const byId = new Map(this.data.items.map(item => [item.nodeId, item]))
       for (const item of result.items || []) byId.set(item.nodeId, present(item))
       this.setData({
@@ -99,17 +135,19 @@ Page({
         hasMore: Boolean(result.hasMore)
       })
     } catch (error) {
-      if (this.pageAlive && sequence === this.requestSequence && activeUserId() === actorId) {
-        this.setData({ errorMessage: error.message || '更多待处理任务加载失败，请稍后重试' })
+      if (this.acceptResponse(sequence, actorKey)) {
+        if (isAccountAccessError(error)) this.clearCards()
+        this.setData({ errorMessage: safeErrorMessage(error, '更多待处理任务加载失败，请稍后重试') })
       }
     } finally {
-      if (this.pageAlive && sequence === this.requestSequence && activeUserId() === actorId) {
+      if (this.acceptResponse(sequence, actorKey)) {
         this.setData({ loadingMore: false })
       }
     }
   },
 
   openItem(event) {
+    if (!this.requireCardActor()) return
     const lineId = String(event.currentTarget.dataset.lineId || '')
     const nodeId = String(event.currentTarget.dataset.nodeId || '')
     if (!this.data.items.some(item => item.businessLineId === lineId && item.nodeId === nodeId)) return

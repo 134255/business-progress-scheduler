@@ -79,13 +79,15 @@ test('marked config/reference errors expose only a safe message; unmarked failur
   assert.doesNotMatch(JSON.stringify(logs), /synthetic-private/)
 })
 
-for (const [action, serviceKey, method, key] of [
+for (const [action, serviceKey, method, key, lineIdKey] of [
   ['listBusinessLines', 'businessService', 'listBusinessLines', 'items'],
+  ['listMyPendingProcessing', 'businessService', 'listMyPendingProcessing', 'items', 'businessLineId'],
+  ['listMyPendingReviews', 'reviewService', 'listMyPendingReviews', 'items', 'businessLineId'],
   ['getMyDashboardSummary', 'businessService', 'getMyDashboardSummary', 'recent'],
   ['getDashboardWorkspace', 'dashboardWorkspaceService', 'getDashboardWorkspace', 'recent']
 ]) {
   test(`${action} decorates exactly its card array after success and preserves the complete envelope`, async () => {
-    const items = [{ _id: 'line-1', code: 'SYNTHETIC-1', matches: [{ label: '型号', excerpt: '示例型号' }] }]
+    const items = [{ _id: lineIdKey ? 'node-1' : 'line-1', businessLineId: 'line-1', code: 'SYNTHETIC-1', matches: [{ label: '型号', excerpt: '示例型号' }] }]
     const result = { [key]: items, stats: { active: 1 }, total: null, cursor: 'opaque-cursor',
       hasMore: true, complete: false, indexStatus: 'recovering', filters: { status: 'active', scope: 'mine' },
       pendingProcessing: [{ _id: 'node-1' }], sourceMetadata: { generation: 'synthetic-generation' } }
@@ -96,6 +98,7 @@ for (const [action, serviceKey, method, key] of [
       businessCardService: {
         async decorateItems(input) {
           events.push('decorate'); assert.equal(input.actor, actor); assert.equal(input.items, items)
+          assert.equal(input.lineIdKey, lineIdKey)
           return input.items.map(item => ({ ...item, cardSummary: { state: 'ready', fields: [], configRevision: 0 } }))
         },
         async refreshAfterMutation() { assert.fail('read must not refresh') }
@@ -193,7 +196,7 @@ test('optional card service preserves old injected adapters and unrelated routes
       async refreshAfterMutation() { unrelatedRefreshes++ }
     }
   })
-  for (const action of ['listMyPendingProcessing', 'getBusinessLine', 'getEvidenceAccess', 'updateTemplateCardDisplay']) {
+  for (const action of ['getBusinessLine', 'getEvidenceAccess', 'updateTemplateCardDisplay']) {
     assert.equal((await main({ action })).data, result)
   }
   assert.equal(unrelatedRefreshes, 0)

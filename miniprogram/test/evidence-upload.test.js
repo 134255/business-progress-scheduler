@@ -60,6 +60,233 @@ function session(number = 1) {
   }
 }
 
+function uploadInput(overrides = {}) {
+  return { businessLineId: 'line', nodeId: 'node', expectedNodeVersion: 4,
+    file: { name: 'proof.mp4', path: 'wxfile://proof.mp4', size: 10 }, ...overrides }
+}
+
+test('transient registration retries the same uploaded object at most three times and reports attempts', async () => {
+  let begun = 0
+  let transferred = 0
+  const attempts = []
+  const statuses = []
+  const waits = []
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => session(++begun),
+    refreshUpload: async () => assert.fail('not expired'),
+    cosFactory: () => ({ uploadFile(params, callback) { transferred++; callback(null, {}) } }),
+    finalizeUpload: async input => {
+      attempts.push(input)
+      if (attempts.length < 3) throw Object.assign(new Error('busy'), { code: 'EVIDENCE_UPLOAD_RETRYABLE' })
+      return { evidenceId: input.evidenceId, storageStatus: 'available' }
+    },
+    delay: async ms => waits.push(ms)
+  })
+  assert.equal((await uploader.upload(uploadInput({ onStatus: status => statuses.push(status) }))).storageStatus, 'available')
+  assert.equal(begun, 1)
+  assert.equal(transferred, 1)
+  assert.deepEqual(attempts, Array(3).fill({ evidenceId: 'evidence-1', uploadSessionToken: 'token-1', expectedNodeVersion: 4 }))
+  assert.deepEqual(waits, [250, 500])
+  assert.deepEqual(statuses.filter(x => x.stage === 'finalize' && x.attempt > 0).map(x => x.attempt), [1, 2, 3])
+  assert.doesNotMatch(JSON.stringify(statuses), /token|secret|bucket|wxfile|proof/)
+})
+
+test('parallel transfers finish independently but registrations queue, survive failure and stop at three attempts', async () => {
+  let begun = 0
+  let transferred = 0
+  let releaseFirst
+  let enteredFirst
+  const firstEntered = new Promise(resolve => { enteredFirst = resolve })
+  const firstRelease = new Promise(resolve => { releaseFirst = resolve })
+  const attempts = []
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => session(++begun),
+    refreshUpload: async () => assert.fail('not expired'),
+    cosFactory: () => ({ uploadFile(params, callback) { transferred++; callback(null, {}) } }),
+    finalizeUpload: async input => {
+      attempts.push(input.evidenceId)
+      if (input.evidenceId === 'evidence-1') {
+        enteredFirst()
+        await firstRelease
+        throw Object.assign(new Error('busy'), { code: 'EVIDENCE_UPLOAD_RETRYABLE' })
+      }
+      return { evidenceId: input.evidenceId, storageStatus: 'available' }
+    },
+    delay: async () => {}
+  })
+  const resultsPromise = Promise.allSettled([uploader.upload(uploadInput()), uploader.upload(uploadInput())])
+  await firstEntered
+  await new Promise(resolve => setImmediate(resolve))
+  const whileBlocked = attempts.slice()
+  releaseFirst()
+  const results = await resultsPromise
+  assert.equal(transferred, 2, 'queue must not serialize byte transfer')
+  assert.deepEqual(whileBlocked, ['evidence-1'])
+  assert.deepEqual(attempts, ['evidence-1', 'evidence-1', 'evidence-1', 'evidence-2'])
+  assert.equal(results[0].reason.attempts, 3)
+  assert.equal(results[1].value.storageStatus, 'available')
+})
+
+test('expired registration and temporary failures share one three-attempt budget', async () => {
+  let attempts = 0
+  let refreshed = 0
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => session(),
+    refreshUpload: async () => { refreshed++; return refreshedSession() },
+    cosFactory: () => ({ uploadFile(params, callback) { callback(null, {}) } }),
+    finalizeUpload: async () => {
+      attempts++
+      throw Object.assign(new Error('failure'), { code: attempts === 1 ? 'EVIDENCE_UPLOAD_EXPIRED' : 'EVIDENCE_UPLOAD_RETRYABLE' })
+    },
+    delay: async () => {}
+  })
+  await assert.rejects(uploader.upload(uploadInput()), { code: 'EVIDENCE_UPLOAD_RETRYABLE', attempts: 3 })
+  assert.equal(attempts, 3)
+  assert.equal(refreshed, 1)
+})
+
+test('permanent registration failures and unclassified internal errors never auto retry', async () => {
+  for (const code of ['FORBIDDEN', 'VERSION_CONFLICT', 'NODE_NOT_ACTIVE', 'UNSUPPORTED_FILE_TYPE', 'FEEDBACK_TOTAL_TOO_LARGE', 'INTERNAL_ERROR']) {
+    let attempts = 0
+    const uploader = createEvidenceUploader({
+      beginUpload: async () => session(), refreshUpload: async () => assert.fail('must not refresh'),
+      cosFactory: () => ({ uploadFile(params, callback) { callback(null, {}) } }),
+      finalizeUpload: async () => { attempts++; throw Object.assign(new Error('private'), { code }) },
+      delay: async () => assert.fail('must not retry')
+    })
+    await assert.rejects(uploader.upload(uploadInput()), { code })
+    assert.equal(attempts, 1)
+  }
+})
+
+test('stale account or node after transfer cannot register', async () => {
+  let current = true
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => session(), refreshUpload: async () => assert.fail('must not refresh'),
+    cosFactory: () => ({ uploadFile(params, callback) { current = false; callback(null, {}) } }),
+    finalizeUpload: async () => ({ storageStatus: 'available' })
+  })
+  await assert.rejects(uploader.upload(uploadInput({ isCurrent: () => current })), { code: 'UPLOAD_CANCELLED' })
+})
+
+test('invalidation during retry backoff stops the next registration attempt', async () => {
+  let current = true
+  let attempts = 0
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => session(), refreshUpload: async () => assert.fail('must not refresh'),
+    cosFactory: () => ({ uploadFile(params, callback) { callback(null, {}) } }),
+    finalizeUpload: async () => { attempts++; throw Object.assign(new Error('busy'), { code: 'EVIDENCE_UPLOAD_RETRYABLE' }) },
+    delay: async () => { current = false }
+  })
+  await assert.rejects(uploader.upload(uploadInput({ isCurrent: () => current })), { code: 'UPLOAD_CANCELLED' })
+  assert.equal(attempts, 1)
+})
+
+test('transport exhaustion reports three attempts without registering or creating another reservation', async () => {
+  let begun = 0
+  let attempts = 0
+  const statuses = []
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => session(++begun), refreshUpload: async () => assert.fail('must not refresh'),
+    cosFactory: () => ({ uploadFile(params, callback) { attempts++; callback(Object.assign(new Error('network'), { code: 'RequestError' })) } }),
+    finalizeUpload: async () => assert.fail('not uploaded'), delay: async () => {}
+  })
+  await assert.rejects(uploader.upload(uploadInput({ onStatus: value => statuses.push(value) })), { code: 'RequestError', attempts: 3 })
+  assert.equal(begun, 1)
+  assert.equal(attempts, 3)
+  assert.deepEqual(statuses.filter(x => x.stage === 'transfer').map(x => x.attempt), [1, 2, 3])
+})
+
+test('nested provider errors preserve safe classification and explicit permanent errors take precedence', async () => {
+  for (const failure of [
+    { code: 'FORBIDDEN', statusCode: 503 },
+    { code: 'UPLOAD_FAILED', statusCode: 403 },
+    { error: { Code: 'AccessDenied', statusCode: 403, message: 'private path' } }
+  ]) {
+    let calls = 0
+    const uploader = createEvidenceUploader({
+      beginUpload: async () => session(), refreshUpload: async () => assert.fail('must not refresh'),
+      cosFactory: () => ({ uploadFile(params, callback) { calls++; callback(failure) } }),
+      finalizeUpload: async () => assert.fail('must not register'), delay: async () => {}
+    })
+    await assert.rejects(uploader.upload(uploadInput()), error => {
+      assert.equal(error.code, failure.code || failure.error.Code)
+      assert.equal(error.attempts, 1)
+      assert.doesNotMatch(JSON.stringify(error), /private|path/)
+      return true
+    })
+    assert.equal(calls, 1)
+  }
+})
+
+test('queued registration rechecks page state and throwing status observers cannot break another file', async () => {
+  let begun = 0
+  let current = true
+  let release
+  let entered
+  const blocked = new Promise(resolve => { release = resolve })
+  const started = new Promise(resolve => { entered = resolve })
+  const registered = []
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => session(++begun), refreshUpload: async () => assert.fail('must not refresh'),
+    cosFactory: () => ({ uploadFile(params, callback) { callback(null, {}) } }),
+    finalizeUpload: async input => { registered.push(input.evidenceId); entered(); await blocked; return { storageStatus: 'available' } }
+  })
+  const first = uploader.upload(uploadInput({ onStatus() { throw new Error('observer failed') } }))
+  await started
+  const second = uploader.upload(uploadInput({ isCurrent: () => current }))
+  const result = Promise.allSettled([first, second])
+  await new Promise(resolve => setImmediate(resolve))
+  current = false
+  release()
+  const outcomes = await result
+  assert.equal(outcomes[0].value.storageStatus, 'available')
+  assert.equal(outcomes[1].reason.code, 'UPLOAD_CANCELLED')
+  assert.deepEqual(registered, ['evidence-1'])
+})
+
+test('COS text-only expired-token response refreshes before sanitizing the error', async () => {
+  let transfers = 0
+  let refreshes = 0
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => session(),
+    refreshUpload: async () => { refreshes++; return refreshedSession() },
+    cosFactory: () => ({ uploadFile(params, callback) {
+      transfers++
+      callback(transfers === 1 ? { error: 'The security token has expired', statusCode: 403 } : null, {})
+    } }),
+    finalizeUpload: async () => ({ storageStatus: 'available' }),
+    delay: async () => assert.fail('expired authorization must refresh before retry')
+  })
+  assert.equal((await uploader.upload(uploadInput())).storageStatus, 'available')
+  assert.equal(transfers, 2)
+  assert.equal(refreshes, 1)
+})
+
+test('COS throttling and server errors retry but explicit access denials cannot masquerade as expiry', async () => {
+  for (const [code, statusCode] of [['SlowDown', 503], ['InternalError', 500], ['AccessDenied', 403]]) {
+    let transfers = 0
+    const waits = []
+    const uploader = createEvidenceUploader({
+      beginUpload: async () => session(), refreshUpload: async () => assert.fail('must not refresh'),
+      cosFactory: () => ({ uploadFile(params, callback) {
+        transfers++
+        callback(transfers === 1 ? { error: { Code: code, Message: 'private security token' }, statusCode } : null, {})
+      } }),
+      finalizeUpload: async () => ({ storageStatus: 'available' }), delay: async ms => waits.push(ms)
+    })
+    if (statusCode === 403) {
+      await assert.rejects(uploader.upload(uploadInput()), { code, attempts: 1 })
+      assert.equal(transfers, 1)
+      assert.deepEqual(waits, [])
+    } else {
+      assert.equal((await uploader.upload(uploadInput())).storageStatus, 'available')
+      assert.equal(transfers, 2)
+      assert.deepEqual(waits, [250])
+    }
+  }
+})
+
 test('account/page invalidation while reading the file prevents authorization and transfer', async () => {
   let current = true
   const uploader = createEvidenceUploader({

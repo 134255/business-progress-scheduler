@@ -36,7 +36,7 @@ Page({
     voteProgressText: '', submittedAtText: '', dueText: '待计算',
     processingCommentText: '暂无处理说明', fields: [], evidences: [], votes: [],
     canApprove: false, canReject: false, comment: '', loading: true, submitting: false,
-    errorMessage: '', videoPreview: null
+    errorMessage: '', videoPreview: null, previousRecordsEnabled: false
   },
 
   async onLoad(query = {}) {
@@ -65,13 +65,18 @@ Page({
     this.setData({ votes: [] })
   },
 
+  returnToCurrentForm() {
+    if (!this.pageAlive || !this.actorStillCurrent() || !this.data.previousRecordsEnabled) return
+    wx.pageScrollTo({ selector: '#current-node-form', duration: 200 })
+  },
+
   actorStillCurrent() {
     if (this.identityInvalidated) return false
     if (this.actorId && activeUserId() === this.actorId) return true
     this.identityInvalidated = true
     this.requestSequence += 1
     this.voteSequence = (this.voteSequence || 0) + 1
-    this.setData({ votes: [], canApprove: false, canReject: false, comment: '', loading: false })
+    this.setData({ votes: [], canApprove: false, canReject: false, comment: '', loading: false, previousRecordsEnabled: false })
     wx.reLaunch({ url: '/pages/login/index' })
     return false
   },
@@ -79,7 +84,7 @@ Page({
   clearVotesOnAccessError(error) {
     if (isAccountAccessError(error) && this.pageAlive && this.actorStillCurrent()) {
       this.requestSequence += 1
-      this.setData({ votes: [], canApprove: false, canReject: false, loading: false })
+      this.setData({ votes: [], canApprove: false, canReject: false, loading: false, previousRecordsEnabled: false })
     }
   },
 
@@ -101,6 +106,7 @@ Page({
       }))
       this.setData({
         reviewRoundId: detail.reviewRoundId,
+        previousRecordsEnabled: true,
         roundVersion: Number(detail.version || 0),
         businessLineId: detail.businessLineId,
         nodeId: detail.nodeId,

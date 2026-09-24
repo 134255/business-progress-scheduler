@@ -1,3 +1,6 @@
 {
-  "navigationBarTitleText": "待我审核"
+  "navigationBarTitleText": "待我审核",
+  "usingComponents": {
+    "status-pill": "/components/status-pill/index"
+  }
 }

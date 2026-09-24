@@ -12,6 +12,9 @@
 .history-evidence { display: flex; justify-content: space-between; gap: 20rpx; margin-top: 14rpx; padding-top: 14rpx; border-top: 1rpx solid #e5e7eb; }
 .file-name { display: block; max-width: 470rpx; word-break: break-all; }
 .evidence-actions { display: flex; flex-wrap: wrap; gap: 16rpx; margin: 12rpx 0; }
+.picker-error { margin: 12rpx 0; padding: 16rpx; border-radius: 12rpx; background: #fff7ed; }
+.picker-diagnostic { word-break: break-all; font-size: 22rpx; }
+.picker-error button { margin-top: 14rpx; }
 .local-file { display: flex; align-items: center; justify-content: space-between; gap: 20rpx; padding: 16rpx 0; border-bottom: 1rpx solid #e5e7eb; }
 .local-file-main { min-width: 0; }
 .remove, .error-text { color: #be123c; }

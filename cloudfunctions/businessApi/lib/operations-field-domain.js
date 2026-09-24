@@ -405,4 +405,51 @@ function fieldExportRows(results) {
   } catch (_) { throw invalid() }
 }
 
-module.exports = { buildFinalFieldResult, selectionSnapshot, aggregateFieldResults, fieldExportRows, fieldSourceHeader }
+// Request-local metadata only. This does not extend the persisted snapshot or
+// change the source digest consumed by older analytics workers.
+function describeFieldAnalysisSource(source, rawResult) {
+  try {
+    const result = selectionSnapshot(rawResult)
+    const { line, node } = sourceHead(source)
+    demand(eligible(line, node) && result.nodeId === node._id && result.businessLineId === line._id &&
+      result.templateId === line.sourceTemplateId && result.stableNodeId === node.sourceTemplateNodeKey &&
+      result.sourceHeader === headerFor(line, node, true))
+    const definitions = definitionsFor(node), byKey = new Map(definitions.map(d => [d.fieldKey, d]))
+    const linkage = buildOptionLinkageContext(definitions), groupDigests = new Map()
+    for (const { group } of linkage.members.values()) if (!groupDigests.has(group)) {
+      groupDigests.set(group, digest(optionLinkageSemanticProjection(definitions, group.rule.fieldKeys[0])))
+    }
+    const semantics = new Map()
+    function semantic(definition) {
+      if (semantics.has(definition.fieldKey)) return semantics.get(definition.fieldKey)
+      const member = linkage.members.get(definition.fieldKey)
+      const fieldGroupId = compatibilityFor(result, definition, member ? groupDigests.get(member.group) : null)
+      const parent = definition.condition && byKey.get(definition.condition.parentFieldKey)
+      const id = digest({ purpose:'operations-analysis-dimension-v1', fieldGroupId,
+        ancestor:parent ? semantic(parent).id : null })
+      const value = { id, fieldGroupId }; semantics.set(definition.fieldKey, value); return value
+    }
+    const fields = new Map(result.fields.map(f => [f.fieldKey, f]))
+    const effective = resolveConditionalFields(definitions, result.fields.filter(f => f.value !== null)
+      .map(({fieldKey,value}) => ({fieldKey,value}))).visibleDefinitions
+    const visible = new Set(effective.map(f=>f.fieldKey))
+    const dimensions = definitions.filter(d=>SELECT_TYPES.has(d.type)).map(d=>{
+      const value = semantic(d), field = fields.get(d.fieldKey)
+      demand(Boolean(field) === visible.has(d.fieldKey))
+      if (field) demand(field.compatibilityKey === value.fieldGroupId && field.type === d.type)
+      return {...value,fieldKey:d.fieldKey,name:d.name,type:d.type,sequence:d.sequence,applicable:Boolean(field)}
+    })
+    demand(fields.size === dimensions.filter(d=>d.applicable).length)
+    const linkages = [...groupDigests].map(([group,semanticDigest]) => ({
+      id:digest({purpose:'operations-analysis-linkage-v1',templateId:result.templateId,
+        stableNodeId:result.stableNodeId,semanticDigest}),
+      dimensionIds:group.rule.fieldKeys.map(key=>semantic(byKey.get(key)).id)
+    }))
+    return {nodeId:result.nodeId,sourceHeader:result.sourceHeader,sourceDigest:result.sourceDigest,
+      nodeGroupId:digest({purpose:'operations-analysis-node-v1',templateId:result.templateId,stableNodeId:result.stableNodeId}),
+      dimensions,linkages}
+  } catch (_) { throw invalid() }
+}
+
+module.exports = { buildFinalFieldResult, selectionSnapshot, aggregateFieldResults, fieldExportRows, fieldSourceHeader,
+  describeFieldAnalysisSource }

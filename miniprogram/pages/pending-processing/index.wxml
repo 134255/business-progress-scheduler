@@ -1,9 +1,9 @@
+<import src="../../templates/business-card.wxml" />
 <view class="page">
   <view class="section-title">待我处理</view>
-  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
+  <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}<button size="mini" bindtap="retryCards" disabled="{{loading || loadingMore}}">重试</button></view>
   <view class="card task-card" wx:for="{{items}}" wx:key="nodeId" data-line-id="{{item.businessLineId}}" data-node-id="{{item.nodeId}}" bindtap="openItem">
-    <view class="row-between"><text class="item-title">{{item.businessName}}</text><status-pill status="{{item.status}}" /></view>
-    <text class="muted block">售后编号：{{item.businessCode || '未编号'}}</text>
+    <template is="business-card" data="{{item}}" />
     <text class="block">{{item.nodeName}} · 第 {{item.processingRoundNumber}} 轮处理</text>
     <text class="muted block">{{item.nodeCode}}</text>
     <text class="due block">{{item.dueText}}</text>

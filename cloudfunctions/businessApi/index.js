@@ -27,6 +27,7 @@ const {
   createCloudTemplateRepository
 } = require('./lib/cloud-template-repository')
 const { createCloudBusinessRepository } = require('./lib/cloud-business-repository')
+const { createPreviousNodeResultRepository } = require('./lib/previous-node-result-repository')
 const { createCloudWorkCalendarRepository } = require('./lib/cloud-work-calendar-repository')
 const { createWorkTimeService } = require('./lib/work-time-service')
 const { createEvidenceService } = require('./lib/evidence-service')
@@ -116,6 +117,7 @@ const BUSINESS_CARD_MUTATIONS = new Set([
 ])
 
 const LOGGABLE_ERROR_CODES = new Set([
+  'EVIDENCE_UPLOAD_RETRYABLE',
   'ACCOUNT_DISABLED',
   'ACCOUNT_LOCKED',
   'ACCOUNT_NOT_FOUND',
@@ -339,6 +341,10 @@ function createDashboardWorkspaceRoutes(dashboardWorkspaceService) {
 function createNodeWorkspaceRoutes(nodeWorkspaceService) {
   if (!nodeWorkspaceService) return null
   return {
+    ...(nodeWorkspaceService.getPreviousNodeResult ? {
+      getPreviousNodeResult: ({ actor, payload }) => nodeWorkspaceService.getPreviousNodeResult({ actor,
+        ...selectProtectedPayload(payload, new Set(['businessLineId', 'nodeId', 'anchorNodeId'])) })
+    } : {}),
     getNodeWorkspace: ({ actor, payload }) => {
       const input = selectProtectedPayload(payload, new Set(['businessLineId', 'nodeId']))
       return nodeWorkspaceService.getNodeWorkspace({ actor, ...input })
@@ -447,11 +453,15 @@ function createOperationsFieldRoutes(service) {
   if (!service) return null
   const keys = new Set(['startDate','endDate','grain','templateId','templateVersion','status',
     'businessLineId','stableNodeId','processorToken','reviewerToken','cursor','pageSize'])
+  const analysisKeys = new Set([...keys,'analysis'])
+  const reportKeys = new Set([...keys,'analysis','reportVersion'])
   return Object.fromEntries([
     ['getOperationsFieldSummary','getSummary'],
     ['getOperationsFieldFilters','getFilters'],
+    ['getOperationsFieldAnalysis','getAnalysis'],
     ['exportOperationsReportRows','exportReportRows']
-  ].map(([action,method]) => [action,({actor,payload}) => service[method]({actor,query:selectProtectedPayload(payload,keys)})]))
+  ].map(([action,method]) => [action,({actor,payload}) => service[method]({actor,
+    query:selectProtectedPayload(payload,method==='getAnalysis'?analysisKeys:method==='exportReportRows'?reportKeys:keys)})]))
 }
 
 function createShareRoutes(shareService) {
@@ -627,10 +637,13 @@ function createBusinessApi({
 
   async function withBusinessCards({ actor, action, payload, result }) {
     if (!businessCardService) return result
-    const key = action === 'listBusinessLines' ? 'items'
+    const taskList = ['listMyPendingProcessing', 'listMyPendingReviews'].includes(action)
+    const key = action === 'listBusinessLines' || taskList ? 'items'
       : ['getMyDashboardSummary', 'getDashboardWorkspace'].includes(action) ? 'recent' : null
     if (key) {
-      return { ...result, [key]: await businessCardService.decorateItems({ actor, items: result[key] }) }
+      return { ...result, [key]: await businessCardService.decorateItems({
+        actor, items: result[key], ...(taskList ? { lineIdKey: 'businessLineId' } : {})
+      }) }
     }
     if (BUSINESS_CARD_MUTATIONS.has(action)) {
       // Only derived work is best-effort. The authoritative route has already
@@ -703,7 +716,8 @@ function createBusinessApi({
       const diagnostic = safePublicDiagnostic(error.diagnostic)
       return responseCode === 'INTERNAL_ERROR'
         ? fail('Service error', responseCode, diagnostic)
-        : fail(error.message || 'Service error', responseCode, diagnostic)
+        : fail(responseCode === 'EVIDENCE_UPLOAD_RETRYABLE' ? '上传确认暂时失败，请重试' :
+          error.message || 'Service error', responseCode, diagnostic)
     }
   }
 
@@ -1060,7 +1074,8 @@ function createDefaultBusinessApi() {
         db,
         storage: createCosStorageAdapter({ client, bucket, region }),
         clock: () => new Date(),
-        cloudFilePrefix
+        cloudFilePrefix,
+        onFinalizeError: details => console.error('[businessApi:evidence-finalize]', details)
       }),
       credentialProvider: createScopedCosCredentialProvider({
         sts: STS, secretId, secretKey, bucket, region
@@ -1106,7 +1121,8 @@ function createDefaultBusinessApi() {
   })
   const nodeWorkspaceService = createNodeWorkspaceService({
     businessService,
-    feedbackService
+    feedbackService,
+    previousNodeResultRepository: createPreviousNodeResultRepository({ db, businessRepository })
   })
   const nodeSubmitService = createNodeSubmitService({ feedbackService, reviewService })
   const optionalTailService = createOptionalTailService({

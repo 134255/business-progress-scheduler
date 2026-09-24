@@ -711,6 +711,21 @@ test('运营看板与导出路由只传递受信管理员及白名单日期分�
   ])
 })
 
+test('关联分析新路由独立白名单，旧路由不接受分析参数', async () => {
+  const calls=[]
+  const operationsFieldService={async getAnalysis(input){calls.push(input);return {items:[]}},
+    async exportReportRows(input){calls.push(input);return {items:[]}}}
+  const h=createRouteHarness({operationsFieldService})
+  const analysis={view:'catalog',nodeGroupId:'',linkageId:'',dimensionIds:[],filters:[]}
+  const result=await h.api.main({action:'getOperationsFieldAnalysis',payload:{analysis}})
+  assert.equal(result.ok,true);assert.equal(calls[0].actor._id,'actor-1');assert.deepEqual(calls[0].query,{analysis})
+  assert.equal((await h.api.main({action:'getOperationsFieldAnalysis',payload:{analysis,secret:'forged'}})).ok,false)
+  assert.equal((await h.api.main({action:'getOperationsFieldSummary',payload:{analysis}})).ok,false)
+  assert.equal((await h.api.main({action:'exportOperationsReportRows',payload:{reportVersion:2,analysis}})).ok,true)
+  const anon=createRouteHarness({user:null,operationsFieldService})
+  assert.equal((await anon.api.main({action:'getOperationsFieldAnalysis',payload:{analysis}})).ok,false)
+})
+
 test('字段统计与完整报告路由复用登录边界和精确筛选白名单', async () => {
   const calls = []
   const operationsFieldService = Object.fromEntries(['getSummary','getFilters','exportReportRows'].map(method =>
@@ -965,6 +980,39 @@ test('节点工作区路由只传递受信账号和两个节点标识', async ()
     businessLineId: 'line-1',
     nodeId: 'node-1'
   }])
+})
+
+test('finalize route exposes only the marked retryable error without provider details', async () => {
+  const harness = createRouteHarness({ evidenceUploadService: {
+    async finalizeEvidenceUpload() {
+      throw Object.assign(new Error('private provider response'), {
+        code: 'EVIDENCE_UPLOAD_RETRYABLE', [APPLICATION_ERROR_MARKER]: true
+      })
+    }
+  } })
+  const result = await harness.api.main({ action: 'finalizeEvidenceUpload', payload: {
+    evidenceId: 'evidence-1', uploadSessionToken: 'opaque', expectedNodeVersion: 4
+  } })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'EVIDENCE_UPLOAD_RETRYABLE')
+  assert.doesNotMatch(JSON.stringify(result), /private provider/)
+})
+
+test('前序最终结果路由受登录保护且只传递受信账号与三个节点上下文标识', async () => {
+  const calls = []
+  const nodeWorkspaceService = { async getPreviousNodeResult(input) { calls.push(input); return { nodeId: input.nodeId } } }
+  const { api } = createRouteHarness({ nodeWorkspaceService })
+  const payload = { businessLineId: 'line', nodeId: 'previous', anchorNodeId: 'current', actorId: 'forged' }
+  assert.equal(isPublicAction('getPreviousNodeResult'), false)
+  const result = await api.main({ action: 'getPreviousNodeResult', payload })
+  assert.equal(result.ok, true)
+  assert.equal(calls[0].actor._id, 'actor-1')
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['actor', 'anchorNodeId', 'businessLineId', 'nodeId'])
+  const denied = await createRouteHarness({ user: null, nodeWorkspaceService }).api.main({ action: 'getPreviousNodeResult', payload })
+  assert.equal(denied.ok, false)
+  const invalid = await api.main({ action: 'getPreviousNodeResult', payload: { ...payload, canApprove: true } })
+  assert.equal(invalid.code, 'VALIDATION_ERROR')
+  assert.equal(calls.length, 1)
 })
 
 test('scoped evidence upload routes use the trusted actor and an exact safe payload contract', async () => {

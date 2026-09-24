@@ -84,7 +84,8 @@ const fixture = {
   ] }
 };
 
-for (const page of ['dashboard', 'business-list']) {
+for (const page of ['dashboard', 'business-list', 'pending-processing', 'review-list']) {
+  const task = ['pending-processing', 'review-list'].includes(page);
   const render = compile(page);
   const treeFor = item => render({
     profile: null, stats: { active: 0, completed: 1, pendingMine: 0 },
@@ -92,8 +93,15 @@ for (const page of ['dashboard', 'business-list']) {
   });
   test(`${page}: official rendered card shows number once and selected fields in order`, () => {
     const { presentBusinessCard } = require('../miniprogram/utils/business-card');
-    const tree = treeFor(presentBusinessCard(structuredClone(fixture)));
-    const cards = descendants(tree, node => node.attr && node.attr.bindtap === 'openDetail');
+    const tree = treeFor(presentBusinessCard({ ...structuredClone(fixture),
+      businessLineId: fixture._id, nodeId: 'node-synthetic', reviewRoundId: 'round-synthetic',
+      businessCode: fixture.code, businessName: fixture.name, nodeName: '示例待办节点',
+      nodeCode: 'SYNTHETIC-N002', processingRoundNumber: 2, reviewRoundNumber: 3,
+      cardStatus: page === 'review-list' ? 'pending_review' : undefined,
+      reviewModeLabel: '会签', dueText: '示例截止时间', actionText: '继续处理 →'
+    }));
+    const cards = descendants(tree, node => node.attr &&
+      node.attr.bindtap === (page === 'pending-processing' ? 'openItem' : 'openDetail'));
     assert.equal(cards.length, 1);
     const text = textContent(cards[0]);
     assert.equal(text.split(fixture.code).length - 1, 1);
@@ -104,13 +112,25 @@ for (const page of ['dashboard', 'business-list']) {
       assert.ok(text.indexOf(field.value, next) >= next, text);
       cursor = next;
     }
-    assert.ok(text.includes('示例完成节点'));
-    assert.equal(cards[0].attr['data-id'], fixture._id);
+    assert.ok(text.includes(task ? '示例待办节点' : '示例完成节点'));
+    if (task) {
+      assert.ok(text.includes('示例截止时间'));
+      assert.ok(text.includes(page === 'review-list' ? '会签' : '继续处理'));
+      assert.ok(text.includes(page === 'review-list' ? '3' : '2'));
+    }
+    if (page === 'pending-processing') {
+      assert.equal(cards[0].attr['data-line-id'], fixture._id);
+      assert.equal(cards[0].attr['data-node-id'], 'node-synthetic');
+    } else assert.equal(cards[0].attr['data-id'], page === 'review-list' ? 'round-synthetic' : fixture._id);
     assert.equal(descendants(cards[0], node => node.tag === 'wx-status-pill').length, 1);
+    if (page === 'review-list') {
+      assert.equal(descendants(cards[0], node => node.tag === 'wx-status-pill')[0].attr.status, 'pending_review');
+    }
   });
   test(`${page}: summary error retains card navigation and exposes explicit retry`, () => {
     const { presentBusinessCard } = require('../miniprogram/utils/business-card');
-    const item = presentBusinessCard({ ...fixture, cardSummary: { state: 'unavailable', fields: [] } });
+    const item = presentBusinessCard({ ...fixture, businessCode: fixture.code,
+      businessName: fixture.name, cardSummary: { state: 'unavailable', fields: [] } });
     const tree = treeFor(item);
     assert.ok(textContent(tree).includes(fixture.code));
     assert.ok(textContent(tree).includes('重试'));

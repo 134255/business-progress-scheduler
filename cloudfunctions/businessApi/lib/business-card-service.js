@@ -17,11 +17,12 @@ function id(object, key) {
 
 function createBusinessCardService({ repository }) {
   if (!repository) throw new TypeError('repository is required')
-  async function decorateItems({ actor, items }) {
+  async function decorateItems({ actor, items, lineIdKey = '_id' }) {
     const session = repository.createRequestSession({ actor })
     const summaries = new Map()
     return boundedMap(items, async item => {
-      const businessLineId = id(item, '_id')
+      // Task _id identifies a node/round, never the owning business line.
+      const businessLineId = id(item, lineIdKey)
       if (!summaries.has(businessLineId)) summaries.set(businessLineId, session.getSummary({ businessLineId }))
       return { ...item, cardSummary: await summaries.get(businessLineId) }
     })

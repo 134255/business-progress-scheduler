@@ -137,7 +137,12 @@ test('default runtime ordinary/status lists and both dashboard envelopes share r
     }
     const pending = expectOk(await main({ action: 'listMyPendingProcessing' }))
     assert.equal(pending.items.length, 2)
-    assert.ok(pending.items.every(item => !Object.hasOwn(item, 'cardSummary')))
+    for (const item of pending.items) {
+      assert.deepEqual(item.cardSummary, summary)
+      assert.equal(item._id, item.nodeId)
+      assert.notEqual(item._id, item.businessLineId)
+      assert.equal(item.status, 'in_progress')
+    }
     assert.deepEqual(fake.documents('node_feedback'), feedback)
     assert.deepEqual(fake.documents('business_lines').map(({ cardSummary, ...line }) => line), before)
     assert.ok(fake.transactionRuns.every(run => run.operations <= 100))

@@ -1479,7 +1479,7 @@ function createCloudFeedbackRepository({
   }
 
   async function getNodeHistory({ actor, businessLineId, nodeId }) {
-    const context = await db.runTransaction(async transaction => {
+    const readHistoryContext = async transaction => {
       const currentActor = await readDocument(transaction, COLLECTIONS.users, actor && actor._id)
       if (!currentActor || currentActor.status !== 'active') throw createError('FORBIDDEN')
       const line = await readDocument(transaction, COLLECTIONS.lines, businessLineId)
@@ -1492,7 +1492,8 @@ function createCloudFeedbackRepository({
         : isLegacyMember(line, currentActor)
       if (!allowed) throw createError('FORBIDDEN')
       return { line, node, actor: currentActor }
-    })
+    }
+    const context = await db.runTransaction(readHistoryContext)
     const stored = await readAll(() => db.collection(COLLECTIONS.feedback).where({ nodeId }))
     const visible = stored.filter(item =>
       item.businessLineId === businessLineId && item.nodeId === nodeId &&
@@ -1541,8 +1542,23 @@ function createCloudFeedbackRepository({
       }
       const evidences = [...evidenceById.values()].sort((left, right) =>
         String(left.evidence._id).localeCompare(String(right.evidence._id)))
-      return feedbackProjection(feedback, evidences.map(item => evidenceProjection(item.evidence, item.retention)))
+      const projected = feedbackProjection(feedback, evidences.map(item => evidenceProjection(item.evidence, item.retention)))
+      // Use the instance assignment snapshot, never a mutable users display name.
+      const names = ownDataValue(context.node, 'processorDisplayNames')
+      const processors = processorIds(context.node)
+      const position = processors.indexOf(feedback.submittedBy)
+      if (feedback.publishState === 'published' && context.node.workflowMode === 'review' && position >= 0 &&
+          names.valid && Array.isArray(names.value) && names.value.length === processors.length &&
+          names.value.every(name => typeof name === 'string' && name.trim() && name.length <= 100 && !/[\u0000-\u001f\u007f]/.test(name))) {
+        projected.submittedByLabel = names.value[position]
+      }
+      return projected
     })
+    // History/evidence queries can outlive the initial permission check. Recheck
+    // the same fixed documents before releasing their private projections.
+    const fresh = await db.runTransaction(readHistoryContext)
+    if (fresh.actor.role !== context.actor.role || fresh.actor.openid !== context.actor.openid ||
+        JSON.stringify([fresh.line, fresh.node]) !== JSON.stringify([context.line, context.node])) throw createError('VERSION_CONFLICT')
     const canSubmit = context.line.status === 'active' && isCurrentNode(context.line, context.node) &&
       ACTIVE_NODE_STATUSES.has(context.node.status) && accountSchema(context.line, context.node) &&
       processorIds(context.node).includes(context.actor._id)

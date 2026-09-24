@@ -19,6 +19,7 @@ const ACTIVE_NODE_STATUSES = new Set(['ready', 'in_progress', 'blocked'])
 const QUERY_PAGE_SIZE = 100
 const HEADER_BYTES = 64
 const FINALIZE_CONFLICT_DELAYS_MS = Object.freeze([80, 160, 320])
+const TRANSIENT_SERVICE_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'RequestTimeout', 'SlowDown'])
 const COS_UPLOAD_ACTIONS = Object.freeze([
   'name/cos:PutObject',
   'name/cos:InitiateMultipartUpload',
@@ -94,7 +95,7 @@ function isTransactionConflict(error) {
 }
 
 function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Date(), cloudFilePrefix,
-  delay = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  delay = ms => new Promise(resolve => setTimeout(resolve, ms)), onFinalizeError = () => {} }) {
   if (!db || !storage || typeof storage.headObject !== 'function' || typeof storage.readObjectHeader !== 'function') {
     throw new TypeError('db and storage are required')
   }
@@ -112,6 +113,26 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
         if (!isTransactionConflict(error) || attempt >= FINALIZE_CONFLICT_DELAYS_MS.length) throw error
         await delay(FINALIZE_CONFLICT_DELAYS_MS[attempt])
       }
+    }
+  }
+
+  async function finalizeStage(stage, action) {
+    try {
+      return await action()
+    } catch (error) {
+      // Business rejections remain final. Only transient infrastructure failures
+      // permit the client to replay this same idempotent reservation.
+      if (error && error[APPLICATION_ERROR_MARKER] === true) throw error
+      const conflict = isTransactionConflict(error)
+      const status = Number(error && error.statusCode)
+      const retryable = conflict || TRANSIENT_SERVICE_CODES.has(error && (error.code || error.Code)) ||
+        status === 408 || status === 429 || (status >= 500 && status <= 599)
+      try {
+        onFinalizeError({ stage, causeCode: conflict ? 'TRANSACTION_CONFLICT' :
+          retryable ? 'TRANSIENT_SERVICE_ERROR' : 'UNEXPECTED_ERROR' })
+      } catch (_) { /* Diagnostics must not change the upload result. */ }
+      if (retryable) throw createError('EVIDENCE_UPLOAD_RETRYABLE')
+      throw error
     }
   }
 
@@ -317,26 +338,28 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
         !Number.isSafeInteger(expectedNodeVersion) || expectedNodeVersion < 1) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
-    const preflight = await preflightFinalize(actor, evidenceId, uploadSessionTokenHash, expectedNodeVersion)
+    const preflight = await finalizeStage('preflight', () =>
+      preflightFinalize(actor, evidenceId, uploadSessionTokenHash, expectedNodeVersion))
     if (preflight.available) return preflight.available
     const evidence = preflight.evidence
-    const head = await storage.headObject({ objectKey: evidence.objectKey })
+    const head = await finalizeStage('head', () => storage.headObject({ objectKey: evidence.objectKey }))
     if (!head || !Number.isSafeInteger(head.size) || head.size < 1 || head.size !== evidence.declaredSize) {
       throw createError('EVIDENCE_NOT_ATTACHABLE')
     }
     if (head.size > FEEDBACK_TOTAL_LIMIT) throw createError('FILE_TOO_LARGE')
-    const header = await storage.readObjectHeader({ objectKey: evidence.objectKey, maximumBytes: HEADER_BYTES })
+    const header = await finalizeStage('header', () =>
+      storage.readObjectHeader({ objectKey: evidence.objectKey, maximumBytes: HEADER_BYTES }))
     const classified = classifyHeader({
       fileName: evidence.fileName,
       declaredSize: head.size,
       bytes: header,
       allowedTypes: preflight.allowedTypes
     })
-    const baseline = await sumAvailableEvidence(
+    const baseline = await finalizeStage('capacity', () => sumAvailableEvidence(
       evidence.businessLineId, evidence.nodeId, evidence.processingRoundNumber, evidenceId
-    )
+    ))
     if (classified.size > FEEDBACK_TOTAL_LIMIT - baseline) throw createError('FEEDBACK_TOTAL_TOO_LARGE')
-    return commitFinalization(async transaction => {
+    return finalizeStage('commit', () => commitFinalization(async transaction => {
       const current = await readDocument(transaction, COLLECTIONS.evidences, evidenceId)
       if (!current || current.uploadedBy !== actor._id ||
           current.nodeVersionAtUpload !== expectedNodeVersion ||
@@ -383,7 +406,7 @@ function createCloudEvidenceUploadRepository({ db, storage, clock = () => new Da
         size: classified.size,
         storageStatus: 'available'
       })
-    })
+    }))
   }
 
   return { reserveUpload, refreshUploadAuthorization, finalizeUpload }

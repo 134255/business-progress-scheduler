@@ -1,6 +1,7 @@
 const businessService = require('../../services/business')
 const { toCsv } = require('../../utils/csv')
-const { FIELD_CSV_COLUMNS,formatFieldSummary,mergeFieldFilters,fieldErrorMessage,validReportPage,reportCsvRows,utf8Bytes } = require('../../utils/operations-field-report')
+const { FIELD_CSV_COLUMNS,mergeFieldFilters,fieldErrorMessage,validReportPage,reportCsvRows,utf8Bytes } = require('../../utils/operations-field-report')
+const { catalogSelection, normalizeSelection } = require('../../utils/operations-field-analysis')
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const settle = promise => Promise.resolve(promise).then(value=>({status:'fulfilled',value}),reason=>({status:'rejected',reason}))
@@ -107,12 +108,9 @@ Page({
     exportNotice: '',
     exportErrorMessage: '',
     loading: false,
-    fieldGroups: [],
-    fieldLoading: false,
-    fieldIncomplete: false,
-    fieldNotice: '',
-    fieldScopeNotice: '',
-    fieldErrorMessage: '',
+    fieldAnalysisEnabled: false,
+    fieldAnalysisQuery: {},
+    fieldAnalysisSessionEpoch: 0,
     errorMessage: '',
     startDate: '',
     endDate: '',
@@ -147,6 +145,13 @@ Page({
   },
 
   onShow() {
+    if (this._csvNativeHidden && this.csvExport && this.isCurrentCsvExport(this.csvExport)) {
+      this._csvNativeHidden = false
+      // The native send panel is not a new query session. Keep its exact export
+      // selection until its callback; private analysis UI remains cleared.
+      return
+    }
+    this._csvNativeHidden = false
     this.invalidateFields()
     const user = currentActiveUser()
     if (this.csvExport && !this.isCurrentCsvExport(this.csvExport)) this.resetCsvExport()
@@ -164,7 +169,8 @@ Page({
   },
 
   onHide() {
-    this.invalidateFields()
+    this._csvNativeHidden = Boolean(this.csvExport && this.csvExport.stage === 'sending')
+    this.invalidateFields(this._csvNativeHidden)
     this.requestSequence = (this.requestSequence || 0) + 1
     this.sampleSequence = (this.sampleSequence || 0) + 1
     // A native file-send window can hide this page before its result callback.
@@ -225,7 +231,7 @@ Page({
       this.setData({ templateOptions: templates, templateIndex: 0 })
       if (!templates.length) {
         this.setData({ loading: false, summary: null, nodeSeries: [], trendSeries: [] })
-        await this.loadFieldSummary(sequence,userId)
+        this.activateFieldAnalysis(sequence,userId)
         return
       }
       if (!await this.loadTemplateFilters(sequence, userId)) return
@@ -307,35 +313,42 @@ Page({
       fields.status==='fulfilled' && currentActiveUser()===user && JSON.stringify(this.query())===queryKey ? fields.value : {})
   },
 
-  invalidateFields() {
+  invalidateFields(preserveSelection = false) {
     this.fieldSequence=(this.fieldSequence||0)+1
-    this.setData({fieldGroups:[],fieldLoading:false,fieldIncomplete:false,fieldNotice:'',fieldScopeNotice:'',fieldErrorMessage:''})
+    if (!preserveSelection) this._fieldAnalysisSelection=catalogSelection()
+    this.setData({fieldAnalysisEnabled:false,fieldAnalysisSessionEpoch:this.fieldSequence})
   },
 
-  async loadFieldSummary(sequence,userId) {
+  activateFieldAnalysis(sequence,userId) {
     if (!this.isCurrentRequest(sequence,userId)) return
-    const user=currentActiveUser()
-    const query=this.query(), queryKey=JSON.stringify(query)
-    const fieldSequence=(this.fieldSequence||0)+1
-    this.fieldSequence=fieldSequence
-    const current=()=>this.isCurrentRequest(sequence,userId) && currentActiveUser()===user &&
-      fieldSequence===this.fieldSequence && JSON.stringify(this.query())===queryKey
-    this.setData({fieldLoading:true,fieldErrorMessage:'',fieldGroups:[],fieldNotice:'',fieldIncomplete:false})
-    try {
-      const result=await businessService.getOperationsFieldSummary(query)
-      if(current()) this.setData(formatFieldSummary(result,this.data.templateOptions))
-    } catch(error) {
-      if(current()) this.setData({fieldErrorMessage:fieldErrorMessage(error,'字段统计加载失败，请稍后重试。')})
-    } finally {
-      if(current()) this.setData({fieldLoading:false})
-      else if(fieldSequence===this.fieldSequence && currentActiveUser()!==user) this.invalidateFields()
-    }
+    this._fieldAnalysisOwner=currentActiveUser()
+    this._fieldAnalysisSelection=catalogSelection()
+    if(this.csvExport && !this.isCurrentCsvExport(this.csvExport)) this.resetCsvExport()
+    this.fieldSequence=(this.fieldSequence||0)+1
+    this.setData({fieldAnalysisEnabled:true,fieldAnalysisQuery:this.query(),fieldAnalysisSessionEpoch:this.fieldSequence})
+  },
+
+  onFieldAnalysisChange(event) {
+    if(!this.data.fieldAnalysisEnabled || currentActiveUser()!==this._fieldAnalysisOwner) return
+    let selection
+    try { selection=normalizeSelection(event.detail.selection) } catch (_) { return }
+    this._fieldAnalysisSelection=selection
+    this.resetCsvExport()
+  },
+
+  onFieldAnalysisAccessInvalid() {
+    this.invalidateFields()
+    this.resetCsvExport()
+  },
+
+  onFieldAnalysisSourceInvalid() {
+    if(currentActiveUser()===this._fieldAnalysisOwner) this.resetCsvExport()
   },
 
   async loadCharts(sequence,userId) {
     if (!this.isCurrentRequest(sequence,userId)) return
-    const [timing]=await Promise.all([this.loadSummary(sequence,userId),this.loadFieldSummary(sequence,userId)].map(settle))
-    if(timing.status==='rejected') throw timing.reason
+    this.activateFieldAnalysis(sequence,userId)
+    await this.loadSummary(sequence,userId)
   },
 
   formatSeries(summary) {
@@ -410,7 +423,7 @@ Page({
       if(!await this.refreshFilterOptions(sequence,user._id)) return
       if(!this.data.templateOptions.length) {
         this.setData({summary:null,nodeSeries:[],trendSeries:[]})
-        await this.loadFieldSummary(sequence,user._id)
+        this.activateFieldAnalysis(sequence,user._id)
         return
       }
       await this.loadCharts(sequence, user._id)
@@ -467,7 +480,7 @@ Page({
   currentStatus() { return this.selected(this.data.statusOptions, this.data.statusIndex) },
 
   csvQuery() {
-    return this.query()
+    return {...this.query(),reportVersion:2,analysis:this._fieldAnalysisSelection || catalogSelection()}
   },
 
   isCurrentCsvExport(task) {
@@ -561,7 +574,7 @@ Page({
           ...query, cursor, pageSize: 50
         })
         if (!this.isCurrentCsvExport(task)) return
-        if (!validReportPage(result)) throw new Error('INVALID_EXPORT_ROWS')
+        if (!validReportPage(result,query.analysis)) throw new Error('INVALID_EXPORT_ROWS')
         rows.push(...result.items)
         if(rows.length>50000) throw Object.assign(new Error('RANGE_TOO_LARGE'),{code:'RANGE_TOO_LARGE'})
         this.setCsvExportStage(task, 'preparing', `正在读取导出数据（已读取 ${rows.length} 条）…`)

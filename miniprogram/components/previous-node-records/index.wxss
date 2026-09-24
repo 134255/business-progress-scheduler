@@ -1,0 +1,29 @@
+.panel { margin: 0 0 28rpx; padding: 24rpx; border: 1rpx solid #d5e9e6; border-radius: 20rpx; background: #fff; color: #253239; font-size: 28rpx; }
+.record-button { display: block; width: 100%; box-sizing: border-box; white-space: normal; word-break: break-all; font-size: 27rpx; line-height: 1.6; border-radius: 12rpx; margin: 12rpx 0; padding: 16rpx; color: #117873; background: #eefaf7; }
+.record-button::after { border: none; }
+.heading, .node-heading, .history-toggle, .entry-heading { display: flex; align-items: center; text-align: left; }
+.heading { font-weight: 600; margin-top: 0; }
+.heading-title { flex: 1; min-width: 0; }
+.chevron { flex-shrink: 0; white-space: nowrap; margin-left: 16rpx; }
+.node-heading { background: #f3f7f7; }
+.node { margin-top: 20rpx; }
+.block, .content { display: block; }
+.content { white-space: pre-wrap; word-break: break-all; }
+.muted { color: #707a80; font-size: 25rpx; }
+.label { font-weight: 600; margin: 22rpx 0 12rpx; }
+.field { display: flex; align-items: flex-start; padding: 12rpx 0; border-bottom: 1rpx solid #edf1f0; }
+.field-name { width: 28%; flex-shrink: 0; padding-right: 16rpx; box-sizing: border-box; word-break: break-all; }
+.field-value { flex: 1; min-width: 0; }
+.record { padding: 12rpx 0; border-bottom: 1rpx solid #e7efed; }
+.entry-heading { background: #f7f9f9; margin: 0; }
+.error { color: #a94e20; }
+.evidence { display: flex; align-items: center; text-align: left; font-size: 25rpx; }
+.evidence-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.evidence-state { flex-shrink: 0; white-space: nowrap; margin-left: 18rpx; }
+.evidence[disabled] { color: #7b8286; }
+.return-bar { position: sticky; bottom: 0; z-index: 2; padding-top: 12rpx; background: #fff; }
+.return-button { background: #117873; color: #fff; margin-bottom: 0; }
+.video-mask { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 1000; background: rgba(0, 0, 0, .72); display: flex; align-items: center; justify-content: center; }
+.video-panel { width: 92%; max-width: 900rpx; max-height: 90vh; box-sizing: border-box; padding: 24rpx; border-radius: 16rpx; background: #fff; }
+.preview-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 16rpx; }
+.video-player { width: 100%; height: 48vh; max-height: 600rpx; }

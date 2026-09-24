@@ -814,7 +814,9 @@ test('本机图片选择取消保持草稿，非取消失败显示安全提示�
   assert.equal(toasts.length, 0)
   page.chooseMediaEvidence()
   picker.fail({ errMsg: 'chooseImage:fail permission denied private-file-path' })
-  assert.deepEqual(page.data, before)
+  assert.deepEqual({ ...page.data, pickerError: null }, before)
+  assert.equal(page.data.pickerError.code, 'PICKER_PERMISSION_DENIED')
+  assert.doesNotMatch(JSON.stringify(page.data.pickerError), /private-file-path/)
   assert.match(toasts.at(-1), /选择.*失败|无法.*选择/)
   assert.doesNotMatch(toasts.at(-1), /private-file-path/)
 })
@@ -894,6 +896,264 @@ test('移动端继续使用相册媒体接口而不是会话选择', async () =>
   assert.deepEqual(mobilePicker.mediaType, ['image', 'video'])
 })
 
+for (const fixture of [
+  { message: 'privacy permission is not authorized', code: 'PICKER_PRIVACY_DENIED', retry: false },
+  { message: 'permission denied', code: 'PICKER_PERMISSION_DENIED', retry: false },
+  { message: 'compress video failed', code: 'PICKER_MEDIA_PROCESSING_FAILED', retry: true },
+  { message: 'read file failed', code: 'PICKER_FILE_READ_FAILED', retry: true },
+  { message: 'native exception', code: 'PICKER_FAILED', retry: true }
+]) {
+  test(`原生选择失败 ${fixture.code} 保留草稿并显示脱敏诊断，不自动重新打开相册`, async () => {
+    let picker
+    const toasts = []
+    const page = await loadDesktopPickerPage({
+      getDeviceInfo: () => ({ platform: 'android' }),
+      chooseMedia: options => { picker = options },
+      chooseVideo: () => assert.fail('失败不能自动重开相册'),
+      showToast: options => toasts.push(options.title)
+    })
+    page.setData({ comment: '待保存说明' })
+    page.addSelectedFiles([{ name: 'old.jpg', path: 'wxfile://old.jpg', size: 10, category: 'image' }])
+    const before = JSON.parse(JSON.stringify(page.data.files))
+    page.chooseMediaEvidence()
+    picker.fail({ errMsg: `chooseMedia:fail ${fixture.message} wxfile://private-record.mov`, errCode: -4 })
+    assert.equal(page.data.pickerError?.code, fixture.code)
+    assert.equal(page.data.pickerError.canRetryVideo, fixture.retry)
+    assert.match(page.data.pickerError.diagnostic, /chooseMedia.*native.*-4/)
+    assert.doesNotMatch(JSON.stringify(page.data.pickerError) + toasts.join(), /private-record|wxfile/)
+    assert.deepEqual(page.data.files, before)
+    assert.equal(page.data.comment, '待保存说明')
+    assert.equal(page.evidencePickerPending, 0)
+  })
+}
+
+test('视频处理失败后可手动走本机不压缩视频接口，成功清除错误并保持 MOV 与原草稿', async () => {
+  let picker
+  let retry
+  const page = await loadDesktopPickerPage({
+    getDeviceInfo: () => ({ platform: 'android' }),
+    chooseMedia: options => { picker = options },
+    chooseVideo: options => { retry = options }
+  })
+  page.setData({ comment: '保留草稿' })
+  page.chooseMediaEvidence()
+  picker.fail({ errMsg: 'chooseMedia:fail compress video failed' })
+  assert.equal(typeof page.retryVideoSelection, 'function')
+  page.retryVideoSelection()
+  assert.equal(retry.compressed, false)
+  assert.deepEqual(retry.sourceType, ['album'])
+  retry.success({ tempFilePath: 'wxfile://original.MOV', size: 1024, duration: 6, width: 1920, height: 1080 })
+  assert.equal(page.data.files[0].extension, 'mov')
+  assert.equal(page.data.files[0].path, 'wxfile://original.MOV')
+  assert.equal(page.data.comment, '保留草稿')
+  assert.equal(page.data.pickerError, null)
+})
+
+test('重试选择继续执行节点白名单和 120MiB 上限，而不是绕过文件验证', async () => {
+  let picker
+  let retry
+  const page = await loadDesktopPickerPage({
+    getDeviceInfo: () => ({ platform: 'android' }),
+    chooseMedia: options => { picker = options },
+    chooseVideo: options => { retry = options }
+  })
+  for (const file of [{ tempFilePath: 'wxfile://too-big.mp4', size: 125829121 },
+    { tempFilePath: 'wxfile://blocked.avi', size: 10 }]) {
+    page.chooseMediaEvidence()
+    picker.fail({ errMsg: 'chooseMedia:fail native exception' })
+    assert.equal(typeof page.retryVideoSelection, 'function')
+    page.retryVideoSelection()
+    retry.success({ ...file, duration: 6, width: 1920, height: 1080 })
+    assert.equal(page.data.files.length, 0)
+  }
+})
+
+for (const transition of ['actor', 'version', 'readOnly', 'reviewDraftLocked', 'submitting', 'unload']) {
+  test(`失败后 ${transition} 改变不允许再发起视频重试`, async () => {
+    let picker
+    const page = await loadDesktopPickerPage({
+      getDeviceInfo: () => ({ platform: 'android' }),
+      chooseMedia: options => { picker = options },
+      chooseVideo: () => assert.fail('过期/无权上下文不得重试')
+    })
+    page.chooseMediaEvidence()
+    picker.fail({ errMsg: 'chooseMedia:fail native exception' })
+    if (transition === 'actor') global.getApp = () => ({ globalData: { currentUser: activeUser('other') } })
+    else if (transition === 'version') page.setData({ expectedNodeVersion: 4 })
+    else if (transition === 'unload') page.onUnload()
+    else page.setData({ [transition]: true })
+    assert.equal(typeof page.retryVideoSelection, 'function')
+    page.retryVideoSelection()
+    assert.equal(page.data.files.length, 0)
+  })
+}
+
+test('异步选择结果处理异常得到独立诊断，不能丢失错误或伪装权限问题', async () => {
+  let picker
+  const page = await loadDesktopPickerPage({
+    getDeviceInfo: () => ({ platform: 'android' }),
+    chooseMedia: options => { picker = options }
+  })
+  page.chooseMediaEvidence()
+  assert.doesNotThrow(() => picker.success({ tempFiles: { invalid: true } }))
+  assert.equal(page.data.pickerError?.code, 'PICKER_RESULT_INVALID')
+  assert.equal(page.evidencePickerPending, 0)
+  assert.equal(page.data.files.length, 0)
+})
+
+test('选择器不可用与调用异常可区分，诊断不得泄漏 Error.message', async () => {
+  for (const mode of ['missing', 'throws']) {
+    const page = await loadDesktopPickerPage({
+      getDeviceInfo: () => ({ platform: 'android' }),
+      ...(mode === 'throws' ? { chooseMedia: () => { throw new Error('private native path') } } : {})
+    })
+    page.chooseMediaEvidence()
+    assert.equal(page.data.pickerError?.code, mode === 'missing' ? 'PICKER_UNAVAILABLE' : 'PICKER_INVOKE_FAILED')
+    assert.doesNotMatch(JSON.stringify(page.data.pickerError), /private native/)
+  }
+})
+
+test('重复点击和重复/迟到回调不重复添加文件或把成功覆盖成错误', async () => {
+  let picker
+  let calls = 0
+  const page = await loadDesktopPickerPage({
+    getDeviceInfo: () => ({ platform: 'android' }),
+    chooseMedia: options => { picker = options; calls += 1 }
+  })
+  page.chooseMediaEvidence()
+  page.chooseMediaEvidence()
+  assert.equal(calls, 1)
+  const result = { type: 'video', tempFiles: [{ tempFilePath: 'wxfile://one.mp4', size: 10, fileType: 'video' }] }
+  picker.success(result)
+  picker.success(result)
+  picker.fail({ errMsg: 'chooseMedia:fail compress failed' })
+  assert.equal(page.data.files.length, 1)
+  assert.equal(page.data.pickerError, null)
+  assert.equal(page.evidencePickerPending, 0)
+})
+
+test('用户取消保持安静，路径中含 cancel 不得误判为用户取消', async () => {
+  let picker
+  const toasts = []
+  const page = await loadDesktopPickerPage({
+    getDeviceInfo: () => ({ platform: 'android' }),
+    chooseMedia: options => { picker = options },
+    showToast: options => toasts.push(options.title)
+  })
+  page.chooseMediaEvidence()
+  picker.fail({ errMsg: 'chooseMedia:fail cancel' })
+  assert.equal(toasts.length, 0)
+  assert.equal(page.data.pickerError, null)
+  page.chooseMediaEvidence()
+  picker.fail({ errMsg: 'chooseMedia:fail read file failed wxfile://cancel.mov', errCode: 'private-code' })
+  assert.equal(page.data.pickerError?.code, 'PICKER_FILE_READ_FAILED')
+  assert.doesNotMatch(page.data.pickerError.diagnostic, /private-code|cancel.mov/)
+})
+
+for (const platform of ['android', 'ios', 'ohos']) {
+  test(`${platform} 支持原视频时明确禁止选择阶段压缩，并保留视频元数据`, async () => {
+    let picker
+    const page = await loadDesktopPickerPage({
+      getDeviceInfo: () => ({ platform }),
+      getAppBaseInfo: () => ({ SDKVersion: '3.17.1' }),
+      canIUse: () => true,
+      chooseMedia: options => { picker = options }
+    })
+    page.chooseMediaEvidence()
+    assert.deepEqual(picker.sizeType, ['original'])
+    assert.deepEqual(picker.sourceType, ['album', 'camera'])
+    picker.success({ type: 'video', tempFiles: [
+      { tempFilePath: 'wxfile://local.MOV', size: 4000, fileType: 'video', duration: 6, width: 1920, height: 1080 }
+    ] })
+    assert.deepEqual(page.data.files.map(file => [file.extension, file.size, file.category]), [['mov', 4000, 'video']])
+  })
+}
+
+for (const result of [{}, null, { tempFiles: [] }, { tempFiles: [null] },
+  { tempFiles: [{ size: 10, fileType: 'video' }] }]) {
+  test(`不完整的媒体选择响应不静默成功也不生成无路径凭证 ${JSON.stringify(result)}`, async () => {
+    let picker
+    const page = await loadDesktopPickerPage({
+      getDeviceInfo: () => ({ platform: 'android' }),
+      chooseMedia: options => { picker = options }
+    })
+    page.chooseMediaEvidence()
+    picker.success(result)
+    assert.equal(page.data.pickerError?.code, 'PICKER_RESULT_INVALID')
+    assert.equal(page.data.files.length, 0)
+    assert.equal(page.evidencePickerPending, 0)
+  })
+}
+
+test('chooseVideo 返回空路径时不得用虚构文件名创建待上传项', async () => {
+  let picker
+  const page = await loadDesktopPickerPage({
+    getDeviceInfo: () => ({ platform: 'windows' }),
+    showActionSheet: options => options.success({ tapIndex: 1 }),
+    chooseVideo: options => { picker = options }
+  })
+  page.chooseMediaEvidence()
+  picker.success({ size: 100, duration: 6, width: 1920, height: 1080 })
+  assert.equal(page.data.pickerError?.code, 'PICKER_RESULT_INVALID')
+  assert.equal(page.data.files.length, 0)
+})
+
+test('批量选择里的坏文件不连带丢弃有效文件，并明确报告部分选择失败', async () => {
+  let picker
+  const page = await loadDesktopPickerPage({
+    getDeviceInfo: () => ({ platform: 'android' }),
+    chooseMedia: options => { picker = options }
+  })
+  page.chooseMediaEvidence()
+  picker.success({ type: 'video', tempFiles: [null,
+    { tempFilePath: 'wxfile://zero.mp4', size: 0, fileType: 'video' },
+    { tempFilePath: 'wxfile://valid.mp4', size: 100, fileType: 'video' },
+    { tempFilePath: 'wxfile://second.MOV', size: 200, fileType: 'video' }
+  ] })
+  assert.deepEqual(page.data.files.map(file => file.name), ['valid.mp4', 'second.MOV'])
+  assert.equal(page.data.pickerError?.code, 'PICKER_RESULT_PARTIAL')
+  assert.equal(page.data.selectedTotalBytes, 300)
+})
+
+test('刷新取得新节点版本后清除旧选择失败的重试入口', async () => {
+  let picker
+  let version = 3
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = {
+    setNavigationBarTitle() {}, showToast() {}, reLaunch() { assert.fail('有效账号不应被重定向') },
+    getDeviceInfo: () => ({ platform: 'android' }),
+    chooseMedia: options => { picker = options }
+  }
+  const refreshingPage = loadPage({ getNodeWorkspace: async () => ({
+    line: { _id: 'line-1', status: 'active', version: 7 },
+    node: nodeFixture({ version, fieldDefinitions: [] }), canSubmit: true, history: []
+  }) })
+  await refreshingPage.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  refreshingPage.chooseMediaEvidence()
+  picker.fail({ errMsg: 'chooseMedia:fail compress failed' })
+  assert.equal(refreshingPage.data.pickerError.canRetryVideo, true)
+  version = 4
+  await refreshingPage.loadData()
+  assert.equal(refreshingPage.data.pickerError, null)
+  assert.equal(refreshingPage.retryVideoContext, null)
+})
+
+for (const path of ['wxfile://privacy.mp4', 'wxfile://permission.mp4', 'C:\\privacy\\video.mp4', '/tmp/permission/video.mp4',
+  '"/tmp/privacy/video.mp4"', "'/storage/permission/video.mp4'"]) {
+  test(`读取失败诊断不能由私有文件名改变分类 ${path}`, async () => {
+    let picker
+    const page = await loadDesktopPickerPage({
+      getDeviceInfo: () => ({ platform: 'android' }),
+      chooseMedia: options => { picker = options }
+    })
+    page.chooseMediaEvidence()
+    picker.fail({ errMsg: `chooseMedia:fail read file failed ${path}` })
+    assert.equal(page.data.pickerError.code, 'PICKER_FILE_READ_FAILED')
+    assert.equal(page.data.pickerError.canRetryVideo, true)
+    assert.doesNotMatch(JSON.stringify(page.data.pickerError), /privacy.mp4|permission.mp4|video.mp4/)
+  })
+}
+
 test('凭证最多三个并发上传，失败重试不重复上传成功项且只提交 evidenceId', async () => {
   const events = []
   let secondAttempt = false
@@ -953,6 +1213,45 @@ test('凭证最多三个并发上传，失败重试不重复上传成功项且�
   ])
   assert.deepEqual(feedbackInput.evidenceIds, ['evidence-a', 'evidence-b', 'evidence-c', 'evidence-d'])
   assert.equal(Object.prototype.hasOwnProperty.call(feedbackInput, 'evidences'), false)
+})
+
+test('上传页面显示各阶段尝试次数，三次失败后仅保留失败文件重试入口', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle() {}, reLaunch() {}, showToast() {} }
+  const page = loadPage({
+    getBusinessLine: async () => businessFixture(nodeFixture({ fieldDefinitions: [], allowedEvidenceTypes: ['mp4'] })),
+    getNodeHistory: async () => ({ node: { id: 'node-1', name: '资料审核' }, canSubmit: true, history: [] })
+  })
+  await page.onLoad({ lineId: 'line-1', nodeId: 'node-1' })
+  page.setData({ files: [
+    { localKey: 'done', name: 'done.mp4', path: 'wxfile://done.mp4', size: 10, status: 'registered', evidenceId: 'done' },
+    { localKey: 'one', name: 'one.mp4', path: 'wxfile://one.mp4', size: 10, status: 'pending' }
+  ] })
+  const labels = []
+  page.createEvidenceUploader = () => ({ upload: async input => {
+    assert.equal(input.file.name, 'one.mp4')
+    for (const status of [
+      { stage: 'transfer', attempt: 2, maxAttempts: 3 },
+      { stage: 'finalize', attempt: 0, maxAttempts: 3 },
+      { stage: 'finalize', attempt: 3, maxAttempts: 3 }
+    ]) {
+      input.onStatus(status)
+      if (status.stage === 'transfer') input.onProgress(80)
+      labels.push(page.data.files[1].statusLabel)
+    }
+    throw Object.assign(new Error('private token'), {
+      code: 'EVIDENCE_UPLOAD_RETRYABLE', uploadStage: 'finalize', attempts: 3
+    })
+  } })
+  await assert.rejects(page.uploadAndRegisterEvidence({
+    actorId: 'account-1', lineId: 'line-1', nodeId: 'node-1',
+    nodeVersion: page.data.expectedNodeVersion, sequence: page.writeSequence
+  }))
+  assert.deepEqual(labels, ['上传中 80%（第 2/3 次）', '等待核验登记', '核验登记中（第 3/3 次）'])
+  assert.equal(page.data.files[0].status, 'registered')
+  assert.equal(page.data.files[1].canRetry, true)
+  assert.match(page.data.files[1].errorMessage, /已尝试3次仍未成功/)
+  assert.doesNotMatch(page.data.files[1].errorMessage, /private|token/)
 })
 
 test('登记后使用服务端规范化文件名和扩展名，不改变本机路径', async () => {

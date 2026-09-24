@@ -86,6 +86,30 @@ test('missing or invalid _id never falls back to a stray valid id', async () => 
   assert.equal(fake.writeCalls.length, 0)
 })
 
+test('task summaries use the owning line, deduplicate it and preserve node/round identity', async () => {
+  const { service, repository, fake } = setup()
+  await repository.getSummary({ actor, businessLineId: 'line-1' })
+  await repository.getSummary({ actor, businessLineId: 'line-2' })
+  const items = [
+    { _id: 'node-1', nodeId: 'node-1', businessLineId: 'line-1', status: 'ready' },
+    { reviewRoundId: 'round-2', businessLineId: 'line-2', status: 'pending', reviewMode: 'all' },
+    { reviewRoundId: 'round-3', businessLineId: 'line-1', status: 'pending', reviewMode: 'any' }
+  ]
+  const before = structuredClone(items)
+  const runs = fake.transactionRuns.length
+  const result = await service.decorateItems({ actor, items, lineIdKey: 'businessLineId' })
+  assert.deepEqual(result.map(item => item.cardSummary.configRevision), [0, 3, 0])
+  assert.deepEqual(result.map(({ cardSummary, ...base }) => base), before)
+  assert.deepEqual(items, before)
+  assert.equal(fake.transactionRuns.length - runs, 2)
+  for (const businessLineId of [undefined, '../line-1', 'missing']) {
+    await assert.rejects(service.decorateItems({ actor, items: [{ _id: 'line-1', businessLineId }],
+      lineIdKey: 'businessLineId' }), { code: 'NOT_FOUND' })
+  }
+  fake.replace('users', actor._id, { ...actor, status: 'disabled' })
+  await assert.rejects(service.decorateItems({ actor, items, lineIdKey: 'businessLineId' }), { code: 'FORBIDDEN' })
+})
+
 for (const [action, payload, result] of [
   ['createBusinessFromTemplate', {}, { id: 'line-1', code: 'SYNTHETIC-1' }],
   ['updateBusinessMetadata', { businessLineId: 'line-1' }, { id: 'line-1', version: 1 }],

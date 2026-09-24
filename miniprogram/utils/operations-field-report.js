@@ -3,7 +3,9 @@ const FIELD_CSV_COLUMNS = Object.freeze([
   ['fieldKey','字段标识'],['fieldName','字段名称'],['fieldType','字段类型'],['fieldValue','字段内容'],
   ['optionValue','选项内容'],['occurrenceCount','出现次数'],['filledSampleCount','有效填写样本数'],
   ['emptySampleCount','未填写样本数'],['dataStatus','数据状态'],['fieldGroupId','字段兼容组'],
-  ['originalValueJson','字段或选项原文（JSON）']
+  ['originalValueJson','字段或选项原文（JSON）'],
+  ['analysisGroupId','关联分析组'],['dimensionIdsJson','维度标识（JSON）'],['dimensionNamesJson','维度名称（JSON）'],
+  ['dimensionValuesJson','维度值原文（JSON）'],['notApplicableSampleCount','不适用样本数'],['analysisContextJson','分析条件（JSON）']
 ])
 const ERROR_MESSAGES = Object.freeze({
   RANGE_TOO_LARGE:'数据范围过大，请缩小日期、模板或节点范围后重试。',
@@ -52,9 +54,21 @@ function mergeFieldFilters(timing={},fields={}) {
     businesses:merge('businesses','businessLineId'),processors:merge('processors','token'),reviewers:merge('reviewers','token'),
     templateVersions:[...new Set([...(timing.templateVersions||[]),...(fields.templateVersions||[])])].sort((a,b)=>b-a)}
 }
-function validReportPage(result) {
+function validReportPage(result,expectedAnalysis) {
   return result && Array.isArray(result.items) && typeof result.hasMore==='boolean' &&
     result.items.every(validReportRow) &&
+    (!expectedAnalysis || result.items.every(row=>{
+      if(row.recordType==='运营基础') return true
+      if(!ownText(row,'analysisContextJson')) return false
+      if(row.recordType!=='关联统计'){
+        const selection=['single_select','multi_select'].includes(row.fieldType)
+        if(!ownText(row,'analysisGroupId',!selection) || (selection?!/^[a-f0-9]{64}$/.test(row.analysisGroupId):row.analysisGroupId!==''))return false
+        if(row.recordType==='选项统计' && (!count(row.notApplicableSampleCount) || row.occurrenceCount===0))return false
+      }
+      try {const context=JSON.parse(row.analysisContextJson);return validAnalysisContext(context) &&
+        ['view','nodeGroupId','linkageId','dimensionIds','filters'].every(k=>JSON.stringify(context[k])===JSON.stringify(expectedAnalysis[k]))}
+      catch (_) {return false}
+    })) &&
     (!result.hasMore || typeof result.nextCursor==='string' && result.nextCursor.length>0)
 }
 const FIELD_TYPES=['short_text','long_text','number','boolean','date','single_select','multi_select']
@@ -82,6 +96,21 @@ function validReportRow(row) {
   if(!row || typeof row!=='object' || Array.isArray(row)) return false
   // Existing base export retains its established optional-cell protocol.
   if(row.recordType==='运营基础') return true
+  if(row.recordType==='关联统计') {
+    if(row.dateBasis!=='节点完成日期' || !ownText(row,'templateName',true) || !ownText(row,'templateVersions') ||
+      !row.templateVersions.split(',').every(v=>/^[1-9]\d*$/.test(v) && Number.isSafeInteger(Number(v))) ||
+      !ownText(row,'nodeName') || !/^[a-f0-9]{64}$/.test(row.analysisGroupId) || row.dataStatus!=='有效' ||
+      !['occurrenceCount','filledSampleCount','emptySampleCount','notApplicableSampleCount'].every(k=>count(row[k])) ||
+      row.occurrenceCount===0 || row.occurrenceCount>row.filledSampleCount) return false
+    try {
+      const ids=JSON.parse(row.dimensionIdsJson),names=JSON.parse(row.dimensionNamesJson),values=JSON.parse(row.dimensionValuesJson),context=JSON.parse(row.analysisContextJson)
+      return Array.isArray(ids) && ids.length>=1 && ids.length<=5 && ids.every(id=>typeof id==='string' && /^[a-f0-9]{64}$/.test(id)) &&
+        new Set(ids).size===ids.length && Array.isArray(names) && names.length===ids.length && names.every(v=>typeof v==='string' && v.trim()) &&
+        Array.isArray(values) && values.length===ids.length && values.every(v=>typeof v==='string' && v.trim()) &&
+        validAnalysisContext(context) && ['pair','combinations'].includes(context.view) &&
+        (context.view!=='pair' || JSON.stringify(context.dimensionIds)===JSON.stringify(ids))
+    } catch (_) {return false}
+  }
   if(!['字段明细','选项统计'].includes(row.recordType) || row.dateBasis!=='节点完成日期' ||
       !ownText(row,'templateName',true) || !ownText(row,'templateVersions') ||
       !row.templateVersions.split(',').every(value=>/^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value))) ||
@@ -95,13 +124,25 @@ function validReportRow(row) {
 }
 function reportCsvRows(rows) {
   return rows.map(row=> {
-    if(row.recordType==='运营基础') return row
+    if(row.recordType==='运营基础' || row.recordType==='关联统计') return row
     // A JSON string/array starts with a quote/bracket, so CSV's formula guard and
     // newline normalization cannot change the original value inside this cell.
     const original=row.recordType==='选项统计'?row.optionValue:
       row.fieldType==='multi_select' && row.fieldValue!==''?JSON.parse(row.fieldValue):row.fieldValue
     return {...row,originalValueJson:JSON.stringify(original)}
   })
+}
+function validAnalysisContext(context) {
+  if(!context || !['catalog','node','field','product','combinations','pair'].includes(context.view) ||
+    Object.keys(context).some(k=>!['view','nodeGroupId','linkageId','dimensionIds','filters'].includes(k)) ||
+    !Array.isArray(context.dimensionIds) || !Array.isArray(context.filters) || context.filters.length>8) return false
+  const hex=value=>typeof value==='string' && /^[a-f0-9]{64}$/.test(value)
+  return (context.view==='catalog'?context.nodeGroupId==='':hex(context.nodeGroupId)) &&
+    (['product','combinations'].includes(context.view)?hex(context.linkageId):context.linkageId==='') &&
+    context.dimensionIds.length===(context.view==='pair'?2:context.view==='field'?1:0) && context.dimensionIds.every(hex) &&
+    new Set(context.dimensionIds).size===context.dimensionIds.length &&
+    context.filters.every(f=>f && hex(f.dimensionId) && typeof f.value==='string' && f.value.trim()) &&
+    new Set(context.filters.map(f=>f.dimensionId)).size===context.filters.length
 }
 function utf8Bytes(text) {
   let bytes=0

@@ -1,5 +1,5 @@
+@import "../../templates/business-card.wxss";
 .task-card { position: relative; }
-.item-title { max-width: 500rpx; font-size: 32rpx; font-weight: 650; }
 .block { display: block; margin-top: 12rpx; }
 .due { color: #92400e; }
 .action { color: #0f766e; text-align: right; }

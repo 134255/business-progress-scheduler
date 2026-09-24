@@ -56,6 +56,7 @@ function harness(documents = seed(), overrides = {}) {
       storage,
       clock: () => new Date(NOW),
       delay: overrides.delay || (async () => {}),
+      onFinalizeError: overrides.onFinalizeError,
       cloudFilePrefix: 'cloud://test-env'
     })
   }
@@ -195,7 +196,7 @@ function finalizeInput(evidenceId = EVIDENCE_ID) {
     uploadSessionTokenHash: TOKEN_HASH, expectedNodeVersion: 4 }
 }
 
-async function conflictFromLockedWxSdk() {
+async function conflictFromLockedWxSdk(operation = 'update') {
   const cloud = require('wx-server-sdk')
   const { Db } = require('@cloudbase/database')
   cloud.init({ env: 'local-upload-repro' })
@@ -207,7 +208,7 @@ async function conflictFromLockedWxSdk() {
   Db.reqClass = class {
     async send(action) {
       if (action === 'database.startTransaction') return { transactionId: 'local-tx' }
-      if (action === 'database.modifyDocument') {
+      if (action === (operation === 'get' ? 'database.getDocument' : 'database.modifyDocument')) {
         updates += 1
         return { code: 'DATABASE_TRANSACTION_CONFLICT', message: 'database transaction conflict' }
       }
@@ -216,7 +217,9 @@ async function conflictFromLockedWxSdk() {
     }
   }
   try {
-    await database.runTransaction(transaction => transaction.collection('test').doc('node').update({ data: { bytes: 100 } }))
+    await database.runTransaction(transaction => operation === 'get'
+      ? transaction.collection('test').doc('node').get()
+      : transaction.collection('test').doc('node').update({ data: { bytes: 100 } }))
     assert.fail('the locked SDK must surface the wrapped conflict')
   } catch (error) {
     assert.equal(updates, 1)
@@ -227,6 +230,80 @@ async function conflictFromLockedWxSdk() {
     Db.reqClass = originalRequest
   }
 }
+
+test('preflight read conflict is safely classified for replay of the same reservation', async () => {
+  const diagnostics = []
+  const { fake, repository, calls } = harness(seed(), { onFinalizeError: value => diagnostics.push(value) })
+  await reserve(repository)
+  const run = fake.db.runTransaction.bind(fake.db)
+  const conflict = await conflictFromLockedWxSdk('get')
+  fake.db.runTransaction = async () => { throw conflict }
+  await assert.rejects(repository.finalizeUpload(finalizeInput()), error => {
+    assert.equal(error.code, 'EVIDENCE_UPLOAD_RETRYABLE')
+    assert.equal(error[APPLICATION_ERROR_MARKER], true)
+    return true
+  })
+  assert.deepEqual(diagnostics, [{ stage: 'preflight', causeCode: 'TRANSACTION_CONFLICT' }])
+  assert.equal(calls.length, 0)
+  assert.equal(fake.documents('evidences')[0].storageStatus, 'uploading')
+  fake.db.runTransaction = run
+  assert.equal((await repository.finalizeUpload(finalizeInput())).storageStatus, 'available')
+  assert.equal(fake.documents('evidences').length, 1)
+  assert.equal(fake.documents('business_nodes')[0].evidenceUploadAvailableBytes, 100)
+})
+
+test('real uploader replays a lost registration response without reuploading or double counting', async () => {
+  const { createEvidenceUploader } = require('../../../miniprogram/utils/evidence-upload')
+  const { repository, fake } = harness()
+  let begins = 0
+  let transfers = 0
+  let finalizations = 0
+  const uploader = createEvidenceUploader({
+    beginUpload: async () => {
+      begins++
+      await reserve(repository)
+      return { evidenceId: EVIDENCE_ID, uploadSessionToken: 'synthetic-token',
+        bucket: 'synthetic-123', region: 'ap-shanghai', objectKey: 'synthetic-key' }
+    },
+    refreshUpload: async () => assert.fail('not expired'),
+    cosFactory: () => ({ uploadFile(params, callback) { transfers++; callback(null, {}) } }),
+    finalizeUpload: async input => {
+      assert.deepEqual(input, { evidenceId: EVIDENCE_ID, uploadSessionToken: 'synthetic-token', expectedNodeVersion: 4 })
+      const result = await repository.finalizeUpload(finalizeInput(input.evidenceId))
+      if (++finalizations === 1) throw Object.assign(new Error('response lost'), { code: 'NetworkError' })
+      return result
+    },
+    delay: async () => {}
+  })
+  const result = await uploader.upload({ businessLineId: 'business-1', nodeId: 'node-1', expectedNodeVersion: 4,
+    file: { name: 'synthetic.heic', path: '/synthetic.heic', size: 100 } })
+  assert.equal(result.storageStatus, 'available')
+  assert.equal(begins, 1)
+  assert.equal(transfers, 1)
+  assert.equal(finalizations, 2)
+  assert.equal(fake.documents('evidences').length, 1)
+  assert.equal(fake.documents('business_nodes')[0].evidenceUploadAvailableBytes, 100)
+})
+
+test('only transient storage errors are retryable and diagnostics never expose provider details', async () => {
+  for (const stage of ['head', 'header']) {
+    for (const transient of [true, false]) {
+      const diagnostics = []
+      const raw = Object.assign(new Error('private path and token'), { code: transient ? 'ETIMEDOUT' : 'AccessDenied', statusCode: transient ? 504 : 403 })
+      const storage = {
+        async headObject() { if (stage === 'head') throw raw; return { size: 100, etag: 'etag' } },
+        async readObjectHeader() { throw raw }
+      }
+      const { fake, repository } = harness(seed(), { storage, onFinalizeError(value) { diagnostics.push(value); throw new Error('logger failed') } })
+      await reserve(repository)
+      await assert.rejects(repository.finalizeUpload(finalizeInput()), error =>
+        transient ? error.code === 'EVIDENCE_UPLOAD_RETRYABLE' && error[APPLICATION_ERROR_MARKER] === true : error === raw)
+      assert.deepEqual(diagnostics, [{ stage, causeCode: transient ? 'TRANSIENT_SERVICE_ERROR' : 'UNEXPECTED_ERROR' }])
+      assert.doesNotMatch(JSON.stringify(diagnostics), /private|path|token|ETIMEDOUT|AccessDenied/)
+      assert.equal(fake.documents('evidences')[0].storageStatus, 'uploading')
+    }
+  }
+})
 
 test('finalization recovers a wx SDK wrapped write conflict without reuploading or double counting', async () => {
   const waits = []
@@ -267,21 +344,22 @@ test('finalization conflict retry rereads the counter and current permission ins
 
 test('only explicit transaction conflicts are retried, with a finite backoff budget', async () => {
   const cases = [
-    { error: wrappedWriteConflict(), waits: [80, 160, 320] },
-    { error: Object.assign(new Error('conflict'), { code: 'DATABASE_TRANSACTION_CONFLICT' }), waits: [80, 160, 320] },
+    { error: wrappedWriteConflict(), waits: [80, 160, 320], retryable: true },
+    { error: Object.assign(new Error('conflict'), { code: 'DATABASE_TRANSACTION_CONFLICT' }), waits: [80, 160, 320], retryable: true },
     { error: Object.assign(new Error('document.update:fail -501001 resource system error. permission denied'), { errCode: -501001 }), waits: [] },
     { error: Object.assign(new Error('database transaction conflict'), { code: 'VERSION_CONFLICT', [APPLICATION_ERROR_MARKER]: true }), waits: [] },
     { error: Object.assign(wrappedWriteConflict(), { [APPLICATION_ERROR_MARKER]: true }), waits: [] },
-    { error: Object.assign(new Error('network failure'), { code: 'ETIMEDOUT' }), waits: [] }
+    { error: Object.assign(new Error('network failure'), { code: 'ETIMEDOUT' }), waits: [], retryable: true }
   ]
-  for (const { error, waits: expectedWaits } of cases) {
+  for (const { error, waits: expectedWaits, retryable } of cases) {
     const waits = []
     const { fake, repository } = harness(seed(), { delay: async ms => { waits.push(ms) } })
     await reserve(repository)
     for (let i = 0; i < 5; i += 1) {
       fake.failNextWrite({ collection: 'business_nodes', operation: 'update', error })
     }
-    await assert.rejects(repository.finalizeUpload(finalizeInput()), error)
+    await assert.rejects(repository.finalizeUpload(finalizeInput()), failure =>
+      retryable ? failure.code === 'EVIDENCE_UPLOAD_RETRYABLE' && failure[APPLICATION_ERROR_MARKER] === true : failure === error)
     assert.deepEqual(waits, expectedWaits)
     assert.equal(fake.documents('evidences')[0].storageStatus, 'uploading')
     assert.equal(fake.documents('business_nodes')[0].evidenceUploadAvailableBytes, undefined)

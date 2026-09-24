@@ -1,3 +1,4 @@
 {
-  "navigationBarTitleText": "运营看板"
+  "navigationBarTitleText": "运营看板",
+  "usingComponents": { "operations-field-analysis": "/components/operations-field-analysis/index" }
 }

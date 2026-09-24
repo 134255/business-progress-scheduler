@@ -30,6 +30,20 @@ test('standalone field bundle is byte-identical and executes the approved source
   }
 })
 
+test('query-only metadata does not change the deployed worker snapshot protocol', () => {
+  const domain = require('../lib/operations-field-domain')
+  const source = fieldSource(), result = domain.buildFinalFieldResult(source)
+  // Captured from the verified pre-analysis implementation, not recomputed by
+  // the new metadata helper under test.
+  assert.equal(result.sourceHeader, '2a4274b01bb8aa83e2585a92fc4fb6f7418c8edb8bd670a9ef9f2c73044a3943')
+  assert.equal(result.sourceDigest, 'beaaba023114ac518207214c740920266285fcde6fe57ede89740ddcdadaf2e3')
+  const snapshot = domain.selectionSnapshot(result)
+  domain.describeFieldAnalysisSource(source, snapshot)
+  assert.deepEqual(domain.selectionSnapshot(result), snapshot)
+  assert.equal(snapshot.schemaVersion, 1)
+  assert.equal(Object.hasOwn(snapshot,'dimensions'), false)
+})
+
 test('real sync CLI copies only the three allowlisted files and check mode detects drift without writing', t => {
   assert.ok(fs.existsSync(script), 'the standalone bundle must have a reproducible sync command')
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'operations-field-bundle-'))

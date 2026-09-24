@@ -1,0 +1,68 @@
+<view class="analysis" wx:if="{{enabled}}">
+  <view class="analysis-heading">节点字段与关联分析</view>
+  <view class="analysis-note">按节点完成日期统计最终有效结果；仅显示有记录的单选和多选。</view>
+  <view wx:if="{{catalogNotice}}" class="analysis-notice">{{catalogNotice}}</view>
+  <view wx:if="{{catalogLoading}}" class="analysis-note">正在加载字段目录…</view>
+  <view wx:if="{{catalogError}}" class="analysis-error">{{catalogError}}<button bindtap="loadMoreNodes" class="analysis-button">重试目录</button></view>
+  <view wx:if="{{!catalogLoading && !nodes.length}}" class="analysis-note">当前条件下暂无有效选项记录</view>
+  <view class="analysis-node" wx:for="{{nodes}}" wx:key="id">
+    <button class="analysis-node-button" data-id="{{item.id}}" bindtap="toggleNode">{{item.nodeName}} · {{selectedId === item.id ? '收起' : '展开'}}</button>
+    <view class="analysis-note">{{item.templateName || '历史模板'}} · 版本 {{item.versionLabel}} · {{item.fieldCount}} 个有效字段 · {{item.sampleCount}} 个节点样本</view>
+  </view>
+  <button wx:if="{{catalogHasMore}}" class="analysis-button" bindtap="loadMoreNodes" disabled="{{catalogLoading || panelLoading}}">继续加载节点</button>
+  <view wx:if="{{selectedId}}" class="analysis-panel">
+    <button class="analysis-button" bindtap="nodeOverview" disabled="{{panelLoading}}">返回节点字段概览</button>
+    <view wx:if="{{linkOptions.length}}" class="analysis-tools">
+      <picker wx:if="{{linkOptions.length > 1}}" range="{{linkOptions}}" range-key="label" value="{{linkIndex}}" bindchange="onLinkChange"><view class="analysis-picker">{{linkOptions[linkIndex].label}}</view></picker>
+      <button class="analysis-button" bindtap="startProduct">商品关联分析</button>
+    </view>
+    <view wx:if="{{pairOptions.length > 1}}" class="analysis-tools">
+      <view class="analysis-heading">同节点双字段</view>
+      <picker range="{{pairOptions}}" range-key="label" value="{{pairLeft}}" data-side="pairLeft" bindchange="selectPairDimension"><view class="analysis-picker">{{pairLeft >= 0 ? pairOptions[pairLeft].label : '选择第一个字段'}}</view></picker>
+      <picker range="{{pairOptions}}" range-key="label" value="{{pairRight}}" data-side="pairRight" bindchange="selectPairDimension"><view class="analysis-picker">{{pairRight >= 0 ? pairOptions[pairRight].label : '选择第二个字段'}}</view></picker>
+    </view>
+    <view wx:if="{{path.length}}" class="analysis-path">
+      <view wx:for="{{path}}" wx:key="dimensionId">{{item.name}}：{{item.value}}</view>
+    </view>
+    <view wx:if="{{panel && (panel.view === 'product' || panel.view === 'combinations')}}" class="analysis-tools">
+      <button wx:if="{{path.length}}" class="analysis-button" bindtap="backProduct">返回上一级</button>
+      <button class="analysis-button" bindtap="resetProduct">重置商品条件</button>
+      <button wx:if="{{panel.productStage === 'attributes'}}" class="analysis-button" bindtap="showCombinations">查看属性组合</button>
+    </view>
+    <view wx:if="{{panelLoading}}" class="analysis-note">正在读取已核实的节点样本…</view>
+    <view wx:if="{{panelError}}" class="analysis-error">{{panelError}}<button bindtap="retryAnalysis" class="analysis-button">重试分析</button></view>
+    <block wx:if="{{panel}}">
+      <view wx:if="{{panel.incomplete}}" class="analysis-error">部分最终数据尚未补齐，以下仅为已核实样本。</view>
+      <view class="analysis-note">{{panel.explanation}}</view>
+      <view wx:if="{{!panel.bundled}}" class="analysis-note">有效填写 {{panel.filledSampleCount}} · 未填写 {{panel.emptySampleCount}} · 不适用 {{panel.notApplicableSampleCount}}（节点样本）</view>
+      <view wx:if="{{!panel.items.length}}" class="analysis-note">{{panel.view === 'product' && panel.productStage === 'none' ? '当前型号没有适用属性' : '当前条件下暂无有效选项记录'}}</view>
+      <block wx:if="{{panel.bundled}}">
+        <view class="analysis-field" wx:for="{{panel.items}}" wx:for-item="field" wx:key="id">
+          <view class="analysis-heading">{{field.name}}</view>
+          <view class="analysis-note">{{field.label}} · {{field.type === 'multi_select' ? '多选' : '单选'}}</view>
+          <view class="analysis-note">填写 {{field.filledSampleCount}} · 未填写 {{field.emptySampleCount}} · 不适用 {{field.notApplicableSampleCount}}（节点样本）</view>
+          <view class="analysis-option" wx:for="{{field.options}}" wx:for-item="option" wx:key="label">
+            <text class="analysis-label">{{option.label}}</text><text class="analysis-count">{{option.count}} 次 · {{option.percent}}</text>
+          </view>
+          <button wx:if="{{field.totalOptionCount > 10}}" class="analysis-button" data-id="{{field.id}}" bindtap="showAllOptions">查看全部 {{field.totalOptionCount}} 项</button>
+        </view>
+      </block>
+      <block wx:else>
+        <view wx:if="{{panel.view === 'field' || panel.productStage === 'next'}}" class="analysis-heading">{{panel.dimensionMetadata[0].name}}</view>
+        <view wx:for="{{panel.items}}" wx:key="key" class="analysis-option">
+          <button wx:if="{{panel.productStage === 'next'}}" class="analysis-choice" data-index="{{index}}" bindtap="selectProductValue">{{item.label}}<text class="analysis-choice-count">{{item.count}} 次 · {{item.percent}} →</text></button>
+          <block wx:else>
+            <view class="analysis-label">
+              <view wx:if="{{panel.view === 'pair' || panel.view === 'combinations'}}" class="analysis-tuple">
+                <view wx:for="{{item.dimensions}}" wx:for-item="dimension" wx:key="id">{{dimension.name}}：{{dimension.value}}</view>
+              </view>
+              <text wx:else>{{item.label}}</text>
+            </view>
+            <text class="analysis-count">{{item.count}} 次 · {{item.percent}}</text>
+          </block>
+        </view>
+      </block>
+      <button wx:if="{{panel.hasMore}}" class="analysis-button" bindtap="loadMoreAnalysis" disabled="{{panelLoading}}">继续加载（已显示 {{panel.items.length}} / {{panel.totalCount}}）</button>
+    </block>
+  </view>
+</view>

@@ -17,6 +17,15 @@ test('field summary normalizes completion-day range and allows an active ordinar
   assert.equal(reads[0].range.startAt.toISOString(), '2026-08-31T16:00:00.000Z')
   assert.equal(reads[0].range.endAt.toISOString(), '2026-09-11T16:00:00.000Z')
 })
+test('analysis validates nested query before repository access and enforces active actor',async()=>{
+  const calls=[],service=createOperationsFieldService({repository:{async getAnalysis(input){calls.push(input);return {items:[]}}}})
+  const analysis={view:'catalog'}
+  await service.getAnalysis({actor:user,query:{analysis}})
+  assert.deepEqual(calls[0].range.analysis,{view:'catalog',nodeGroupId:'',linkageId:'',dimensionIds:[],filters:[]})
+  await assert.rejects(service.getAnalysis({actor:{...user,status:'disabled'},query:{analysis}}),{code:'FORBIDDEN'})
+  await assert.rejects(service.getAnalysis({actor:user,query:{analysis:{...analysis,filters:[{dimensionId:'a'.repeat(64),value:'A'}]}}}),{code:'VALIDATION_ERROR'})
+  assert.equal(calls.length,1)
+})
 test('field report prevents non-admin and disabled actors reaching data reads', async () => {
   const { service, reads } = harness()
   for (const actor of [user, { ...admin, status: 'disabled' }, null]) await assert.rejects(service.exportReportRows({ actor, query: {} }), { code: 'FORBIDDEN' })

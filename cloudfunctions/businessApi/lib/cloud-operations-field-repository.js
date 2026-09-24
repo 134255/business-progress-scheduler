@@ -4,6 +4,8 @@ const { boundedMap } = require('./bounded-map')
 const { fieldError } = require('./operations-field-service')
 const { createOperationsReportCursor } = require('./operations-report-cursor')
 const domain = require('./operations-field-domain')
+const { buildFieldAnalysis, fieldAnalysisExportRows } = require('./operations-field-analysis')
+const { createOperationsFieldAnalysisCursor } = require('./operations-field-analysis-cursor')
 
 const MAX_NODES = 2000
 const MAX_LINES = 5000
@@ -98,7 +100,7 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     const votes = round ? await scan('node_review_votes',{reviewRoundId:round._id},50) : []
     return {line,node,feedback,round,votes}
   }
-  async function finalResult(actor, source, result, adminOnly, publish = false) {
+  async function finalResult(actor, source, result, adminOnly, publish = false, analysis = false) {
     return db.runTransaction(async tx=>{
       const current = await actorNow(actor,tx,adminOnly)
       const line = await read(tx,'business_lines',source.line._id)
@@ -112,7 +114,7 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
       const fresh = domain.buildFinalFieldResult({line,node,feedback,round,votes})
       if (!fresh || fresh.sourceDigest !== result.sourceDigest) throw fieldError('REPORT_CHANGED')
       if (publish) await tx.collection('operations_field_snapshots').doc(node._id).set({data:domain.selectionSnapshot(fresh)})
-      return fresh
+      return analysis ? {result:fresh,schema:domain.describeFieldAnalysisSource({line,node},fresh)} : fresh
     })
   }
   function cachedSelection(snapshot,line,node) {
@@ -126,7 +128,7 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
       return selection
     } catch (_) { return null }
   }
-  async function readCachedSelection(actor,line,node) {
+  async function readCachedSelection(actor,line,node,analysis = false) {
     const snapshot = await read(db,'operations_field_snapshots',node._id)
     const candidate = cachedSelection(snapshot,line,node)
     if (!candidate) return null
@@ -136,7 +138,7 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
       if (!canRead(current,freshLine)) throw fieldError('FORBIDDEN')
       const freshNode = await read(tx,'business_nodes',node._id)
       if (!freshNode || !cachedSelection(candidate,freshLine,freshNode)) throw fieldError('REPORT_CHANGED')
-      return candidate
+      return analysis ? {result:candidate,schema:domain.describeFieldAnalysisSource({line:freshLine,node:freshNode},candidate)} : candidate
     })
   }
   async function refreshAfterMutation({actor,action,payload}) {
@@ -158,7 +160,7 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     const result = domain.buildFinalFieldResult(source)
     if (result) await finalResult(actor,source,result,false,true)
   }
-  async function collect(actor, range, { full = false, filters = false } = {}) {
+  async function collect(actor, range, { full = false, filters = false, analysis = false } = {}) {
     const selected = await authorizedLines(actor,range)
     const lines = selected.lines.filter(line => !['deleted','creating'].includes(line.status) &&
       (!range.templateId || line.sourceTemplateId === range.templateId) &&
@@ -190,14 +192,15 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     const results = await boundedMap(candidates,async node=>{
       const line = lineMap.get(node.businessLineId)
       try {
-        const cached = !full ? await readCachedSelection(actor,line,node) : null
+        const cached = !full ? await readCachedSelection(actor,line,node,analysis) : null
         const source = cached ? null : await readSource(line,node)
-        const result = cached || domain.buildFinalFieldResult(source)
+        const result = cached ? analysis ? cached.result : cached : domain.buildFinalFieldResult(source)
         if (!result) return null
         if (range.templateVersion !== null && range.templateVersion !== undefined && result.templateVersion !== range.templateVersion) return null
         if (!filters && (range.processorToken && result.processorToken !== range.processorToken ||
             range.reviewerToken && !result.reviewerTokens.includes(range.reviewerToken))) return null
-        const fresh = cached || await finalResult(actor,source,result,full)
+        const fresh = cached || await finalResult(actor,source,result,full,false,analysis)
+        if (analysis) return {...fresh,result:full ? fresh.result : domain.selectionSnapshot(fresh.result)}
         return full ? fresh : domain.selectionSnapshot(fresh)
       } catch (error) {
         if (['FIELD_SOURCE_INVALID','INVALID_FIELD_VALUE'].includes(error && error.code)) { incomplete = true; return null }
@@ -205,8 +208,56 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
       }
     },4)
     await reauthorize(actor,selected.current,lines,full)
-    return {scope:selected.current.role==='super_admin'?'all':'authorized',results:results.filter(Boolean),incomplete,
-      current:selected.current,lines,candidateNodes:filters ? candidates : []}
+    const verified=results.filter(Boolean)
+    return {scope:selected.current.role==='super_admin'?'all':'authorized',results:analysis ? verified.map(r=>r.result) : verified,
+      records:analysis ? verified : [],incomplete,
+      current:selected.current,lines,candidateNodes:filters || analysis ? candidates : []}
+  }
+  function analysisManifest(data) {
+    return {incomplete:data.incomplete,
+      records:data.records.map(r=>({nodeId:r.result.nodeId,digest:fingerprint(r)})).sort((a,b)=>a.nodeId.localeCompare(b.nodeId)),
+      candidates:data.candidateNodes.map(n=>({id:n._id,stamp:fingerprint(n)})).sort((a,b)=>a.id.localeCompare(b.id)),
+      lines:data.lines.map(l=>({id:l._id,stamp:lineIdentity(l)})).sort((a,b)=>a.id.localeCompare(b.id))}
+  }
+  async function revalidateAnalysis(actor,data) {
+    const lines=new Map(data.lines.map(l=>[l._id,l]))
+    await boundedMap(data.records,record=>db.runTransaction(async tx=>{
+      const current=await actorNow(actor,tx)
+      if(current.role!==data.current.role) throw fieldError('FORBIDDEN')
+      const line=await read(tx,'business_lines',record.result.businessLineId)
+      if(!canRead(current,line)) throw fieldError('FORBIDDEN')
+      if(lineIdentity(line)!==lineIdentity(lines.get(line._id))) throw fieldError('REPORT_CHANGED')
+      const node=await read(tx,'business_nodes',record.result.nodeId)
+      try {
+        if(!node || domain.fieldSourceHeader({line,node})!==record.result.sourceHeader ||
+          fingerprint(domain.describeFieldAnalysisSource({line,node},record.result))!==fingerprint(record.schema)) throw fieldError('REPORT_CHANGED')
+      } catch(error) {
+        if(error.code==='FIELD_SOURCE_INVALID') throw fieldError('REPORT_CHANGED')
+        throw error
+      }
+    }),4)
+    await reauthorize(actor,data.current,data.lines)
+  }
+  async function getAnalysis({actor,range}) {
+    const codec=createOperationsFieldAnalysisCursor({secret,clock})
+    const {cursor,pageSize,...query}=range,queryDigest=fingerprint(query)
+    const continuation=cursor ? codec.decode(cursor,{actorId:actor._id,queryDigest}) : null
+    const data=await collect(actor,range,{analysis:true})
+    const reportDigest=fingerprint(analysisManifest(data))
+    if(continuation && continuation.reportDigest!==reportDigest) throw fieldError('REPORT_CHANGED')
+    const result=buildFieldAnalysis(data.records,range.analysis)
+    const offset=continuation ? continuation.offset : 0
+    if(offset>result.items.length) throw fieldError('VALIDATION_ERROR')
+    const items=result.items.slice(offset,offset+pageSize),hasMore=offset+items.length<result.items.length
+    const output={schemaVersion:1,view:result.view,scope:data.scope,incomplete:data.incomplete,items,totalCount:result.items.length,
+      sampleCount:result.sampleCount,filledSampleCount:result.filledSampleCount,emptySampleCount:result.emptySampleCount,
+      notApplicableSampleCount:result.notApplicableSampleCount,dimensionMetadata:result.dimensionMetadata,
+      linkages:result.linkages,productStage:result.productStage,context:result.context,hasMore,
+      nextCursor:hasMore ? codec.encode({actorId:actor._id,queryDigest,reportDigest,offset:offset+items.length,
+        expiresAt:continuation ? continuation.expiresAt : clock().getTime()+20*60*1000}) : ''}
+    if(Buffer.byteLength(JSON.stringify(output))>512*1024) throw fieldError('RANGE_TOO_LARGE')
+    await revalidateAnalysis(actor,data)
+    return output
   }
   async function getSummary({actor,range}) {
     const data = await collect(actor,range)
@@ -249,13 +300,16 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     const query = {...range}; delete query.cursor; delete query.pageSize
     const queryDigest = fingerprint(query)
     const continuation = range.cursor ? codec.decode(range.cursor,{actorId:actor._id,queryDigest}) : null
-    const data = await collect(actor,range,{full:true})
+    const version2=range.reportVersion===2
+    const {analysis,reportVersion,...baseRange}=range
+    const data = await collect(actor,range,{full:true,analysis:version2})
     if (data.incomplete) throw fieldError('INCOMPLETE_FIELD_DATA')
     const sourceManifest = {
       nodes:data.results.map(result=>({nodeId:result.nodeId,sourceDigest:result.sourceDigest,
         labels:fingerprint([result.businessCode,result.businessName,result.businessStatus,result.templateName,
           result.nodeName,result.nodeCode,result.nodeSequence])})).sort((a,b)=>a.nodeId.localeCompare(b.nodeId)),
-      lines:data.lines.map(line=>({id:line._id,stamp:lineIdentity(line)})).sort((a,b)=>a.id.localeCompare(b.id))
+      lines:data.lines.map(line=>({id:line._id,stamp:lineIdentity(line)})).sort((a,b)=>a.id.localeCompare(b.id)),
+      ...(version2 ? {analysis:analysisManifest(data)} : {})
     }
     const now=clock().getTime()
     for(const [key,value] of reports) if(value.expiresAt<=now) reports.delete(key)
@@ -263,12 +317,13 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     let report=continuation && reports.get(prefix+continuation.reportDigest)
     if(report) {
       if(fingerprint(report.sourceManifest)!==fingerprint(sourceManifest)) throw fieldError('REPORT_CHANGED')
-      await operationsRepository.validateReportBase({actor,range,manifest:report.baseManifest})
+      await operationsRepository.validateReportBase({actor,range:baseRange,manifest:report.baseManifest})
     } else {
-      const base=await operationsRepository.collectReportBase({actor,range:{...range,cursor:''}})
+      const base=await operationsRepository.collectReportBase({actor,range:{...baseRange,cursor:''}})
       if(!base || !Array.isArray(base.items) || !base.manifest) throw fieldError('INCOMPLETE_FIELD_DATA')
-      const rows=[...base.items.map(row=>({...row,recordType:'运营基础',dateBasis:'售后创建日期'})),
-        ...domain.fieldExportRows(data.results)]
+      const rows=[...base.items.map(row=>({...row,recordType:'运营基础',dateBasis:'售后创建日期',
+        ...(version2 ? {analysisContextJson:JSON.stringify({dateBasis:'售后创建日期',analysisApplied:false})} : {})})),
+        ...(version2 ? fieldAnalysisExportRows(data.records,analysis).rows : domain.fieldExportRows(data.results))]
       report={rows,sourceManifest,baseManifest:base.manifest,
         expiresAt:continuation ? continuation.expiresAt : now+20*60*1000}
       report.digest=fingerprint({rows,sourceManifest,baseManifest:base.manifest})
@@ -304,6 +359,6 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
     return {items,hasMore,nextCursor:hasMore ? codec.encode({actorId:actor._id,queryDigest,reportDigest,
       offset:offset+items.length,expiresAt:report.expiresAt}) : ''}
   }
-  return {getSummary,getFilters,exportReportRows,refreshAfterMutation}
+  return {getSummary,getFilters,getAnalysis,exportReportRows,refreshAfterMutation}
 }
 module.exports = {createCloudOperationsFieldRepository}

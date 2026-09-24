@@ -1,8 +1,10 @@
 const businessService = require('../../services/business')
+const { presentBusinessCard } = require('../../utils/business-card')
+const { isAccountAccessError, safeErrorMessage } = require('../../utils/safe-error')
 
-function activeUserId() {
+function activeUserKey() {
   const user = getApp().globalData.currentUser
-  return user && user.status === 'active' ? user._id : ''
+  return user && user._id && user.status === 'active' ? JSON.stringify([user._id, user.role || '']) : ''
 }
 
 function dueText(item) {
@@ -17,7 +19,11 @@ function dueText(item) {
 }
 
 function present(item) {
-  return {
+  return presentBusinessCard({
+    code: item.businessCode,
+    name: item.businessName,
+    cardSummary: item.cardSummary,
+    cardStatus: item.status === 'pending' ? 'pending_review' : item.status,
     reviewRoundId: item.reviewRoundId,
     businessLineId: item.businessLineId,
     businessCode: item.businessCode || '',
@@ -30,7 +36,7 @@ function present(item) {
     reviewModeLabel: item.reviewMode === 'all' ? '会签' : '或签',
     dueText: dueText(item),
     createdAtText: item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN') : ''
-  }
+  })
 }
 
 Page({
@@ -44,58 +50,90 @@ Page({
   onUnload() {
     this.pageAlive = false
     this.requestSequence = (this.requestSequence || 0) + 1
+    this.clearCards()
+  },
+
+  clearCards() {
+    this.loadActorKey = ''
+    this.setData({ items: [], page: 1, hasMore: false, loading: false, loadingMore: false })
+  },
+
+  requireCardActor() {
+    const actorKey = activeUserKey()
+    if (this.loadActorKey !== actorKey) this.clearCards()
+    if (!actorKey) {
+      this.clearCards()
+      wx.reLaunch({ url: '/pages/login/index' })
+      return ''
+    }
+    this.loadActorKey = actorKey
+    return actorKey
+  },
+
+  acceptResponse(sequence, actorKey) {
+    if (!this.pageAlive || sequence !== this.requestSequence) return false
+    if (activeUserKey() !== actorKey) {
+      this.clearCards()
+      return false
+    }
+    return true
+  },
+
+  retryCards() {
+    if (this.data.loading || this.data.loadingMore) return
+    return this.refresh()
   },
 
   async refresh() {
-    const requestedActorId = activeUserId()
-    if (!requestedActorId) {
-      wx.reLaunch({ url: '/pages/login/index' })
-      return
-    }
-    this.loadActorId = requestedActorId
+    const actorKey = this.requireCardActor()
+    if (!actorKey) return
     const requestSequence = (this.requestSequence || 0) + 1
     this.requestSequence = requestSequence
-    this.setData({ loading: true, errorMessage: '', page: 1 })
+    this.setData({ loading: true, loadingMore: false, errorMessage: '' })
     try {
       const result = await businessService.listMyPendingReviews({ page: 1, pageSize: 20 })
-      if (!this.pageAlive || this.requestSequence !== requestSequence || activeUserId() !== requestedActorId) return
+      if (!this.acceptResponse(requestSequence, actorKey)) return
       this.setData({ items: (result.items || []).map(present), hasMore: Boolean(result.hasMore), page: 1 })
     } catch (error) {
-      if (this.pageAlive && this.requestSequence === requestSequence && activeUserId() === requestedActorId) {
-        this.setData({ errorMessage: error.message || '审核待办加载失败，请稍后重试' })
+      if (this.acceptResponse(requestSequence, actorKey)) {
+        if (isAccountAccessError(error)) this.clearCards()
+        this.setData({ errorMessage: safeErrorMessage(error, '审核待办加载失败，请稍后重试') })
       }
     } finally {
-      if (this.pageAlive && this.requestSequence === requestSequence && activeUserId() === requestedActorId) {
+      if (this.acceptResponse(requestSequence, actorKey)) {
         this.setData({ loading: false })
       }
     }
   },
 
   async loadMore() {
+    const actorKey = this.requireCardActor()
+    if (!actorKey) return
     if (this.data.loading || this.data.loadingMore || !this.data.hasMore) return
-    const requestedActorId = activeUserId()
     const requestSequence = (this.requestSequence || 0) + 1
     this.requestSequence = requestSequence
     const page = this.data.page + 1
-    this.setData({ loadingMore: true })
+    this.setData({ loadingMore: true, errorMessage: '' })
     try {
       const result = await businessService.listMyPendingReviews({ page, pageSize: 20 })
-      if (!this.pageAlive || this.requestSequence !== requestSequence || activeUserId() !== requestedActorId) return
+      if (!this.acceptResponse(requestSequence, actorKey)) return
       const byId = new Map(this.data.items.map(item => [item.reviewRoundId, item]))
       for (const item of result.items || []) byId.set(item.reviewRoundId, present(item))
       this.setData({ items: [...byId.values()], hasMore: Boolean(result.hasMore), page })
     } catch (error) {
-      if (this.pageAlive && this.requestSequence === requestSequence && activeUserId() === requestedActorId) {
-        this.setData({ errorMessage: error.message || '更多审核待办加载失败，请稍后重试' })
+      if (this.acceptResponse(requestSequence, actorKey)) {
+        if (isAccountAccessError(error)) this.clearCards()
+        this.setData({ errorMessage: safeErrorMessage(error, '更多审核待办加载失败，请稍后重试') })
       }
     } finally {
-      if (this.pageAlive && this.requestSequence === requestSequence && activeUserId() === requestedActorId) {
+      if (this.acceptResponse(requestSequence, actorKey)) {
         this.setData({ loadingMore: false })
       }
     }
   },
 
   openDetail(event) {
+    if (!this.requireCardActor()) return
     const id = String(event.currentTarget.dataset.id || '')
     if (!this.data.items.some(item => item.reviewRoundId === id)) return
     wx.navigateTo({ url: `/pages/review-detail/index?reviewRoundId=${encodeURIComponent(id)}` })
