@@ -33,3 +33,29 @@
 .recognition-preview { display: grid; gap: 16rpx; margin-top: 18rpx; }
 .recognition-candidate { padding: 18rpx; border: 1rpx solid #d1d5db; border-radius: 14rpx; background: #fff; }
 .recognition-warning { display: block; margin-top: 8rpx; color: #b45309; font-size: 22rpx; }
+.compact-card { padding: 20rpx 24rpx; margin-bottom: 16rpx; border-radius: 14rpx; box-shadow: none; }
+.compact-heading { color: #0f766e; font-size: 28rpx; font-weight: 650; }
+.compact-note { display: block; margin-top: 8rpx; font-size: 22rpx; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.compact-fields { margin-top: 10rpx; }
+.compact-field, .history-field { display: flex; align-items: flex-start; gap: 20rpx; padding: 12rpx 0; border-bottom: 1rpx solid #edf2ef; }
+.compact-field:last-child, .history-field:last-child { border-bottom: 0; }
+.compact-label { flex: 0 0 160rpx; color: #6b7280; font-size: 24rpx; line-height: 1.6; word-break: break-all; }
+.compact-value { flex: 1; min-width: 0; font-size: 26rpx; line-height: 1.6; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
+.compact-subheading { margin-top: 16rpx; color: #374151; font-size: 24rpx; font-weight: 600; }
+.compact-toggle { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 16rpx; margin: 0; padding: 16rpx 0; background: transparent; text-align: left; line-height: 1.5; font-size: 26rpx; color: #0f766e; border-radius: 0; }
+.compact-toggle::after { border: 0; }
+.section-toggle { margin: 12rpx 0; border-bottom: 1rpx solid #dce9e3; font-weight: 600; }
+.revision-toggle { padding: 0; }
+.revision-summary { flex: 1; min-width: 0; }
+.fold-indicator { flex-shrink: 0; font-size: 22rpx; font-weight: 400; }
+.history-fields { padding: 0; background: transparent; }
+.history-comment { white-space: pre-wrap; word-break: break-all; }
+.history-evidence { align-items: flex-start; font-size: 24rpx; line-height: 1.5; }
+.history-evidence .file-name { flex: 1; min-width: 0; max-width: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+.evidence-state { flex-shrink: 0; max-width: 180rpx; font-size: 22rpx; }
+.scan-field-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12rpx; margin-top: 12rpx; }
+.scan-field-actions button { margin: 0; }
+.scan-field-hint { flex: 1; min-width: 220rpx; font-size: 22rpx; line-height: 1.5; }
+.readonly-header .node-title { margin-top: 6rpx; font-size: 32rpx; }
+.compact-meta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8rpx 16rpx; margin-top: 12rpx; padding-top: 12rpx; border-top: 1rpx solid #edf2ef; color: #6b7280; font-size: 22rpx; line-height: 1.5; word-break: break-all; }
+.meta-wide { grid-column: 1 / -1; }

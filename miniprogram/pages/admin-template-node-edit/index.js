@@ -624,11 +624,21 @@ Page({
   onFieldNameInput(event) { this.updateField(Number(event.currentTarget.dataset.index), { name: event.detail.value }) },
   onFieldDescriptionInput(event) { this.updateField(Number(event.currentTarget.dataset.index), { description: event.detail.value }) },
   onFieldRequiredChange(event) { this.updateField(Number(event.currentTarget.dataset.index), { required: Boolean(event.detail.value) }) },
+  onFieldScanEnabledChange(event) {
+    const index = Number(event.currentTarget.dataset.index)
+    const field = this.draftField(this.data.fields[index])
+    if (field && field.type === 'short_text' && typeof event.detail.value === 'boolean') {
+      this.updateField(index, { scanEnabled: event.detail.value })
+    }
+  },
   onFieldTypeChange(event) {
     const type = FIELD_TYPE_OPTIONS[Number(event.detail.value)] && FIELD_TYPE_OPTIONS[Number(event.detail.value)][0]
     if (!type) return
     const constraints = type === 'single_select' || type === 'multi_select' ? { options: [] } : {}
-    this.updateField(Number(event.currentTarget.dataset.index), { type, constraints, optionText: '', conditionalOptionTexts: {} })
+    const index = Number(event.currentTarget.dataset.index)
+    const field = this.draftField(this.data.fields[index])
+    this.updateField(index, { type, constraints, optionText: '', conditionalOptionTexts: {},
+      ...(type !== 'short_text' && field && hasOwn(field, 'scanEnabled') ? { scanEnabled: false } : {}) })
   },
   onFieldConditionChange(event) {
     if (!this.requireSuperAdmin() || this.data.readOnly) return
@@ -794,6 +804,7 @@ Page({
       description: String(field.description || '').trim(),
       type: field.type,
       required: Boolean(field.required),
+      ...(hasOwn(field, 'scanEnabled') ? { scanEnabled: field.type === 'short_text' && field.scanEnabled === true } : {}),
       constraints: {}
     }
     const constraints = field.constraints || {}

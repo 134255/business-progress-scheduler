@@ -178,6 +178,7 @@
       <view class="picker-value">类型：{{item.type}}</view>
     </picker>
     <label class="required-row"><switch checked="{{item.required}}" disabled="{{readOnly}}" data-index="{{index}}" bindchange="onFieldRequiredChange" />必填</label>
+    <label wx:if="{{item.type === 'short_text'}}" class="required-row"><switch checked="{{item.scanEnabled === true}}" disabled="{{readOnly}}" data-index="{{index}}" bindchange="onFieldScanEnabledChange" />允许扫描条码填写（仍可手动输入）</label>
 
     <view wx:if="{{item.type === 'short_text' || item.type === 'long_text'}}" class="constraint-grid">
       <input class="input compact" type="number" value="{{item.constraints.minLength}}" placeholder="最小长度" disabled="{{readOnly}}" data-index="{{index}}" bindinput="onFieldMinLengthInput" />

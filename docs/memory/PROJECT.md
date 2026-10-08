@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact update: 2026-10-08 (Asia/Shanghai; bounded template-entry loading implementation; deployment in STATUS)
+Last stable-fact update: 2026-10-08 (Asia/Shanghai; optional barcode entry and compact record UI; deployment in STATUS)
 
 ## Product
 
@@ -20,6 +20,8 @@ Approved V1 rules include:
 - 活动超级管理员可复制已保存模板为独立草稿，启用中的源模板无需停用。副本生成全新文档/节点/字段标识并同步重建联动、流程和卡片展示引用，不复制历史售后、凭证或统计；同一事务校验当前源定义、展示配置、账号和参与人，超出现有100次操作预算时明确拒绝。未保存编辑不纳入复制；详见 ADR-0020 与发布验收文档 `docs/deployment/template-copy-acceptance.md`，实际部署状态以 STATUS 为准。
 - 普通用户从模板创建售后时，售后线名称由服务端在编号分配事务中固定生成为“模板名称-售后线编号”，客户端名称与计划日期输入均不参与创建；普通元数据编辑只允许修改说明。历史售后已有名称和计划日期保持原值并只读展示，不做迁移或清空；售后列表的日期筛选统一按售后创建日期解释。
 - Node feedback is revisioned and immutable. New review-workflow nodes separate non-overlapping processors and reviewers: processors save progress or submit for review, while independent reviewers use OR/ALL votes to approve or reject; new nodes cannot use the legacy direct-complete or legacy-reject path. Old business nodes retain controlled feedback-read compatibility and never receive fabricated review history.
+- 节点只读页以紧凑字段行展示“最近保存内容”，不把最新保存记录推断成最终审核结果；反馈历史默认折叠并可逐版展开，审核历史/审核详情意见可折叠，原始值、附件与意见仍保留。编辑表单与审批操作保持原流程，不引入 Figma 运行时或全局换肤；权限失效时清空只读记录。部署与五端验收状态见 STATUS。
+- 短文本字段可显式配置 `scanEnabled: true` 提供“扫码填入”，默认缺省/false 不改变旧定义形状和摘要。扫码仅解码、预览确认后填普通文本，保留前导零/大小写及手工输入/粘贴，不判重、不查商品、不自动提交；异步回填重验账号、节点版本、字段可见性和表单状态。旧编辑器省略标记时按稳定键保留，显式 false 关闭；只对新建实例快照生效，不改写旧售后或自动启用模板。详见 ADR-0023。
 - 新版模板的任意节点都可明确配置为空审核人；空审核节点仍属于 `review` 工作流，但由当前处理人在完成字段与凭证校验后直接完成，不创建审核轮次或投票。至少包含两个节点的模板最多有一个位于末尾的 `optional_tail` 节点；它在售后创建时完整固化为 `awaiting_decision`，但售后头保持 `optionalTailState: none`，最后必经节点完成后才由候选处理人以首个成功事务进入待决定并选择开启或跳过。待决定阶段以短生命周期 `decisionReminderStatus: pending` 与休眠追加节点隔离，决定成功即移除；待决定耗时与节点处理耗时分离，只有开启时才启动处理计时，只有真正跳过或完成追加节点时才冻结售后并开始 60 天凭证保留。决定统计使用独立 `decisionAnalytics*` 来源，不等待追加节点处理终态；待办、通知、工作小时提醒、日历补算、检索和固定分享均复用同一完成分类，详细决策见 `docs/memory/decisions/ADR-0015-optional-tail-and-reviewerless-node-transitions.md`。
 - 已接受下一代流程模式版本 2 设计：模板改用唯一入口的单线有向无环路由，任意节点可选择结束、默认后续、单选分支或人工决定；分支可继续嵌套并在互斥路线后重新汇合，但同一售后始终只有一个活动节点。单选字段支持单一父字段、多层级联的显示条件与候选项切换；发起人通过独立标记加入固定处理人而不再强制唯一，解析后的处理人与审核人仍不得重叠。隔离验收后将受控重置旧模板与全部业务数据，同时保留账号、安全配置、编号连续性和脱敏审计；任何不可恢复删除仍须单独核对并确认。完整设计见 `docs/superpowers/specs/2026-09-03-branching-workflow-and-conditional-fields-design.md` 与 `docs/memory/decisions/ADR-0016-general-branch-routing-and-conditional-fields.md`。
 - 新审核轮次会把当前处理轮最新已发布反馈的处理说明保存为不可变 `processingComment` 快照，并把该快照纳入审核草稿摘要和幂等校验；审核详情只读取轮次快照，不回查可变化的反馈。修复前的旧轮次缺少该字段时仅显示固定占位“暂无处理说明”，损坏、访问器或继承值均失败关闭。

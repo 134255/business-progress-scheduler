@@ -265,6 +265,20 @@ test('creation allocates a generated code and publishes a complete immutable tem
   assert.deepEqual(fake.transactionQueries, [])
 })
 
+test('barcode field configuration remains in immutable business snapshots and authorized detail', async () => {
+  const fields = [{ fieldKey: 'code', sequence: 0, name: 'Code', type: 'short_text', scanEnabled: true,
+    required: false, constraints: {} }]
+  const { repository, fake } = createRepositoryHarness(seedDefinition({ nodes: [sourceNode({ fields })] }))
+  const source = await definition(repository)
+  await repository.createBusinessSnapshot({ actor: { _id: 'user-1' }, input: input(), definition: source })
+  const line = fake.documents('business_lines')[0]
+  const detail = await repository.getBusinessLine({ actor: { _id: 'user-1', status: 'active' }, lineId: line._id })
+  assert.equal(detail.nodes[0].fieldDefinitions[0].scanEnabled, true)
+  source.nodes[0].fields[0].scanEnabled = false
+  detail.nodes[0].fieldDefinitions[0].scanEnabled = false
+  assert.equal(fake.documents('business_nodes')[0].fieldDefinitions[0].scanEnabled, true)
+})
+
 test('business snapshot and authorized detail preserve complete product linkage for actual feedback rendering', async () => {
   const fields=Array.from({length:8},(_,index)=>({fieldKey:`f${index}`,sequence:index,name:`字段${index}`,
     type:'single_select',required:true,constraints:{options:['A','B']}}))

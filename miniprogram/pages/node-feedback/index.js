@@ -9,6 +9,9 @@ const {
   recognitionSnapshotStillCurrent
 } = require('../../utils/node-text-recognition')
 const { deriveConditionalForm, nonemptyVisibleValues } = require('../../utils/conditional-form')
+const { scanIntoField } = require('../../utils/barcode-entry')
+const { initialCompactState, toggleCompactSection, toggleFeedbackRevision,
+  compactValueText: valueText } = require('../../utils/compact-node-presentation')
 
 const FROZEN_STATUSES = new Set(['completed', 'cancelled', 'closed', 'deleted'])
 const STATUS_OPTIONS = Object.freeze([
@@ -96,6 +99,7 @@ function schemaFingerprint(fields) {
     type: field.type,
     required: field.required,
     constraints: field.constraints,
+    ...(field.scanEnabled === true ? { scanEnabled: true } : {}),
     condition: field.condition || null,
     ...(field.optionLinkage ? { optionLinkage:field.optionLinkage } : {})
   })))
@@ -120,13 +124,6 @@ function initialValue(field) {
   if (field.type === 'multi_select') return []
   if (field.type === 'short_text' || field.type === 'long_text') return ''
   return null
-}
-
-function valueText(value) {
-  if (value === null || value === undefined || value === '') return '未填写'
-  if (typeof value === 'boolean') return value ? '是' : '否'
-  if (Array.isArray(value)) return value.length ? value.join('、') : '未填写'
-  return String(value)
 }
 
 function formattedHistory(history) {
@@ -228,6 +225,7 @@ function supportsOriginalMediaVideo() {
 
 Page({
   data: {
+    ...initialCompactState(),
     lineId: '',
     nodeId: '',
     nodeName: '',
@@ -283,7 +281,8 @@ Page({
     submitting: false,
     recognitionText: '',
     recognitionCandidates: [],
-    recognizing: false
+    recognizing: false,
+    scanningFieldKey: ''
   },
 
   async onLoad(query = {}) {
@@ -308,7 +307,7 @@ Page({
 
   onShow() {
     if (!this.actorStillCurrent()) return
-    if (!this.data.lineId || !this.hasLoaded || this.evidencePickerPending > 0 || this.data.submitting) return
+    if (!this.data.lineId || !this.hasLoaded || this.scanRequestActive || this.evidencePickerPending > 0 || this.data.submitting) return
     if (this.data.draftDirty || this.data.reviewDraftLocked) return this.loadReviewHistory()
     return this.loadData()
   },
@@ -326,6 +325,22 @@ Page({
     this.definitionSchemaFingerprint = null
     this.loadSequence += 1
     this.recognitionSequence += 1
+    this.setData(initialCompactState())
+  },
+
+  onToggleFeedbackHistory() {
+    if (!this.pageAlive || !this.actorStillCurrent() || !this.data.previousRecordsEnabled) return
+    this.setData(toggleCompactSection(this.data, 'feedbackHistoryOpen'))
+  },
+
+  onToggleReviewHistory() {
+    if (!this.pageAlive || !this.actorStillCurrent() || !this.data.previousRecordsEnabled) return
+    this.setData(toggleCompactSection(this.data, 'reviewHistoryOpen'))
+  },
+
+  onToggleFeedbackRevision(event) {
+    if (!this.pageAlive || !this.actorStillCurrent() || !this.data.previousRecordsEnabled) return
+    this.setData(toggleFeedbackRevision(this.data, this.data.history, event.currentTarget.dataset.id))
   },
 
   returnToCurrentForm() {
@@ -340,7 +355,7 @@ Page({
     this.clearReviewHistory()
     this.loadSequence += 1
     this.retryVideoContext = null
-    this.setData({ canSubmit: false, readOnly: true, pickerError: null, previousRecordsEnabled: false })
+    this.setData({ ...initialCompactState(), history: [], canSubmit: false, readOnly: true, pickerError: null, previousRecordsEnabled: false })
     wx.reLaunch({ url: '/pages/login/index' })
     return false
   },
@@ -473,7 +488,7 @@ Page({
     if (isAccountAccessError(error) && this.pageAlive && this.actorStillCurrent()) {
       this.clearReviewHistory('审核历史暂时无法查看，请重试')
       this.loadSequence += 1
-      this.setData({ canSubmit: false, readOnly: true, loadingHistory: false, previousRecordsEnabled: false })
+      this.setData({ ...initialCompactState(), history: [], canSubmit: false, readOnly: true, loadingHistory: false, previousRecordsEnabled: false })
     }
   },
 
@@ -638,6 +653,10 @@ Page({
     this.applyFieldValue(event.currentTarget.dataset.fieldkey, event.detail.value)
   },
 
+  onScanField(event) {
+    return scanIntoField(this, event.currentTarget.dataset.fieldkey, wx)
+  },
+
   onNumberInput(event) {
     this.onFieldInput(event)
   },
@@ -673,9 +692,10 @@ Page({
     return this.applyConditionalValues({ ...this.data.fieldValues, [fieldKey]: value })
   },
 
-  applyConditionalValues(values, extraUpdate = {}, onApplied) {
+  applyConditionalValues(values, extraUpdate = {}, onApplied, canCommit = () => true) {
     const derived = deriveConditionalForm(this.fieldDefinitions || this.data.fields, values)
     const commit = () => {
+      if (!canCommit()) return false
       if (!this.markDraftDirty({
         fieldValues: derived.fieldValues,
         visibleFields: derived.visibleFields,

@@ -41,6 +41,7 @@ function cleanField(field, sequence) {
     description: field.description || '',
     type: field.type,
     required: Boolean(field.required),
+    ...(hasOwn(field, 'scanEnabled') ? { scanEnabled: field.type === 'short_text' && field.scanEnabled === true } : {}),
     constraints: clone(field.constraints || {}),
     ...(field.condition ? { condition: clone(field.condition) } : {}),
     ...(hasOwn(field, 'optionLinkage') ? { optionLinkage: clone(field.optionLinkage) } : {})

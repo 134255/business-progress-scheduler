@@ -148,6 +148,7 @@ test('review detail renders every vote comment as multiline plain text with blan
     canApprove: false, canReject: false
   }) }, 'pages/review-detail/index.js')
   await page.onLoad({ reviewRoundId: 'round-2' })
+  page.onToggleVotes()
   const rendered = view('pages/review-detail/index.wxml', page.data)
   assert.ok(rendered.text.includes('第一行\n<说明>&正文'))
   assert.ok(rendered.text.includes('请补充资料'))
@@ -194,6 +195,7 @@ for (const state of [
       getNodeWorkspace: async () => workspace(state.status, state.lineStatus, state.canSubmit),
       listNodeReviewHistory: async () => ({ items: [fixtureRound(2), fixtureRound(1, { status: 'approved' })], hasMore: false, nextBeforeRoundNumber: null })
     }))
+    page.onToggleReviewHistory()
     const rendered = historyView(page)
     assert.ok(Array.isArray(page.data.reviewHistory), 'Review history must be available to authorized readers')
     assert.equal(page.data.reviewHistory.length, 2)
@@ -214,6 +216,7 @@ test('load more is single-flight and retries the same failed cursor while retain
     if (calls.length === 2) return pending.promise
     return Promise.resolve({ items: [fixtureRound(5), fixtureRound(4)], hasMore: false, nextBeforeRoundNumber: null })
   } }))
+  page.onToggleReviewHistory()
   assert.ok(historyView(page).nodes.some(node => node.attrs.bindtap === 'onLoadMoreReviewHistory'))
   const loading = page.onLoadMoreReviewHistory()
   await page.onLoadMoreReviewHistory()
@@ -392,6 +395,8 @@ test('both visible comment elements preserve whitespace and wrap long plain text
     }, `pages/${name}/index.js`)
     await page.onLoad({ lineId: 'line-synthetic', nodeId: 'node-synthetic', reviewRoundId: 'round-2' })
     await tick()
+    if (name === 'node-feedback') page.onToggleReviewHistory()
+    else page.onToggleVotes()
     const rendered = view(`pages/${name}/index.wxml`, page.data)
     const comment = rendered.nodes.find(node => node.tag === 'text' && node.children.includes('第一行\n<说明>&正文'))
     assert.ok(comment, `${name} must render a plain-text comment`)

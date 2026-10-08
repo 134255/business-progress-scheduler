@@ -151,6 +151,14 @@ function normalizeConstraints(type, input) {
 function normalizeFieldDefinition(input) {
   input = validateOptionLinkageFields([input])[0]
   if (!isPlainObject(input)) throw createError('INVALID_FIELD_VALUE')
+  const scan = Object.getOwnPropertyDescriptor(input, 'scanEnabled')
+  if (('scanEnabled' in input && !scan) || (scan &&
+      (!hasOwn(scan, 'value') || typeof scan.value !== 'boolean'))) throw createError('INVALID_FIELD_VALUE')
+  const scanEnabled = Boolean(scan && scan.value)
+  if (scanEnabled) {
+    const type = Object.getOwnPropertyDescriptor(input, 'type')
+    if (!type || !hasOwn(type, 'value') || type.value !== 'short_text') throw createError('INVALID_FIELD_VALUE')
+  }
   if (!FIELD_TYPES.includes(input.type)) throw createError('INVALID_FIELD_VALUE')
   const sequence = hasOwn(input, 'sequence') ? normalizeNonnegativeInteger(input.sequence) : 0
   const required = hasOwn(input, 'required') ? input.required : false
@@ -164,6 +172,7 @@ function normalizeFieldDefinition(input) {
     type: input.type,
     required,
     constraints: normalizeConstraints(input.type, hasOwn(input, 'constraints') ? input.constraints : {}),
+    ...(scanEnabled ? { scanEnabled: true } : {}),
     ...(hasOwn(input, 'condition') ? { condition: normalizeConditionInput(input.condition) } : {}),
     ...(hasOwn(input, 'optionLinkage') ? { optionLinkage: normalizeOptionLinkageInput(input.optionLinkage) } : {})
   }

@@ -12,3 +12,18 @@
 .video-panel { width: 100%; padding: 24rpx; border-radius: 20rpx; background: white; }
 .video-player { width: 100%; margin-top: 20rpx; }
 .close { color: #be123c; }
+.compact-card { padding: 20rpx 24rpx; margin-bottom: 16rpx; border-radius: 14rpx; box-shadow: none; }
+.compact-heading { color: #0f766e; font-size: 28rpx; font-weight: 650; }
+.compact-fields { margin-top: 10rpx; }
+.compact-field { display: flex; align-items: flex-start; gap: 20rpx; padding: 12rpx 0; border-bottom: 1rpx solid #edf2ef; }
+.compact-field:last-child { border-bottom: 0; }
+.compact-label { flex: 0 0 160rpx; color: #6b7280; font-size: 24rpx; line-height: 1.6; word-break: break-all; }
+.compact-value { flex: 1; min-width: 0; font-size: 26rpx; line-height: 1.6; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
+.evidence-row { align-items: flex-start; padding: 14rpx 0; margin-top: 10rpx; border-top: 1rpx solid #edf2ef; font-size: 24rpx; line-height: 1.5; }
+.evidence-name { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
+.evidence-row .action { flex-shrink: 0; max-width: 180rpx; font-size: 22rpx; }
+.compact-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16rpx; width: 100%; margin: 12rpx 0; padding: 16rpx 0; color: #0f766e; background: transparent; border-radius: 0; text-align: left; font-size: 26rpx; line-height: 1.5; font-weight: 600; }
+.compact-toggle::after { border: 0; }
+.fold-indicator { flex-shrink: 0; font-size: 22rpx; font-weight: 400; }
+.vote-row { padding: 12rpx 0; border-bottom: 1rpx solid #edf2ef; }
+.vote-row:last-child { border-bottom: 0; }

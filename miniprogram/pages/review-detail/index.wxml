@@ -16,28 +16,33 @@
     <previous-node-records business-line-id="{{businessLineId}}" node-id="{{nodeId}}" enabled="{{previousRecordsEnabled}}" return-label="返回当前审核" bindreturntocurrent="returnToCurrentForm" />
     <view id="current-node-form" />
 
-    <view class="section-title">处理说明</view>
-    <view class="card">
-      <text class="block">{{processingCommentText}}</text>
+    <view class="card compact-card">
+      <view class="compact-heading">本轮提交内容</view>
+      <view class="compact-fields">
+        <view class="compact-field" wx:for="{{fields}}" wx:key="fieldKey">
+          <text class="compact-label">{{item.name}}</text><text class="compact-value" user-select="true">{{item.valueText}}</text>
+        </view>
+        <view class="compact-field"><text class="compact-label">处理说明</text><text class="compact-value" user-select="true">{{processingCommentText}}</text></view>
+      </view>
+      <text wx:if="{{!fields.length}}" class="muted block">本轮没有字段内容</text>
     </view>
 
-    <view class="section-title">字段快照</view>
-    <view class="card field-row" wx:for="{{fields}}" wx:key="fieldKey">
-      <text class="muted">{{item.name}}</text><text>{{item.valueText}}</text>
+    <view class="card compact-card">
+      <view class="compact-heading">节点凭证（{{evidences.length}}）</view>
+      <view class="evidence-row" wx:for="{{evidences}}" wx:key="evidenceId" data-id="{{item.evidenceId}}" bindtap="previewEvidence">
+        <text class="evidence-name">{{item.fileName || '凭证 ' + item.sequence}}</text><text class="action">{{item.storageStatus === 'purged' ? '已清理' : '查看 / 下载 →'}}</text>
+      </view>
+      <text wx:if="{{!evidences.length}}" class="muted block">本轮没有凭证</text>
     </view>
-    <view wx:if="{{!fields.length}}" class="empty compact">本轮没有字段内容</view>
 
-    <view class="section-title">节点凭证</view>
-    <view class="card evidence-row" wx:for="{{evidences}}" wx:key="evidenceId" data-id="{{item.evidenceId}}" bindtap="previewEvidence">
-      <text>凭证 {{item.sequence}}</text><text class="action">安全查看 →</text>
-    </view>
-    <view wx:if="{{!evidences.length}}" class="empty compact">本轮没有凭证</view>
-
-    <view class="section-title">审核记录</view>
-    <view class="card vote-row" wx:for="{{votes}}" wx:key="voteKey">
+    <button class="compact-toggle" bindtap="onToggleVotes"><text>审核记录（{{votes.length}}）</text><text class="fold-indicator">{{votesOpen ? '收起 ▴' : '展开 ▾'}}</text></button>
+    <view wx:if="{{votesOpen}}" class="card compact-card">
+    <view class="vote-row" wx:for="{{votes}}" wx:key="voteKey">
       <view class="row-between"><text>{{item.reviewerDisplayName}}</text><text>{{item.decisionLabel}}</text></view>
       <text class="muted block">{{item.createdAtText}}</text>
       <text class="block vote-comment">{{item.commentText}}</text>
+    </view>
+    <text wx:if="{{!votes.length}}" class="muted block">本轮暂无审核意见</text>
     </view>
 
     <view wx:if="{{status === 'pending' && (canApprove || canReject)}}" class="card operation-card">

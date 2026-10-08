@@ -2,10 +2,10 @@
   <view wx:if="{{errorMessage}}" class="error">{{errorMessage}}</view>
   <view wx:if="{{frozen}}" class="frozen-banner">售后已冻结，反馈历史和凭证保持只读。</view>
 
-  <view class="card">
+  <view class="card {{readOnly ? 'compact-card readonly-header' : ''}}">
     <text class="muted">当前节点 {{nodeCode}}</text>
     <view class="title node-title">{{nodeName}}</view>
-    <view wx:if="{{workflowMode === 'review'}}" class="review-summary">
+    <view wx:if="{{workflowMode === 'review' && !readOnly}}" class="review-summary">
       <text class="muted block">处理人：{{processorNamesText || '未配置'}}</text>
       <text class="muted block">审核人：{{reviewerNamesText || '未配置'}}（{{reviewModeLabel}}）</text>
       <text class="muted block">处理轮次：{{processingRoundNumber}} · 审核轮次：{{reviewRoundNumber}}</text>
@@ -13,12 +13,18 @@
       <text wx:if="{{reviewStartedText}}" class="muted block">提交审核：{{reviewStartedText}}</text>
       <text class="muted block">审核截止：{{reviewDueText}}</text>
     </view>
+    <view wx:elif="{{workflowMode === 'review'}}" class="compact-meta">
+      <text class="meta-wide">处理人：{{processorNamesText || '未配置'}} · 审核人：{{reviewerNamesText || '未配置'}}（{{reviewModeLabel}}）</text>
+      <text class="meta-wide">处理轮次：{{processingRoundNumber}} · 审核轮次：{{reviewRoundNumber}}</text>
+      <text>处理截止：{{processingDueText}}</text><text>审核截止：{{reviewDueText}}</text>
+      <text wx:if="{{reviewStartedText}}" class="meta-wide">提交审核：{{reviewStartedText}}</text>
+    </view>
   </view>
 
   <previous-node-records business-line-id="{{lineId}}" node-id="{{nodeId}}" enabled="{{previousRecordsEnabled}}" return-label="返回当前填写" bindreturntocurrent="returnToCurrentForm" />
   <view id="current-node-form" />
 
-  <view wx:if="{{canSubmit || workflowMode === 'review'}}" class="card">
+  <view wx:if="{{!readOnly && (canSubmit || workflowMode === 'review')}}" class="card">
     <view wx:if="{{legacyMode}}" class="field">
       <text class="field-label">节点状态</text>
       <picker mode="selector" disabled="{{submitting || readOnly}}" range="{{statusOptions}}" range-key="label" value="{{statusIndex}}" bindchange="onStatus">
@@ -69,6 +75,10 @@
           <checkbox value="{{option.value}}" checked="{{option.selected}}" />{{option.value}}
         </label>
       </checkbox-group>
+      <view wx:if="{{item.type === 'short_text' && item.scanEnabled === true && !readOnly}}" class="scan-field-actions">
+        <button size="mini" class="secondary-button" data-fieldkey="{{item.fieldKey}}" bindtap="onScanField" loading="{{scanningFieldKey === item.fieldKey}}" disabled="{{reviewDraftLocked || submitting || loadingHistory || scanningFieldKey}}">扫码填入</button>
+        <text class="muted scan-field-hint">保留手动输入或粘贴；扫码后核对填入。</text>
+      </view>
     </view>
 
     <view class="field">
@@ -110,13 +120,36 @@
     </view>
   </view>
 
+  <view wx:elif="{{readOnly}}" class="card compact-card">
+    <view class="compact-heading">最近保存内容</view>
+    <text class="muted compact-note">只读展示保存记录；审核结论请查看审核历史。</text>
+    <view wx:if="{{history.length}}">
+      <text class="muted compact-note">{{history[0].statusLabel}} · 第 {{history[0].revision || 1}} 版 · {{history[0].submittedAtText}}</text>
+      <view class="compact-fields">
+        <view class="compact-field" wx:for="{{history[0].fieldValues}}" wx:for-item="field" wx:key="fieldKey">
+          <text class="compact-label">{{field.name}}</text><text class="compact-value" user-select="true">{{field.valueText}}</text>
+        </view>
+        <view class="compact-field"><text class="compact-label">进度说明</text><text class="compact-value" user-select="true">{{history[0].comment || '未填写说明'}}</text></view>
+      </view>
+      <view class="compact-subheading">节点凭证（{{history[0].evidences.length}}）</view>
+      <view class="history-evidence" wx:for="{{history[0].evidences}}" wx:for-item="evidence" wx:key="evidenceId" data-evidenceid="{{evidence.evidenceId}}" data-category="{{evidence.category}}" data-status="{{evidence.storageStatus}}" data-filename="{{evidence.fileName}}" bindtap="previewEvidence">
+        <text class="file-name">{{evidence.fileName}}</text>
+        <text class="muted evidence-state">{{evidence.storageStatusLabel}}{{evidence.canPreview ? (evidence.downloadOnly ? ' · 下载' : ' · 查看') : ''}}</text>
+      </view>
+      <text wx:if="{{!history[0].evidences.length}}" class="muted compact-note">无凭证</text>
+    </view>
+    <text wx:elif="{{loadingHistory}}" class="muted compact-note">正在加载保存记录…</text>
+    <text wx:else class="muted compact-note">暂无可展示的保存记录</text>
+    <text class="muted compact-note">当前节点不可编辑，审核结果以服务端最新状态为准。</text>
+  </view>
   <view class="card" wx:elif="{{!loadingHistory}}">
     <text class="muted">你可以查看节点记录与凭证，但当前账号不能提交此节点。</text>
   </view>
 
   <view wx:if="{{workflowMode === 'review'}}" class="review-history-section">
-    <view class="section-title">审核历史</view>
-    <view class="card" wx:for="{{reviewHistory}}" wx:for-item="round" wx:key="reviewRoundId">
+    <button class="compact-toggle section-toggle" bindtap="onToggleReviewHistory"><text>审核历史（{{reviewHistory.length}}{{reviewHistoryHasMore ? '+' : ''}}）</text><text class="fold-indicator">{{reviewHistoryOpen ? '收起 ▴' : '展开 ▾'}}</text></button>
+    <view wx:if="{{reviewHistoryOpen}}">
+    <view class="card compact-card" wx:for="{{reviewHistory}}" wx:for-item="round" wx:key="reviewRoundId">
       <view class="row-between"><text class="history-status">第 {{round.reviewRoundNumber}} 轮审核</text><text>{{round.statusLabel}}</text></view>
       <text class="muted block">处理轮次：{{round.processingRoundNumber}} · 提交时间：{{round.submittedAtText || '待记录'}}</text>
       <view class="review-history-vote" wx:for="{{round.votes}}" wx:for-item="vote" wx:key="voteKey">
@@ -126,33 +159,39 @@
       </view>
       <text wx:if="{{!round.votes.length}}" class="muted block">本轮暂无审核意见</text>
     </view>
+    </view>
     <view wx:if="{{reviewHistoryLoading}}" class="empty">正在加载审核历史…</view>
     <view wx:elif="{{reviewHistoryError}}" class="card">
       <text class="error-text">{{reviewHistoryError}}</text>
       <button class="secondary-button" bindtap="onRetryReviewHistory">重试加载审核历史</button>
     </view>
     <view wx:elif="{{reviewHistoryLoaded && !reviewHistory.length}}" class="empty">暂无审核记录</view>
-    <button wx:if="{{reviewHistoryHasMore && !reviewHistoryError}}" class="secondary-button" loading="{{reviewHistoryLoading}}" disabled="{{reviewHistoryLoading}}" bindtap="onLoadMoreReviewHistory">加载更多审核历史</button>
+    <button wx:if="{{reviewHistoryOpen && reviewHistoryHasMore && !reviewHistoryError}}" class="secondary-button" loading="{{reviewHistoryLoading}}" disabled="{{reviewHistoryLoading}}" bindtap="onLoadMoreReviewHistory">加载更多审核历史</button>
   </view>
 
-  <view class="section-title">反馈历史</view>
-  <view class="card history" wx:for="{{history}}" wx:key="feedbackId">
-    <view class="row-between">
-      <text class="history-status">{{item.statusLabel}} · 第 {{item.revision || 1}} 版</text>
-      <text class="muted">{{item.submittedAtText}}</text>
-    </view>
+  <button class="compact-toggle section-toggle" bindtap="onToggleFeedbackHistory"><text>反馈历史（{{history.length}}）</text><text class="fold-indicator">{{feedbackHistoryOpen ? '收起 ▴' : '展开 ▾'}}</text></button>
+  <view wx:if="{{feedbackHistoryOpen}}">
+  <text class="muted compact-note">按版展开查看原始保存内容，不代表最终有效结果。</text>
+  <view class="card history compact-card" wx:for="{{history}}" wx:key="feedbackId">
+    <button class="compact-toggle revision-toggle" data-id="{{item.feedbackId}}" bindtap="onToggleFeedbackRevision">
+      <view class="revision-summary"><text class="history-status">{{item.statusLabel}} · 第 {{item.revision || 1}} 版</text><text class="muted compact-note">{{item.submittedAtText}} · 凭证 {{item.evidences.length}}</text></view>
+      <text class="fold-indicator">{{expandedFeedback[item.feedbackId] ? '收起 ▴' : '展开 ▾'}}</text>
+    </button>
+    <view wx:if="{{expandedFeedback[item.feedbackId]}}">
     <view class="history-fields" wx:if="{{item.fieldValues.length}}">
       <view class="history-field" wx:for="{{item.fieldValues}}" wx:for-item="field" wx:key="fieldKey">
-        <text class="muted">{{field.name}}</text><text>{{field.valueText}}</text>
+        <text class="compact-label">{{field.name}}</text><text class="compact-value" user-select="true">{{field.valueText}}</text>
       </view>
     </view>
     <text class="history-comment">{{item.comment || '未填写说明'}}</text>
     <view class="history-evidence" wx:for="{{item.evidences}}" wx:for-item="evidence" wx:key="evidenceId" data-evidenceid="{{evidence.evidenceId}}" data-category="{{evidence.category}}" data-status="{{evidence.storageStatus}}" data-filename="{{evidence.fileName}}" bindtap="previewEvidence">
       <text class="file-name">{{evidence.fileName}}</text>
-      <text class="muted">{{evidence.storageStatusLabel}}{{evidence.storageStatus === 'purged' ? '（已清理）' : evidence.canPreview ? (evidence.downloadOnly ? ' · 下载' : ' · 查看') : ''}}</text>
+      <text class="muted evidence-state">{{evidence.storageStatusLabel}}{{evidence.storageStatus === 'purged' ? '（已清理）' : evidence.canPreview ? (evidence.downloadOnly ? ' · 下载' : ' · 查看') : ''}}</text>
+    </view>
     </view>
   </view>
   <view class="empty" wx:if="{{!loadingHistory && !history.length}}">暂无反馈记录</view>
+  </view>
 
   <button wx:if="{{history.length}}" class="secondary-button download-all" bindtap="downloadAllEvidence" loading="{{downloading}}" disabled="{{downloading}}">顺序下载可用凭证</button>
 

@@ -568,7 +568,7 @@ function createCloudBusinessRepository({
   function safeFieldDefinitions(value) {
     if (!Array.isArray(value)) throw createError('FORBIDDEN')
     const allowed = [
-      'fieldKey', 'sequence', 'name', 'description', 'type', 'required', 'constraints', 'condition', 'optionLinkage'
+      'fieldKey', 'sequence', 'name', 'description', 'type', 'required', 'constraints', 'condition', 'optionLinkage', 'scanEnabled'
     ]
     let definitions
     try {

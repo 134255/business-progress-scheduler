@@ -78,6 +78,46 @@ function nodePage(node, owner) {
 }
 const fieldEvent = (index, value, direction) => ({ currentTarget: { dataset: { index, direction } }, detail: { value } })
 
+test('barcode setting survives node editing, conditional refresh and template save projection', () => {
+  environment()
+  const source = originalNode()
+  source.fields[0].scanEnabled = true
+  source.fields[4].scanEnabled = true
+  source.fields[4].condition = { parentFieldKey: 'cat', visibleWhen: ['旧类'] }
+  const editor = nodePage(source)
+  editor.onFieldNameInput(fieldEvent(0, 'Changed'))
+  assert.equal(editor.normalizedField(editor.data.fields[0], 0).scanEnabled, true)
+  assert.equal(editor.fieldsForSave().map((field, index) => editor.normalizedField(field, index))[4].scanEnabled, true)
+  const owner = page('pages/admin-template-edit/index.js')
+  owner.data.name = 'Sample'
+  owner.data.nodes = [{ ...source, fields: editor.fieldsForSave().map((field, index) => editor.normalizedField(field, index)) }]
+  assert.equal(owner.definition().nodes[0].fields[0].scanEnabled, true)
+  assert.equal(owner.definition().nodes[0].fields[4].scanEnabled, true)
+})
+
+test('barcode toggle is short-text only, readonly guarded and type changes explicitly disable it', () => {
+  environment()
+  const editor = nodePage(originalNode())
+  assert.equal(Object.hasOwn(editor.normalizedField(editor.data.fields[0], 0), 'scanEnabled'), false)
+  editor.onFieldScanEnabledChange(fieldEvent(0, true))
+  assert.equal(editor.normalizedField(editor.data.fields[0], 0).scanEnabled, true)
+  editor.data.readOnly = true
+  editor.onFieldScanEnabledChange(fieldEvent(0, false))
+  assert.equal(editor.data.fields[0].scanEnabled, true)
+  editor.data.readOnly = false
+  editor.onFieldTypeChange(fieldEvent(0, '2'))
+  assert.equal(editor.data.fields[0].type, 'number')
+  assert.equal(editor.normalizedField(editor.data.fields[0], 0).scanEnabled, false)
+  editor.onFieldScanEnabledChange(fieldEvent(0, true))
+  assert.equal(editor.data.fields[0].scanEnabled, false)
+  editor.onFieldTypeChange(fieldEvent(0, '0'))
+  assert.equal(editor.data.fields[0].scanEnabled, false)
+  const owner = page('pages/admin-template-edit/index.js')
+  owner.data.name = 'Sample'
+  owner.data.nodes = [{ ...originalNode(), fields: editor.fieldsForSave().map((field, index) => editor.normalizedField(field, index)) }]
+  assert.equal(owner.definition().nodes[0].fields[0].scanEnabled, false)
+})
+
 test('structured import preserves stable IDs and unrelated draft state, replacing only SKU and the group', () => {
   const before = originalNode()
   const result = importNode(before)

@@ -262,6 +262,30 @@ function assertLinkageSaveIntent(input, current = null) {
   if (intent.expectedDefinitionDigest !== expected) throw createError('VERSION_CONFLICT')
 }
 
+// Old editors omit unknown field metadata. Absence is therefore not an opt-out:
+// only an explicit false can disable an existing scan setting. Stable node/field
+// keys keep this preservation local; removed fields are not resurrected.
+function preserveScanSettings(input, current) {
+  const enabledByNode = new Map()
+  for (const rawNode of safeArrayValues(current.nodes)) {
+    const node = safeOwnDataRecord(rawNode)
+    const enabled = new Set(safeArrayValues(node.fields || []).map(safeOwnDataRecord)
+      .filter(field => field.scanEnabled === true).map(field => field.fieldKey))
+    if (enabled.size) enabledByNode.set(node.nodeKey, enabled)
+  }
+  if (!enabledByNode.size) return input
+  return { ...input, nodes: safeArrayValues(input.nodes === undefined ? [] : input.nodes).map(rawNode => {
+    const node = safeOwnDataRecord(rawNode)
+    const enabled = enabledByNode.get(node.nodeKey)
+    if (!enabled || !Object.prototype.hasOwnProperty.call(node, 'fields')) return node
+    return { ...node, fields: safeArrayValues(node.fields).map(rawField => {
+      const field = safeOwnDataRecord(rawField)
+      return enabled.has(field.fieldKey) && !Object.prototype.hasOwnProperty.call(field, 'scanEnabled')
+        ? { ...field, scanEnabled: true } : field
+    }) }
+  }) }
+}
+
 function allParticipantUserIds(nodes) {
   if (Array.isArray(nodes) && nodes.length === 0) return []
   return callTemplateDomain(() => collectTemplateParticipantUserIds(nodes)).sort()
@@ -405,7 +429,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     const current = requireCurrent(await repository.getTemplateDefinition(requireText(templateId)))
     assertExpectedVersion(current, expectedVersion)
     callTemplateDomain(() => assertTemplateEditable(current.template))
-    const safeInput = safeOwnDataRecord(input)
+    const safeInput = preserveScanSettings(safeOwnDataRecord(input), current)
     assertLinkageSaveIntent(safeInput, current)
     const metadata = normalizeMetadata(safeInput)
     const isVersion2 = current.template.flowSchemaVersion === 2 || safeInput.flowSchemaVersion === 2

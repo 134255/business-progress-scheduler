@@ -1,5 +1,6 @@
 const businessService = require('../../services/business')
 const { safeErrorMessage, isAccountAccessError } = require('../../utils/safe-error')
+const { compactValueText } = require('../../utils/compact-node-presentation')
 
 function activeUserId() {
   const user = getApp().globalData.currentUser
@@ -10,11 +11,9 @@ function newRequestKey() {
   return `vote-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
 }
 
-function valueText(value) {
-  if (value === null || value === undefined || value === '') return '未填写'
-  if (typeof value === 'boolean') return value ? '是' : '否'
-  if (Array.isArray(value)) return value.length ? value.join('、') : '未填写'
-  return String(value)
+function emptyReadonlyDetail() {
+  return { fields: [], evidences: [], votes: [], votesOpen: false,
+    processingCommentText: '暂无处理说明', videoPreview: null, comment: '' }
 }
 
 function dueText(detail) {
@@ -34,7 +33,7 @@ Page({
     businessName: '', businessCode: '', nodeName: '', nodeCode: '', status: '',
     reviewModeLabel: '', reviewRoundNumber: 0, processorNamesText: '', reviewerNamesText: '',
     voteProgressText: '', submittedAtText: '', dueText: '待计算',
-    processingCommentText: '暂无处理说明', fields: [], evidences: [], votes: [],
+    processingCommentText: '暂无处理说明', fields: [], evidences: [], votes: [], votesOpen: false,
     canApprove: false, canReject: false, comment: '', loading: true, submitting: false,
     errorMessage: '', videoPreview: null, previousRecordsEnabled: false
   },
@@ -62,7 +61,7 @@ Page({
     this.pageAlive = false
     this.requestSequence += 1
     this.voteSequence = (this.voteSequence || 0) + 1
-    this.setData({ votes: [] })
+    this.setData(emptyReadonlyDetail())
   },
 
   returnToCurrentForm() {
@@ -76,7 +75,7 @@ Page({
     this.identityInvalidated = true
     this.requestSequence += 1
     this.voteSequence = (this.voteSequence || 0) + 1
-    this.setData({ votes: [], canApprove: false, canReject: false, comment: '', loading: false, previousRecordsEnabled: false })
+    this.setData({ ...emptyReadonlyDetail(), canApprove: false, canReject: false, loading: false, previousRecordsEnabled: false })
     wx.reLaunch({ url: '/pages/login/index' })
     return false
   },
@@ -84,7 +83,7 @@ Page({
   clearVotesOnAccessError(error) {
     if (isAccountAccessError(error) && this.pageAlive && this.actorStillCurrent()) {
       this.requestSequence += 1
-      this.setData({ votes: [], canApprove: false, canReject: false, loading: false, previousRecordsEnabled: false })
+      this.setData({ ...emptyReadonlyDetail(), canApprove: false, canReject: false, loading: false, previousRecordsEnabled: false })
     }
   },
 
@@ -122,7 +121,7 @@ Page({
         processingCommentText: typeof detail.processingComment === 'string' && detail.processingComment
           ? detail.processingComment
           : '暂无处理说明',
-        fields: (detail.fieldValues || []).map(field => ({ ...field, valueText: valueText(field.value) })),
+        fields: (detail.fieldValues || []).map(field => ({ ...field, valueText: compactValueText(field.value) })),
         evidences: (detail.evidences || []).map((item, index) => ({ ...item, sequence: index + 1 })),
         votes,
         canApprove: Boolean(detail.canApprove), canReject: Boolean(detail.canReject)
@@ -151,6 +150,11 @@ Page({
   },
 
   onApprove() { return this.submitVote('approve') },
+
+  onToggleVotes() {
+    if (!this.pageAlive || !this.actorStillCurrent() || !this.data.previousRecordsEnabled) return
+    this.setData({ votesOpen: !this.data.votesOpen })
+  },
 
   onReject() {
     if (!this.data.comment.trim()) {
@@ -201,21 +205,29 @@ Page({
   },
 
   async previewEvidence(event) {
+    if (!this.pageAlive || !this.actorStillCurrent()) return
     const evidenceId = String(event.currentTarget.dataset.id || '')
     if (!this.data.evidences.some(item => item.evidenceId === evidenceId)) return
+    const sequence = this.requestSequence
+    const isCurrent = () => this.pageAlive && this.actorStillCurrent() && sequence === this.requestSequence
     try {
       const grant = await businessService.getEvidenceAccess(evidenceId)
-      if (!this.pageAlive || activeUserId() !== this.actorId) return
+      if (!isCurrent()) return
+      this.setData({ errorMessage: '', evidences: this.data.evidences.map(item => item.evidenceId === evidenceId
+        ? { ...item, fileName: grant.fileName || item.fileName } : item) })
       if (grant.category === 'image') wx.previewImage({ current: grant.url, urls: [grant.url] })
       else if (grant.category === 'video') this.setData({ videoPreview: grant })
       else if (grant.category === 'pdf') {
         const downloaded = await wx.downloadFile({ url: grant.url })
-        if (!this.pageAlive || activeUserId() !== this.actorId) return
+        if (!isCurrent()) return
         await wx.openDocument({ filePath: downloaded.tempFilePath, fileType: 'pdf', showMenu: true })
       }
     } catch (error) {
+      if (!isCurrent()) return
       this.clearVotesOnAccessError(error)
-      wx.showToast({ title: '凭证暂时无法打开', icon: 'none' })
+      const message = safeErrorMessage(error, '凭证暂时无法打开，请稍后重试')
+      this.setData({ errorMessage: message })
+      wx.showToast({ title: message, icon: 'none' })
     }
   },
 
