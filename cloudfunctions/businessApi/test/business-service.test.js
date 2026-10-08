@@ -204,7 +204,7 @@ test('创建与幂等重试在公开返回前同步检索且索引失败不重�
   assert.deepEqual(indexCalls, [envelope])
 
   const failed = createBusinessService({
-    repository: { ...repository, async findCreationResult() { return stored } },
+    repository: { ...repository, async createBusinessSnapshot() { return stored } },
     workTimeService: { async tryAddWorkMinutes() { throw new Error('not used') } },
     businessSearchClient: { async ensureIndexed() { throw new Error('timeout') } }
   })

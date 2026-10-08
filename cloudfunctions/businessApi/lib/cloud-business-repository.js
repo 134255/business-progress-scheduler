@@ -1974,10 +1974,20 @@ function createCloudBusinessRepository({
     }
   }
 
-  async function createBusinessSnapshot({ actor, input, definition, firstProcessingDue: suppliedFirstDue }) {
+  async function createBusinessSnapshot({ actor, input, definition, firstProcessingDue: suppliedFirstDue,
+    prepareSnapshot }) {
     const identity = creationIdentity(actor && actor._id, input)
     const existing = await findCreationResult({ actorId: actor._id, input })
     if (existing) return existing
+
+    // Internal lazy preparation avoids a second preflight lookup without caching
+    // authorization or bypassing the reservation/publication transaction checks.
+    if (prepareSnapshot !== undefined) {
+      if (typeof prepareSnapshot !== 'function') throw new TypeError('prepareSnapshot must be a function')
+      const preparedInput = await prepareSnapshot()
+      definition = preparedInput.definition
+      suppliedFirstDue = preparedInput.firstProcessingDue
+    }
 
     let route = null
     if (isVersion2Template(definition.template)) {

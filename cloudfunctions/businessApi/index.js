@@ -286,9 +286,10 @@ function createBusinessRoutes(businessService) {
     },
     getBusinessLine: ({ actor, payload }) => businessService.getBusinessLine({ actor, lineId: payload.id }),
     updateBusinessMetadata: ({ actor, payload }) => businessService.updateMetadata({ actor, input: payload }),
-    createBusinessFromTemplate: ({ actor, payload }) => businessService.createFromTemplate({
+    createBusinessFromTemplate: ({ actor, payload, afterCreated }) => businessService.createFromTemplate({
       actor,
-      input: payload
+      input: payload,
+      afterCreated
     })
   }
 }
@@ -689,17 +690,24 @@ function createBusinessApi({
       const actor = isPublicAction(action) ? null : await resolveActor(openid)
       const routes = accountRoutes(openid, payload, actor)
       const route = hasOwn(routes, action) ? routes[action] : null
+      // Request-local, server-owned hook. Older injected services that do not
+      // invoke it retain the normal post-route refresh below.
+      let creationCardsRefreshed = false
+      const afterCreated = action === 'createBusinessFromTemplate' ? async result => {
+        creationCardsRefreshed = true
+        await withBusinessCards({ actor, action, payload, result })
+      } : undefined
       const data = route
         ? await route()
         : knownProtectedAction
-          ? await domainRoutes[action]({ actor, payload })
+          ? await domainRoutes[action]({ actor, payload, afterCreated })
           : await legacyRoutes[action](actor.openid, payload)
       if (knownProtectedAction && FIELD_RESULT_MUTATIONS.has(action) && operationsFieldService &&
           typeof operationsFieldService.refreshAfterMutation === 'function') {
         // A derived snapshot is retryable; it must never undo an authoritative business success.
         try { await operationsFieldService.refreshAfterMutation({actor,action,payload}) } catch (_) {}
       }
-      return ok(knownProtectedAction
+      return ok(knownProtectedAction && !creationCardsRefreshed
         ? await withBusinessCards({ actor, action, payload, result: data })
         : data)
     } catch (error) {

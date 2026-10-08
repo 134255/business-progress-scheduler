@@ -34,6 +34,124 @@ function marked(code, message = code) {
   return Object.assign(new Error(message), { code, [APPLICATION_ERROR_MARKER]: true })
 }
 
+function deferred() {
+  let resolve
+  const promise = new Promise(done => { resolve = done })
+  return { promise, resolve }
+}
+
+for (const first of ['search', 'card']) {
+  test(`creation starts search and cards after publication, and waits for both (${first} finishes first)`, async () => {
+    const { createBusinessService } = require('../lib/business-service')
+    const gates = { search: deferred(), card: deferred() }
+    const starts = []
+    let published = false
+    let returned = false
+    const stored = { id: 'line-1', code: 'SYNTHETIC-1' }
+    Object.defineProperties(stored, {
+      publicResult: { value: stored },
+      searchEnvelope: { value: { actorId: actor._id, businessLineId: 'line-1', sourceVersion: 1 } }
+    })
+    const businessService = createBusinessService({
+      repository: { async createBusinessSnapshot() { published = true; return stored } },
+      workTimeService: { async tryAddWorkMinutes() { assert.fail('existing snapshot') } },
+      businessSearchClient: { async ensureIndexed() {
+        assert.equal(published, true); starts.push('search'); await gates.search.promise
+      } }
+    })
+    const { main } = harness({ businessService, businessCardService: { async refreshAfterMutation(input) {
+      assert.equal(published, true)
+      assert.equal(input.actor, actor)
+      assert.equal(input.result, stored)
+      starts.push('card'); await gates.card.promise
+    } } })
+    const response = main({ action: 'createBusinessFromTemplate', payload: {
+      templateId: 'template-1', requestKey: 'create-1',
+      // A client cannot replace the trusted post-publication callback.
+      afterCreated: 'untrusted', creationCardsRefreshed: true
+    } }).then(result => { returned = true; return result })
+    try {
+      await new Promise(resolve => setImmediate(resolve))
+      assert.deepEqual(starts.slice().sort(), ['card', 'search'])
+      assert.equal(returned, false)
+      gates[first].resolve()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(returned, false)
+    } finally {
+      gates.card.resolve(); gates.search.resolve()
+      await response
+    }
+    assert.deepEqual(await response, { ok: true, data: stored })
+    assert.equal(starts.length, 2, 'no duplicate refresh')
+  })
+}
+
+test('parallel creation derived failures keep authoritative success and drain both tasks', async () => {
+  const { createBusinessService } = require('../lib/business-service')
+  let creates = 0
+  for (const fails of ['search', 'card']) {
+    const survivor = deferred()
+    let returned = false
+    const started = []
+    const stored = { id: 'line-1', code: 'SYNTHETIC-1' }
+    Object.defineProperties(stored, {
+      publicResult: { value: stored },
+      searchEnvelope: { value: { actorId: actor._id, businessLineId: 'line-1', sourceVersion: 1 } }
+    })
+    const work = async name => {
+      started.push(name)
+      if (fails === name) throw new Error('synthetic-derived-failure')
+      await survivor.promise
+    }
+    const businessService = createBusinessService({
+      repository: { async createBusinessSnapshot() { creates++; return stored } },
+      workTimeService: { async tryAddWorkMinutes() { assert.fail('unused') } },
+      businessSearchClient: { ensureIndexed: () => work('search') }
+    })
+    const { main, logs } = harness({ businessService,
+      businessCardService: { refreshAfterMutation: () => work('card') } })
+    const response = main({ action: 'createBusinessFromTemplate', payload: {
+      templateId: 'template-1', requestKey: 'request-1'
+    } }).then(result => { returned = true; return result })
+    try {
+      await new Promise(resolve => setImmediate(resolve))
+      assert.deepEqual(started.slice().sort(), ['card', 'search'])
+      assert.equal(returned, false)
+    } finally { survivor.resolve(); await response }
+    assert.deepEqual(await response, { ok: true, data: {
+      ...stored, ...(fails === 'search' ? { searchIndexStatus: 'pending' } : {})
+    } })
+    assert.equal(logs.length, 0)
+  }
+  assert.equal(creates, 2, 'never retry authoritative creation for a derived failure')
+})
+
+test('concurrent creation callbacks and fallback refreshes stay request-local', async () => {
+  const gate = deferred()
+  const modernStarted = deferred()
+  const refreshes = []
+  const { main } = harness({
+    businessService: { async createFromTemplate({ input, afterCreated }) {
+      const result = { id: input.requestKey }
+      if (input.requestKey === 'modern') await afterCreated(result)
+      return result
+    } },
+    businessCardService: { async refreshAfterMutation({ result }) {
+      refreshes.push(result.id)
+      if (result.id === 'modern') { modernStarted.resolve(); await gate.promise }
+    } }
+  })
+  const modern = main({ action: 'createBusinessFromTemplate', payload: { requestKey: 'modern' } })
+  try {
+    await modernStarted.promise
+    const fallback = await main({ action: 'createBusinessFromTemplate', payload: { requestKey: 'fallback' } })
+    assert.deepEqual(fallback, { ok: true, data: { id: 'fallback' } })
+    assert.deepEqual(refreshes, ['modern', 'fallback'])
+  } finally { gate.resolve(); await modern }
+  assert.deepEqual(await modern, { ok: true, data: { id: 'modern' } })
+  assert.equal(refreshes.length, 2)
+})
+
 for (const action of ['getTemplateCardDisplay', 'updateTemplateCardDisplay']) {
   test(`${action} is protected and delegates only trusted actor and allowlisted config inputs`, async () => {
     const calls = []

@@ -216,15 +216,33 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
   }
   if (typeof clock !== 'function') throw new TypeError('clock is required')
 
-  async function createFromTemplate({ actor, input }) {
+  async function createFromTemplate({ actor, input, afterCreated }) {
     requireActiveActor(actor)
     const normalized = normalizeInput(input)
-    const existing = await repository.findCreationResult({ actorId: actor._id, input: normalized })
-    if (existing) return synchronizeSearchResult(existing, businessSearchClient)
+    const stored = await repository.createBusinessSnapshot({
+      actor, input: normalized,
+      prepareSnapshot: () => prepareCreation(normalized.templateId)
+    })
+    const publicResult = stripSearchEnvelope(stored)
+    // Only independent derived work overlaps, after the full snapshot is active.
+    // Both branches are awaited; neither failure retries authoritative creation.
+    const refresh = async () => {
+      if (typeof afterCreated !== 'function') return
+      try { await afterCreated(publicResult) } catch (_) { /* Derived work is best-effort. */ }
+    }
+    const [result] = await Promise.all([
+      synchronizeSearchResult(stored, businessSearchClient), refresh()
+    ])
+    return result
+  }
+
+  // Preparation is lazy: the repository owns the single existing-result check,
+  // so retries can recover a committed snapshot even after its template changes.
+  async function prepareCreation(templateId) {
     const definition = requireEnabledDefinition(
-      await repository.getTemplateDefinition(normalized.templateId)
+      await repository.getTemplateDefinition(templateId)
     )
-    const snapshotInput = { actor, input: normalized, definition }
+    const snapshotInput = { definition }
     const entryNode = definition.template && definition.template.flowSchemaVersion === 2
       ? definition.nodes.find(node => node && node.nodeKey === definition.template.entryNodeKey)
       : definition.nodes[0]
@@ -241,7 +259,7 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
         await workTimeService.tryAddWorkMinutes(new Date(startedAt), minutes)
       )
     }
-    return synchronizeSearchResult(await repository.createBusinessSnapshot(snapshotInput), businessSearchClient)
+    return snapshotInput
   }
 
   async function listBusinessLines({ actor, query = {} }) {

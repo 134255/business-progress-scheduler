@@ -54,6 +54,12 @@ function createBusinessHarness({
       return clone(definition)
     },
     async createBusinessSnapshot(input) {
+      if (input.prepareSnapshot) {
+        const existing = await repository.findCreationResult({ actorId: input.actor._id, input: input.input })
+        if (existing) return existing
+        const prepared = await input.prepareSnapshot()
+        input = { actor: input.actor, input: input.input, ...prepared }
+      }
       calls.push(['createBusinessSnapshot', clone(input)])
       if (createError) throw createError
       return { id: 'business-1', code: 'BL-20260807-0001' }
