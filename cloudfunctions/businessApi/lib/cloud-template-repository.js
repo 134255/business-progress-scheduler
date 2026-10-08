@@ -1,6 +1,7 @@
 const crypto = require('node:crypto')
 const { isDeepStrictEqual } = require('node:util')
 const { ownDataValue } = require('./account-relationship-schema')
+const { boundedMap } = require('./bounded-map')
 const {
   readCardDisplay, normalizeCardDisplayFields, assertCardDisplayReferences
 } = require('./business-card-display')
@@ -159,8 +160,11 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
     }
   }
 
-  async function listTemplateDefinitions({ status } = {}) {
-    const templates = (await readAll(() => db.collection(COLLECTIONS.templates).orderBy('_id', 'asc')))
+  async function listTemplateDefinitions({ status, templateId } = {}) {
+    const selected = templateId === undefined
+      ? await readAll(() => db.collection(COLLECTIONS.templates).orderBy('_id', 'asc'))
+      : [await readDocument(db, COLLECTIONS.templates, templateId)].filter(Boolean)
+    const templates = selected
       .filter(template => template.status !== 'deleted')
       .filter(template => !status || template.status === status)
       .sort(compareIds)
@@ -172,12 +176,9 @@ function createCloudTemplateRepository({ db, idFactory = defaultIdFactory }) {
   }
 
   async function listActiveUserIds(userIds) {
-    const result = []
-    for (const userId of [...new Set(userIds)].sort()) {
-      const user = await readDocument(db, COLLECTIONS.users, userId)
-      if (user && user.status === 'active') result.push(user._id)
-    }
-    return result
+    const users = await boundedMap([...new Set(userIds)].sort(),
+      userId => readDocument(db, COLLECTIONS.users, userId), 4)
+    return users.filter(user => user && user.status === 'active').map(user => user._id)
   }
 
   async function assertActiveParticipantDocuments(database, userIds) {

@@ -24,10 +24,11 @@ function createTemplateHarness({ templates = [], nodes = [], users = [] } = {}) 
   }
 
   const repository = {
-    async listTemplateDefinitions({ status } = {}) {
+    async listTemplateDefinitions({ status, templateId } = {}) {
       return [...definitions.values()]
         .filter(item => item.template.status !== 'deleted')
         .filter(item => !status || item.template.status === status)
+        .filter(item => templateId === undefined || item.template._id === templateId)
         .map(clone)
     },
     async getTemplateDefinition(templateId) {

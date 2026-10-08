@@ -132,7 +132,7 @@ Page({
   },
 
   createBusiness() {
-    wx.navigateTo({ url: '/pages/business-edit/index' })
+    wx.navigateTo({ url: '/pages/template-list/index' })
   },
 
   openTemplates() {

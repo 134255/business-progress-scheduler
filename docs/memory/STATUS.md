@@ -1,5 +1,25 @@
 # Current Status
 
+- 2026-10-08 用户授权上传及GitHub交付，并确认上次仍为1.2.8、本次使用1.2.9。新建入口优化已通过官方CLI发布businessApi并上传小程序1.2.9，覆盖下方本地“未发布/未上传”。登录最初虽islogin=true但云接口要求重新登录，经用户扫码恢复；CLI错误可能exit0，按实际响应和文件核验判定，未将早期失败计为成功。
+
+  新鲜下载线上6498文件，清单摘要与上次发布9b23b2ca785dc9bbe71ffbd3164be35b62a76e7e02a7ed91dfd844d566ffbcb7一致；只覆盖本批index.js及3个模板库文件，保留线上依赖、包配置和旧导出仓储。官方inc-deploy成功（6498文件/9.0MB）；独立回下载6498/6498 SHA256一致、0差异，载荷摘要5032d0cff885c8d60dfea4e584038d0b5d9b489fac60e19c90eb762bdf832ff1。没有发布其他函数或更改资源、权限、环境变量、Timer、模板、业务记录。
+
+  小程序独立上传目录178文件，只包含本次3个客户端产品差异，摘要f6ff0151169c1ce6e6c71cc9b5fa8cba3707954e51b3ffdf485f5700fdd57adf。官方upload 1.2.9返回明确成功/exit0，包1397411字节；未设为体验版、提交微信审核或发布正式版。回执与代码备份在本机outputs/deploy，不进入Git。
+
+  精确载荷QA新鲜回归businessApi1445、客户端652、businessSearch119、nodeTextParser38、calendarSync61、workflowReminder39、evidenceRetention43、operationsAnalytics66、基线容量工具136、WXML结构4及官方渲染10/6/8，共2627项通过、0失败/取消/跳过；故意排除另一批未发布导出规则56项测试。补充统计测试初跑65/66，根因是QA中Git导出与云端副本四个共享域文件行尾不一致；规范化文本逐一相同，仅同步QA副本后66/66通过，未改产品或已发布载荷、不弱化测试。部署细节见 `docs/deployment/template-entry-loading-acceptance.md`。
+
+  GitHub交付按本批7产品+4测试+验收文档以及PROJECT/STATUS中的本批增量分离，不提交原有导出仓储/ADR/容量测试改动、附件或输出；推送与远端哈希的最终核验由本轮Git交接记录补充。真实云端打开耗时及Android/HarmonyOS/iOS/macOS/Windows原生体验仍unverified；下一步在体验版核对导航、回退、最新可用性、联动、账号切换，不擅自新建生产测试售后。
+
+- 2026-10-08 用户明确慢点为点击“新建售后线”后的模板/填写页打开，并批准按局部范围实施且不得影响原功能。本地完成：首页直接打开原模板列表；填写预览经原action传可选templateId，仅重读所选启用定义；参与账号非事务查询复用boundedMap最多4路并发；单请求内部复用规范化结果。旧无编号请求、旧入口重定向、新旧客户端/后端兼容、安全投影、当前账号/模板状态、定义摘要、V2流程、严格联动、角色和快照预算检查保留。实际创建事务/幂等、业务记录、模板配置、权限、依赖、Timer及其他功能未改；不建立跨请求/账号授权缓存。
+
+  产品载荷仅4个后端文件（businessApi/index.js、lib/cloud-template-repository.js、lib/template-domain.js、lib/template-service.js）及3个客户端文件（dashboard/index.js、business-edit/index.js、services/templates.js），对main=e3a7e94338961f03ce1f9784b08ac0dbad70904b为46增/17删。保留原有导出范围隔离脏改动、文档及所有未跟踪输出，未操作模板、生产业务数据或云配置；未发布、上传、暂存、提交或推送Git。本批不是B2辅助集合/日期候选发现实施。
+
+  TDD先观察定向读取、编号校验、并发、重复解析、入口和参数传递等预期失败，再修改实现。真实仓储+服务的合成测试覆盖旧版/V2的10节点2545条联动、停用/删除/缺失模板、请求间账号变更、切换账号、读取失败与损坏定义，所有写入0。新鲜完整回归businessApi1445、客户端652、businessSearch119、nodeTextParser38、calendarSync61、workflowReminder39、evidenceRetention43、operationsAnalytics66、容量工具192、WXML结构4，共2659项全部通过、0失败/取消/跳过。命令及准确载荷见 `docs/deployment/template-entry-loading-acceptance.md`。
+
+  一次独立只读复核无Critical/Important/Minor发现；另110项定向测试及35场景700次内存HEAD对照通过，不重复计入上述总数。既有非事务预览不能保证整个读取期间账号/模板的原子快照，实际创建事务重验仍保留；没有引入更强承诺，也未全面审计无关旧逻辑。只读合成的2启用模板“列表→预览”与HEAD保持安全投影、0写入，逻辑读取86→65、账号查询最大并发1→4；不代表生产时延/费用，单启用模板也不保证减少读取数。
+
+  真实云端耗时、SDK并发表现和Android/HarmonyOS/iOS/macOS/Windows原生交互仍unverified，本轮未运行官方WXML编译器。下一步另获发布/上传授权后核对准确载荷，不能夹带之前未发布的导出优化，并在体验版核对导航、回退、填写/联动、账号切换及实测打开耗时；实际功能影响必须先取得用户批准。`git -c core.safecrlf=false diff --check` 与项目记忆validator均exit0，暂存区为空。
+
 - 2026-09-24 用户“全部执行”明确授权发布B1、上传包含A诊断的小程序及将历史/优化代码分批提交GitHub。已完成businessApi官方CLI inc-deploy（6498文件/9.0MB）及独立回读，6498/6498 SHA256与验收载荷一致、0差异；仅两个仓储内容变化，清单摘要9b23b2ca785dc9bbe71ffbd3164be35b62a76e7e02a7ed91dfd844d566ffbcb7。新鲜下载的发布前基线无额外差异；未部署operationsAnalytics或修改依赖、配置、权限、索引、Timer、业务数据。
 
   独立小程序上传目录仅含project.config.json及miniprogram，177/177文件与工作区逐字节一致；178项小程序/配置对A启动基线仅performance-timing.js不同（8项默认关闭诊断），无其他新增前端变化。官方CLI上传1.2.8返回“√ upload”、exit0，包1397367字节，信息文件outputs/deploy/miniprogram-1.2.8-20260924-capacity-info.json。没有设为体验版、提交微信审核或发布正式版；真实五端/线上CSV功能验收仍unverified。

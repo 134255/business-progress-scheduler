@@ -32,7 +32,9 @@ function changeTemplateStatus(templateId, expectedVersion, status) {
 function deleteTemplate(templateId, expectedVersion) {
   return callBusinessApi('deleteTemplate', { templateId, expectedVersion })
 }
-function listEnabledTemplates() { return callBusinessApi('listEnabledTemplates', {}) }
+function listEnabledTemplates(templateId) {
+  return callBusinessApi('listEnabledTemplates', templateId === undefined ? {} : { templateId })
+}
 
 module.exports = {
   listTemplates, getTemplate, createTemplate, copyTemplate, updateTemplate, getTemplateCardDisplay, updateTemplateCardDisplay,

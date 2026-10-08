@@ -86,7 +86,7 @@ Page({
   },
 
   async loadTemplatePreview(expectedUserId) {
-    const result = await templates.listEnabledTemplates()
+    const result = await templates.listEnabledTemplates(this.data.templateId)
     if (!this.requireActiveUser(expectedUserId)) return
     const preview = (Array.isArray(result.items) ? result.items : [])
       .find(item => item._id === this.data.templateId)

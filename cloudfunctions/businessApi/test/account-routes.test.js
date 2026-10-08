@@ -512,6 +512,24 @@ test('copy template route accepts only source identity/version and uses the auth
   assert.equal((await anonymous.api.main({ action: 'copyTemplate', payload: {} })).code, 'UNAUTHORIZED')
 })
 
+test('selected template preview forwards only the optional identity and the authenticated actor', async () => {
+  const calls = []
+  const harness = createRouteHarness({ templateService: {
+    listEnabledTemplates: async input => { calls.push(input); return { items: [] } }
+  } })
+  const result = await harness.api.main({ action: 'listEnabledTemplates', payload: {
+    templateId: 'selected', actor: { _id: 'forged' }, ignored: true
+  } })
+  assert.equal(result.ok, true)
+  assert.equal(calls[0].actor._id, 'actor-1')
+  assert.equal(calls[0].templateId, 'selected')
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['actor', 'templateId'])
+  const anonymous = createRouteHarness({ user: null, templateService: {
+    listEnabledTemplates: async () => assert.fail('unauthenticated preview must not run')
+  } })
+  assert.equal((await anonymous.api.main({ action: 'listEnabledTemplates', payload: { templateId: 'selected' } })).code, 'UNAUTHORIZED')
+})
+
 test('the template-backed business route delegates generated creation to the trusted service boundary', async () => {
   const calls = []
   const businessService = {

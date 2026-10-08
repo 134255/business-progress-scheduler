@@ -157,6 +157,68 @@ test('dashboard presents the protected pending assignment count', () => {
   assert.match(wxml, /stats\.pendingMine/)
 })
 
+test('new after-sales entry opens the template list directly without a temporary edit page', () => {
+  const navigations = []
+  global.wx = { navigateTo: options => navigations.push(options) }
+  const page = loadPage('pages/dashboard/index.js')
+  page.createBusiness()
+  assert.deepEqual(navigations, [{ url: '/pages/template-list/index' }])
+})
+
+test('create preview requests only its selected template through the existing cloud action', async () => {
+  const calls = []
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle() {}, reLaunch: () => assert.fail('must stay authenticated') }
+  const templatesService = withFakeModule('utils/cloud.js', {
+    callBusinessApi: async (action, payload) => {
+      calls.push([action, payload])
+      return { items: [{ _id: 'template/selected', name: 'Selected', nodeCount: 2, available: true, unavailableReason: '' }] }
+    }
+  }, () => freshRequire('services/templates.js'))
+  const page = loadPage('pages/business-edit/index.js', { 'services/templates.js': templatesService })
+  await page.onLoad({ templateId: 'template%2Fselected' })
+  assert.deepEqual(calls, [['listEnabledTemplates', { templateId: 'template/selected' }]])
+  assert.equal(page.data.templateAvailable, true)
+  assert.equal(page.data.templatePreview.name, 'Selected')
+  await templatesService.listEnabledTemplates()
+  assert.deepEqual(calls[1], ['listEnabledTemplates', {}], 'old list callers must retain the unfiltered contract')
+})
+
+test('selected preview still works with an older backend that returns the whole enabled list', async () => {
+  global.getApp = () => ({ globalData: { currentUser: activeUser() } })
+  global.wx = { setNavigationBarTitle() {} }
+  const page = loadPage('pages/business-edit/index.js', { 'services/templates.js': {
+    listEnabledTemplates: async () => ({ items: [
+      { _id: 'other', available: true },
+      { _id: 'selected', name: 'Selected', available: false, unavailableReason: 'ASSIGNEE_INACTIVE' }
+    ] }), unavailableReasonMessage: fakeUnavailableReasonMessage
+  } })
+  await page.onLoad({ templateId: 'selected' })
+  assert.equal(page.data.templatePreview._id, 'selected')
+  assert.equal(page.data.templateAvailable, false)
+  assert.equal(page.data.errorMessage, '模板负责人不可用，请联系管理员')
+})
+
+test('selected preview discards a response after switching accounts and cannot create from it', async () => {
+  const pending = deferred()
+  const app = { globalData: { currentUser: activeUser('before') } }
+  const launches = []
+  global.getApp = () => app
+  global.wx = { setNavigationBarTitle() {}, reLaunch: options => launches.push(options) }
+  const page = loadPage('pages/business-edit/index.js', {
+    'services/templates.js': { listEnabledTemplates: () => pending.promise },
+    'services/business.js': { createBusinessFromTemplate: () => assert.fail('stale preview must not authorize creation') }
+  })
+  const loading = page.onLoad({ templateId: 'selected' })
+  app.globalData.currentUser = activeUser('after')
+  pending.resolve({ items: [{ _id: 'selected', available: true }] })
+  await loading
+  await page.save()
+  assert.equal(page.data.templatePreview, null)
+  assert.equal(page.data.templateAvailable, false)
+  assert.deepEqual(launches, [{ url: '/pages/login/index' }])
+})
+
 test('dashboard uses the approved after-sales record slogan', () => {
   const wxml = fs.readFileSync(path.join(miniProgramRoot, 'pages/dashboard/index.wxml'), 'utf8')
   assert.match(wxml, /让每条售后都有清晰的记录/)

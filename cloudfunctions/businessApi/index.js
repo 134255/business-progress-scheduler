@@ -261,7 +261,10 @@ function createTemplateRoutes(templateService) {
       templateId: payload.templateId,
       expectedVersion: payload.expectedVersion
     }),
-    listEnabledTemplates: ({ actor }) => templateService.listEnabledTemplates({ actor })
+    listEnabledTemplates: ({ actor, payload }) => templateService.listEnabledTemplates({
+      actor,
+      ...(payload.templateId === undefined ? {} : { templateId: payload.templateId })
+    })
   }
 }
 

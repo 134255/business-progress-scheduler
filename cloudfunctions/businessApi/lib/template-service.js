@@ -4,6 +4,7 @@ const {
   version2TemplateDefinitionDigest,
   templateDefinitionDigest,
   collectTemplateParticipantUserIds,
+  prepareTemplateEnableValidation,
   validateTemplateForEnable,
   assertTemplateEditable
 } = require('./template-domain')
@@ -524,12 +525,16 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     })
   }
 
-  async function listEnabledTemplates({ actor }) {
+  async function listEnabledTemplates({ actor, templateId }) {
     requireActiveActor(actor)
-    const definitions = await repository.listTemplateDefinitions({ status: 'enabled' })
+    const definitions = await repository.listTemplateDefinitions({
+      status: 'enabled',
+      ...(templateId === undefined ? {} : { templateId: requireText(templateId) })
+    })
     const definitionsWithParticipants = definitions.map(definition => {
       try {
-        return { definition, participantUserIds: allParticipantUserIds(definition.nodes) }
+        const validation = callTemplateDomain(() => prepareTemplateEnableValidation(definition.nodes))
+        return { definition, validation, participantUserIds: validation.participantUserIds }
       } catch (error) {
         return { definition, participantUserIds: null }
       }
@@ -537,7 +542,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
     const requested = [...new Set(definitionsWithParticipants.flatMap(item => item.participantUserIds || []))].sort()
     const active = new Set(await repository.listActiveUserIds(requested))
     return {
-      items: definitionsWithParticipants.map(({ definition, participantUserIds }) => {
+      items: definitionsWithParticipants.map(({ definition, validation, participantUserIds }) => {
         let unavailableReason = ''
         try {
           if (!participantUserIds) throw createError('TEMPLATE_INVALID')
@@ -548,7 +553,7 @@ function createTemplateService({ repository, clock = () => new Date(), keyFactor
               nodes: definition.nodes
             }))
           }
-          validateTemplateForEnable(definition.template, definition.nodes, [...active])
+          validation.validate([...active])
           if (!canCreateBusinessSnapshot(nodesForSnapshotBudget(definition.nodes, participantUserIds))) {
             unavailableReason = 'TEMPLATE_LIMIT_EXCEEDED'
           }

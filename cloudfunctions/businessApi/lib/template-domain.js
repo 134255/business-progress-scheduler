@@ -346,6 +346,23 @@ function assertTemplateEditable(template) {
 
 function validateTemplateForEnable(template, nodes, activeUserIds) {
   const definition = normalizeDefinitionNodes(nodes)
+  return validateNormalizedTemplateForEnable(definition, activeUserIds)
+}
+
+// Request-local prepared validation only. Never reuse this across requests or
+// expose the normalized definition; current account status is supplied later.
+function prepareTemplateEnableValidation(nodes) {
+  const definition = normalizeDefinitionNodes(nodes)
+  const userIds = definition.workflowMode === WORKFLOW_MODE
+    ? definition.nodes.flatMap(node => [...node.processorUserIds, ...node.reviewerUserIds])
+    : definition.nodes.flatMap(node => node.assigneeUserIds)
+  return {
+    participantUserIds: [...new Set(userIds)].sort(),
+    validate: activeUserIds => validateNormalizedTemplateForEnable(definition, activeUserIds)
+  }
+}
+
+function validateNormalizedTemplateForEnable(definition, activeUserIds) {
   if (!Array.isArray(activeUserIds)) throw createError('TEMPLATE_INVALID')
   const active = new Set(activeUserIds)
   const participants = definition.workflowMode === WORKFLOW_MODE
@@ -402,6 +419,7 @@ module.exports = {
   templateDefinitionDigest,
   preActivationModeTemplateDefinitionDigest,
   collectTemplateParticipantUserIds,
+  prepareTemplateEnableValidation,
   validateTemplateForEnable,
   assertTemplateEditable
 }

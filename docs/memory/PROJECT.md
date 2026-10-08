@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact update: 2026-09-24 (Asia/Shanghai; user-confirmed capacity planning inputs)
+Last stable-fact update: 2026-10-08 (Asia/Shanghai; bounded template-entry loading implementation; deployment in STATUS)
 
 ## Product
 
@@ -16,6 +16,7 @@ Approved V1 rules include:
 - Account/password login with first-login password change, one-to-one WeChat identity binding, lockout, administrator reset, and at least one active super administrator.
 - Template snapshots, sequential nodes, multiple responsible accounts with first-completion-wins (`OR` signing), logical deletion, audit history, and optimistic/concurrent flow protection.
 - Templates contain stable node and dynamic-field identifiers. Enabled workflow definitions are read-only and must be disabled before editing; the independent card display configuration remains editable by an active super administrator without disabling the workflow. New business lines receive server-generated globally unique codes, and instance nodes receive immutable codes derived from the business code.
+- 新建入口直接打开模板列表；填写预览通过原 `listEnabledTemplates` 的可选 `templateId` 定向读取所选启用定义，不传编号的旧调用仍返回全部启用模板。预览每次重新检查参与账号（非事务读取最多 4 路并发），仅在请求内部复用规范化结果，不缓存跨请求授权；定义完整性、V2/联动、角色和快照预算检查保留，创建事务的重验与幂等逻辑不变。真实五端时延与部署状态以 STATUS 为准。
 - 活动超级管理员可复制已保存模板为独立草稿，启用中的源模板无需停用。副本生成全新文档/节点/字段标识并同步重建联动、流程和卡片展示引用，不复制历史售后、凭证或统计；同一事务校验当前源定义、展示配置、账号和参与人，超出现有100次操作预算时明确拒绝。未保存编辑不纳入复制；详见 ADR-0020 与发布验收文档 `docs/deployment/template-copy-acceptance.md`，实际部署状态以 STATUS 为准。
 - 普通用户从模板创建售后时，售后线名称由服务端在编号分配事务中固定生成为“模板名称-售后线编号”，客户端名称与计划日期输入均不参与创建；普通元数据编辑只允许修改说明。历史售后已有名称和计划日期保持原值并只读展示，不做迁移或清空；售后列表的日期筛选统一按售后创建日期解释。
 - Node feedback is revisioned and immutable. New review-workflow nodes separate non-overlapping processors and reviewers: processors save progress or submit for review, while independent reviewers use OR/ALL votes to approve or reject; new nodes cannot use the legacy direct-complete or legacy-reject path. Old business nodes retain controlled feedback-read compatibility and never receive fabricated review history.
