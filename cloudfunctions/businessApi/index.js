@@ -1,5 +1,6 @@
 const cloud = require('wx-server-sdk')
 const crypto = require('node:crypto')
+const { createCreationTiming, measureCreationStage } = require('./lib/creation-timing')
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV })
 
@@ -286,10 +287,11 @@ function createBusinessRoutes(businessService) {
     },
     getBusinessLine: ({ actor, payload }) => businessService.getBusinessLine({ actor, lineId: payload.id }),
     updateBusinessMetadata: ({ actor, payload }) => businessService.updateMetadata({ actor, input: payload }),
-    createBusinessFromTemplate: ({ actor, payload, afterCreated }) => businessService.createFromTemplate({
+    createBusinessFromTemplate: ({ actor, payload, afterCreated, creationTiming }) => businessService.createFromTemplate({
       actor,
       input: payload,
-      afterCreated
+      afterCreated,
+      creationTiming
     })
   }
 }
@@ -682,12 +684,16 @@ function createBusinessApi({
     const openid = context.OPENID
     const action = event.action
     const payload = event.payload || {}
+    const creationTiming = action === 'createBusinessFromTemplate' ? createCreationTiming({ logger }) : undefined
+    let creationOutcome = 'ERROR'
     try {
       const knownAccountAction = ACCOUNT_ACTIONS.has(action)
       const knownProtectedAction = hasOwn(domainRoutes, action) && typeof domainRoutes[action] === 'function'
       const knownLegacyAction = hasOwn(legacyRoutes, action) && typeof legacyRoutes[action] === 'function'
       assert(knownAccountAction || knownProtectedAction || knownLegacyAction, 'Unsupported action', 'UNKNOWN_ACTION')
-      const actor = isPublicAction(action) ? null : await resolveActor(openid)
+      const actor = isPublicAction(action) ? null : creationTiming
+        ? await measureCreationStage(creationTiming, 'authorize', () => resolveActor(openid))
+        : await resolveActor(openid)
       const routes = accountRoutes(openid, payload, actor)
       const route = hasOwn(routes, action) ? routes[action] : null
       // Request-local, server-owned hook. Older injected services that do not
@@ -695,21 +701,25 @@ function createBusinessApi({
       let creationCardsRefreshed = false
       const afterCreated = action === 'createBusinessFromTemplate' ? async result => {
         creationCardsRefreshed = true
-        await withBusinessCards({ actor, action, payload, result })
+        await measureCreationStage(creationTiming, 'card_refresh', () => withBusinessCards({ actor, action, payload, result }))
       } : undefined
       const data = route
         ? await route()
         : knownProtectedAction
-          ? await domainRoutes[action]({ actor, payload, afterCreated })
+          ? await domainRoutes[action]({ actor, payload, afterCreated, creationTiming })
           : await legacyRoutes[action](actor.openid, payload)
       if (knownProtectedAction && FIELD_RESULT_MUTATIONS.has(action) && operationsFieldService &&
           typeof operationsFieldService.refreshAfterMutation === 'function') {
         // A derived snapshot is retryable; it must never undo an authoritative business success.
         try { await operationsFieldService.refreshAfterMutation({actor,action,payload}) } catch (_) {}
       }
-      return ok(knownProtectedAction && !creationCardsRefreshed
-        ? await withBusinessCards({ actor, action, payload, result: data })
+      const response = ok(knownProtectedAction && !creationCardsRefreshed
+        ? creationTiming
+          ? await measureCreationStage(creationTiming, 'card_refresh', () => withBusinessCards({ actor, action, payload, result: data }))
+          : await withBusinessCards({ actor, action, payload, result: data })
         : data)
+      creationOutcome = 'OK'
+      return response
     } catch (error) {
       const protectedAction = hasOwn(domainRoutes, action) && typeof domainRoutes[action] === 'function'
       const responseCode = protectedAction && error[APPLICATION_ERROR_MARKER] !== true
@@ -729,6 +739,8 @@ function createBusinessApi({
         ? fail('Service error', responseCode, diagnostic)
         : fail(responseCode === 'EVIDENCE_UPLOAD_RETRYABLE' ? '上传确认暂时失败，请重试' :
           error.message || 'Service error', responseCode, diagnostic)
+    } finally {
+      if (creationTiming) creationTiming.finish(creationOutcome)
     }
   }
 

@@ -2,11 +2,20 @@ function clone(value) {
   return value === undefined ? undefined : structuredClone(value)
 }
 
+// Model the SDK's top-level field projection, leaving missing fields absent.
+function project(document, fields) {
+  if (!fields) return document
+  const include = Object.entries(fields).some(([key, value]) => key !== '_id' && value === true)
+  return Object.fromEntries(Object.entries(document).filter(([key]) =>
+    include ? fields[key] === true || key === '_id' && fields._id !== false : fields[key] !== false))
+}
+
 function createFakeCloudDatabase(seed = {}, options = {}) {
   const removeValue = { __remove: true }
   const state = {}
   const transactionQueries = []
   const queryCalls = []
+  const readCalls = []
   const writeCalls = []
   const transactionRuns = []
   const beforeTransactionHooks = []
@@ -99,11 +108,14 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     throw failure.error
   }
 
-  function createDocument(name, id, transactionRecord = null, targetState = state) {
+  function createDocument(name, id, transactionRecord = null, targetState = state, fields = null) {
     function countOperation() {
       if (transactionRecord) transactionRecord.operations += 1
     }
     return {
+      field(nextFields) {
+        return createDocument(name, id, transactionRecord, targetState, clone(nextFields))
+      },
       async get() {
         countOperation()
         maybeFailRead(name, id, Boolean(transactionRecord))
@@ -111,7 +123,10 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
         if (!document) {
           throw new Error(`document.get:fail document with _id ${id} does not exist`)
         }
-        return { data: readClone(name, document) }
+        const data = project(document, fields)
+        readCalls.push({ collection: name, id, transaction: Boolean(transactionRecord),
+          fields: clone(fields), keys: Object.keys(data), bytes: Buffer.byteLength(JSON.stringify(data)) })
+        return { data: readClone(name, data) }
       },
       async set({ data }) {
         countOperation()
@@ -182,7 +197,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
   }
 
   function createQuery(name, transaction, criteria = null, order = [], offset = 0, maximum = 100,
-    targetState = state) {
+    targetState = state, fields = null) {
     function rejectTransactionQuery(operation) {
       if (!transaction) return
       transactionQueries.push({ collection: name, operation })
@@ -190,30 +205,34 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     }
 
     return {
+      field(nextFields) {
+        return createQuery(name, transaction, criteria, order, offset, maximum, targetState, clone(nextFields))
+      },
       doc(id) {
         return createDocument(name, id, transaction && typeof transaction === 'object' ? transaction : null,
           targetState)
       },
       where(nextCriteria) {
         rejectTransactionQuery('where')
-        return createQuery(name, transaction, nextCriteria, order, offset, maximum, targetState)
+        return createQuery(name, transaction, nextCriteria, order, offset, maximum, targetState, fields)
       },
       orderBy(field, direction) {
         rejectTransactionQuery('orderBy')
         return createQuery(name, transaction, criteria, [...order, [field, direction]], offset, maximum,
-          targetState)
+          targetState, fields)
       },
       skip(nextOffset) {
         rejectTransactionQuery('skip')
-        return createQuery(name, transaction, criteria, order, nextOffset, maximum, targetState)
+        return createQuery(name, transaction, criteria, order, nextOffset, maximum, targetState, fields)
       },
       limit(nextMaximum) {
         rejectTransactionQuery('limit')
-        return createQuery(name, transaction, criteria, order, offset, nextMaximum, targetState)
+        return createQuery(name, transaction, criteria, order, offset, nextMaximum, targetState, fields)
       },
       async get() {
         rejectTransactionQuery('get')
-        queryCalls.push({ collection: name, criteria: clone(criteria), order: clone(order), offset, limit: maximum })
+        queryCalls.push({ collection: name, criteria: clone(criteria), order: clone(order), offset, limit: maximum,
+          ...(fields ? { fields: clone(fields) } : {}) })
         let result = [...documents(name, targetState).values()].filter(document => matches(document, criteria))
         for (const [field, direction] of order.slice().reverse()) {
           result.sort((left, right) => {
@@ -227,7 +246,12 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
             return direction === 'desc' ? -comparison : comparison
           })
         }
-        return { data: result.slice(offset, offset + maximum).map(document => readClone(name, document)) }
+        return { data: result.slice(offset, offset + maximum).map(document => {
+          const data = project(document, fields)
+          readCalls.push({ collection: name, id: document._id, transaction: false, query: true,
+            fields: clone(fields), keys: Object.keys(data), bytes: Buffer.byteLength(JSON.stringify(data)) })
+          return readClone(name, data)
+        }) }
       },
       async count() {
         rejectTransactionQuery('count')
@@ -288,12 +312,12 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
       serverDateSequence += 1
       return { __serverDate: serverDateSequence }
     },
-    async runTransaction(callback) {
+    async runTransaction(callback, retries = 7) {
       const hook = beforeTransactionHooks.shift()
       if (hook) await hook()
       const record = { callbacks: 0, operations: 0, conflicts: 0 }
       transactionRuns.push(record)
-      for (let attempt = 0; attempt < 8; attempt += 1) {
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
         const baseVersion = stateVersion
         const localState = snapshot()
         const attemptRecord = { operations: 0, writes: 0, writeDetails: [] }
@@ -328,7 +352,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
         if (!committed) {
           record.conflicts += 1
           metrics.conflicts += 1
-          metrics.retries += 1
+          if (attempt < retries) metrics.retries += 1
           continue
         }
         writeCalls.push(...attemptRecord.writeDetails)
@@ -338,7 +362,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
         return result
       }
       const error = new Error('transaction conflict retry exhausted')
-      error.code = 'TRANSACTION_CONFLICT'
+      error.code = 'DATABASE_TRANSACTION_CONFLICT'
       if (options.afterTransactionError) {
         await options.afterTransactionError({ error, record: clone(record) })
       }
@@ -351,6 +375,7 @@ function createFakeCloudDatabase(seed = {}, options = {}) {
     state,
     transactionQueries,
     queryCalls,
+    readCalls,
     writeCalls,
     transactionRuns,
     metrics,

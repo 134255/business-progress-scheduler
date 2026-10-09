@@ -317,6 +317,34 @@ function version2TemplateDefinitionDigest(input) {
     .digest('hex')
 }
 
+// Creation-only preparation from raw nodes. The repository owns this value for
+// one request; transaction reads must still be normalized independently.
+function prepareVersion2TemplateCreation(input) {
+  const route = normalizeVersion2TemplateDefinition(input)
+  const reviewNodes = ownArrayValues(input.nodes).every(node => {
+    const source = ownDataObject(node)
+    return source.workflowMode === WORKFLOW_MODE ||
+      (!hasOwn(source, 'workflowMode') &&
+        (hasOwn(source, 'processorUserIds') || hasOwn(source, 'reviewerUserIds')))
+  })
+  const orderedNodes = route.nodes.slice().sort((left, right) => left.sequence - right.sequence)
+  const participantUserIds = [...new Set(orderedNodes.flatMap(node =>
+    [...node.processorUserIds, ...node.reviewerUserIds]))]
+  return {
+    route,
+    digest: crypto.createHash('sha256').update(JSON.stringify(route)).digest('hex'),
+    validateForEnable() {
+      // Graph normalization alone does not enforce the legacy enable checks:
+      // workflow markers, contiguous sequence, optional tail and role overlap.
+      if (!reviewNodes || orderedNodes.some((node, index) => node.sequence !== index)) {
+        throw createError('TEMPLATE_INVALID')
+      }
+      return validateNormalizedTemplateForEnable(
+        { workflowMode: WORKFLOW_MODE, nodes: orderedNodes }, participantUserIds)
+    }
+  }
+}
+
 function preActivationModeTemplateDefinitionDigest(nodes) {
   const values = ownArrayValues(nodes)
   if (values.length === 0) return templateDefinitionDigest(values)
@@ -416,6 +444,7 @@ module.exports = {
   normalizeDefinitionNodes,
   normalizeVersion2TemplateDefinition,
   version2TemplateDefinitionDigest,
+  prepareVersion2TemplateCreation,
   templateDefinitionDigest,
   preActivationModeTemplateDefinitionDigest,
   collectTemplateParticipantUserIds,

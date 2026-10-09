@@ -152,6 +152,15 @@ function createOptimisticBusinessDatabase(seed = {}) {
     return {
       doc(id) {
         return {
+          field(fields) {
+            const reference = this
+            return { async get() {
+              const { data } = await reference.get()
+              const include = Object.entries(fields).some(([key, value]) => key !== '_id' && value === true)
+              return { data: Object.fromEntries(Object.entries(data).filter(([key]) => include
+                ? fields[key] === true || key === '_id' && fields._id !== false : fields[key] !== false)) }
+            } }
+          },
           async get() {
             await Promise.resolve()
             const document = documents(source, name).get(id)

@@ -60,7 +60,7 @@ function stripSearchEnvelope(result) {
   return publicResult.value
 }
 
-async function synchronizeSearchResult(stored, businessSearchClient) {
+async function synchronizeSearchResult(stored, businessSearchClient, creationTiming) {
   const envelope = stored && Object.getOwnPropertyDescriptor(stored, 'searchEnvelope')
   if (!envelope) return stored
   if (!Object.prototype.hasOwnProperty.call(envelope, 'value')) throw createError('SEARCH_STATE_INVALID')
@@ -69,7 +69,8 @@ async function synchronizeSearchResult(stored, businessSearchClient) {
     if (!businessSearchClient || typeof businessSearchClient.ensureIndexed !== 'function') {
       throw new Error('search unavailable')
     }
-    await businessSearchClient.ensureIndexed(envelope.value)
+    if (creationTiming) await businessSearchClient.ensureIndexed(envelope.value, creationTiming)
+    else await businessSearchClient.ensureIndexed(envelope.value)
     return publicResult
   } catch (_) {
     return Object.assign({}, publicResult, { searchIndexStatus: 'pending' })

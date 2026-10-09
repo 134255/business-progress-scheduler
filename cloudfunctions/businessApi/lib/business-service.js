@@ -1,5 +1,6 @@
-const { collectTemplateParticipantUserIds, validateTemplateForEnable } = require('./template-domain')
+const { prepareTemplateEnableValidation } = require('./template-domain')
 const { stripSearchEnvelope, synchronizeSearchResult } = require('./search-version')
+const { measureCreationStage, startCreationStage } = require('./creation-timing')
 const { normalizeBusinessListFilters } = require('./business-list-filters')
 const {
   APPLICATION_ERROR_MARKER,
@@ -90,7 +91,7 @@ function normalizePendingQuery(query = {}) {
   return { cursor: query.cursor || '', pageSize }
 }
 
-function requireEnabledDefinition(definition) {
+function requireEnabledDefinition(definition, validatePrepared) {
   if (!definition || !definition.template || definition.template.status !== 'enabled') {
     throw createError('TEMPLATE_NOT_ENABLED')
   }
@@ -98,10 +99,13 @@ function requireEnabledDefinition(definition) {
     throw createError('TEMPLATE_LIMIT_EXCEEDED', TEMPLATE_LIMIT_MESSAGE)
   }
   if (definition.template.nodeCount !== definition.nodes.length) throw createError('TEMPLATE_INVALID')
-  let participantUserIds
   try {
-    participantUserIds = collectTemplateParticipantUserIds(definition.nodes)
-    validateTemplateForEnable(definition.template, definition.nodes, participantUserIds)
+    if (typeof validatePrepared === 'function') {
+      validatePrepared()
+    } else {
+      const validation = prepareTemplateEnableValidation(definition.nodes)
+      validation.validate(validation.participantUserIds)
+    }
   } catch (error) {
     error[APPLICATION_ERROR_MARKER] = true
     throw error
@@ -216,12 +220,12 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
   }
   if (typeof clock !== 'function') throw new TypeError('clock is required')
 
-  async function createFromTemplate({ actor, input, afterCreated }) {
+  async function createFromTemplate({ actor, input, afterCreated, creationTiming }) {
     requireActiveActor(actor)
     const normalized = normalizeInput(input)
     const stored = await repository.createBusinessSnapshot({
-      actor, input: normalized,
-      prepareSnapshot: () => prepareCreation(normalized.templateId)
+      actor, input: normalized, creationTiming,
+      prepareSnapshot: loadDefinition => prepareCreation(normalized.templateId, creationTiming, loadDefinition)
     })
     const publicResult = stripSearchEnvelope(stored)
     // Only independent derived work overlaps, after the full snapshot is active.
@@ -231,17 +235,23 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
       try { await afterCreated(publicResult) } catch (_) { /* Derived work is best-effort. */ }
     }
     const [result] = await Promise.all([
-      synchronizeSearchResult(stored, businessSearchClient), refresh()
+      measureCreationStage(creationTiming, 'search_sync', () => synchronizeSearchResult(stored, businessSearchClient, creationTiming)), refresh()
     ])
     return result
   }
 
   // Preparation is lazy: the repository owns the single existing-result check,
   // so retries can recover a committed snapshot even after its template changes.
-  async function prepareCreation(templateId) {
-    const definition = requireEnabledDefinition(
-      await repository.getTemplateDefinition(templateId)
-    )
+  async function prepareCreation(templateId, creationTiming, loadDefinition) {
+    // A real repository supplies a request-owned loader. Older injected
+    // repositories retain the complete, uncached validation path.
+    const prepared = await measureCreationStage(creationTiming, 'template_read', async () =>
+      typeof loadDefinition === 'function'
+        ? loadDefinition(templateId)
+        : { definition: await repository.getTemplateDefinition(templateId) })
+    const endValidation = startCreationStage(creationTiming, 'template_validate')
+    const definition = requireEnabledDefinition(prepared.definition, prepared.validateForEnable)
+    endValidation()
     const snapshotInput = { definition }
     const entryNode = definition.template && definition.template.flowSchemaVersion === 2
       ? definition.nodes.find(node => node && node.nodeKey === definition.template.entryNodeKey)
@@ -256,7 +266,7 @@ function createBusinessService({ repository, workTimeService, businessSearchClie
       if (!Number.isSafeInteger(minutes) || minutes <= 0) throw createError('TEMPLATE_INVALID')
       snapshotInput.firstProcessingDue = firstProcessingDue(
         startedAt,
-        await workTimeService.tryAddWorkMinutes(new Date(startedAt), minutes)
+        await measureCreationStage(creationTiming, 'calendar_due', () => workTimeService.tryAddWorkMinutes(new Date(startedAt), minutes))
       )
     }
     return snapshotInput

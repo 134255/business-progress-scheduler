@@ -96,15 +96,23 @@ function summarizeNodeFields({ definitions, values, selections, fallbackDefiniti
   // order so stale hidden children are suppressed, while invalid VISIBLE values
   // still fail closed (clearInvalidConditionalValues would silently drop them).
   const current = []
+  // Definitions and values are private copies for this synchronous summary.
+  // Reuse only an identical accepted prefix; never cache across cards/requests.
+  let resolved
   for (const field of normalized) {
-    const visible = resolveConditionalFields(normalized, current).visibleDefinitions
+    if (!submitted.has(field.fieldKey)) continue
+    if (!resolved) resolved = resolveConditionalFields(normalized, current)
+    const visible = resolved.visibleDefinitions
       .find(candidate => candidate.fieldKey === field.fieldKey)
-    if (!visible || !submitted.has(field.fieldKey)) continue
+    if (!visible) continue
     const value = submitted.get(field.fieldKey)
     formatNormalizedValue(visible, value)
-    if (value !== undefined && value !== null && value !== '') current.push({ fieldKey: field.fieldKey, value })
+    if (value !== undefined && value !== null && value !== '') {
+      current.push({ fieldKey: field.fieldKey, value })
+      resolved = undefined
+    }
   }
-  const resolved = resolveConditionalFields(normalized, current)
+  if (!resolved) resolved = resolveConditionalFields(normalized, current)
   const visible = new Map(resolved.visibleDefinitions.map(field => [field.fieldKey, field]))
   const fallback = new Map(copyOwnData(fallbackDefinitions, 0, { remaining:100000, arrayLimit:5000 }).map(field => {
     const normalizedField = normalizeFieldDefinition(field)

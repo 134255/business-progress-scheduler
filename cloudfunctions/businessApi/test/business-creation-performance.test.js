@@ -4,6 +4,7 @@ const { createFakeCloudDatabase } = require('./helpers/fake-cloud-database')
 const { createCloudBusinessRepository } = require('../lib/cloud-business-repository')
 const { createBusinessService } = require('../lib/business-service')
 const { version2TemplateDefinitionDigest } = require('../lib/template-domain')
+const { createCreationTiming } = require('../lib/creation-timing')
 
 function harness({ dueStatus = 'calculated' } = {}) {
   // Synthetic catalogue: no customer or production template data.
@@ -58,15 +59,18 @@ function harness({ dueStatus = 'calculated' } = {}) {
         let active = false
         const serial = { collection(name) {
           return { doc(id) {
-            const doc = transaction.collection(name).doc(id)
-            return Object.fromEntries(['get', 'set', 'update', 'remove'].map(method => [method, async (...args) => {
+            function wrap(doc) {
+              return { field(fields) { return wrap(doc.field(fields)) },
+                ...Object.fromEntries(['get', 'set', 'update', 'remove'].map(method => [method, async (...args) => {
               assert.equal(active, false, 'same-transaction commands must stay serial')
               active = true
               try {
                 await new Promise(resolve => setImmediate(resolve))
                 return await doc[method](...args)
               } finally { active = false }
-            }]))
+                }])) }
+            }
+            return wrap(transaction.collection(name).doc(id))
           } }
         } }
         return callback(serial)
@@ -103,6 +107,55 @@ test('new creation checks existing result once, retaining all 3000 catalogue row
     h.fake.transactionRuns.reduce((sum, run) => sum + run.operations, 0), 66)
 })
 
+for (const dueStatus of ['calculated', 'pending_calendar']) {
+  test(`creation checks small node headers without rereading catalogue; calendar=${dueStatus}`, async () => {
+    const h = harness({ dueStatus })
+    const first = await h.service.createFromTemplate({ actor: h.actor, input: h.input })
+    assert.deepEqual(await h.service.createFromTemplate({ actor: h.actor, input: h.input }), first)
+    const reads = h.fake.readCalls.filter(call => call.collection === 'business_nodes')
+    assert(reads.length >= 11)
+    assert(reads.every(call => !call.keys.includes('fieldDefinitions')),
+      'publication and calendar checks must not transfer full catalogue snapshots')
+    assert(reads.every(call => call.bytes < 1000))
+    const stored = h.fake.documents('business_nodes').sort((a, b) => a.sequence - b.sequence)
+    assert.deepEqual(stored[0].fieldDefinitions, h.nodes[0].fields)
+    assert.equal(stored.length, 10)
+    assert.equal(stored[0].processingDueStatus, dueStatus)
+    assert.equal(h.fake.documents('sequence_counters')[0].sequence, 1)
+    assert.equal(h.fake.documents('audit_logs').length, 1)
+    assert.equal(h.fake.documents('notifications').length, dueStatus === 'pending_calendar' ? 1 : 0)
+    assert(h.fake.transactionRuns.every(run => run.operations <= 100))
+  })
+}
+
+test('creation diagnostics cover the real snapshot path without adding database operations or leaking catalogue values', async () => {
+  const h = harness()
+  const events = []
+  const timing = createCreationTiming({ logger: { info: (_, event) => events.push(event) } })
+  const result = await h.service.createFromTemplate({ actor: h.actor, input: h.input, creationTiming: timing })
+  timing.finish('OK')
+  assert.equal(result.code, 'BL-20261008-0001')
+  assert.equal(h.reads.length + h.fake.queryCalls.length +
+    h.fake.transactionRuns.reduce((sum, run) => sum + run.operations, 0), 66)
+  assert.deepEqual(Object.keys(events[0].stages).sort(), [
+    'existing_lookup', 'template_read', 'template_validate', 'calendar_due', 'snapshot_prepare',
+    'reservation_transaction', 'reservation_template_read', 'reservation_template_validate',
+    'reservation_participants', 'reservation_write', 'publication_transaction', 'calendar_warning', 'search_sync'
+  ].sort())
+  assert.deepEqual(events[0].counters, { reservation_attempts: 1, publication_attempts: 1, calendar_attempts: 1 })
+  assert.equal(Object.values(events[0].stages).every(stage => stage.calls === 1 && stage.failedCalls === 0), true)
+  for (const secret of [result.id, result.code, 'Synthetic template', 'Option 499', 'Name processor-0']) {
+    assert.equal(JSON.stringify(events).includes(secret), false)
+  }
+  const retry = createCreationTiming({ logger: { info: (_, event) => events.push(event) } })
+  assert.deepEqual(await h.service.createFromTemplate({ actor: h.actor, input: h.input, creationTiming: retry }), result)
+  retry.finish('OK')
+  assert.deepEqual(Object.keys(events[1].stages).sort(),
+    ['existing_lookup', 'publication_transaction', 'calendar_warning', 'search_sync'].sort())
+  assert.equal(h.fake.documents('business_lines').length, 1)
+  assert.equal(h.fake.documents('business_nodes').length, 10)
+})
+
 test('repository lazy preparation runs only for new requests; retry survives disabled template', async () => {
   const h = harness()
   let prepared = 0
@@ -137,7 +190,19 @@ for (const sameKey of [true, false]) {
   test(`service concurrent creation preserves ${sameKey ? 'idempotency' : 'unique numbering'}`, async () => {
     const h = harness()
     const inputs = [h.input, { ...h.input, requestKey: sameKey ? h.input.requestKey : 'second-create' }]
-    const results = await Promise.all(inputs.map(input => h.service.createFromTemplate({ actor: h.actor, input })))
+    const events = []
+    const results = await Promise.all(inputs.map(async input => {
+      const timing = createCreationTiming({ logger: { info: (_, event) => events.push(event) } })
+      const result = await h.service.createFromTemplate({ actor: h.actor, input, creationTiming: timing })
+      timing.finish('OK')
+      return result
+    }))
+    assert.equal(events.length, 2)
+    assert(h.fake.metrics.retries > 0, 'exercise actual optimistic callback replays')
+    assert.equal(events.reduce((sum, event) => sum + Object.values(event.counters).reduce((a, b) => a + b, 0), 0),
+      h.fake.transactionRuns.reduce((sum, run) => sum + run.callbacks, 0))
+    assert(events.every(event => event.stages.existing_lookup.calls === 1 &&
+      Object.values(event.stages).every(stage => stage.incompleteCalls === 0)))
     const expected = sameKey ? 1 : 2
     assert.equal(new Set(results.map(result => result.id)).size, expected)
     assert.equal(new Set(results.map(result => result.code)).size, expected)
@@ -154,7 +219,12 @@ for (const sameKey of [true, false]) {
 test('failed snapshot write rolls back; retry publishes one full snapshot and preserves calendar warning', async () => {
   const h = harness({ dueStatus: 'pending_calendar' })
   h.fake.failNextWrite({ collection: 'business_nodes', operation: 'set', error: new Error('synthetic failure') })
-  await assert.rejects(h.service.createFromTemplate({ actor: h.actor, input: h.input }), /synthetic failure/)
+  const events = []
+  const timing = createCreationTiming({ logger: { info: (_, event) => events.push(event) } })
+  await assert.rejects(h.service.createFromTemplate({ actor: h.actor, input: h.input, creationTiming: timing }), /synthetic failure/)
+  timing.finish('ERROR')
+  assert.equal(events[0].stages.reservation_write.failedCalls, 1)
+  assert.equal(events[0].stages.reservation_write.incompleteCalls, 0)
   assert.equal(h.fake.documents('business_lines').length, 0)
   assert.equal(h.fake.documents('business_nodes').length, 0)
   assert.equal(h.fake.documents('sequence_counters').length, 0)

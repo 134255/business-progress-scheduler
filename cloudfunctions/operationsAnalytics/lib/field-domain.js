@@ -3,7 +3,7 @@ const FIELD_TYPES = Object.freeze([
   'date', 'single_select', 'multi_select'
 ])
 const MAX_REGEX_LENGTH = 256
-const { normalizeOptionLinkageInput, validateOptionLinkageFields } = require('./option-linkage-domain')
+const { validateOptionLinkageFields } = require('./option-linkage-domain')
 const {
   normalizeConditionInput,
   normalizeConditionalFields,
@@ -174,7 +174,8 @@ function normalizeFieldDefinition(input) {
     constraints: normalizeConstraints(input.type, hasOwn(input, 'constraints') ? input.constraints : {}),
     ...(scanEnabled ? { scanEnabled: true } : {}),
     ...(hasOwn(input, 'condition') ? { condition: normalizeConditionInput(input.condition) } : {}),
-    ...(hasOwn(input, 'optionLinkage') ? { optionLinkage: normalizeOptionLinkageInput(input.optionLinkage) } : {})
+    // The strict preflight above already owns a fresh normalized rule copy.
+    ...(hasOwn(input, 'optionLinkage') ? { optionLinkage: input.optionLinkage } : {})
   }
 }
 

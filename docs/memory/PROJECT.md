@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact update: 2026-10-08 (Asia/Shanghai; optional barcode entry and compact record UI; deployment in STATUS)
+Last stable-fact update: 2026-10-09 (Asia/Shanghai; bounded search-publication conflict recovery; deployment in STATUS)
 
 ## Product
 
@@ -17,7 +17,9 @@ Approved V1 rules include:
 - Template snapshots, sequential nodes, multiple responsible accounts with first-completion-wins (`OR` signing), logical deletion, audit history, and optimistic/concurrent flow protection.
 - Templates contain stable node and dynamic-field identifiers. Enabled workflow definitions are read-only and must be disabled before editing; the independent card display configuration remains editable by an active super administrator without disabling the workflow. New business lines receive server-generated globally unique codes, and instance nodes receive immutable codes derived from the business code.
 - 新建入口直接打开模板列表；填写预览通过原 `listEnabledTemplates` 的可选 `templateId` 定向读取所选启用定义，不传编号的旧调用仍返回全部启用模板。预览每次重新检查参与账号（非事务读取最多 4 路并发），仅在请求内部复用规范化结果，不缓存跨请求授权；定义完整性、V2/联动、角色和快照预算检查保留，创建事务的重验与幂等逻辑不变。真实五端时延与部署状态以 STATUS 为准。
-- 创建提交由仓储执行一次既有结果预检查，服务层只在新请求时惰性准备完整模板与首节点工期；不缓存授权、不提供跳过事务校验开关。预约和发布事务内固定文档操作继续串行，保留编号、完整商品/节点快照及重授权。完成权威发布及原日历告警检查后，仅检索同步与卡片摘要刷新并行且两者都等待；检索失败仍返回原pending状态，卡片失败不逆转权威成功，请求内标记避免重复刷新且兼容旧注入适配器。其他写入口和前端操作不变；发布/真机耗时以 STATUS 为准。
+- 创建提交由仓储执行一次既有结果预检查，服务层只在新请求时惰性准备模板目录与首节点工期；不缓存授权、不提供跳过事务校验开关。预约和发布事务内固定文档操作继续串行，保留编号、完整商品/节点快照及重授权。完成权威发布及原日历告警检查后，仅检索同步与卡片摘要刷新并行且两者都等待；检索失败仍返回原pending状态，卡片失败不逆转权威成功，请求内标记避免重复刷新且兼容旧注入适配器。其他写入口和前端操作不变；发布/真机耗时以 STATUS 为准。
+- 完整V2头、全部轻量节点目录及真实入口显式review/显式合法SLA符合资格时，创建预读不传商品正文；冻结目录只通过本次仓储加载对象身份绑定，不接受外部可信标记。预约事务及每次重试读取全部当前权威源、一次完整规范化/启用规则/创建者解析前摘要及入口原始工期绑定，继而检查角色、预算和当前活动账号，再保存完整快照。旧模板、不合快路径资格及旧适配器仍走完整准备（事务外摘要、启用规则与路由共享一次规范化；事务内独立重验）。用户已批准轻量路径正文校验后移、日历错误可能优先和工期起算提前；头变化NOT_ENABLED、头不变而正文/源损坏INVALID，详见ADR-0011补充。部署与实际性能以STATUS为准。
+- 单字段规范化仅复用本次严格预校验生成的独立规则副本，避免在同一函数内再次解析该私有副本；条件字段及路由的原始/最终字段检查继续保留，不把原始上下文当作可变字段的最终证明。未增加准备接口/可信参数，普通入口仍严格验证输入，不沿用前次请求对象；option-linkage纯引擎及摘要编码不变。field-domain属于API/Analytics共享包，修改需通过既有同步工具保持字节一致；当前发布状态见STATUS。
 - 活动超级管理员可复制已保存模板为独立草稿，启用中的源模板无需停用。副本生成全新文档/节点/字段标识并同步重建联动、流程和卡片展示引用，不复制历史售后、凭证或统计；同一事务校验当前源定义、展示配置、账号和参与人，超出现有100次操作预算时明确拒绝。未保存编辑不纳入复制；详见 ADR-0020 与发布验收文档 `docs/deployment/template-copy-acceptance.md`，实际部署状态以 STATUS 为准。
 - 普通用户从模板创建售后时，售后线名称由服务端在编号分配事务中固定生成为“模板名称-售后线编号”，客户端名称与计划日期输入均不参与创建；普通元数据编辑只允许修改说明。历史售后已有名称和计划日期保持原值并只读展示，不做迁移或清空；售后列表的日期筛选统一按售后创建日期解释。
 - Node feedback is revisioned and immutable. New review-workflow nodes separate non-overlapping processors and reviewers: processors save progress or submit for review, while independent reviewers use OR/ALL votes to approve or reject; new nodes cannot use the legacy direct-complete or legacy-reject path. Old business nodes retain controlled feedback-read compatibility and never receive fabricated review history.
@@ -62,6 +64,8 @@ The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-bus
 - 售后卡片后端使用独立的模板 `cardDisplay` 修订与售后头 `cardSummary` 派生缓存：按稳定节点/字段标识选择最多4项当前有效字段，已有实例沿用自身字段类型/标签，输出每项最多80个Unicode码点；展示修订不改变流程定义版本，摘要不改变业务版本、更新时间、排序或检索状态。五个首页/列表/待办读入口在筛选、授权、分页后统一装配；待办明确使用 `businessLineId` 读取所属售后，不能把节点或轮次 `_id` 当作售后ID。十一种现有业务写入口成功后有界刷新，派生失败不反转权威成功。每次请求独立会话去重、最多4路并发，缓存命中仍重验当前账号和业务关系；超级管理员全局列表非成员保持固定信息可见但不获得详情字段权限。决策与发布边界见 `docs/memory/decisions/ADR-0018-template-configurable-card-summary.md`，当前部署/客户端状态见 `docs/memory/STATUS.md`。
 
 - 检索漏索引恢复同时支持正常关键词请求驱动：每次最多扫描40条售后头、重建2条当前用户有权且符合筛选的售后；加密认证游标绑定账号、角色、条件和有效期，客户端每批最多20次请求后只允许显式继续。`searchSchemaVersion: 2` 区分完整当前格式与需重新生成的旧代；恢复不改变业务版本/完成状态，不执行清理或开启Timer，失败结果明确标为不完整。规则见 `docs/memory/decisions/ADR-0017-request-driven-search-recovery.md`。
+
+- 搜索最终发布事务仅对原生数据库冲突或固定 SDK 的精确包装冲突形态做最多3次应用层尝试；该事务关闭 SDK 自动重试，避免预算叠加，其他事务保留原策略。重试重读来源版本、节点及请求恢复授权，不重耗票据、不重建或重复写入索引条目、不改变权威售后；权限/业务版本变化及未知错误不重试。错误诊断仅输出固定分类，不包含异常原文。此局部修复保留创建后的搜索/卡片并行及等待语义，部署和线上效果以 STATUS 为准。
 
 - Client: native WeChat Mini Program using JavaScript, WXML, and WXSS under `miniprogram/`.
 - Client authentication starts at `pages/login/index`; an uninitialized system navigates to the guarded `pages/admin-initialize/index` page, which calls the cloud function from the Mini Program runtime and automatically hands successful initialization to forced password change. `miniprogram/app.js` owns the in-memory current-user state and the reset helper. First-login challenges remain memory-only until password change completes. Explicit logout persists only a non-sensitive boolean manual-login preference; it suppresses binding-based automatic restoration until successful password authentication clears it.

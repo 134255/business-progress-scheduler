@@ -1,4 +1,5 @@
 const crypto = require('node:crypto')
+const { measureCreationStage, startCreationStage, countCreationAttempt } = require('./creation-timing')
 
 const { formatBusinessCode, formatNodeCode } = require('./business-numbering')
 const { createCloudWorkCalendarRepository } = require('./cloud-work-calendar-repository')
@@ -21,7 +22,8 @@ const {
   REVIEWER_ASSIGNMENT_MODE,
   templateDefinitionDigest,
   normalizeVersion2TemplateDefinition,
-  version2TemplateDefinitionDigest
+  version2TemplateDefinitionDigest,
+  prepareVersion2TemplateCreation
 } = require('./template-domain')
 const {
   ACTIVATION_MODE,
@@ -75,6 +77,15 @@ function clone(value) {
   if (Array.isArray(value)) return value.map(clone)
   if (!value || typeof value !== 'object') return value
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]))
+}
+
+function freezeCreationData(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  Object.freeze(value)
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (Object.prototype.hasOwnProperty.call(descriptor, 'value')) freezeCreationData(descriptor.value)
+  }
+  return value
 }
 
 function validDate(value) {
@@ -277,9 +288,10 @@ function createCloudBusinessRepository({
     throw new TypeError('workTimeService.tryAddWorkMinutes is required')
   }
 
-  async function readDocument(database, collectionName, id) {
+  async function readDocument(database, collectionName, id, fields) {
     try {
-      const result = await database.collection(collectionName).doc(id).get()
+      const document = database.collection(collectionName).doc(id)
+      const result = await (fields ? document.field(fields) : document).get()
       return result && result.data ? result.data : null
     } catch (error) {
       if (isMissingDocumentError(error)) return null
@@ -287,22 +299,22 @@ function createCloudBusinessRepository({
     }
   }
 
-  async function readTemplateNodes(templateId) {
+  async function readTemplateNodes(templateId, fields) {
     const nodes = []
     for (let offset = 0; ; offset += QUERY_PAGE_SIZE) {
-      const result = await db.collection(COLLECTIONS.templateNodes)
+      const query = db.collection(COLLECTIONS.templateNodes)
         .where({ templateId })
         .orderBy('sequence', 'asc')
         .skip(offset)
         .limit(QUERY_PAGE_SIZE)
-        .get()
+      const result = await (fields ? query.field(fields) : query).get()
       const page = result.data || []
       nodes.push(...page)
       if (page.length < QUERY_PAGE_SIZE) return nodes.sort(compareNodes)
     }
   }
 
-  async function getTemplateDefinition(templateId) {
+  async function readTemplateDefinition(templateId, capturePreparation) {
     const template = await readDocument(db, COLLECTIONS.templates, templateId)
     if (!template || template.status === 'deleted') return null
     const nodes = await readTemplateNodes(templateId)
@@ -320,9 +332,17 @@ function createCloudBusinessRepository({
       throw createError('TEMPLATE_INVALID')
     }
     let actualDigest = null
+    let preparation = null
     if (hasDigest) {
       try {
-        actualDigest = versionedTemplateDigest(template, nodes)
+        if (capturePreparation && isVersion2Template(template)) {
+          preparation = prepareVersion2TemplateCreation({
+            flowSchemaVersion: template.flowSchemaVersion, entryNodeKey: template.entryNodeKey, nodes
+          })
+          actualDigest = preparation.digest
+        } else {
+          actualDigest = versionedTemplateDigest(template, nodes)
+        }
       } catch (error) {
         throw createError('TEMPLATE_INVALID')
       }
@@ -332,7 +352,54 @@ function createCloudBusinessRepository({
         actualDigest !== template.definitionDigest)) || (requiresDigest && !hasDigest)) {
       throw createError('TEMPLATE_INVALID')
     }
-    return { template, nodes }
+    const definition = { template, nodes }
+    if (preparation) capturePreparation(freezeCreationData(definition), freezeCreationData(preparation))
+    return definition
+  }
+
+  async function getTemplateDefinition(templateId) {
+    return readTemplateDefinition(templateId)
+  }
+
+  // Private, request-owned preflight. This is an eligibility check, not proof
+  // that the template body is valid. Every body is read and validated in the
+  // reservation transaction before participants or creation writes.
+  async function readLightCreationDefinition(templateId) {
+    const template = await readDocument(db, COLLECTIONS.templates, templateId)
+    const ids = template && exactDefinitionNodeIds(template.definitionNodeIds)
+    if (!template || template.status !== 'enabled' || !isVersion2Template(template) ||
+        !Number.isSafeInteger(template.version) || template.version < 1 ||
+        !ids || !ids.length || template.nodeCount !== ids.length ||
+        typeof template.definitionDigest !== 'string' || !/^[a-f0-9]{64}$/.test(template.definitionDigest) ||
+        typeof template.entryNodeKey !== 'string' || !template.entryNodeKey) return null
+    const nodes = await readTemplateNodes(templateId, {
+      _id: true, templateId: true, sequence: true, nodeKey: true,
+      workflowMode: true, processingSlaWorkHours: true
+    })
+    const actualIds = templateNodeDocumentIds(nodes)
+    if (!actualIds || actualIds.length !== ids.length || ids.some((id, i) => id !== actualIds[i]) ||
+        nodes.some(node => node.templateId !== templateId)) throw createError('TEMPLATE_INVALID')
+    if (nodes.some((node, i) => node.sequence !== i || typeof node.nodeKey !== 'string' || !node.nodeKey) ||
+        new Set(nodes.map(node => node.nodeKey)).size !== nodes.length) return null
+    const entry = nodes.find(node => node.nodeKey === template.entryNodeKey)
+    if (!hasExplicitEntryClock(entry)) return null
+    return freezeCreationData({ template, nodes })
+  }
+
+  function hasExplicitEntryClock(entry) {
+    const mode = ownDataValue(entry, 'workflowMode')
+    const sla = ownDataValue(entry, 'processingSlaWorkHours')
+    return mode.valid && mode.value === 'review' && sla.valid &&
+      typeof sla.value === 'number' && Number.isFinite(sla.value) && sla.value > 0 &&
+      Number.isSafeInteger(sla.value * 60)
+  }
+
+  function assertLightEntryClock(definition, currentNodes) {
+    const before = definition.nodes.find(node => node.nodeKey === definition.template.entryNodeKey)
+    const current = currentNodes.find(node => node.nodeKey === definition.template.entryNodeKey)
+    if (!hasExplicitEntryClock(current) || current._id !== before._id ||
+        current.workflowMode !== before.workflowMode ||
+        current.processingSlaWorkHours !== before.processingSlaWorkHours) throw createError('TEMPLATE_INVALID')
   }
 
   function assertCurrentTemplateHeader(template, definition, expectedNodes) {
@@ -1874,12 +1941,16 @@ function createCloudBusinessRepository({
     return `work-calendar-missing-${hash(`${lineId}\0processing`).slice(0, 40)}`
   }
 
-  async function ensurePendingCalendarWarning(lineId) {
+  async function ensurePendingCalendarWarning(lineId, creationTiming) {
     try {
-      return await db.runTransaction(async transaction => {
+      return await measureCreationStage(creationTiming, 'calendar_warning', () => db.runTransaction(async transaction => {
+        countCreationAttempt(creationTiming, 'calendar_attempts')
         const line = await readDocument(transaction, COLLECTIONS.lines, lineId)
         if (!line || line.status !== 'active' || typeof line.currentNodeId !== 'string') return false
-        const node = await readDocument(transaction, COLLECTIONS.nodes, line.currentNodeId)
+        const node = await readDocument(transaction, COLLECTIONS.nodes, line.currentNodeId, {
+          _id: true, businessLineId: true, sequence: true, workflowMode: true,
+          processingDueStatus: true, calendarNotificationStatus: true
+        })
         if (!node || node.businessLineId !== lineId || node.sequence !== 0 ||
             node.workflowMode !== 'review' || node.processingDueStatus !== 'pending_calendar') return false
         const warningId = calendarWarningId(lineId)
@@ -1899,15 +1970,16 @@ function createCloudBusinessRepository({
           } })
         }
         return true
-      })
+      }))
     } catch (_) {
       return false
     }
   }
 
-  async function publishCreation(actorId, input, lineId, expectedNodes) {
+  async function publishCreation(actorId, input, lineId, expectedNodes, creationTiming) {
     const identity = creationIdentity(actorId, input)
-    return db.runTransaction(async transaction => {
+    return measureCreationStage(creationTiming, 'publication_transaction', () => db.runTransaction(async transaction => {
+      countCreationAttempt(creationTiming, 'publication_attempts')
       const actor = await readDocument(transaction, COLLECTIONS.users, actorId)
       const line = await readDocument(transaction, COLLECTIONS.lines, lineId)
       if (!line) throw createError('NOT_FOUND')
@@ -1918,7 +1990,9 @@ function createCloudBusinessRepository({
       }
 
       for (const expected of expectedNodes) {
-        const stored = await readDocument(transaction, COLLECTIONS.nodes, expected.id)
+        const stored = await readDocument(transaction, COLLECTIONS.nodes, expected.id, {
+          _id: true, businessLineId: true, nodeCode: true, sequence: true
+        })
         if (!stored || stored.businessLineId !== lineId || stored.nodeCode !== expected.data.nodeCode ||
             stored.sequence !== expected.data.sequence) {
           throw createError('BUSINESS_ERROR')
@@ -1938,10 +2012,10 @@ function createCloudBusinessRepository({
         }
       })
       return withSearchEnvelope({ id: lineId, code: line.code }, actorId, line)
-    })
+    }))
   }
 
-  async function findCreationResult({ actorId, input }) {
+  async function findCreationResult({ actorId, input, creationTiming }) {
     const identity = creationIdentity(actorId, input)
     const actor = await readDocument(db, COLLECTIONS.users, actorId)
     if (!actor || ownDataValue(actor, 'status').value !== 'active') throw createError('FORBIDDEN')
@@ -1953,8 +2027,8 @@ function createCloudBusinessRepository({
       id: nodeId(line._id, index),
       data: { nodeCode: formatNodeCode(line.code, index + 1), sequence: index }
     }))
-    const result = await publishCreation(actorId, input, line._id, nodes)
-    await ensurePendingCalendarWarning(line._id)
+    const result = await publishCreation(actorId, input, line._id, nodes, creationTiming)
+    await ensurePendingCalendarWarning(line._id, creationTiming)
     return result
   }
 
@@ -1975,59 +2049,96 @@ function createCloudBusinessRepository({
   }
 
   async function createBusinessSnapshot({ actor, input, definition, firstProcessingDue: suppliedFirstDue,
-    prepareSnapshot }) {
+    prepareSnapshot, creationTiming }) {
     const identity = creationIdentity(actor && actor._id, input)
-    const existing = await findCreationResult({ actorId: actor._id, input })
+    const existing = await measureCreationStage(creationTiming, 'existing_lookup', () =>
+      findCreationResult({ actorId: actor._id, input, creationTiming }))
     if (existing) return existing
 
     // Internal lazy preparation avoids a second preflight lookup without caching
     // authorization or bypassing the reservation/publication transaction checks.
+    let preparedDefinition = null
+    let lightDefinition = null
     if (prepareSnapshot !== undefined) {
       if (typeof prepareSnapshot !== 'function') throw new TypeError('prepareSnapshot must be a function')
-      const preparedInput = await prepareSnapshot()
+      const preparedInput = await prepareSnapshot(async templateId => {
+        preparedDefinition = null
+        lightDefinition = null
+        if (templateId !== input.templateId) throw createError('TEMPLATE_INVALID')
+        lightDefinition = await readLightCreationDefinition(templateId)
+        if (lightDefinition) {
+          // Only the loader's exact frozen object selects this path. The service
+          // may compute the provisional deadline; body validation is deferred.
+          return { definition: lightDefinition, validateForEnable() {} }
+        }
+        const loaded = await readTemplateDefinition(templateId, (definition, preparation) => {
+          preparedDefinition = { definition, preparation }
+        })
+        return { definition: loaded,
+          ...(preparedDefinition ? { validateForEnable: preparedDefinition.preparation.validateForEnable } : {}) }
+      })
       definition = preparedInput.definition
       suppliedFirstDue = preparedInput.firstProcessingDue
     }
 
-    let route = null
-    if (isVersion2Template(definition.template)) {
+    // Only a definition read and frozen by this invocation can reuse work.
+    // Caller-provided definitions or preparation-shaped properties cannot opt in.
+    const preparation = preparedDefinition && preparedDefinition.definition === definition
+      ? preparedDefinition.preparation : null
+    const lightPreflight = lightDefinition !== null && lightDefinition === definition
+
+    const endPreparation = startCreationStage(creationTiming, 'snapshot_prepare')
+    function prepareSource(definition, preparation) {
+      let route = null
+      if (isVersion2Template(definition.template)) {
+        try {
+          route = preparation ? preparation.route : normalizeVersion2TemplateDefinition({
+            flowSchemaVersion: definition.template.flowSchemaVersion,
+            entryNodeKey: definition.template.entryNodeKey,
+            nodes: definition.nodes
+          })
+        } catch (error) {
+          throw createError('TEMPLATE_INVALID')
+        }
+      }
+      const snapshotSourceNodes = route
+        ? route.nodes.map(node => {
+            const stored = definition.nodes.find(candidate => candidate && candidate.nodeKey === node.nodeKey)
+            if (!stored) throw createError('TEMPLATE_INVALID')
+            return { ...node, _id: stored._id, templateId: stored.templateId }
+          })
+        : definition.nodes
+      const sourceNodes = resolveSnapshotNodes(clone(snapshotSourceNodes), actor._id).sort(compareNodes)
+      const entryNode = route
+        ? sourceNodes.find(node => node.nodeKey === route.entryNodeKey)
+        : sourceNodes[0]
+      if (!entryNode) throw createError('TEMPLATE_INVALID')
+      let expectedTemplateDigest
       try {
-        route = normalizeVersion2TemplateDefinition({
-          flowSchemaVersion: definition.template.flowSchemaVersion,
-          entryNodeKey: definition.template.entryNodeKey,
-          nodes: definition.nodes
-        })
+        // Hash before creator resolution. Only an invocation-owned preparation
+        // can reuse its digest; raw callers still take the strict legacy path.
+        expectedTemplateDigest = preparation ? preparation.digest : route
+          ? hash(JSON.stringify(route))
+          : versionedTemplateDigest(definition.template, definition.nodes)
       } catch (error) {
         throw createError('TEMPLATE_INVALID')
       }
+      const processorIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
+        Array.isArray(node.processorUserIds) ? node.processorUserIds : []))].sort()
+      const reviewerIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
+        Array.isArray(node.reviewerUserIds) ? node.reviewerUserIds : []))].sort()
+      const legacyAssigneeIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode !== 'review' &&
+        Array.isArray(node.assigneeUserIds) ? node.assigneeUserIds : []))].sort()
+      const participantIds = snapshotParticipantUserIds(sourceNodes)
+      assertDefinitionBudget({ ...definition, nodes: sourceNodes }, actor._id)
+      const memberUserIds = [...new Set([actor._id, ...participantIds])].sort()
+      return { route, sourceNodes, entryNode, expectedTemplateDigest, processorIds, reviewerIds,
+        legacyAssigneeIds, memberUserIds }
     }
-    const snapshotSourceNodes = route
-      ? route.nodes.map(node => {
-          const stored = definition.nodes.find(candidate => candidate && candidate.nodeKey === node.nodeKey)
-          if (!stored) throw createError('TEMPLATE_INVALID')
-          return { ...node, _id: stored._id, templateId: stored.templateId }
-        })
-      : definition.nodes
-    const sourceNodes = resolveSnapshotNodes(clone(snapshotSourceNodes), actor._id).sort(compareNodes)
-    const entryNode = route
-      ? sourceNodes.find(node => node.nodeKey === route.entryNodeKey)
-      : sourceNodes[0]
-    if (!entryNode) throw createError('TEMPLATE_INVALID')
-    let expectedTemplateDigest
-    try {
-      expectedTemplateDigest = versionedTemplateDigest(definition.template, definition.nodes)
-    } catch (error) {
-      throw createError('TEMPLATE_INVALID')
-    }
-    const processorIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
-      Array.isArray(node.processorUserIds) ? node.processorUserIds : []))].sort()
-    const reviewerIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode === 'review' &&
-      Array.isArray(node.reviewerUserIds) ? node.reviewerUserIds : []))].sort()
-    const legacyAssigneeIds = [...new Set(sourceNodes.flatMap(node => node.workflowMode !== 'review' &&
-      Array.isArray(node.assigneeUserIds) ? node.assigneeUserIds : []))].sort()
-    const participantIds = snapshotParticipantUserIds(sourceNodes)
-    assertDefinitionBudget({ ...definition, nodes: sourceNodes }, actor._id)
-    const memberUserIds = [...new Set([actor._id, ...participantIds])].sort()
+    const fullPreparation = lightPreflight ? null : prepareSource(definition, preparation)
+    const entryNode = lightPreflight
+      ? definition.nodes.find(node => node.nodeKey === definition.template.entryNodeKey)
+      : fullPreparation.entryNode
     const at = clock()
     if (!(at instanceof Date) || Number.isNaN(at.getTime())) throw new TypeError('clock must return a Date')
     let firstProcessingDue = suppliedFirstDue ? clone(suppliedFirstDue) : null
@@ -2070,6 +2181,7 @@ function createCloudBusinessRepository({
           (pendingDue && firstProcessingDue.processingDueAt !== null) ||
           (!calculatedDue && !pendingDue)) throw createError('BUSINESS_ERROR')
     }
+    endPreparation()
     const dayKey = formatBusinessCode(at, 1).slice(3, 11)
     const counterId = `business-line-${dayKey}`
     let minimumSequence = 1
@@ -2079,7 +2191,8 @@ function createCloudBusinessRepository({
     for (let attempt = 0; attempt < duplicateRetries; attempt += 1) {
       let attemptedSequence
       try {
-        reserved = await db.runTransaction(async transaction => {
+        reserved = await measureCreationStage(creationTiming, 'reservation_transaction', () => db.runTransaction(async transaction => {
+          countCreationAttempt(creationTiming, 'reservation_attempts')
           const creator = await readDocument(transaction, COLLECTIONS.users, actor._id)
           if (!creator || creator.status !== 'active') throw createError('FORBIDDEN')
           const concurrent = await readDocument(transaction, COLLECTIONS.lines, identity.lineId)
@@ -2089,71 +2202,99 @@ function createCloudBusinessRepository({
             return { line: concurrent, existing: true }
           }
           const template = await readDocument(transaction, COLLECTIONS.templates, definition.template._id)
-          assertCurrentTemplateHeader(template, definition, sourceNodes)
+          assertCurrentTemplateHeader(template, definition,
+            lightPreflight ? definition.nodes : fullPreparation.sourceNodes)
           const sourceNodeIds = definition.nodes.map(node => node && node._id)
           if (sourceNodeIds.some(id => typeof id !== 'string' || !id) ||
               new Set(sourceNodeIds).size !== sourceNodeIds.length) {
             throw createError('TEMPLATE_NOT_ENABLED')
           }
-          const currentTemplateNodes = []
-          for (const sourceNodeId of sourceNodeIds) {
-            const currentNode = await readDocument(transaction, COLLECTIONS.templateNodes, sourceNodeId)
-            if (!currentNode || currentNode.templateId !== template._id) throw createError('TEMPLATE_NOT_ENABLED')
-            currentTemplateNodes.push(currentNode)
-          }
-          let currentTemplateDigest
-          try {
-            currentTemplateDigest = versionedTemplateDigest(template, currentTemplateNodes.sort(compareNodes))
-          } catch (error) {
-            throw createError('TEMPLATE_NOT_ENABLED')
-          }
-          if (currentTemplateDigest !== expectedTemplateDigest ||
-              (template.definitionDigest !== undefined && template.definitionDigest !== currentTemplateDigest)) {
-            throw createError('TEMPLATE_NOT_ENABLED')
-          }
+          const currentTemplateNodes = await measureCreationStage(creationTiming, 'reservation_template_read', async () => {
+            const nodes = []
+            for (const sourceNodeId of sourceNodeIds) {
+              const currentNode = await readDocument(transaction, COLLECTIONS.templateNodes, sourceNodeId)
+              if (!currentNode || currentNode.templateId !== template._id) {
+                throw createError(lightPreflight ? 'TEMPLATE_INVALID' : 'TEMPLATE_NOT_ENABLED')
+              }
+              nodes.push(currentNode)
+            }
+            return nodes
+          })
+          const attemptPreparation = await measureCreationStage(creationTiming, 'reservation_template_validate', () => {
+            if (lightPreflight) {
+              let currentPreparation
+              try {
+                currentPreparation = prepareVersion2TemplateCreation({ flowSchemaVersion: template.flowSchemaVersion,
+                  entryNodeKey: template.entryNodeKey, nodes: currentTemplateNodes })
+              } catch (_) { throw createError('TEMPLATE_INVALID') }
+              if (currentPreparation.digest !== template.definitionDigest) throw createError('TEMPLATE_INVALID')
+              // Preserve role/enable errors and the API's application marker.
+              try { currentPreparation.validateForEnable() } catch (error) {
+                error[APPLICATION_ERROR_MARKER] = true
+                throw error
+              }
+              assertLightEntryClock(definition, currentTemplateNodes)
+              return prepareSource({ template, nodes: currentTemplateNodes }, currentPreparation)
+            }
+            let currentTemplateDigest
+            try {
+              currentTemplateDigest = versionedTemplateDigest(template, currentTemplateNodes.sort(compareNodes))
+            } catch (error) {
+              throw createError('TEMPLATE_NOT_ENABLED')
+            }
+            if (currentTemplateDigest !== fullPreparation.expectedTemplateDigest ||
+                (template.definitionDigest !== undefined && template.definitionDigest !== currentTemplateDigest)) {
+              throw createError('TEMPLATE_NOT_ENABLED')
+            }
+            return fullPreparation
+          })
+          const { route, sourceNodes, processorIds, reviewerIds, legacyAssigneeIds, memberUserIds } = attemptPreparation
           if (sourceNodes.some(node => node.workflowMode === 'review' &&
               node.processorUserIds.some(userId => node.reviewerUserIds.includes(userId)))) {
             throw createError('CREATOR_REVIEWER_CONFLICT')
           }
           const displayNames = new Map([[actor._id, snapshotDisplayName(creator)]])
-          for (const userId of processorIds) {
-            if (userId === actor._id) continue
-            const user = await readDocument(transaction, COLLECTIONS.users, userId)
-            if (!user || user.status !== 'active') throw createError('PROCESSOR_INACTIVE')
-            displayNames.set(userId, snapshotDisplayName(user))
-          }
-          for (const userId of reviewerIds.filter(userId => !processorIds.includes(userId))) {
-            if (userId === actor._id) continue
-            const user = await readDocument(transaction, COLLECTIONS.users, userId)
-            if (!user || user.status !== 'active') throw createError('REVIEWER_INACTIVE')
-            displayNames.set(userId, snapshotDisplayName(user))
-          }
-          for (const userId of legacyAssigneeIds.filter(userId =>
-            !processorIds.includes(userId) && !reviewerIds.includes(userId))) {
-            if (userId === actor._id) continue
-            const user = await readDocument(transaction, COLLECTIONS.users, userId)
-            if (!user || user.status !== 'active') throw createError('ASSIGNEE_INACTIVE')
-            displayNames.set(userId, snapshotDisplayName(user))
-          }
+          await measureCreationStage(creationTiming, 'reservation_participants', async () => {
+            for (const userId of processorIds) {
+              if (userId === actor._id) continue
+              const user = await readDocument(transaction, COLLECTIONS.users, userId)
+              if (!user || user.status !== 'active') throw createError('PROCESSOR_INACTIVE')
+              displayNames.set(userId, snapshotDisplayName(user))
+            }
+            for (const userId of reviewerIds.filter(userId => !processorIds.includes(userId))) {
+              if (userId === actor._id) continue
+              const user = await readDocument(transaction, COLLECTIONS.users, userId)
+              if (!user || user.status !== 'active') throw createError('REVIEWER_INACTIVE')
+              displayNames.set(userId, snapshotDisplayName(user))
+            }
+            for (const userId of legacyAssigneeIds.filter(userId =>
+              !processorIds.includes(userId) && !reviewerIds.includes(userId))) {
+              if (userId === actor._id) continue
+              const user = await readDocument(transaction, COLLECTIONS.users, userId)
+              if (!user || user.status !== 'active') throw createError('ASSIGNEE_INACTIVE')
+              displayNames.set(userId, snapshotDisplayName(user))
+            }
 
-          const counter = await readDocument(transaction, COLLECTIONS.counters, counterId)
-          const currentSequence = counter ? counter.sequence : 0
-          if (!Number.isSafeInteger(currentSequence) || currentSequence < 0 ||
-              currentSequence === Number.MAX_SAFE_INTEGER) {
-            throw createError('BUSINESS_ERROR')
-          }
-          attemptedSequence = Math.max(currentSequence + 1, minimumSequence)
-          const code = formatBusinessCode(at, attemptedSequence)
-          const templateName = typeof template.name === 'string' ? template.name.trim() : ''
-          if (!templateName) throw createError('TEMPLATE_NOT_ENABLED')
-          prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue, displayNames, route)
-          const entrySnapshot = route
-            ? prepared.find(node => node.data.nodeKey === route.entryNodeKey)
-            : prepared[0]
-          if (!entrySnapshot) throw createError('TEMPLATE_NOT_ENABLED')
-          const optionalTail = prepared.find(node => node.data.activationMode === ACTIVATION_MODE.OPTIONAL_TAIL)
-          await transaction.collection(COLLECTIONS.counters).doc(counterId).set({
-            data: { sequence: attemptedSequence, dateKey: dayKey, updatedAt: db.serverDate() }
+          })
+          return measureCreationStage(creationTiming, 'reservation_write', async () => {
+            const counter = await readDocument(transaction, COLLECTIONS.counters, counterId)
+            const currentSequence = counter ? counter.sequence : 0
+            if (!Number.isSafeInteger(currentSequence) || currentSequence < 0 ||
+                currentSequence === Number.MAX_SAFE_INTEGER) {
+              throw createError('BUSINESS_ERROR')
+            }
+            attemptedSequence = Math.max(currentSequence + 1, minimumSequence)
+            const code = formatBusinessCode(at, attemptedSequence)
+            const templateName = typeof template.name === 'string' ? template.name.trim() : ''
+            if (!templateName) throw createError('TEMPLATE_NOT_ENABLED')
+            prepared = preparedSnapshot(identity.lineId, code, sourceNodes, firstProcessingDue, displayNames, route)
+            const entrySnapshot = route
+              ? prepared.find(node => node.data.nodeKey === route.entryNodeKey)
+              : prepared[0]
+            if (!entrySnapshot) throw createError('TEMPLATE_NOT_ENABLED')
+            const optionalTail = prepared.find(node => node.data.activationMode === ACTIVATION_MODE.OPTIONAL_TAIL)
+            await transaction.collection(COLLECTIONS.counters).doc(counterId).set({
+              data: { sequence: attemptedSequence, dateKey: dayKey, updatedAt: db.serverDate() }
           })
           const line = {
             code,
@@ -2193,7 +2334,8 @@ function createCloudBusinessRepository({
             await transaction.collection(COLLECTIONS.nodes).doc(node.id).set({ data: node.data })
           }
           return { line: { _id: identity.lineId, ...line }, existing: false }
-        })
+          })
+        }))
         break
       } catch (error) {
         if (!isDuplicateError(error)) throw error
@@ -2209,8 +2351,8 @@ function createCloudBusinessRepository({
         data: { nodeCode: formatNodeCode(reserved.line.code, index + 1), sequence: index }
       }))
     }
-    const result = await publishCreation(actor._id, input, identity.lineId, prepared)
-    await ensurePendingCalendarWarning(identity.lineId)
+    const result = await publishCreation(actor._id, input, identity.lineId, prepared, creationTiming)
+    await ensurePendingCalendarWarning(identity.lineId, creationTiming)
     return result
   }
 

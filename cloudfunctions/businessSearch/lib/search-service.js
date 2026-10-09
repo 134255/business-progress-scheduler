@@ -2,6 +2,7 @@ const crypto = require('node:crypto')
 
 const { buildSearchEntries, tokenizeEntry } = require('./search-domain')
 const { reportSearchFailure } = require('./search-diagnostics')
+const { createIndexTiming, measureIndexStage } = require('./index-timing')
 
 function createError(code) {
   const error = new Error(code)
@@ -21,6 +22,7 @@ function createSearchService({
   repository,
   secret,
   logger = console,
+  timingNow,
   generationIdFactory = () => crypto.randomBytes(24).toString('hex')
 }) {
   if (!repository || typeof repository.consumeRequest !== 'function' ||
@@ -33,9 +35,9 @@ function createSearchService({
     throw createError('SEARCH_SECRET_INVALID')
   }
 
-  async function stage(phase, operation) {
+  async function stage(phase, operation, timing, timingPhase = phase) {
     try {
-      return await operation()
+      return await measureIndexStage(timing, timingPhase, operation)
     } catch (error) {
       // Preserve the original exception/code. Logging only reads this safe tag.
       try { Object.defineProperty(error, 'searchPhase', { value: phase, configurable: true }) } catch (_) {}
@@ -43,12 +45,13 @@ function createSearchService({
     }
   }
 
-  async function buildAndPublish(request) {
+  async function buildAndPublish(request, timing) {
     if (typeof repository.isGenerationCurrent === 'function' &&
-        await stage('load_snapshot', () => repository.isGenerationCurrent(request))) {
+        await stage('load_snapshot', () => repository.isGenerationCurrent(request), timing, 'generation_check')) {
       return { businessLineId: request.businessLineId, sourceVersion: request.sourceVersion, indexStatus: 'generated' }
     }
-    const snapshot = await stage('load_snapshot', () => repository.loadAuthoritativeSnapshot(request))
+    const snapshot = await stage('load_snapshot', () => repository.loadAuthoritativeSnapshot(request, timing),
+      timing, 'snapshot_load')
     const { generationId, entries } = await stage('build_entries', () => {
       const generationId = generationIdFactory(request)
       if (typeof generationId !== 'string' || generationId.length < 1 || generationId.length > 128) {
@@ -63,20 +66,29 @@ function createSearchService({
         }))
       }))
       return { generationId, entries }
-    })
+    }, timing, 'entries_build')
     await stage('publish_generation', () => repository.publishGeneration({
       businessLineId: request.businessLineId,
       sourceVersion: request.sourceVersion,
       ...(request.recoveryAccess ? { recoveryAccess: request.recoveryAccess } : {}),
       generationId,
       entries
-    }))
+    }, timing), timing, 'generation_publish')
     return { businessLineId: request.businessLineId, sourceVersion: request.sourceVersion, indexStatus: 'generated' }
   }
 
   async function indexRequest({ token }) {
-    const request = await repository.consumeRequest({ token, operation: 'index' })
-    return buildAndPublish(request)
+    const timing = createIndexTiming({ logger, now: timingNow })
+    try {
+      const request = await measureIndexStage(timing, 'ticket_consume',
+        () => repository.consumeRequest({ token, operation: 'index' }, timing))
+      const result = await buildAndPublish(request, timing)
+      timing.finish('OK')
+      return result
+    } catch (error) {
+      timing.finish('ERROR')
+      throw error
+    }
   }
 
   async function queryRequest({ token }) {

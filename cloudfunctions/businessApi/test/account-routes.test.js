@@ -549,6 +549,7 @@ test('the template-backed business route delegates generated creation to the tru
     actorId: 'forged-actor',
     code: 'CLIENT-CODE',
     afterCreated: 'client-cannot-supply-hook',
+    creationTiming: 'client-cannot-supply-timing',
     nodes: [{ name: '客户端节点' }]
   }
   const result = await harness.api.main({ action: 'createBusinessFromTemplate', payload })
@@ -559,7 +560,9 @@ test('the template-backed business route delegates generated creation to the tru
   })
   assert.equal(calls.length, 1)
   assert.equal(typeof calls[0].afterCreated, 'function')
-  assert.deepEqual(calls.map(({ afterCreated, ...input }) => input), [{
+  assert.equal(typeof calls[0].creationTiming.start, 'function')
+  assert.notEqual(calls[0].creationTiming, payload.creationTiming)
+  assert.deepEqual(calls.map(({ afterCreated, creationTiming, ...input }) => input), [{
     actor: {
       _id: 'actor-1', username: 'admin', role: 'super_admin', status: 'active', openid: 'wx-bound'
     },

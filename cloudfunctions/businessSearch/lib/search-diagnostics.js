@@ -1,3 +1,5 @@
+const { databaseErrorCause } = require('./search-database-errors')
+
 const CAUSES = new Set([
   'SEARCH_SOURCE_INVALID', 'SEARCH_STATE_INVALID', 'SEARCH_CONFIGURATION_INVALID',
   'SEARCH_SECRET_INVALID', 'SEARCH_GENERATION_INVALID', 'SEARCH_CURSOR_INVALID',
@@ -8,8 +10,10 @@ const OPERATIONS = new Set(['index', 'query', 'recovery', 'cycle'])
 
 function ownValue(object, key) {
   if (!object || typeof object !== 'object') return undefined
-  const descriptor = Object.getOwnPropertyDescriptor(object, key)
-  return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value') ? descriptor.value : undefined
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key)
+    return descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value') ? descriptor.value : undefined
+  } catch (_) { return undefined }
 }
 
 function reportSearchFailure(logger, error, operation) {
@@ -19,7 +23,7 @@ function reportSearchFailure(logger, error, operation) {
   try {
     logger.error('[businessSearch]', {
       code: 'BUSINESS_SEARCH_FAILED',
-      causeCode: CAUSES.has(cause) ? cause : 'UNKNOWN',
+      causeCode: CAUSES.has(cause) ? cause : databaseErrorCause(error),
       phase: PHASES.has(phase) ? phase : 'unknown',
       operation: OPERATIONS.has(operation) ? operation : 'unknown'
     })

@@ -1,5 +1,7 @@
 const crypto = require('node:crypto')
 const { mapBounded } = require('./bounded-map')
+const { measureIndexStage, countIndexOperation } = require('./index-timing')
+const { isDatabaseTransactionConflict } = require('./search-database-errors')
 
 const {
   safeSearchExcerpt
@@ -26,6 +28,11 @@ const MAX_GENERATION_ENTRIES = 5000
 const MAX_CYCLE_BATCH = 40
 const SEARCH_SCHEMA_VERSION = 2
 const MAX_QUERY_RECOVERY_BUILDS = 2
+const PUBLICATION_CONFLICT_DELAYS_MS = Object.freeze([40, 80])
+const PUBLISH_NODE_FIELDS = Object.freeze({
+  _id: true, businessLineId: true, routeState: true,
+  searchSourceVersion: true, searchGeneratedVersion: true, searchIndexStatus: true
+})
 const QUERY_CURSOR_TTL_MS = 5 * 60 * 1000
 const CURSOR_SCHEMA_VERSION = 1
 const CURSORS = Object.freeze({
@@ -125,10 +132,13 @@ function documentId(parts) {
   return crypto.createHash('sha256').update(parts.join('\u0000'), 'utf8').digest('hex')
 }
 
-async function readDocument(store, collection, id) {
+async function readDocument(store, collection, id, fields, preserveConflict = false) {
   try {
-    return (await store.collection(collection).doc(id).get()).data || null
-  } catch (_) {
+    const document = store.collection(collection).doc(id)
+    return (await (fields ? document.field(fields) : document).get()).data || null
+  } catch (error) {
+    // Only publication opts in; keep all other historical read semantics.
+    if (preserveConflict && isDatabaseTransactionConflict(error)) throw error
     return null
   }
 }
@@ -243,18 +253,34 @@ function compareNodes(left, right) {
   return Number(left.sequence) - Number(right.sequence) || String(left._id).localeCompare(String(right._id))
 }
 
-function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
+function createCloudSearchRepository({ db, clock = () => new Date(), secret,
+  delay = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   if (!db || typeof db.runTransaction !== 'function' || !exactString(secret) || Array.from(secret).length < 32) {
     throw createError('SEARCH_CONFIGURATION_INVALID')
   }
 
-  async function consumeRequest({ token, operation }) {
+  async function publishTransaction(callback) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        // Own the retry budget here so native SDK retries cannot multiply it.
+        // Each attempt re-reads source versions and recovery authorization;
+        // ticket consumption and immutable generation writes are not replayed.
+        return await db.runTransaction(callback, 0)
+      } catch (error) {
+        if (!isDatabaseTransactionConflict(error) || attempt >= PUBLICATION_CONFLICT_DELAYS_MS.length) throw error
+        await delay(PUBLICATION_CONFLICT_DELAYS_MS[attempt])
+      }
+    }
+  }
+
+  async function consumeRequest({ token, operation }, timing) {
     if (!exactString(token, { maximum: 512 }) || !['index', 'query'].includes(operation)) {
       throw createError('FORBIDDEN')
     }
     const now = clock()
     const id = hashHex(secret, token)
     return db.runTransaction(async transaction => {
+      countIndexOperation(timing, 'ticket_attempts')
       const ticket = await readDocument(transaction, COLLECTIONS.requests, id)
       const ticketOperation = ownDataValue(ticket, 'operation')
       const actorId = ownDataValue(ticket, 'actorId')
@@ -729,18 +755,24 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
     }
   }
 
-  async function loadAuthoritativeSnapshot({ businessLineId, sourceVersion, recoveryAccess }) {
+  async function loadAuthoritativeSnapshot({ businessLineId, sourceVersion, recoveryAccess }, timing) {
     if (!exactString(businessLineId, { maximum: 128 }) || !exactSafeInteger(sourceVersion)) throw sourceError()
-    const line = recoveryAccess
-      ? await authorizeRecoveryLine(businessLineId, recoveryAccess)
-      : await readDocument(db, COLLECTIONS.lines, businessLineId)
+    const line = await measureIndexStage(timing, 'snapshot_head', () => recoveryAccess
+      ? authorizeRecoveryLine(businessLineId, recoveryAccess)
+      : readDocument(db, COLLECTIONS.lines, businessLineId))
     if (recoveryAccess && !line) throw createError('FORBIDDEN')
     if (!safeSourceVersion(line, sourceVersion) || !exactString(line.code, { maximum: 128 }) ||
         !exactString(line.name, { maximum: 500 }) ||
         !exactString(line.description || '', { allowEmpty: true, maximum: 10000 }) ||
         ['creating', 'deleted'].includes(line.status)) throw sourceError()
-    const response = await db.collection(COLLECTIONS.nodes)
-      .where({ businessLineId }).orderBy('sequence', 'asc').orderBy('_id', 'asc').limit(MAX_NODES + 1).get()
+    const response = await measureIndexStage(timing, 'snapshot_nodes', () => {
+      const query = db.collection(COLLECTIONS.nodes).where({ businessLineId })
+        .orderBy('sequence', 'asc').orderBy('_id', 'asc').limit(MAX_NODES + 1)
+      // Only V2 makes legacy-definition presence irrelevant. Keep every other
+      // marker and pointer, and retain the original full read for legacy lines.
+      const version = ownDataValue(line, 'flowSchemaVersion')
+      return (version.valid && version.value === 2 ? query.field({ fieldDefinitions: false }) : query).get()
+    })
     let nodes = (response.data || []).slice().sort(compareNodes)
     if (nodes.length > MAX_NODES || !exactSafeInteger(line.nodeCount, 1) || line.nodeCount !== nodes.length) {
       throw sourceError()
@@ -800,13 +832,14 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
       exactString(line.searchGenerationId, { maximum: 128 }))
   }
 
-  async function publishGeneration({ businessLineId, sourceVersion, generationId, entries, recoveryAccess }) {
+  async function publishGeneration({ businessLineId, sourceVersion, generationId, entries, recoveryAccess }, timing) {
     if (!exactString(businessLineId, { maximum: 128 }) || !exactSafeInteger(sourceVersion) ||
         !exactString(generationId, { maximum: 128 }) || !Array.isArray(entries) || entries.length > 5000) {
       throw sourceError()
     }
-    const nodesResponse = await db.collection(COLLECTIONS.nodes)
-      .where({ businessLineId }).orderBy('sequence', 'asc').orderBy('_id', 'asc').limit(MAX_NODES + 1).get()
+    const nodesResponse = await measureIndexStage(timing, 'publish_nodes', () => db.collection(COLLECTIONS.nodes)
+      .where({ businessLineId }).orderBy('sequence', 'asc').orderBy('_id', 'asc').limit(MAX_NODES + 1)
+      .field({ _id: true, sequence: true }).get())
     const nodeIds = (nodesResponse.data || []).slice().sort(compareNodes).map(node => node._id)
     if (nodeIds.length < 1 || nodeIds.length > MAX_NODES) throw sourceError()
     const createdAt = clock()
@@ -845,28 +878,35 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
         }
       }
     }
-    await mapBounded(generationWrites(), write =>
-      db.collection(COLLECTIONS.documents).doc(write.id).set({ data: write.data }))
-    return db.runTransaction(async transaction => {
-      const readHead = recoveryAccess ? readRecoveryDocument : readDocument
-      const actor = recoveryAccess && await readHead(transaction, COLLECTIONS.users, recoveryAccess.actorId)
-      const line = await readHead(transaction, COLLECTIONS.lines, businessLineId)
-      if (recoveryAccess && !recoveryCanRead(actor, line, recoveryAccess)) throw createError('FORBIDDEN')
-      if (!safeSourceVersion(line, sourceVersion) || line.nodeCount !== nodeIds.length) {
-        throw createError('VERSION_CONFLICT')
-      }
-      const currentNodes = []
-      for (const nodeId of nodeIds) {
-        const node = await readDocument(transaction, COLLECTIONS.nodes, nodeId)
-        if (!node || node.businessLineId !== businessLineId) {
+    await measureIndexStage(timing, 'generation_writes', () => mapBounded(generationWrites(), write => {
+      countIndexOperation(timing, write.data.documentType === 'entry' ? 'entry_write_attempts' : 'token_write_attempts')
+      return db.collection(COLLECTIONS.documents).doc(write.id).set({ data: write.data })
+    }))
+    return measureIndexStage(timing, 'publication_transaction', () => publishTransaction(async transaction => {
+      countIndexOperation(timing, 'publication_attempts')
+      const currentNodes = await measureIndexStage(timing, 'publication_reads', async () => {
+        const readHead = recoveryAccess ? readRecoveryDocument :
+          (store, collection, id) => readDocument(store, collection, id, undefined, true)
+        const actor = recoveryAccess && await readHead(transaction, COLLECTIONS.users, recoveryAccess.actorId)
+        const line = await readHead(transaction, COLLECTIONS.lines, businessLineId)
+        if (recoveryAccess && !recoveryCanRead(actor, line, recoveryAccess)) throw createError('FORBIDDEN')
+        if (!safeSourceVersion(line, sourceVersion) || line.nodeCount !== nodeIds.length) {
           throw createError('VERSION_CONFLICT')
         }
-        if (!includeRouteNode(line, node)) continue
-        if (!safeSourceVersion(node, sourceVersion, { allowLagging: true })) {
-          throw createError('VERSION_CONFLICT')
+        const currentNodes = []
+        for (const nodeId of nodeIds) {
+          const node = await readDocument(transaction, COLLECTIONS.nodes, nodeId, PUBLISH_NODE_FIELDS, true)
+          if (!node || node.businessLineId !== businessLineId) {
+            throw createError('VERSION_CONFLICT')
+          }
+          if (!includeRouteNode(line, node)) continue
+          if (!safeSourceVersion(node, sourceVersion, { allowLagging: true })) {
+            throw createError('VERSION_CONFLICT')
+          }
+          currentNodes.push(node)
         }
-        currentNodes.push(node)
-      }
+        return currentNodes
+      })
       const update = {
         searchSourceVersion: sourceVersion,
         searchGeneratedVersion: sourceVersion,
@@ -875,12 +915,14 @@ function createCloudSearchRepository({ db, clock = () => new Date(), secret }) {
         searchSchemaVersion: SEARCH_SCHEMA_VERSION,
         searchGeneratedAt: createdAt
       }
-      await transaction.collection(COLLECTIONS.lines).doc(businessLineId).update({ data: update })
-      for (const node of currentNodes) {
-        await transaction.collection(COLLECTIONS.nodes).doc(node._id).update({ data: update })
-      }
+      await measureIndexStage(timing, 'publication_writes', async () => {
+        await transaction.collection(COLLECTIONS.lines).doc(businessLineId).update({ data: update })
+        for (const node of currentNodes) {
+          await transaction.collection(COLLECTIONS.nodes).doc(node._id).update({ data: update })
+        }
+      })
       return { generatedVersion: sourceVersion, generationId }
-    })
+    }))
   }
 
   function accountCanRead(actor, line, scope) {

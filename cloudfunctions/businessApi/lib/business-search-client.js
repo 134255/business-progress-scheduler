@@ -1,5 +1,6 @@
 const crypto = require('node:crypto')
 const { normalizeBusinessListFilters } = require('./business-list-filters')
+const { measureCreationStage } = require('./creation-timing')
 
 function createError(code) {
   const error = new Error(code)
@@ -76,7 +77,7 @@ function createBusinessSearchClient({ db, callFunction, secret, clock = () => ne
     }
   }
 
-  async function ensureIndexed(envelope) {
+  async function ensureIndexed(envelope, creationTiming) {
     if (envelope === null || envelope === undefined) return null
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
         typeof envelope.actorId !== 'string' || !envelope.actorId ||
@@ -84,12 +85,18 @@ function createBusinessSearchClient({ db, callFunction, secret, clock = () => ne
         !Number.isSafeInteger(envelope.sourceVersion) || envelope.sourceVersion < 0) {
       throw createError('SEARCH_STATE_INVALID')
     }
-    const ticket = await storeRequest('index', {
+    const saveTicket = () => storeRequest('index', {
       actorId: envelope.actorId,
       businessLineId: envelope.businessLineId,
       sourceVersion: envelope.sourceVersion
     })
-    return invoke('index', ticket)
+    // Server-owned request context only; it never enters the ticket or cloud payload.
+    const ticket = creationTiming
+      ? await measureCreationStage(creationTiming, 'search_ticket_save', saveTicket)
+      : await saveTicket()
+    return creationTiming
+      ? measureCreationStage(creationTiming, 'search_function_call', () => invoke('index', ticket))
+      : invoke('index', ticket)
   }
 
   async function query({ actorId, query: input = {} }) {

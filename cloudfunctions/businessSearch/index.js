@@ -3,6 +3,7 @@
 const { createSearchService } = require('./lib/search-service')
 const { createCloudSearchRepository } = require('./lib/cloud-search-repository')
 const { reportSearchFailure } = require('./lib/search-diagnostics')
+const { createRuntimeTiming, measureRuntimeStage, measureRuntimeStageAsync } = require('./lib/runtime-timing')
 
 function safeError(code, message) {
   const error = new Error(message)
@@ -54,24 +55,44 @@ function createBusinessSearchHandler({
   }
 }
 
-function createDefaultHandler() {
-  const cloud = require('wx-server-sdk')
-  cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV })
-  const db = cloud.database()
-  const secret = process.env.BUSINESS_SEARCH_HMAC_SECRET
-  const repository = createCloudSearchRepository({ db, secret })
-  return createBusinessSearchHandler({
-    service: createSearchService({ repository, secret }),
-    getContext: () => cloud.getWXContext(),
-    getTriggerSource: () => process.env.TRIGGER_SRC
+function createDefaultHandler(timing) {
+  const cloud = measureRuntimeStage(timing, 'sdk_load', () => require('wx-server-sdk'))
+  measureRuntimeStage(timing, 'sdk_init', () => cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV }))
+  const db = measureRuntimeStage(timing, 'database_create', () => cloud.database())
+  return measureRuntimeStage(timing, 'handler_create', () => {
+    const secret = process.env.BUSINESS_SEARCH_HMAC_SECRET
+    const repository = createCloudSearchRepository({ db, secret })
+    return createBusinessSearchHandler({
+      service: createSearchService({ repository, secret }),
+      getContext: () => cloud.getWXContext(),
+      getTriggerSource: () => process.env.TRIGGER_SRC
+    })
   })
 }
 
 let defaultHandler
 
 exports.main = async function main(event) {
-  if (!defaultHandler) defaultHandler = createDefaultHandler()
-  return defaultHandler(event)
+  let timing
+  try {
+    // Do not evaluate arbitrary accessors or log arbitrary operation names.
+    const operation = Object.getOwnPropertyDescriptor(event || {}, 'operation')?.value
+    const ticket = Object.getOwnPropertyDescriptor(event || {}, 'ticket')?.value
+    if (operation === 'index' && typeof ticket === 'string' && ticket) {
+      timing = createRuntimeTiming({ handlerReused: Boolean(defaultHandler) })
+    }
+  } catch (_) { /* A diagnostic probe must not change routing. */ }
+  try {
+    if (!defaultHandler) defaultHandler = createDefaultHandler(timing)
+    const result = timing
+      ? await measureRuntimeStageAsync(timing, 'handler_execute', () => defaultHandler(event))
+      : await defaultHandler(event)
+    if (timing) timing.finish('OK')
+    return result
+  } catch (error) {
+    if (timing) timing.finish('ERROR')
+    throw error
+  }
 }
 
 exports.createBusinessSearchHandler = createBusinessSearchHandler

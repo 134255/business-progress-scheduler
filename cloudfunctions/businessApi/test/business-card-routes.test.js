@@ -47,6 +47,7 @@ for (const first of ['search', 'card']) {
     const starts = []
     let published = false
     let returned = false
+    const timingLogs = []
     const stored = { id: 'line-1', code: 'SYNTHETIC-1' }
     Object.defineProperties(stored, {
       publicResult: { value: stored },
@@ -59,7 +60,9 @@ for (const first of ['search', 'card']) {
         assert.equal(published, true); starts.push('search'); await gates.search.promise
       } }
     })
-    const { main } = harness({ businessService, businessCardService: { async refreshAfterMutation(input) {
+    const { main } = harness({ businessService,
+      logger: { error() {}, info: (...args) => timingLogs.push(args) },
+      businessCardService: { async refreshAfterMutation(input) {
       assert.equal(published, true)
       assert.equal(input.actor, actor)
       assert.equal(input.result, stored)
@@ -68,12 +71,13 @@ for (const first of ['search', 'card']) {
     const response = main({ action: 'createBusinessFromTemplate', payload: {
       templateId: 'template-1', requestKey: 'create-1',
       // A client cannot replace the trusted post-publication callback.
-      afterCreated: 'untrusted', creationCardsRefreshed: true
+      afterCreated: 'untrusted', creationCardsRefreshed: true, creationTiming: { finish: 'untrusted' }
     } }).then(result => { returned = true; return result })
     try {
       await new Promise(resolve => setImmediate(resolve))
       assert.deepEqual(starts.slice().sort(), ['card', 'search'])
       assert.equal(returned, false)
+      assert.equal(timingLogs.length, 0, 'summary must not be emitted before completion')
       gates[first].resolve()
       await new Promise(resolve => setImmediate(resolve))
       assert.equal(returned, false)
@@ -83,8 +87,51 @@ for (const first of ['search', 'card']) {
     }
     assert.deepEqual(await response, { ok: true, data: stored })
     assert.equal(starts.length, 2, 'no duplicate refresh')
+    assert.equal(timingLogs.length, 1)
+    assert.equal(timingLogs[0][0], '[businessApi.creationTiming]')
+    assert.equal(timingLogs[0][1].outcome, 'OK')
+    assert.deepEqual(Object.keys(timingLogs[0][1].stages).sort(), ['authorize', 'card_refresh', 'search_sync'])
+    assert.equal(JSON.stringify(timingLogs).includes('untrusted'), false)
   })
 }
+
+test('creation timing includes rejected authorization but is absent on unrelated actions', async () => {
+  const events = []
+  const logger = { error() {}, info: (_, event) => events.push(event) }
+  const denied = harness({ logger, businessService: { createFromTemplate() { assert.fail('not authorized') } } }, null)
+  const response = await denied.main({ action: 'createBusinessFromTemplate', payload: { description: 'PRIVATE' } })
+  assert.equal(response.code, 'UNAUTHORIZED')
+  assert.equal(events.length, 1)
+  assert.equal(events[0].outcome, 'ERROR')
+  assert.equal(events[0].stages.authorize.failedCalls, 1)
+  assert.equal(JSON.stringify(events).includes('PRIVATE'), false)
+  const other = harness({ logger, businessService: { listBusinessLines: async () => ({ items: [] }) } })
+  assert.equal((await other.main({ action: 'listBusinessLines', payload: {} })).ok, true)
+  assert.equal(events.length, 1)
+})
+
+test('a broken timing log sink cannot change the creation API success or failure response', async () => {
+  for (const asynchronous of [false, true]) {
+    let logCalls = 0
+    const logger = { error() {}, info() {
+      logCalls++
+      const error = new Error('synthetic log sink unavailable')
+      if (asynchronous) return Promise.reject(error)
+      throw error
+    } }
+    const success = harness({ logger, businessService: { async createFromTemplate() {
+      return { id: 'synthetic-line', code: 'synthetic-code' }
+    } } })
+    assert.deepEqual(await success.main({ action: 'createBusinessFromTemplate', payload: {} }),
+      { ok: true, data: { id: 'synthetic-line', code: 'synthetic-code' } })
+    const failure = harness({ logger, businessService: { async createFromTemplate() { throw marked('TEMPLATE_NOT_ENABLED') } } })
+    const response = await failure.main({ action: 'createBusinessFromTemplate', payload: {} })
+    assert.equal(response.ok, false)
+    assert.equal(response.code, 'TEMPLATE_NOT_ENABLED')
+    assert.equal(logCalls, 2)
+    await new Promise(resolve => setImmediate(resolve))
+  }
+})
 
 test('parallel creation derived failures keep authoritative success and drain both tasks', async () => {
   const { createBusinessService } = require('../lib/business-service')
