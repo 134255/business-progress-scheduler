@@ -1,5 +1,7 @@
 # Current Status
 
+- 2026-10-09 本批GitHub交付完成：40个明确路径提交为c1992a32953b91a6ce208f301e70fa67840bcaea，普通推送origin/main成功，独立git ls-remote确认远端相同哈希，未强推。提交前暂存的三个函数全部应用代码与隔离准确载荷一致（仅Git行尾规范化），对应测试/部署文档一致；工作区及筛选后的暂存记忆均通过validator，git diff --cached --check通过。共享记忆仅纳入本批创建/搜索内容，原未发布导出仓储/测试/ADR、无关模板配置记忆、附件和输出保留且未纳入本提交。暂存脚本曾在文档边界保护断言处停止，确认39条部分暂存路径均属本批后补齐第40条，未覆盖或提交其他改动。下条记录两函数已发布及2752项准确回归、12332文件回读零差异的证据；下一步仍是正常业务创建的真实耗时/五端验收，不重复发布或自动制造测试售后。
+
 - 2026-10-09 用户授权“发布并提交GitHub”，已完成创建轻量预读与私有字段副本消重的精确增量发布，覆盖下条未发布状态。businessApi仅更新lib/cloud-business-repository.js、lib/field-domain.js（2文件/25.6KB）；operationsAnalytics仅同步lib/field-domain.js（1文件/3.0KB）。官方微信开发者工具inc-deploy以独立upload目录、file=lib执行并明确成功，不使用脏工作目录整包。未部署businessSearch、未重传小程序、未提交配置或安装依赖；不修改权限、资源、Timer、环境变量、模板或业务数据，未创建测试售后或访问此前受限云日志。
 
   两次只读下载确认API与creation-preparation已发布基线6499/6499、Analytics与compact-barcode基线5833/5833一致；Search也与其已发布基线5836/5836一致，仅核对并整理相关历史Git增量，不重新发布。候选运行时与隔离QA逐文件一致：API6499、Analytics5826、Search5824个运行/包/依赖文件；下载包附带的旧测试不作为回归来源。使用当前98个API测试文件、17个Search测试文件及当前Analytics测试，客户端183文件无内容差异（110文件仅Git归档换行不同）。新鲜完整回归命令node outputs/deploy/creation-light-20261009/verify.cjs：API1616、Search187、Parser38、Calendar61、Reminder39、Retention43、Analytics66、客户端698、WXML4，共2752项全通过，0失败/取消/跳过。共享四文件字节一致，沿用下条同一源哈希的独立复核，无新产品改动。
