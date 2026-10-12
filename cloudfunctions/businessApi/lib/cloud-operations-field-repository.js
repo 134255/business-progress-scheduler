@@ -1,6 +1,7 @@
 const crypto = require('node:crypto')
 const { ownExactAccountIds } = require('./account-relationship-schema')
 const { boundedMap } = require('./bounded-map')
+const { groupNodeReads } = require('./operations-read-batches')
 const { fieldError } = require('./operations-field-service')
 const { createOperationsReportCursor } = require('./operations-report-cursor')
 const domain = require('./operations-field-domain')
@@ -128,18 +129,41 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
       return selection
     } catch (_) { return null }
   }
-  async function readCachedSelection(actor,line,node,analysis = false) {
-    const snapshot = await read(db,'operations_field_snapshots',node._id)
-    const candidate = cachedSelection(snapshot,line,node)
-    if (!candidate) return null
-    return db.runTransaction(async tx=>{
+  async function readCachedSelections(actor,lineMap,nodes,analysis = false) {
+    const recoverable = error => ['FIELD_SOURCE_INVALID','INVALID_FIELD_VALUE'].includes(error && error.code)
+    const discovered = await boundedMap(nodes,async node=>{
+      try {
+        const snapshot = await read(db,'operations_field_snapshots',node._id)
+        return {node,candidate:cachedSelection(snapshot,lineMap.get(node.businessLineId),node)}
+      } catch(error) {
+        if (recoverable(error)) return {node,error}
+        throw error
+      }
+    },4)
+    const batches = groupNodeReads(discovered.filter(item=>item.candidate),item=>item.node.businessLineId)
+    const verified = await boundedMap(batches,batch=>db.runTransaction(async tx=>{
       const current = await actorNow(actor,tx)
-      const freshLine = await read(tx,'business_lines',line._id)
+      const freshLine = await read(tx,'business_lines',batch[0].node.businessLineId)
       if (!canRead(current,freshLine)) throw fieldError('FORBIDDEN')
-      const freshNode = await read(tx,'business_nodes',node._id)
-      if (!freshNode || !cachedSelection(candidate,freshLine,freshNode)) throw fieldError('REPORT_CHANGED')
-      return analysis ? {result:candidate,schema:domain.describeFieldAnalysisSource({line:freshLine,node:freshNode},candidate)} : candidate
-    })
+      const results = []
+      for (const {node,candidate} of batch) {
+        try {
+          const freshNode = await read(tx,'business_nodes',node._id)
+          if (!freshNode || !cachedSelection(candidate,freshLine,freshNode)) throw fieldError('REPORT_CHANGED')
+          const value = analysis
+            ? {result:candidate,schema:domain.describeFieldAnalysisSource({line:freshLine,node:freshNode},candidate)}
+            : candidate
+          results.push({node,value})
+        } catch(error) {
+          if (!recoverable(error)) throw error
+          results.push({node,error})
+        }
+      }
+      return results
+    }),4)
+    // Publish to the request-local map only after each transaction succeeds.
+    // A retry therefore cannot leave partially verified values in the map.
+    return new Map([...discovered.filter(item=>item.error),...verified.flat()].map(item=>[item.node._id,item]))
   }
   async function refreshAfterMutation({actor,action,payload}) {
     if (!['submitFeedback','saveAndSubmitNodeForReview','submitNodeForReview','submitReviewVote','decideNodeRoute'].includes(action)) return
@@ -189,10 +213,13 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
       }
     }
     const lineMap = new Map(lines.map(line=>[line._id,line]))
+    const cachedSelections = full ? new Map() : await readCachedSelections(actor,lineMap,candidates,analysis)
     const results = await boundedMap(candidates,async node=>{
       const line = lineMap.get(node.businessLineId)
       try {
-        const cached = !full ? await readCachedSelection(actor,line,node,analysis) : null
+        const cachedEntry = cachedSelections.get(node._id)
+        if (cachedEntry && cachedEntry.error) throw cachedEntry.error
+        const cached = cachedEntry ? cachedEntry.value : null
         const source = cached ? null : await readSource(line,node)
         const result = cached ? analysis ? cached.result : cached : domain.buildFinalFieldResult(source)
         if (!result) return null
@@ -227,19 +254,21 @@ function createCloudOperationsFieldRepository({ db, operationsRepository, secret
   }
   async function revalidateAnalysis(actor,data) {
     const lines=new Map(data.lines.map(l=>[l._id,l]))
-    await boundedMap(data.records,record=>db.runTransaction(async tx=>{
+    await boundedMap(groupNodeReads(data.records,record=>record.result.businessLineId),batch=>db.runTransaction(async tx=>{
       const current=await actorNow(actor,tx)
       if(current.role!==data.current.role) throw fieldError('FORBIDDEN')
-      const line=await read(tx,'business_lines',record.result.businessLineId)
+      const line=await read(tx,'business_lines',batch[0].result.businessLineId)
       if(!canRead(current,line)) throw fieldError('FORBIDDEN')
       if(lineIdentity(line)!==lineIdentity(lines.get(line._id))) throw fieldError('REPORT_CHANGED')
-      const node=await read(tx,'business_nodes',record.result.nodeId)
-      try {
-        if(!node || domain.fieldSourceHeader({line,node})!==record.result.sourceHeader ||
-          fingerprint(domain.describeFieldAnalysisSource({line,node},record.result))!==fingerprint(record.schema)) throw fieldError('REPORT_CHANGED')
-      } catch(error) {
-        if(error.code==='FIELD_SOURCE_INVALID') throw fieldError('REPORT_CHANGED')
-        throw error
+      for (const record of batch) {
+        const node=await read(tx,'business_nodes',record.result.nodeId)
+        try {
+          if(!node || domain.fieldSourceHeader({line,node})!==record.result.sourceHeader ||
+            fingerprint(domain.describeFieldAnalysisSource({line,node},record.result))!==fingerprint(record.schema)) throw fieldError('REPORT_CHANGED')
+        } catch(error) {
+          if(error.code==='FIELD_SOURCE_INVALID') throw fieldError('REPORT_CHANGED')
+          throw error
+        }
       }
     }),4)
     await reauthorize(actor,data.current,data.lines)
