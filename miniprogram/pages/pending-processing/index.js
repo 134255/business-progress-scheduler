@@ -48,16 +48,24 @@ Page({
 
   onShow() {
     this.pageAlive = true
+    this.refreshRequest = null
     return this.refresh()
   },
 
-  onUnload() {
+  onHide() {
     this.pageAlive = false
     this.requestSequence = (this.requestSequence || 0) + 1
+    this.refreshRequest = null
+  },
+
+  onUnload() {
+    this.onHide()
     this.clearCards()
   },
 
   clearCards() {
+    this.requestSequence = (this.requestSequence || 0) + 1
+    this.refreshRequest = null
     this.loadActorKey = ''
     this.setData({ items: [], cursor: '', hasMore: false, loading: false, loadingMore: false })
   },
@@ -84,16 +92,29 @@ Page({
   },
 
   retryCards() {
-    if (this.data.loading || this.data.loadingMore) return
+    if (this.data.loadingMore) return
     return this.refresh()
   },
 
   async refresh() {
+    if (this.pageAlive === false) return
     const actorKey = this.requireCardActor()
     if (!actorKey) return
+    const actor = getApp().globalData.currentUser
+    const pending = this.refreshRequest
+    if (pending && pending.actor === actor && pending.actorKey === actorKey &&
+        pending.sequence === this.requestSequence) return pending.promise
     const sequence = (this.requestSequence || 0) + 1
     this.requestSequence = sequence
     this.setData({ loading: true, loadingMore: false, errorMessage: '' })
+    const request = { actor, actorKey, sequence }
+    this.refreshRequest = request
+    request.promise = this.fetchCards(request)
+    return request.promise
+  },
+
+  async fetchCards(request) {
+    const { actorKey, sequence } = request
     try {
       const result = await businessService.listMyPendingProcessing({ cursor: '', pageSize: 20 })
       if (!this.acceptResponse(sequence, actorKey)) return
@@ -111,6 +132,7 @@ Page({
       if (this.acceptResponse(sequence, actorKey)) {
         this.setData({ loading: false })
       }
+      if (this.refreshRequest === request) this.refreshRequest = null
     }
   },
 

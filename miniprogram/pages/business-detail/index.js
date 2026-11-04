@@ -83,16 +83,27 @@ Page({
     }
     this.actorId = user._id
     this.pageAlive = true
+    this.detailVisible = true
     this.detailSequence = 0
+    this.detailRequest = null
     this.setData({ id: String(query.id || '') })
   },
 
+  onHide() {
+    this.detailVisible = false
+    this.detailSequence = (this.detailSequence || 0) + 1
+    this.detailRequest = null
+  },
+
   onUnload() {
+    this.onHide()
     this.pageAlive = false
-    this.detailSequence += 1
   },
 
   onShow() {
+    this.pageAlive = true
+    this.detailVisible = true
+    this.detailRequest = null
     if (!this.actorStillCurrent()) return
     if (this.data.id) return this.loadDetail()
   },
@@ -100,7 +111,14 @@ Page({
   actorStillCurrent() {
     const user = activeUser()
     if (user && user._id === this.actorId) return user
-    this.detailSequence += 1
+    this.clearDetail()
+    wx.reLaunch({ url: '/pages/login/index' })
+    return null
+  },
+
+  clearDetail() {
+    this.detailSequence = (this.detailSequence || 0) + 1
+    this.detailRequest = null
     this.setData({
       loading: false,
       refreshing: false,
@@ -128,8 +146,6 @@ Page({
       shareCreatingNodeId: '',
       errorMessage: ''
     })
-    wx.reLaunch({ url: '/pages/login/index' })
-    return null
   },
 
   presentDetail(data) {
@@ -255,11 +271,11 @@ Page({
       this.routeDecisionRequestKey = ''
       this.setData({ routeDecisionPanelOpen: false, routeDecision: '', routeDecisionComment: '' })
       wx.showToast({ title: decision === 'activate' ? '后续节点已开启' : '已按跳过路径继续', icon: 'success' })
-      await this.loadDetail()
+      await this.reloadDetail()
       return true
     } catch (error) {
       if (this.pageAlive && this.actorStillCurrent() && this.actorId === actorId && this.data.id === lineId) {
-        if (error.code === 'VERSION_CONFLICT') await this.loadDetail()
+        if (error.code === 'VERSION_CONFLICT') await this.reloadDetail()
         wx.showToast({ title: safeErrorMessage(error, '节点分支决定失败，请稍后重试'), icon: 'none' })
       }
       return false
@@ -271,23 +287,49 @@ Page({
   },
 
   async loadDetail() {
-    if (!this.actorStillCurrent()) return
-    const requestSequence = ++this.detailSequence
-    const requestedActorId = this.actorId
+    const actor = this.actorStillCurrent()
+    if (!actor || this.pageAlive === false || this.detailVisible === false) return
+    const pending = this.detailRequest
+    if (pending && pending.actor === actor && pending.actorId === this.actorId &&
+        pending.role === actor.role && pending.lineId === this.data.id &&
+        pending.sequence === this.detailSequence) return pending.promise
+    const requestSequence = (this.detailSequence || 0) + 1
+    this.detailSequence = requestSequence
     const hasRenderedDetail = Boolean(this.data.line && this.data.line._id === this.data.id)
     this.setData({ loading: !hasRenderedDetail, refreshing: hasRenderedDetail, errorMessage: '' })
+    const request = { actor, actorId: this.actorId, role: actor.role,
+      lineId: this.data.id, sequence: requestSequence }
+    this.detailRequest = request
+    request.promise = this.fetchDetail(request)
+    return request.promise
+  },
+
+  reloadDetail() {
+    this.detailRequest = null
+    return this.loadDetail()
+  },
+
+  acceptDetail(request) {
+    if (!this.pageAlive || this.detailVisible === false ||
+        request.sequence !== this.detailSequence || this.data.id !== request.lineId) return false
+    const actor = this.actorStillCurrent()
+    if (!actor) return false
+    if (actor.role !== request.role) { this.clearDetail(); return false }
+    return actor._id === request.actorId
+  },
+
+  async fetchDetail(request) {
     try {
-      const data = await businessService.getBusinessLine(this.data.id)
-      if (!this.pageAlive || requestSequence !== this.detailSequence ||
-          !this.actorStillCurrent() || activeUser()._id !== requestedActorId) return
+      const data = await businessService.getBusinessLine(request.lineId)
+      if (!this.acceptDetail(request)) return
       this.setData(this.presentDetail(data))
     } catch (error) {
-      if (this.pageAlive && requestSequence === this.detailSequence && this.actorStillCurrent()) {
+      if (this.acceptDetail(request)) {
         this.setData({ errorMessage: safeErrorMessage(error, '售后详情加载失败，请稍后重试') })
       }
     } finally {
-      if (this.pageAlive && requestSequence === this.detailSequence && activeUser() &&
-          activeUser()._id === requestedActorId) this.setData({ loading: false, refreshing: false })
+      if (this.acceptDetail(request)) this.setData({ loading: false, refreshing: false })
+      if (this.detailRequest === request) this.detailRequest = null
     }
   },
 
@@ -359,11 +401,11 @@ Page({
       this.optionalDecisionRequestKey = ''
       this.setData({ optionalDecisionPanelOpen: false, optionalDecision: '', optionalDecisionComment: '' })
       wx.showToast({ title: decision === 'activate' ? '追加节点已启用' : '售后已完成', icon: 'success' })
-      await this.loadDetail()
+      await this.reloadDetail()
       return true
     } catch (error) {
       if (this.pageAlive && this.actorStillCurrent() && this.actorId === actorId && this.data.id === lineId) {
-        if (error.code === 'VERSION_CONFLICT') await this.loadDetail()
+        if (error.code === 'VERSION_CONFLICT') await this.reloadDetail()
         wx.showToast({ title: safeErrorMessage(error, '追加节点决定失败，请稍后重试'), icon: 'none' })
       }
       return false
@@ -437,12 +479,12 @@ Page({
       this.rejectionRequestKey = ''
       this.setData({ rejectionReason: '' })
       wx.showToast({ title: '已驳回上一节点', icon: 'success' })
-      await this.loadDetail()
+      await this.reloadDetail()
     } catch (error) {
       if (!this.pageAlive || !activeUser() || activeUser()._id !== requestedActorId ||
           this.data.id !== requestedBusinessLineId) return
       if (error.code === 'VERSION_CONFLICT') {
-        await this.loadDetail()
+        await this.reloadDetail()
         wx.showToast({ title: '节点版本已变化，请核对后重试', icon: 'none' })
       } else {
         wx.showToast({ title: safeErrorMessage(error, '驳回失败，请稍后重试'), icon: 'none' })
@@ -484,11 +526,11 @@ Page({
           this.data.id !== requestedBusinessLineId || this.data.line.version !== requestedLineVersion) return
       this.setData({ closureReason: '' })
       wx.showToast({ title: '售后状态已更新', icon: 'success' })
-      await this.loadDetail()
+      await this.reloadDetail()
     } catch (error) {
       if (!this.pageAlive || !activeUser() || activeUser()._id !== requestedActorId ||
           this.data.id !== requestedBusinessLineId) return
-      if (error.code === 'VERSION_CONFLICT') await this.loadDetail()
+      if (error.code === 'VERSION_CONFLICT') await this.reloadDetail()
       wx.showToast({
         title: error.code === 'VERSION_CONFLICT'
           ? '售后版本已变化，请核对后重试'

@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact update: 2026-10-12 (Asia/Shanghai; request-local operations-field read batching; deployment in STATUS)
+Last stable-fact update: 2026-11-04 (Asia/Shanghai; per-page client read coalescing; exact deployments and billing gates in STATUS)
 
 ## Product
 
@@ -55,6 +55,8 @@ The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-bus
 - 批量凭证传输最多3路，核验登记在单次页面上传操作内串行；传输、登记各最多3次应用层尝试，仅恢复明确暂态错误。登记重试保持同一预约，不重复传输/计容量；权限、状态、格式、容量及未知内部错误不自动重试。该逻辑只在既有上传工具和上传仓储内，页面仅展示阶段/次数，不能扩展成业务提交或审批的通用重试。部署与五端验收状态见 STATUS。
 
 ## Architecture
+
+- 2026-11-04 详情、待处理和待审核页各自合并同账号对象/编号/角色、同目标/参数及同代在途读取，不缓存完成响应或权限。每次显示与详情写后/版本冲突刷新都新读；清空、隐藏及卸载使旧读取失效，旧finally不能清新请求。详情读取可见性与原写操作pageAlive分离，原写入收尾及分页保持；准确客户端上传/正式发布与真实收益见STATUS。
 
 - 运营字段关联分析使用独立只读接口与前端组件，历史实例规则决定维度及严格联动身份；正计数选项按节点折叠、商品逐层和同节点双字段分析。CSV reportVersion=2 追加精确维度、条件与关联行，旧基础日期口径/列及旧客户端协议不变。完整来源清单、尾部授权、预算和生命周期绑定见 ADR-0022；不改变快照格式/摘要或 worker 写流程。
 
