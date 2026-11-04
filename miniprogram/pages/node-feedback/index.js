@@ -970,14 +970,24 @@ Page({
 
   updateLocalFile(index, changes) {
     const files = this.data.files.slice()
-    files[index] = { ...files[index], ...changes }
+    const current = files[index]
+    const next = { ...current, ...changes }
+    files[index] = next
     const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
     const uploadedBytes = files.reduce((sum, file) => {
       const progress = file.status === 'registered' ? 100 : Number(file.progressPercent || 0)
       return sum + Number(file.size || 0) * Math.max(0, Math.min(100, progress)) / 100
     }, 0)
     const uploadProgressPercent = totalBytes ? Math.round(uploadedBytes * 100 / totalBytes) : 0
-    this.setData({ files, uploadProgressPercent })
+    const update = {}
+    if (!current || Object.keys(next).some(key =>
+      !Object.prototype.hasOwnProperty.call(current, key) || !Object.is(current[key], next[key]))) {
+      update[`files[${index}]`] = next
+    }
+    if (!Object.is(this.data.uploadProgressPercent, uploadProgressPercent)) {
+      update.uploadProgressPercent = uploadProgressPercent
+    }
+    if (Object.keys(update).length) this.setData(update)
   },
 
   createEvidenceUploader() {

@@ -1,6 +1,6 @@
 # Project Memory
 
-Last stable-fact update: 2026-11-04 (Asia/Shanghai; per-page client read coalescing; exact deployments and billing gates in STATUS)
+Last stable-fact update: 2026-11-04 (Asia/Shanghai; client read coalescing and local upload-row rendering; exact deployments and billing gates in STATUS)
 
 ## Product
 
@@ -55,6 +55,8 @@ The complete baseline requirements are in `docs/superpowers/specs/2026-08-05-bus
 - 批量凭证传输最多3路，核验登记在单次页面上传操作内串行；传输、登记各最多3次应用层尝试，仅恢复明确暂态错误。登记重试保持同一预约，不重复传输/计容量；权限、状态、格式、容量及未知内部错误不自动重试。该逻辑只在既有上传工具和上传仓储内，页面仅展示阶段/次数，不能扩展成业务提交或审批的通用重试。部署与五端验收状态见 STATUS。
 
 ## Architecture
+
+- 2026-11-04 上传页updateLocalFile在本地实现同步单行files[index]补丁和变化总进度补丁；两者相同不发送setData，仍保留原字节权重重算以校正列表变化后的旧总进度，不引入定时节流或聚合缓存。上传器/SDK/云接口、最多3路和原登记/重试/资格规则不变。此为本地实现，是否上传及真机/实际费用证据以STATUS为准；界面JSON载荷下降不能当作网络或云费用降幅。
 
 - 2026-11-04 详情、待处理和待审核页各自合并同账号对象/编号/角色、同目标/参数及同代在途读取，不缓存完成响应或权限。每次显示与详情写后/版本冲突刷新都新读；清空、隐藏及卸载使旧读取失效，旧finally不能清新请求。详情读取可见性与原写操作pageAlive分离，原写入收尾及分页保持；准确客户端上传/正式发布与真实收益见STATUS。
 
