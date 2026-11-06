@@ -2,11 +2,13 @@
 
 const { isDeepStrictEqual } = require('node:util')
 const domain = require('./operations-field-domain')
+const { createFieldSourcePrereads } = require('./field-source-prereads')
 
 const CURSOR_ID = 'operations-field-snapshot-cursor'
 const MAX_BATCH = 40
 const MAX_VOTES = 50
 const MAX_TIME_MS = 5000
+const MAX_SKIP_SUFFIX = 7
 
 function invalid() { const error = new Error('FIELD_RECOVERY_INVALID'); error.code = 'FIELD_RECOVERY_INVALID'; return error }
 function demand(condition) { if (!condition) throw invalid() }
@@ -37,6 +39,17 @@ function cursorState(document) {
   if (cursorId !== null) documentId(cursorId)
   demand(Number.isSafeInteger(version) && version > 0 && version < Number.MAX_SAFE_INTEGER)
   return { cursorId, version }
+}
+
+// Page data only proposes a suffix. Never execute accessors or treat a
+// malformed hint as evidence that a current node may be skipped.
+function excludedHint(node) {
+  try {
+    const status = own(node, 'status'), route = own(node, 'routeState')
+    return !['completed', 'awaiting_decision'].includes(status) ||
+      status === 'awaiting_decision' && route !== 'awaiting_manual_decision' ||
+      ['dormant', 'skipped'].includes(route)
+  } catch (_) { return false }
 }
 
 function createFieldSnapshotRecovery({ db, clock = () => new Date(),
@@ -81,6 +94,7 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
         throw error
       }
     }
+    const prereads = createFieldSourcePrereads({ db, budget, own, documentId, excludedHint })
     async function moveCursor(observed, cursorId) {
       budget()
       return db.runTransaction(async transaction => {
@@ -95,17 +109,50 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
         return next
       })
     }
-    async function loadSource(nodeId) {
+    async function skipExcludedPrefix(observed, candidateIds, wrapTail) {
+      budget()
+      return db.runTransaction(async transaction => {
+        const current = cursorState(await read(transaction, 'system_settings', CURSOR_ID))
+        if (current.version !== observed.version || current.cursorId !== observed.cursorId) return null
+        // These are attempt-local: a conflict retry must recheck every node.
+        let consumed = 0
+        for (const nodeId of candidateIds) {
+          let node
+          try { node = await read(transaction, 'business_nodes', nodeId) }
+          catch (error) {
+            if (error && error.code === 'FIELD_RECOVERY_INVALID') break
+            throw error
+          }
+          if (node && !excludedHint(node)) break
+          consumed++
+        }
+        if (!consumed) return { consumed: 0, cursor: current }
+        demand(current.version < Number.MAX_SAFE_INTEGER - 1)
+        const next = { cursorId: wrapTail && consumed === candidateIds.length
+          ? null : candidateIds[consumed - 1], version: current.version + 1 }
+        budget()
+        await transaction.collection('system_settings').doc(CURSOR_ID).set({ data: {
+          ...next, updatedAt: new Date(time())
+        } })
+        return { consumed, cursor: next }
+      })
+    }
+    async function loadSource(nodeId, page, index) {
       const node = await read(db, 'business_nodes', nodeId)
       if (!node) return null
       const status = own(node, 'status'), route = own(node, 'routeState')
       if (!['completed', 'awaiting_decision'].includes(status) ||
           status === 'awaiting_decision' && route !== 'awaiting_manual_decision' ||
           ['dormant', 'skipped'].includes(route)) return null
-      const line = await read(db, 'business_lines', own(node, 'businessLineId'))
+      await prereads.prepare({ page, index, node })
+      const lineId = own(node, 'businessLineId')
+      const line = await prereads.read({ node, collection: 'business_lines', id: lineId,
+        fallback: () => read(db, 'business_lines', lineId) })
       demand(line)
       if (['creating', 'deleted'].includes(own(line, 'status'))) return null
-      const feedback = await read(db, 'node_feedback', own(node, 'latestFeedbackId'))
+      const feedbackId = own(node, 'latestFeedbackId')
+      const feedback = await prereads.read({ node, collection: 'node_feedback', id: feedbackId,
+        fallback: () => read(db, 'node_feedback', feedbackId) })
       const roundId = own(node, 'lastReviewRoundId')
       const round = roundId == null ? null : await read(db, 'node_review_rounds', roundId)
       let votes = []
@@ -186,15 +233,44 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
         const next = await moveCursor(observed, tail && index === page.length - 1 ? null : nodeId)
         if (!next) return counts
         observed = next; previousId = nodeId
+        let maySkipSuffix = false
         try {
-          const source = await loadSource(nodeId)
+          const source = await loadSource(nodeId, page, index)
           if (source) {
             const result = buildFinalFieldResult(source)
             if (result && await publish(source, result)) counts.generated++
-          }
+          } else { prereads.discard(); maySkipSuffix = excludedHint(page[index]) }
         } catch (error) {
+          prereads.discard()
           if (error && error.code === 'FIELD_RECOVERY_BUDGET') return counts
           counts.failed++
+          if (error && error.code === 'FIELD_RECOVERY_PREREAD_STOP') return counts
+        }
+        // The anchor above is already durable. A slow/failed suffix can roll
+        // back without repeatedly starving the same successors next cycle.
+        if (maySkipSuffix) {
+          const candidateIds = []
+          let lastId = nodeId
+          for (let offset = 1; offset <= MAX_SKIP_SUFFIX && index + offset < page.length; offset++) {
+            const hint = page[index + offset]
+            if (!excludedHint(hint)) break
+            let id
+            try { id = documentId(own(hint, '_id')) } catch (_) { break }
+            if (id <= lastId) break
+            candidateIds.push(id); lastId = id
+          }
+          if (candidateIds.length >= 2) {
+            // Deliberately outside the per-node catch: transaction or commit
+            // errors stop this cycle, never replay the batch as single nodes.
+            const skipped = await skipExcludedPrefix(observed, candidateIds,
+              tail && index + candidateIds.length === page.length - 1)
+            if (!skipped) return counts
+            if (skipped.consumed) {
+              index += skipped.consumed
+              previousId = candidateIds[skipped.consumed - 1]
+              observed = skipped.cursor
+            }
+          }
         }
       }
       counts.hasMore = !tail

@@ -1,8 +1,12 @@
 # Project Memory
 
-Last stable-fact update: 2026-11-04 (Asia/Shanghai; client read coalescing and local upload-row rendering; exact deployments and billing gates in STATUS)
+Last stable-fact update: 2026-11-06 (Asia/Shanghai; bounded analytics recovery batching; verification and deployment evidence in STATUS)
 
 ## Product
+
+2026-11-06 字段统计恢复支持当前调用内最多4个相邻候选的固定ID售后头/反馈预读合批，保留节点现读、审核轮/投票路径及发布事务完整重读和外部摘要比较；无跨调用或事务授权缓存。每节点检查点/CAS、40条/5秒、源变更拒绝、原型/描述符保真、未知批失败不重放及原业务/通知隔离不变。预读是非授权提示，单组早退最多6个未消费内容文档，正常请求下降不代表已验证现金降幅；设计与成本边界见ADR0019，实际部署状态以STATUS为准。
+
+2026-11-02 运营字段快照恢复worker在原40条/5秒遍历内支持连续节点状态排除的有界游标合批：组首保留原单条检查点，其后至少2/最多7条在事务中重读当前状态与游标，只推进已确认连续前缀；慢读取回滚仍保留组首进度，未知提交不单条重放。正常生成与已完成相同快照仍做原权威来源复核，不改快照格式、原业务/站内通知或定时配置。此为已验证本地实现事实，云部署与现金效果以STATUS为准，不能从未完成节点合成收益推及全部账单。
 
 This is an internal business-progress management WeChat Mini Program. Super administrators control accounts, templates, node ownership, and system rules. Authorized users create business lines from enabled templates, responsible users submit node progress and evidence, and associated users inspect progress and evidence history.
 
