@@ -12,6 +12,8 @@
 
 **Execution status:** 用户确认原生执行后，任务1–5已完成本地TDD、30组净操作对照、独立整体复核及其单次修正回归。证据和执行取舍见同plan ledger、STATUS与 `docs/deployment/analytics-field-change-priority-recovery-acceptance.md`；默认关闭/legacy，不提交、不推送、不部署。云端与现金、五端真机边界仍unverified。
 
+**Subsequent release authorization:** 用户后来明确要求提交、推送并部署，已在功能分支推送本事项，并完成两个函数的关闭态增量发布与完整SHA读回。此后续授权只覆盖代码发布，不把下方本地阶段约束解释为禁止已授权发布，也不自动开启新队列/模式。新开关仍不存在；真实新模式、计价和私有集合/索引/客户端拒绝规则门禁仍按STATUS另验。
+
 ## Global Constraints
 
 - 仅本地实现和净成本测试；不提交/推送、部署、建云集合、改云变量/权限/Timer/规格、调用真实业务/发送器、发消息或购买。每任务完成保留显式路径与本地证据，不执行技能示例中的自动 commit。
