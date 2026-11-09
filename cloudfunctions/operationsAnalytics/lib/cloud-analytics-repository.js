@@ -60,7 +60,8 @@ async function queryCandidates(db, spec, cursorId, limit) {
     ...(cursorId ? { _id: db.command.gt(cursorId) } : {})
   }
   const result = await db.collection(spec.collection).where(where).orderBy('_id', 'asc').limit(limit).get()
-  return Array.isArray(result && result.data) ? result.data : []
+  if (!result || !Array.isArray(result.data)) throw new TypeError('analytics candidates are invalid')
+  return result.data
 }
 
 async function readAllById(db, collection, baseWhere, pageSize = 100) {
@@ -105,9 +106,11 @@ function createCloudAnalyticsRepository({ db } = {}) {
     const observed = validateCursor(await readDocument(db, 'system_settings', spec.id), spec)
     let rows = await queryCandidates(db, spec, observed.cursorId, limit)
     if (!rows.length && observed.cursorId) rows = await queryCandidates(db, spec, null, limit)
-    if (!rows.length) return []
-    const nextCursorId = rows.at(-1)._id
-    if (typeof nextCursorId !== 'string' || !DOCUMENT_ID.test(nextCursorId)) {
+    if (!rows.length && observed.cursorId === null) return []
+    // A drained old cursor costs a tail query on every later empty cycle.
+    // Reuse the normal CAS once to reset it; never persist an empty conclusion.
+    const nextCursorId = rows.length ? rows.at(-1)._id : null
+    if (rows.length && (typeof nextCursorId !== 'string' || !DOCUMENT_ID.test(nextCursorId))) {
       throw new TypeError('candidate id is invalid')
     }
     const claimed = await db.runTransaction(async transaction => {
@@ -122,7 +125,7 @@ function createCloudAnalyticsRepository({ db } = {}) {
       } })
       return true
     })
-    if (!claimed) return []
+    if (!claimed || !rows.length) return []
     if (kind !== 'refresh') return rows.map(row => ({ sourceId: row._id }))
     const sources = new Map()
     for (const row of rows) {
