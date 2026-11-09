@@ -60,7 +60,7 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
     throw new TypeError('db, clock and field domain functions are required')
   }
 
-  async function runCycle({ batchSize = MAX_BATCH, timeBudgetMs = MAX_TIME_MS } = {}) {
+  async function execute({ batchSize = MAX_BATCH, timeBudgetMs = MAX_TIME_MS, sharedBudget, candidates, details } = {}) {
     if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > MAX_BATCH ||
         !Number.isSafeInteger(timeBudgetMs) || timeBudgetMs < 0 || timeBudgetMs > MAX_TIME_MS) {
       throw new TypeError('batchSize must be 1..40 and timeBudgetMs must be 0..5000')
@@ -69,6 +69,7 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
     if (!timeBudgetMs) return counts
     let highWaterTime = -Infinity
     function time() {
+      if (sharedBudget) return sharedBudget.time()
       const at = clock()
       demand(at instanceof Date && Number.isFinite(Date.prototype.getTime.call(at)))
       highWaterTime = Math.max(highWaterTime, Date.prototype.getTime.call(at))
@@ -76,6 +77,7 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
     }
     let deadline
     function budget() {
+      if (sharedBudget) return sharedBudget.check()
       if (time() >= deadline) {
         const error = new Error('FIELD_RECOVERY_BUDGET'); error.code = 'FIELD_RECOVERY_BUDGET'; throw error
       }
@@ -208,6 +210,33 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
 
     try {
       deadline = time() + timeBudgetMs
+      if (candidates) {
+        counts.examined = candidates.length
+        for (let index = 0; index < candidates.length; index++) {
+          budget()
+          const nodeId = documentId(own(candidates[index], '_id'))
+          try {
+            const source = await loadSource(nodeId, candidates, index)
+            // A queue hint is not proof that this is still its owning line.
+            if (source) demand(own(source.node, 'businessLineId') === own(candidates[index], 'businessLineId'))
+            if (source) {
+              const result = buildFinalFieldResult(source)
+              if (result && await publish(source, result)) counts.generated++
+            } else prereads.discard()
+            details.outcomes.push({ nodeId, status: 'completed' })
+          } catch (error) {
+            prereads.discard()
+            if (error && error.code === 'FIELD_RECOVERY_BUDGET') { details.stopped = true; return counts }
+            counts.failed++
+            details.outcomes.push({ nodeId, status: 'failed' })
+            if (!error || !['FIELD_SOURCE_INVALID', 'INVALID_FIELD_VALUE', 'FIELD_RECOVERY_INVALID'].includes(error.code)) {
+              details.stopped = true; return counts
+            }
+          }
+        }
+        counts.hasMore = false
+        return counts
+      }
       let observed = cursorState(await read(db, 'system_settings', CURSOR_ID))
       budget()
       const response = await db.collection('business_nodes')
@@ -219,8 +248,13 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
       budget()
       const tail = page.length < batchSize
       if (!page.length) {
-        if (observed.cursorId !== null && !await moveCursor(observed, null)) return counts
+        if (observed.cursorId !== null) {
+          const next = await moveCursor(observed, null)
+          if (!next) { if (details) details.stopped = true; return counts }
+          observed = next
+        }
         counts.hasMore = false
+        if (details) details.cursorProof = { cursorId: null, version: observed.version, missing: observed.version === 0, tail: true }
         return counts
       }
       let previousId = observed.cursorId
@@ -231,7 +265,7 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
         // Claim/checkpoint only this raw candidate, not the entire fetched page:
         // expiry or an error cannot perpetually skip its unattempted successors.
         const next = await moveCursor(observed, tail && index === page.length - 1 ? null : nodeId)
-        if (!next) return counts
+        if (!next) { if (details) details.stopped = true; return counts }
         observed = next; previousId = nodeId
         let maySkipSuffix = false
         try {
@@ -242,9 +276,13 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
           } else { prereads.discard(); maySkipSuffix = excludedHint(page[index]) }
         } catch (error) {
           prereads.discard()
-          if (error && error.code === 'FIELD_RECOVERY_BUDGET') return counts
+          if (error && error.code === 'FIELD_RECOVERY_BUDGET') { if (details) details.stopped = true; return counts }
           counts.failed++
-          if (error && error.code === 'FIELD_RECOVERY_PREREAD_STOP') return counts
+          if (error && error.code === 'FIELD_RECOVERY_PREREAD_STOP' || details &&
+              (!error || !['FIELD_SOURCE_INVALID', 'INVALID_FIELD_VALUE', 'FIELD_RECOVERY_INVALID'].includes(error.code))) {
+            if (details) details.stopped = true
+            return counts
+          }
         }
         // The anchor above is already durable. A slow/failed suffix can roll
         // back without repeatedly starving the same successors next cycle.
@@ -264,7 +302,7 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
             // errors stop this cycle, never replay the batch as single nodes.
             const skipped = await skipExcludedPrefix(observed, candidateIds,
               tail && index + candidateIds.length === page.length - 1)
-            if (!skipped) return counts
+            if (!skipped) { if (details) details.stopped = true; return counts }
             if (skipped.consumed) {
               index += skipped.consumed
               previousId = candidateIds[skipped.consumed - 1]
@@ -274,12 +312,36 @@ function createFieldSnapshotRecovery({ db, clock = () => new Date(),
         }
       }
       counts.hasMore = !tail
+      if (tail && details) details.cursorProof = { cursorId: null, version: observed.version, missing: false, tail: true }
     } catch (error) {
       if (!error || error.code !== 'FIELD_RECOVERY_BUDGET') counts.failed++
+      if (details) details.stopped = true
     }
     return counts
   }
-  return { runCycle }
+  return {
+    runCycle: ({ batchSize = MAX_BATCH, timeBudgetMs = MAX_TIME_MS } = {}) => execute({ batchSize, timeBudgetMs }),
+    async runRepairSlice({ batchSize = MAX_BATCH, budget } = {}) {
+      if (!budget || typeof budget.check !== 'function' || typeof budget.time !== 'function') throw new TypeError('shared budget required')
+      const details = {}
+      const counts = await execute({ batchSize, sharedBudget: budget, details })
+      return { counts, cursorProof: details.cursorProof || null, stopped: details.stopped === true }
+    },
+    async recoverCandidates({ candidates, budget } = {}) {
+      demand(Array.isArray(candidates) && Object.getPrototypeOf(candidates) === Array.prototype && candidates.length <= MAX_BATCH)
+      demand(Reflect.ownKeys(candidates).length === candidates.length + 1)
+      const ids = []
+      for (let index = 0; index < candidates.length; index++) {
+        const d = Object.getOwnPropertyDescriptor(candidates, String(index))
+        demand(d && Object.hasOwn(d, 'value')); ids.push(documentId(own(d.value, '_id')))
+      }
+      demand(new Set(ids).size === ids.length)
+      if (!budget || typeof budget.check !== 'function' || typeof budget.time !== 'function') throw new TypeError('shared budget required')
+      const details = { outcomes: [], stopped: false }
+      const counts = await execute({ batchSize: Math.max(1, candidates.length), sharedBudget: budget, candidates, details })
+      return { counts, outcomes: details.outcomes, stopped: details.stopped }
+    }
+  }
 }
 
 module.exports = { createFieldSnapshotRecovery }

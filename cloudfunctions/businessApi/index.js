@@ -50,6 +50,8 @@ const { createOperationsService } = require('./lib/operations-service')
 const { createCloudOperationsRepository } = require('./lib/cloud-operations-repository')
 const { createOperationsFieldService } = require('./lib/operations-field-service')
 const { createCloudOperationsFieldRepository } = require('./lib/cloud-operations-field-repository')
+const { createOperationsFieldChangeSignal } = require('./lib/operations-field-change-signal')
+const { createCloudFieldRefreshQueue } = require('./lib/cloud-field-refresh-queue')
 const { createShareService } = require('./lib/share-service')
 const { createCloudShareRepository } = require('./lib/cloud-share-repository')
 const { createBusinessSearchClient } = require('./lib/business-search-client')
@@ -593,6 +595,7 @@ function createBusinessApi({
   calendarAdminService,
   operationsService,
   operationsFieldService,
+  fieldChangeSignal,
   shareService,
   recognitionService,
   dashboardWorkspaceService,
@@ -708,6 +711,11 @@ function createBusinessApi({
         : knownProtectedAction
           ? await domainRoutes[action]({ actor, payload, afterCreated, creationTiming })
           : await legacyRoutes[action](actor.openid, payload)
+      if (knownProtectedAction && fieldChangeSignal && typeof fieldChangeSignal.enqueueAfterMutation === 'function') {
+        // An independent derived hint must never reverse an authoritative success
+        // or prevent the existing immediate snapshot refresh from running.
+        try { await fieldChangeSignal.enqueueAfterMutation({ actor, action, payload, result: data }) } catch (_) {}
+      }
       if (knownProtectedAction && FIELD_RESULT_MUTATIONS.has(action) && operationsFieldService &&
           typeof operationsFieldService.refreshAfterMutation === 'function') {
         // A derived snapshot is retryable; it must never undo an authoritative business success.
@@ -1176,6 +1184,9 @@ function createDefaultBusinessApi() {
       secret:process.env.BUSINESS_SEARCH_HMAC_SECRET,clock:()=>new Date()}),
     clock:()=>new Date()
   })
+  const fieldChangeSignal = process.env.OPERATIONS_FIELD_CHANGE_QUEUE_ENABLED === 'true'
+    ? createOperationsFieldChangeSignal({ db, queue: createCloudFieldRefreshQueue({ db }), enabled: true })
+    : undefined
   const shareService = createShareService({
     repository: createCloudShareRepository({ db, cloud, clock: () => new Date(), fileReferenceContext }),
     clock: () => new Date(),
@@ -1202,6 +1213,7 @@ function createDefaultBusinessApi() {
     calendarAdminService,
     operationsService,
     operationsFieldService,
+    fieldChangeSignal,
     shareService,
     recognitionService,
     dashboardWorkspaceService,

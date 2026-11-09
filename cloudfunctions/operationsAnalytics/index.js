@@ -5,6 +5,8 @@ const { createCloudAnalyticsRepository } = require('./lib/cloud-analytics-reposi
 const { createWorkTimeService } = require('./lib/work-time-service')
 const { createCloudWorkCalendarRepository } = require('./lib/cloud-work-calendar-repository')
 const { createFieldSnapshotRecovery } = require('./lib/field-snapshot-recovery')
+const { createCloudFieldRefreshQueue } = require('./lib/cloud-field-refresh-queue')
+const { createFieldChangePriorityRecovery } = require('./lib/field-change-priority-recovery')
 
 function safeError(code, message) {
   const error = new Error(message)
@@ -70,8 +72,14 @@ function createDefaultHandler() {
   cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV })
   const db = cloud.database()
   const repository = createCloudAnalyticsRepository({ db })
+  const sourceRecovery = createFieldSnapshotRecovery({ db })
+  const mode = process.env.OPERATIONS_FIELD_RECOVERY_MODE
+  const fieldRecovery = mode === 'priority-repair'
+    ? createFieldChangePriorityRecovery({ db, queue: createCloudFieldRefreshQueue({ db }), sourceRecovery })
+    : !mode || mode === 'legacy' ? sourceRecovery
+      : { async runCycle() { throw new Error('FIELD_RECOVERY_CONFIGURATION_INVALID') } }
   return createOperationsAnalyticsHandler({
-    fieldRecovery: createFieldSnapshotRecovery({ db }),
+    fieldRecovery,
     service: createAnalyticsService({
       analyticsRepository: repository,
       workTimeService: createWorkTimeService({

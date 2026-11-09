@@ -2,7 +2,8 @@ import { copyFile, mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const FILES = ['operations-field-domain.js', 'field-domain.js', 'conditional-field-domain.js', 'option-linkage-domain.js']
+const FILES = ['operations-field-domain.js', 'field-domain.js', 'conditional-field-domain.js', 'option-linkage-domain.js',
+  'operations-field-recovery-contract.js', 'cloud-field-refresh-queue.js']
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 export async function syncOperationsFieldDomain({ root = defaultRoot, check = false } = {}) {

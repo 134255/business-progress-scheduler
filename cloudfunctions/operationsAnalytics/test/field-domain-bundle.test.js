@@ -9,7 +9,8 @@ const { spawnSync } = require('node:child_process')
 const { fieldSource } = require('../../businessApi/test/helpers/field-fixtures')
 
 const root = path.resolve(__dirname, '../../..')
-const files = ['operations-field-domain.js', 'field-domain.js', 'conditional-field-domain.js', 'option-linkage-domain.js']
+const files = ['operations-field-domain.js', 'field-domain.js', 'conditional-field-domain.js', 'option-linkage-domain.js',
+  'operations-field-recovery-contract.js', 'cloud-field-refresh-queue.js']
 const script = path.join(root, 'tools/sync-operations-field-domain.mjs')
 
 test('standalone field bundle is byte-identical and executes the approved source/header/projection contract', () => {
@@ -44,7 +45,7 @@ test('query-only metadata does not change the deployed worker snapshot protocol'
   assert.equal(Object.hasOwn(snapshot,'dimensions'), false)
 })
 
-test('real sync CLI copies only the three allowlisted files and check mode detects drift without writing', t => {
+test('real sync CLI copies only the six allowlisted files and check mode detects drift without writing', t => {
   assert.ok(fs.existsSync(script), 'the standalone bundle must have a reproducible sync command')
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'operations-field-bundle-'))
   t.after(() => {

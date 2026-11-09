@@ -1,0 +1,36 @@
+'use strict'
+const test=require('node:test'),assert=require('node:assert/strict')
+const {fixture}=require('./helpers/field-priority-fixture')
+const {createFieldChangePriorityRecovery}=require('../lib/field-change-priority-recovery')
+const {createOperationsFieldChangeSignal}=require('../../businessApi/lib/operations-field-change-signal')
+const {createCloudOperationsFieldRepository}=require('../../businessApi/lib/cloud-operations-field-repository')
+const make=f=>createFieldChangePriorityRecovery({db:f.fake.db,...f})
+test('missed enqueue and failed immediate refresh recover via a later full sweep without business writes',async()=>{
+  const f=fixture(3),r=make(f);await r.runCycle()
+  const fb=f.fake.documents('node_feedback')[0];fb.fieldValues.find(v=>v.fieldKey==='choice').value='B';f.fake.replace('node_feedback',fb._id,fb)
+  const before=f.protectedState();f.advance(3599999)
+  assert.equal((await r.runCycle()).generated,0);f.advance(1)
+  assert.equal((await r.runCycle()).generated,1)
+  assert.deepEqual(f.protectedState(),before)
+  assert.ok(f.fake.writeCalls.every(x=>['system_settings','operations_field_snapshots'].includes(x.collection)))
+})
+test('a successful change signal and the original actual immediate refresh coexist',async()=>{
+  const f=fixture(1),actor={_id:'processor-1',status:'active',role:'user'}
+  f.fake.replace('users',actor._id,actor)
+  const signal=createOperationsFieldChangeSignal({db:f.fake.db,queue:f.queue,enabled:true})
+  const fields=createCloudOperationsFieldRepository({db:f.fake.db,clock:f.clock})
+  const payload={nodeId:'node-00001',businessLineId:'line-000'}
+  await signal.enqueueAfterMutation({actor,action:'submitFeedback',payload,result:{businessLineId:'line-000'}})
+  await fields.refreshAfterMutation({actor,action:'submitFeedback',payload})
+  assert.equal(f.fake.documents('operations_field_snapshots').length,1)
+  assert.equal(f.fake.documents('operations_field_refresh_queue').length,1)
+  await make(f).runCycle();assert.equal(f.fake.documents('operations_field_refresh_queue').length,0)
+})
+test('an old middle cursor is continued without resetting it or changing the original row format',async()=>{
+  const f=fixture(41)
+  f.fake.replace('system_settings','operations-field-snapshot-cursor',{_id:'operations-field-snapshot-cursor',cursorId:'node-00030',version:1,updatedAt:f.clock()})
+  const r=await make(f).runCycle();assert.equal(r.examined,11)
+  assert.equal(f.fake.documents('operations_field_snapshots').length,11)
+  const cur=f.fake.documents('system_settings').find(x=>x._id==='operations-field-snapshot-cursor')
+  assert.deepEqual(Object.keys(cur).sort(),['_id','cursorId','updatedAt','version'])
+})
